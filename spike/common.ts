@@ -56,19 +56,16 @@ export function findCodex(): string {
   throw new Error("codex executable not found");
 }
 
-/** claude on PATH, else the copy the Claude desktop app keeps in %APPDATA%\Claude\claude-code\<ver>\<hash>\claude.exe. */
+/**
+ * Standalone Claude Code: PATH, else the native installer's %USERPROFILE%\.local\bin\claude.exe.
+ * The desktop app's private copy (%APPDATA%\Claude\claude-code\<ver>\<hash>\claude.exe) is deliberately
+ * not used: it comes and goes with app updates and is not logged in outside the app.
+ */
 export function findClaude(): string {
   if (process.env.CLAUDE_EXE && existsSync(process.env.CLAUDE_EXE)) return process.env.CLAUDE_EXE;
   const path = onPath("claude") ?? join(homedir(), ".local", "bin", exe("claude"));
   if (existsSync(path)) return path;
-  const appData = process.env.APPDATA ?? join(homedir(), "AppData", "Roaming");
-  const desktop = newestIn(
-    subdirs(join(appData, "Claude", "claude-code"))
-      .flatMap(subdirs)
-      .map((d) => join(d, exe("claude"))),
-  );
-  if (desktop) return desktop;
-  throw new Error("claude executable not found");
+  throw new Error("standalone claude executable not found (install: irm https://claude.ai/install.ps1 | iex)");
 }
 
 export function version(file: string): string {
