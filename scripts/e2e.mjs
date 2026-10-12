@@ -33,8 +33,14 @@ const countProcs = (name) => {
   }
 };
 
+// E2E_EXE=path\to\AI_ChatterBox.exe tests a packaged build instead of out/.
+const exe = process.env.E2E_EXE;
+
 async function launch() {
-  const app = await electron.launch({ args: [root], env: { ...process.env, AI_CHATTERBOX_DATA: dataDir } });
+  const app = await electron.launch({
+    ...(exe ? { executablePath: exe, args: [] } : { args: [root] }),
+    env: { ...process.env, AI_CHATTERBOX_DATA: dataDir },
+  });
   const page = await app.firstWindow();
   page.on("console", (m) => m.type() === "error" && console.log("[renderer]", m.text()));
   page.on("pageerror", (e) => console.log("[pageerror]", e.message));
@@ -74,7 +80,7 @@ async function sendAndWait(page, text, { onApproval } = {}) {
 
 async function openSession(page, agent, index = 0) {
   await page.locator(`.group.${agent} li button`).nth(index).click();
-  await page.waitForSelector(".chat");
+  await page.waitForSelector(`.chat .badge.${agent}`);
   await page.waitForTimeout(500);
 }
 
@@ -87,6 +93,7 @@ await page.waitForSelector(".sidebar");
 
 // Claude
 await page.getByLabel("새 Claude 세션").click();
+await page.waitForSelector(".chat .badge.claude");
 let r = await sendAndWait(page, "코드워드 '바나나-77'을 기억해 줘. 다른 말 없이 '확인'이라고만 답해.");
 check("claude turn 1 reply", r.last.includes("확인"), r.last);
 r = await sendAndWait(
@@ -101,6 +108,7 @@ await page.screenshot({ path: join(docs, "m1-claude.png") });
 
 // Codex
 await page.getByLabel("새 Codex 세션").click();
+await page.waitForSelector(".chat .badge.codex");
 r = await sendAndWait(page, "코드워드 '수박-31'을 기억해 줘. 명령은 실행하지 말고 '확인'이라고만 답해.");
 check("codex turn 1 reply", r.last.includes("확인"), r.last);
 r = await sendAndWait(

@@ -28,7 +28,18 @@ npm run dev
 - `npm run e2e`: 실제 CLI로 끝까지 검사 (Claude·Codex 각 2턴, 승인 거부, 종료 후 재실행해서 이어 가기). 데이터는 `.scratch/e2e`에 따로 저장해요. 실제 API를 호출하니 사용량이 조금 들어요.
 - `npm run codex:schema`: 설치된 codex 버전으로 `src/main/codex-schema`를 다시 만들어요 (`codex app-server generate-ts`).
 
-설치 파일(electron-builder) 패키징은 아직 설정하지 않았어요.
+## exe 만들기
+
+```powershell
+npm run dist
+```
+
+`dist\AI_ChatterBox-<버전>-portable.exe`(약 96MB)가 만들어져요. 설치 없이 더블클릭하면 바로 실행되는 단일 파일이에요. 실행할 때마다 `%TEMP%`에 압축을 풀기 때문에 시작하는 데 10초 정도 걸려요. 같은 내용이 `dist\win-unpacked\AI_ChatterBox.exe`에도 풀려 있어요.
+
+- 서명하지 않은 exe라서 처음 실행할 때 SmartScreen이 막을 수 있어요. **추가 정보 → 실행**을 누르면 돼요.
+- exe 안에는 Claude Code와 Codex가 들어 있지 않아요. 위 "필요한 것"에 적힌 대로 PC에 따로 설치하고 로그인해야 해요.
+- 아이콘은 `build/icon.png`이고, `scripts/make-icon.mjs`로 다시 만들 수 있어요 (`npm run build` 먼저).
+- 확인: `$env:E2E_EXE="dist\win-unpacked\AI_ChatterBox.exe"; node scripts/e2e.mjs`는 패키징한 앱으로 전체 검사를 하고, `node scripts/smoke-portable.mjs dist\AI_ChatterBox-<버전>-portable.exe`는 portable exe 자체를 원격 디버깅 포트로 띄워서 짧게 검사해요.
 
 ## 사용법
 

@@ -64,7 +64,8 @@ app.whenReady().then(async () => {
       sessionUpdated: (session) => win?.webContents.send("session:updated", session),
     },
     dataDir,
-    join(import.meta.dirname, "approver-mcp.js"),
+    // claude.exe runs this script with our exe as Node; packaged, it is unpacked next to app.asar.
+    join(import.meta.dirname, "approver-mcp.js").replace(/app\.asar([\\/])/, "app.asar.unpacked$1"),
   );
   await sessions.start();
   registerIpc();
