@@ -1,0 +1,31 @@
+{
+  "name": "ai-chatterbox",
+  "productName": "AI_ChatterBox",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop chat front-end for Claude Code and Codex",
+  "main": "out/main/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "codex:schema": "node scripts/gen-codex-schema.mjs",
+    "e2e": "electron-vite build && node scripts/e2e.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^44.7.0",
+    "electron-vite": "^5.0.0",
+    "playwright-core": "^1.64.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.7"
+  }
+}
