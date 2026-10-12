@@ -1,0 +1,22 @@
+{
+  "name": "ai-chatterbox-m0-spike",
+  "private": true,
+  "version": "0.0.0",
+  "description": "M0 technical spike: drive Claude Code (stream-json) and Codex (app-server) from Node",
+  "type": "module",
+  "scripts": {
+    "claude": "tsx claude-stream.ts",
+    "codex": "tsx codex-appserver.ts",
+    "codex:schema": "tsx gen-codex-schema.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^4.6.6"
+  }
+}
