@@ -284,7 +284,17 @@ export class CodexDriver implements AgentDriver {
       const others = input.attachments.filter((a) => !images.includes(a));
       const items: UserInput[] = images.map((a) => ({ type: "localImage", path: a.path }));
       items.push({ type: "text", text: (input.text || "(첨부 파일을 확인해 주세요)") + fileNote(others), text_elements: [] });
-      const params: TurnStartParams = { threadId, input: items, model: this.opts.model || null };
+      const params: TurnStartParams = {
+        threadId,
+        input: items,
+        model: this.opts.model || null,
+        // Scoped work: read-only turn, so file writes ask for approval and are checked against the scope.
+        sandboxPolicy: this.opts.readOnly
+          ? null
+          : input.readOnlyTurn
+            ? { type: "readOnly", networkAccess: false }
+            : { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false },
+      };
       const r = await this.server.request<TurnStartResponse>("turn/start", params);
       this.turnKnown(r.turn.id);
     } catch (e) {
@@ -388,6 +398,14 @@ export class CodexDriver implements AgentDriver {
         break;
       case "turn/started":
         this.turnKnown(n.params.turn.id);
+        break;
+      case "turn/plan/updated":
+        // Codex's native update_plan checklist → plan card.
+        this.host.emit({
+          type: "plan_update",
+          steps: n.params.plan.map((p) => ({ title: p.step, status: p.status })),
+          explanation: n.params.explanation ?? undefined,
+        });
         break;
       case "turn/completed": {
         const t = n.params.turn;

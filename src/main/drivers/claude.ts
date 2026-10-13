@@ -165,6 +165,17 @@ export class ClaudeDriver implements AgentDriver {
           if (c.type === "text" && c.text) this.host.emit({ type: "text", text: c.text });
           else if (c.type === "tool_use") {
             this.toolInputs.set(c.id, { name: c.name, input: c.input });
+            // Claude's native checklist → plan card.
+            if (c.name === "TodoWrite" && Array.isArray(c.input?.todos)) {
+              this.host.emit({
+                type: "plan_update",
+                steps: c.input.todos.map((t: any) => ({
+                  title: String(t.content ?? t.activeForm ?? ""),
+                  status: t.status === "completed" ? "completed" : t.status === "in_progress" ? "inProgress" : "pending",
+                })),
+              });
+              continue;
+            }
             this.host.emit({
               type: "tool_call",
               id: c.id,

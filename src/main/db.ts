@@ -5,6 +5,7 @@ import {
   DEFAULT_SETTINGS,
   type AgentEvent,
   type AttachmentRef,
+  type ChatAgent,
   type Role,
   type Chat,
   type ChatStatus,
@@ -88,6 +89,18 @@ CREATE TABLE IF NOT EXISTS approvals (
   scope TEXT NOT NULL,
   ts INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS agents (
+  id INTEGER PRIMARY KEY,
+  chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('claude','gpt')),
+  number INTEGER NOT NULL,
+  nickname TEXT NOT NULL,
+  job TEXT NOT NULL DEFAULT '',
+  session_id TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agents_chat ON agents(chat_id, id);
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -137,6 +150,7 @@ export type ChatPatch = Partial<
     | "codexModelOverride"
     | "approvalModeOverride"
     | "orchestratorModelOverride"
+    | "goal"
     | "status"
     | "unread"
     | "archived"
@@ -163,6 +177,7 @@ const toChat = (r: Row): Chat => ({
   codexModelOverride: r.codex_model_override,
   approvalModeOverride: r.approval_mode_override ?? null,
   orchestratorModelOverride: r.orchestrator_model_override ?? null,
+  goal: r.goal_json ? JSON.parse(r.goal_json) : null,
   status: r.status,
   unread: !!r.unread,
   archived: !!r.archived,
@@ -175,6 +190,7 @@ const toConsult = (r: Row): Consult => ({
   seq: r.seq,
   fromRole: r.from_role,
   toRole: r.to_role,
+  scope: r.scope_json ? JSON.parse(r.scope_json) : [],
   kind: r.kind,
   request: r.request,
   responseSummary: r.response_summary,
@@ -182,6 +198,18 @@ const toConsult = (r: Row): Consult => ({
   status: r.status,
   startedAt: r.started_at,
   endedAt: r.ended_at,
+});
+const toAgent = (r: Row): ChatAgent => ({
+  id: r.id,
+  chatId: r.chat_id,
+  key: `w${r.id}` as Role,
+  kind: r.kind,
+  number: r.number,
+  nickname: r.nickname,
+  job: r.job,
+  sessionId: r.session_id,
+  status: r.status,
+  createdAt: r.created_at,
 });
 const toAttachment = (r: Row): AttachmentRef => ({ id: r.id, name: r.name, mime: r.mime, size: r.size, path: r.path });
 
@@ -197,6 +225,81 @@ export class Store {
     this.db.exec("UPDATE chats SET status = 'interrupted' WHERE status IN ('working','approval')");
     this.db.exec("UPDATE consults SET status = 'stopped', ended_at = COALESCE(ended_at, started_at) WHERE status = 'running'");
     this.migrateV1();
+    this.migrateAgents();
+  }
+
+  /**
+   * 0.3: fixed "claude" / "gpt" worker roles become pooled workers. Existing chats get 클로드 1호 /
+   * 지피티 1호 carrying the old session/thread ids, and their events/consults move to the new keys.
+   */
+  private migrateAgents() {
+    if (this.getSetting("migratedAgents")) return;
+    this.db.exec("BEGIN");
+    try {
+      for (const c of this.db.prepare("SELECT * FROM chats").all() as Row[]) {
+        for (const [old, kind, session] of [
+          ["claude", "claude", c.claude_session_id],
+          ["gpt", "gpt", c.codex_thread_id],
+        ] as const) {
+          const used =
+            session ||
+            this.db.prepare("SELECT 1 FROM chat_events WHERE chat_id = ? AND (role = ? OR node = ?) LIMIT 1").get(c.id, old, old) ||
+            this.db.prepare("SELECT 1 FROM consults WHERE chat_id = ? AND (to_role = ? OR from_role = ?) LIMIT 1").get(c.id, old, old);
+          if (!used) continue;
+          const r = this.db
+            .prepare("INSERT INTO agents (chat_id, kind, number, nickname, job, session_id, status, created_at) VALUES (?, ?, 1, ?, '', ?, 'active', ?)")
+            .run(c.id, kind, `${kind === "claude" ? "클로드" : "지피티"} 1호`, session ?? null, c.created_at);
+          const key = `w${Number(r.lastInsertRowid)}`;
+          this.db.prepare("UPDATE chat_events SET role = ? WHERE chat_id = ? AND role = ?").run(key, c.id, old);
+          this.db.prepare("UPDATE chat_events SET node = ? WHERE chat_id = ? AND node = ?").run(key, c.id, old);
+          this.db.prepare("UPDATE consults SET to_role = ? WHERE chat_id = ? AND to_role = ?").run(key, c.id, old);
+          this.db.prepare("UPDATE consults SET from_role = ? WHERE chat_id = ? AND from_role = ?").run(key, c.id, old);
+          // Approval and consult payloads name the role too.
+          for (const e of this.db.prepare("SELECT id, payload_json FROM chat_events WHERE chat_id = ? AND type IN ('approval_request','approval_auto','consult_start')").all(c.id) as Row[]) {
+            const ev = JSON.parse(e.payload_json);
+            let changed = false;
+            if (ev.request?.role === old) (ev.request.role = key), (changed = true);
+            if (ev.to === old) (ev.to = key), (changed = true);
+            if (ev.from === old) (ev.from = key), (changed = true);
+            if (changed) this.db.prepare("UPDATE chat_events SET payload_json = ? WHERE id = ?").run(JSON.stringify(ev), e.id);
+          }
+        }
+      }
+      this.db.exec("COMMIT");
+      this.setSetting("migratedAgents", "1");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      console.error("agent migration failed", e);
+    }
+  }
+
+  // ---- agents (pooled workers)
+  listAgents(chatId: number): ChatAgent[] {
+    return this.db.prepare("SELECT * FROM agents WHERE chat_id = ? ORDER BY id").all(chatId).map(toAgent);
+  }
+  agent(id: number): ChatAgent | undefined {
+    const r = this.db.prepare("SELECT * FROM agents WHERE id = ?").get(id);
+    return r ? toAgent(r) : undefined;
+  }
+  agentByKey(chatId: number, key: string): ChatAgent | undefined {
+    const m = /^w(\d+)$/.exec(key);
+    const a = m ? this.agent(Number(m[1])) : undefined;
+    return a && a.chatId === chatId ? a : undefined;
+  }
+  createAgent(chatId: number, kind: "claude" | "gpt", job: string): ChatAgent {
+    // Numbers are never reused within a chat.
+    const n = ((this.db.prepare("SELECT MAX(number) m FROM agents WHERE chat_id = ? AND kind = ?").get(chatId, kind) as Row).m ?? 0) + 1;
+    const r = this.db
+      .prepare("INSERT INTO agents (chat_id, kind, number, nickname, job, status, created_at) VALUES (?, ?, ?, ?, ?, 'active', ?)")
+      .run(chatId, kind, n, `${kind === "claude" ? "클로드" : "지피티"} ${n}호`, job, Date.now());
+    return this.agent(Number(r.lastInsertRowid))!;
+  }
+  updateAgent(id: number, patch: { sessionId?: string; status?: "active" | "released"; job?: string }) {
+    const a = this.agent(id)!;
+    this.db
+      .prepare("UPDATE agents SET session_id = ?, status = ?, job = ? WHERE id = ?")
+      .run(patch.sessionId ?? a.sessionId, patch.status ?? a.status, patch.job ?? a.job, id);
+    return this.agent(id)!;
   }
 
   /** Columns added after 0.2.0 (CREATE TABLE IF NOT EXISTS doesn't add them to existing DBs). */
@@ -207,6 +310,8 @@ export class Store {
     };
     add("chats", "approval_mode_override", "approval_mode_override TEXT");
     add("chats", "orchestrator_model_override", "orchestrator_model_override TEXT");
+    add("chats", "goal_json", "goal_json TEXT");
+    add("consults", "scope_json", "scope_json TEXT");
     add("approvals", "decided_by", "decided_by TEXT NOT NULL DEFAULT 'user'");
     add("approvals", "reason", "reason TEXT");
   }
@@ -327,7 +432,7 @@ export class Store {
     this.db
       .prepare(
         `UPDATE chats SET title = ?, orch_claude_session_id = ?, orch_codex_thread_id = ?, claude_session_id = ?, codex_thread_id = ?,
-         claude_model_override = ?, codex_model_override = ?, approval_mode_override = ?, orchestrator_model_override = ?, status = ?, unread = ?, archived = ?, last_active_at = ? WHERE id = ?`,
+         claude_model_override = ?, codex_model_override = ?, approval_mode_override = ?, orchestrator_model_override = ?, goal_json = ?, status = ?, unread = ?, archived = ?, last_active_at = ? WHERE id = ?`,
       )
       .run(
         pick("title"),
@@ -339,6 +444,10 @@ export class Store {
         pick("codexModelOverride"),
         pick("approvalModeOverride"),
         pick("orchestratorModelOverride"),
+        (() => {
+          const g = pick("goal");
+          return g ? JSON.stringify(g) : null;
+        })(),
         patch.status ?? c.status,
         (patch.unread ?? c.unread) ? 1 : 0,
         (patch.archived ?? c.archived) ? 1 : 0,
@@ -359,11 +468,11 @@ export class Store {
     const r = this.db.prepare("SELECT * FROM consults WHERE id = ?").get(id);
     return r ? toConsult(r) : undefined;
   }
-  createConsult(chatId: number, from: Role, to: Role, kind: ConsultKind, request: string): Consult {
+  createConsult(chatId: number, from: Role, to: Role, kind: ConsultKind, request: string, scope: string[] = []): Consult {
     const seq = ((this.db.prepare("SELECT MAX(seq) m FROM consults WHERE chat_id = ?").get(chatId) as Row).m ?? 0) + 1;
     const r = this.db
-      .prepare("INSERT INTO consults (chat_id, seq, from_role, to_role, kind, request, status, started_at) VALUES (?, ?, ?, ?, ?, ?, 'running', ?)")
-      .run(chatId, seq, from, to, kind, request, Date.now());
+      .prepare("INSERT INTO consults (chat_id, seq, from_role, to_role, kind, request, status, started_at, scope_json) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)")
+      .run(chatId, seq, from, to, kind, request, Date.now(), JSON.stringify(scope));
     return this.consult(Number(r.lastInsertRowid))!;
   }
   finishConsult(id: number, status: ConsultStatus, summary: string, files: string[]): Consult {

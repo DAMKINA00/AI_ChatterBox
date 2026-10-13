@@ -72,7 +72,7 @@ function Welcome({ hasProjects, onNewProject }: { hasProjects: boolean; onNewPro
       <div className="space-y-1.5">
         <div className="text-lg font-semibold">Claude와 GPT가 함께 일하는 채팅</div>
         <div className="max-w-md text-[13px] leading-relaxed text-muted-foreground">
-          프로젝트(작업 폴더)를 만들고 채팅에 지시하면, 오케스트레이터가 Claude와 GPT에게 구현과 리뷰를 나눠 맡기고 결과를 정리해 보고합니다.
+          프로젝트(작업 폴더)를 만들고 채팅에 지시하면, 마스터가 일의 양에 맞춰 클로드·지피티 작업자를 꾸리고 구현과 리뷰를 나눠 맡긴 뒤 결과를 정리해 보고합니다.
         </div>
       </div>
       <div className="flex gap-2">

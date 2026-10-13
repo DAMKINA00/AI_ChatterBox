@@ -16,7 +16,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { CONSULT_KIND_LABEL, ROLE_LABEL, type AttachmentRef, type Role } from "../../../shared/types";
+import { CONSULT_KIND_LABEL, MASTER_LABEL, roleName, roleTone, type AttachmentRef, type Role } from "../../../shared/types";
 import { api, cn, errorMessage, formatBytes } from "../lib/utils";
 import { useStore } from "../store";
 import type { Item } from "../timeline";
@@ -24,22 +24,26 @@ import { Markdown, CopyButton } from "./Markdown";
 import { DiffList, Stats } from "./DiffView";
 import { Badge, Button, Input } from "./ui";
 
-export const ROLE_COLOR: Record<Role, string> = {
-  orch: "text-orch",
-  claude: "text-claude",
-  gpt: "text-gpt",
-};
-const ROLE_BG: Record<Role, string> = { orch: "bg-orch", claude: "bg-claude", gpt: "bg-gpt" };
+export type Tone = "orch" | "claude" | "gpt";
+const TONE_TEXT: Record<Tone, string> = { orch: "text-orch", claude: "text-claude", gpt: "text-gpt" };
+const TONE_BG: Record<Tone, string> = { orch: "bg-orch", claude: "bg-claude", gpt: "bg-gpt" };
 
-export function RoleDot({ role, className }: { role: Role; className?: string }) {
-  return <span className={cn("inline-block size-2 shrink-0 rounded-full", ROLE_BG[role], className)} />;
+export function RoleDot({ tone, className }: { tone: Tone; className?: string }) {
+  return <span className={cn("inline-block size-2 shrink-0 rounded-full", TONE_BG[tone], className)} />;
 }
 
-export function RoleName({ role }: { role: Role }) {
+/** Name + color of a role in a chat: 마스터, 클로드 2호, 지피티 1호 … */
+export function useRole(chatId: number, role: Role | null | undefined) {
+  const agents = useStore((s) => s.agents[chatId]);
+  return { name: roleName(role, agents), tone: roleTone(role, agents) as Tone };
+}
+
+export function RoleName({ chatId, role }: { chatId: number; role: Role }) {
+  const { name, tone } = useRole(chatId, role);
   return (
-    <span className={cn("inline-flex items-center gap-1.5 text-[12px] font-semibold", ROLE_COLOR[role])}>
-      <RoleDot role={role} />
-      {ROLE_LABEL[role]}
+    <span className={cn("inline-flex items-center gap-1.5 text-[12px] font-semibold whitespace-nowrap", TONE_TEXT[tone])} data-testid="role-name">
+      <RoleDot tone={tone} />
+      {name}
     </span>
   );
 }
@@ -109,7 +113,7 @@ function ItemView({ item, chatId, nested }: { item: Item; chatId: number; nested
     case "message":
       return (
         <div className="flex flex-col gap-1" data-testid="agent-message" data-role={item.role}>
-          {!nested && <RoleName role={item.role} />}
+          {!nested && <RoleName chatId={chatId} role={item.role} />}
           <div className={cn("group relative", nested ? "" : "pl-3.5")}>
             <Markdown text={item.text} />
             {item.streaming && <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse-dot rounded-sm bg-primary align-text-bottom" />}
@@ -134,7 +138,7 @@ function ItemView({ item, chatId, nested }: { item: Item; chatId: number; nested
     case "approval":
       return <ApprovalCard item={item} chatId={chatId} />;
     case "auto":
-      return <AutoApproval item={item} />;
+      return <AutoApproval item={item} chatId={chatId} />;
     case "consult":
       return <ConsultCard item={item} chatId={chatId} />;
     case "ask":
@@ -237,7 +241,7 @@ function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval"
       <div className="flex items-center gap-2">
         {high ? <ShieldAlert className="size-4 text-destructive" /> : <Hand className="size-4 text-warning" />}
         <span className="text-[13px] font-semibold">승인 요청</span>
-        <RoleName role={r.role} />
+        <RoleName chatId={chatId} role={r.role} />
         <Badge className="font-mono">{r.title}</Badge>
         {high && <Badge className="border-destructive/40 text-destructive">위험 · {r.riskReason}</Badge>}
         {status && (
@@ -249,7 +253,7 @@ function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval"
       </div>
       {r.judgeReason && (
         <div className="flex items-start gap-1.5 rounded-md bg-orch/10 px-2.5 py-1.5 text-[12.5px] select-text" data-testid="judge-reason">
-          <RoleDot role="orch" className="mt-1.5" />
+          <RoleDot tone="orch" className="mt-1.5" />
           {r.judgeReason}
         </div>
       )}
@@ -284,7 +288,8 @@ function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval"
 }
 
 /** An approval the orchestrator answered: one compact line, details on click. */
-function AutoApproval({ item }: { item: Extract<Item, { kind: "auto" }> }) {
+function AutoApproval({ item, chatId }: { item: Extract<Item, { kind: "auto" }>; chatId: number }) {
+  const who = useRole(chatId, item.request.role).name;
   const [open, setOpen] = useState(false);
   const r = item.request;
   const allowed = item.decision === "allow";
@@ -297,9 +302,9 @@ function AutoApproval({ item }: { item: Extract<Item, { kind: "auto" }> }) {
       >
         {allowed ? <ShieldCheck className="size-3.5 shrink-0 text-success" /> : <X className="size-3.5 shrink-0 text-destructive" />}
         <span className={cn("shrink-0 font-medium", allowed ? "text-success" : "text-destructive")}>
-          오케스트레이터 {allowed ? "승인" : "거부"}
+          {MASTER_LABEL} {allowed ? "승인" : "거부"}
         </span>
-        <span className="shrink-0">· {ROLE_LABEL[r.role]} · {r.title}</span>
+        <span className="shrink-0">· {who} · {r.title}</span>
         <span className="min-w-0 truncate font-mono">{brief}</span>
         <span className="min-w-0 shrink truncate">— {item.reason}</span>
       </button>
@@ -317,6 +322,10 @@ function AutoApproval({ item }: { item: Extract<Item, { kind: "auto" }> }) {
   );
 }
 
+function ConsultTargetName({ chatId, role }: { chatId: number; role: Role }) {
+  return <>{useRole(chatId, role).name}</>;
+}
+
 const STATUS_LABEL = { running: "진행 중", done: "완료", error: "오류", stopped: "중지됨", limited: "한도 도달" } as const;
 
 function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }>; chatId: number }) {
@@ -328,10 +337,15 @@ function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }
       <div className="flex items-center gap-2 px-3 py-2">
         <button className="flex min-w-0 flex-1 items-center gap-2 text-left" onClick={() => setOpen(!expanded)}>
           <ChevronRight className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", expanded && "rotate-90")} />
-          <RoleName role={item.from} />
+          <RoleName chatId={chatId} role={item.from} />
           <ArrowRight className="size-3.5 text-muted-foreground" />
-          <RoleName role={item.to} />
+          <RoleName chatId={chatId} role={item.to} />
           <Badge>{CONSULT_KIND_LABEL[item.consultKind]}</Badge>
+          {item.scope && item.scope.length > 0 && (
+            <span className="shrink-0 font-mono text-[11px] text-muted-foreground" title={item.scope.join(", ")}>
+              {item.scope.join(", ").slice(0, 40)}
+            </span>
+          )}
           <span className="min-w-0 flex-1 truncate text-[12.5px] text-muted-foreground">{item.request.split("\n")[0]}</span>
         </button>
         {item.files && item.files.length > 0 && <Badge>파일 {item.files.length}개</Badge>}
@@ -361,7 +375,7 @@ function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }
           ) : (
             item.status === "running" && (
               <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
-                <Loader2 className="size-3.5 animate-spin" /> {ROLE_LABEL[item.to]} 작업 시작 중…
+                <Loader2 className="size-3.5 animate-spin" /> <ConsultTargetName chatId={chatId} role={item.to} /> 작업 시작 중…
               </div>
             )
           )}
@@ -384,7 +398,7 @@ function AskCard({ item, chatId }: { item: Extract<Item, { kind: "ask" }>; chatI
     <div className="space-y-2.5 rounded-xl border border-primary/40 bg-primary/6 p-3" data-testid="ask-card">
       <div className="flex items-center gap-2 text-[13px] font-semibold">
         <MessageCircleQuestion className="size-4 text-primary" />
-        오케스트레이터의 질문
+        마스터의 질문
       </div>
       <Markdown text={item.question} />
       {item.answer !== undefined ? (

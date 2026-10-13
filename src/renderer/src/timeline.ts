@@ -2,7 +2,8 @@
 //  - unified (default): user + orchestrator, with each consult as a card holding the worker's events
 //  - "orch" / "claude" / "gpt": one conversation, flat
 //  - "consult:N": one consult
-import type { AgentEvent, ApprovalDecision, ApprovalRequest, AttachmentRef, ConsultKind, ConsultStatus, FileDiff, NodeId, Role, TimelineEvent } from "../../shared/types";
+import { isWorkerKey } from "../../shared/types";
+import type { PlanStep, AgentEvent, ApprovalDecision, ApprovalRequest, AttachmentRef, ConsultKind, ConsultStatus, FileDiff, NodeId, Role, TimelineEvent } from "../../shared/types";
 
 export type Item =
   | { kind: "user"; key: string; text: string; attachments: AttachmentRef[]; at: number; queued?: boolean }
@@ -21,6 +22,7 @@ export type Item =
       request: string;
       attachments: AttachmentRef[];
       status: ConsultStatus;
+      scope?: string[];
       summary?: string;
       files?: string[];
       children: Item[];
@@ -45,7 +47,7 @@ function belongs(e: TimelineEvent, view: View): "top" | "child" | false {
     return "top";
   }
   if (view === "orch") return e.role === "orch" || e.role === null ? "top" : false;
-  if (view === "claude" || view === "gpt") {
+  if (isWorkerKey(view)) {
     if ((ev.type === "consult_start" || ev.type === "consult_end") && consultTarget(e) === view) return "top";
     return e.role === view ? "top" : false;
   }
@@ -155,6 +157,7 @@ export function apply(items: Item[], e: TimelineEvent): Item[] {
           consultKind: ev.kind,
           request: ev.request,
           attachments: ev.attachments ?? [],
+          scope: ev.scope,
           status: "running",
           children: [],
           at: e.at,
@@ -170,6 +173,11 @@ export function apply(items: Item[], e: TimelineEvent): Item[] {
       return items.map((x) => (x.kind === "ask" && x.id === ev.id ? { ...x, answer: ev.answer } : x));
     case "notice":
       return [...items, { kind: "notice", key: key, tone: "info", text: ev.text }];
+    // Shown in the pinned plan panel / goal bar, not as timeline items.
+    case "plan_update":
+    case "plan_state":
+    case "goal_update":
+      return items;
     case "error":
       return [...closeStream(items, role), { kind: "notice", key: key, tone: ev.kind === "auth" ? "auth" : "error", text: ev.message }];
     case "turn_end": {
@@ -180,4 +188,24 @@ export function apply(items: Item[], e: TimelineEvent): Item[] {
       return closed;
     }
   }
+}
+
+/** Latest plan checklist and its /plan state, for the pinned plan panel. */
+export function planOf(events: TimelineEvent[]): { steps: PlanStep[]; explanation?: string; state: "proposed" | "running" | "done" | "cancelled" | "live" } | null {
+  let steps: PlanStep[] | null = null;
+  let explanation: string | undefined;
+  let state: "proposed" | "running" | "done" | "cancelled" | "live" = "live";
+  for (const e of events) {
+    const ev = e.event;
+    if (ev.type === "plan_update" && e.role === "orch") {
+      steps = ev.steps;
+      explanation = ev.explanation;
+    } else if (ev.type === "plan_state") state = ev.state;
+    else if (ev.type === "user" && !ev.queued && !ev.text.startsWith("/plan") && ev.text !== "계획 실행" && state !== "running") {
+      // A new ordinary instruction starts fresh (its own checklist, if any, will follow).
+      steps = null;
+      state = "live";
+    }
+  }
+  return steps ? { steps, explanation, state } : null;
 }

@@ -5,11 +5,49 @@ export type AgentKind = "claude" | "codex";
 
 export const AGENT_LABEL: Record<AgentKind, string> = { claude: "Claude", codex: "Codex" };
 
-/** A chat has three conversations: the orchestrator and two workers. */
-export type Role = "orch" | "claude" | "gpt";
+/**
+ * Who said / did something in a chat: "orch" = the master (마스터), or "w<agent id>" = a worker
+ * (클로드 N호 / 지피티 N호). Workers are created and released by the master as the work needs.
+ */
+export type Role = "orch" | `w${number}`;
 
-export const ROLE_LABEL: Record<Role, string> = { orch: "오케스트레이터", claude: "Claude", gpt: "GPT" };
-export const WORKER_AGENT: Record<"claude" | "gpt", AgentKind> = { claude: "claude", gpt: "codex" };
+export const MASTER_LABEL = "마스터";
+
+export type WorkerKind = "claude" | "gpt";
+export const WORKER_KIND_LABEL: Record<WorkerKind, string> = { claude: "클로드", gpt: "지피티" };
+export const WORKER_AGENT: Record<WorkerKind, AgentKind> = { claude: "claude", gpt: "codex" };
+
+export interface ChatAgent {
+  id: number;
+  chatId: number;
+  /** Role key used in events: `w${id}` */
+  key: Role;
+  kind: WorkerKind;
+  /** Per chat and kind, never reused. */
+  number: number;
+  /** "클로드 2호" */
+  nickname: string;
+  /** What the master spawned it for. */
+  job: string;
+  sessionId: string | null;
+  status: "active" | "released";
+  createdAt: number;
+}
+
+export const workerKey = (id: number): Role => `w${id}`;
+export const isWorkerKey = (r: string): r is `w${number}` => /^w\d+$/.test(r);
+
+/** Display name for a role key. */
+export function roleName(role: Role | null | undefined, agents: ChatAgent[] | undefined): string {
+  if (!role || role === "orch") return MASTER_LABEL;
+  return agents?.find((a) => a.key === role)?.nickname ?? "작업자";
+}
+
+/** "claude" | "gpt" | "orch" — for colors. */
+export function roleTone(role: Role | null | undefined, agents: ChatAgent[] | undefined): "orch" | WorkerKind {
+  if (!role || role === "orch") return "orch";
+  return agents?.find((a) => a.key === role)?.kind ?? "claude";
+}
 
 /** Orchestrator model, encoded as "<agent>:<model id>", e.g. "claude:opus" or "codex:gpt-6-astra". */
 export type OrchestratorModel = `${AgentKind}:${string}`;
@@ -39,6 +77,9 @@ export interface ProjectSettings {
   maxReviews: number;
   /** Minutes per user instruction before the lead is told to wrap up. */
   maxMinutes: number;
+  /** Max workers of each kind alive at once in a chat. */
+  maxClaudeWorkers: number;
+  maxGptWorkers: number;
   /** Who answers workers' approval requests. */
   approvalMode: ApprovalMode;
   /** Let the orchestrator also allow high-risk requests (otherwise they go to the user). */
@@ -47,7 +88,7 @@ export interface ProjectSettings {
 
 export type ApprovalMode = "orchestrator" | "user";
 export const APPROVAL_MODE_LABEL: Record<ApprovalMode, string> = {
-  orchestrator: "오케스트레이터 자동 판단",
+  orchestrator: "마스터 자동 판단",
   user: "매번 직접 승인",
 };
 
@@ -60,6 +101,8 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   maxConsults: 8,
   maxReviews: 3,
   maxMinutes: 60,
+  maxClaudeWorkers: 3,
+  maxGptWorkers: 3,
   approvalMode: "orchestrator",
   delegateHighRisk: false,
 };
@@ -92,6 +135,7 @@ export interface Chat {
   codexModelOverride: string | null;
   /** Per-chat approval mode; null = follow the project. */
   approvalModeOverride: ApprovalMode | null;
+  goal: ChatGoal | null;
   status: ChatStatus;
   unread: boolean;
   archived: boolean;
@@ -110,6 +154,8 @@ export interface Consult {
   seq: number;
   fromRole: Role;
   toRole: Role;
+  /** implement: path globs the worker may write (relative to the project folder). */
+  scope: string[];
   kind: ConsultKind;
   request: string;
   responseSummary: string | null;
@@ -168,13 +214,36 @@ export type AgentEvent =
   | { type: "approval_resolved"; id: string; decision: ApprovalDecision | "auto" | "expired" }
   /** An approval the orchestrator (or a remembered decision) answered without the user. */
   | { type: "approval_auto"; request: ApprovalRequest; decision: "allow" | "deny"; reason: string; reused?: boolean }
-  | { type: "consult_start"; consultId: number; kind: ConsultKind; from: Role; to: Role; request: string; attachments: AttachmentRef[] }
+  | { type: "consult_start"; consultId: number; kind: ConsultKind; from: Role; to: Role; request: string; attachments: AttachmentRef[]; scope?: string[] }
   | { type: "consult_end"; consultId: number; status: ConsultStatus; summary: string; files: string[] }
   | { type: "ask_user"; id: string; question: string; options: string[] }
   | { type: "ask_user_answer"; id: string; answer: string }
   | { type: "notice"; text: string }
+  /** Checklist from the orchestrator's native plan tool (Claude TodoWrite / Codex update_plan). */
+  | { type: "plan_update"; steps: PlanStep[]; explanation?: string }
+  /** /plan proposal lifecycle: proposed → running → done / cancelled. */
+  | { type: "plan_state"; state: "proposed" | "running" | "done" | "cancelled" }
+  | { type: "goal_update"; goal: ChatGoal | null }
   | { type: "turn_end"; ok: boolean; error?: string; interrupted?: boolean }
   | { type: "error"; message: string; kind?: "auth" | "missing_cli" | "process" };
+
+export interface PlanStep {
+  title: string;
+  status: "pending" | "inProgress" | "completed";
+}
+
+export type GoalStatus = "active" | "complete" | "blocked" | "paused";
+
+/** /goal: a persistent objective the orchestrator keeps working toward across turns. */
+export interface ChatGoal {
+  objective: string;
+  status: GoalStatus;
+  /** Latest progress note from the orchestrator. */
+  progress: string;
+  /** Turns spent on it so far (auto-continuation is bounded). */
+  turns: number;
+  updatedAt: number;
+}
 
 export interface TimelineEvent {
   id: number;
@@ -234,6 +303,7 @@ export interface ChatterBoxApi {
   deleteChat(id: number): Promise<void>;
   markViewed(id: number): Promise<void>;
   listConsults(chatId: number): Promise<Consult[]>;
+  listAgents(chatId: number): Promise<ChatAgent[]>;
   loadEvents(chatId: number): Promise<TimelineEvent[]>;
   /** Chat ids whose messages contain the text. */
   searchChats(q: string): Promise<number[]>;
@@ -241,6 +311,8 @@ export interface ChatterBoxApi {
   stop(chatId: number): Promise<void>;
   /** Continue a run the app quit or crashed in the middle of. */
   resume(chatId: number): Promise<void>;
+  /** Slash command from the composer: /plan, /goal, /review, /compact … */
+  command(chatId: number, name: string, arg: string): Promise<void>;
   dismissInterrupted(chatId: number): Promise<void>;
   answerApproval(chatId: number, approvalId: string, decision: ApprovalDecision): Promise<void>;
   answerAskUser(chatId: number, askId: string, answer: string): Promise<void>;
@@ -261,6 +333,7 @@ export interface ChatterBoxApi {
   onEvent(cb: (e: TimelineEvent) => void): () => void;
   onChatUpdated(cb: (chat: Chat) => void): () => void;
   onConsultUpdated(cb: (consult: Consult) => void): () => void;
+  onAgentsUpdated(cb: (chatId: number, agents: ChatAgent[]) => void): () => void;
   onUsage(cb: (u: UsageInfo) => void): () => void;
   /** Main asks to show a chat (tray notification clicked). */
   onSelectChat(cb: (chatId: number) => void): () => void;

@@ -53,6 +53,23 @@ export function leftovers(before, names = /^(claude|codex)\.exe$/i) {
     .map((p) => `${p.name}#${p.pid}`);
 }
 
+/** PIDs of a process's descendants (to check later that they all exited). */
+export function descendants(rootPid) {
+  const table = processTable();
+  const out = new Set();
+  const walk = (pid) => {
+    for (const p of table) if (p.ppid === pid && !out.has(p.pid)) (out.add(p.pid), walk(p.pid));
+  };
+  walk(rootPid);
+  return [...out].map((pid) => ({ pid, name: table.find((p) => p.pid === pid)?.name }));
+}
+
+/** Of the given processes, the CLI ones (claude/codex) still running. Safe when tests run in parallel. */
+export function stillAlive(procs) {
+  const alive = new Set(processTable().map((p) => p.pid));
+  return procs.filter((p) => alive.has(p.pid) && /^(claude|codex)\.exe$/i.test(p.name ?? "")).map((p) => `${p.name}#${p.pid}`);
+}
+
 export function countProcs(name) {
   try {
     return execSync(`tasklist /FI "IMAGENAME eq ${name}" /NH`, { encoding: "utf8" })

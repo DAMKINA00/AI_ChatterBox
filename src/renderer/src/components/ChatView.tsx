@@ -3,7 +3,8 @@ import { ArrowDown, Check, ChevronDown, History, ImagePlus, Loader2, Paperclip, 
 import {
   APPROVAL_MODE_LABEL,
   parseOrchestrator,
-  ROLE_LABEL,
+  roleName,
+  MASTER_LABEL,
   CONSULT_KIND_LABEL,
   type ApprovalMode,
   type AttachmentRef,
@@ -13,7 +14,9 @@ import {
 } from "../../../shared/types";
 import { api, cn, errorMessage } from "../lib/utils";
 import { useStore } from "../store";
-import { buildItems } from "../timeline";
+import { buildItems, planOf } from "../timeline";
+import { GoalBar, PlanPanel } from "./PlanGoal";
+import { SLASH_COMMANDS, StatusDialog, type SlashCommand } from "./Commands";
 import { AttachmentChip, ItemList, RoleDot } from "./Items";
 import { ModelPicker, useModelLabel } from "./ModelPicker";
 import {
@@ -37,15 +40,17 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
   const items = useMemo(() => buildItems(events ?? [], node, busy), [events, node, busy]);
   const [dragging, setDragging] = useState(false);
   const composer = useRef<ComposerHandle>(null);
+  const plan = useMemo(() => planOf(events ?? []), [events]);
 
+  const agents = useStore((s) => s.agents[chat.id]);
   const nodeLabel = useMemo(() => {
     if (!node) return null;
     if (node.startsWith("consult:")) {
       const c = consults?.find((x) => x.id === Number(node.slice(8)));
-      return c ? `협의 ${c.seq} · ${ROLE_LABEL[c.toRole]} ${CONSULT_KIND_LABEL[c.kind]}` : "협의";
+      return c ? `협의 ${c.seq} · ${roleName(c.fromRole, agents)} → ${roleName(c.toRole, agents)} · ${CONSULT_KIND_LABEL[c.kind]}` : "협의";
     }
-    return `${ROLE_LABEL[node as "orch"]} 대화`;
-  }, [node, consults]);
+    return node === "orch" ? `${MASTER_LABEL} 대화` : roleName(node as "orch", agents);
+  }, [node, consults, agents]);
 
   return (
     <div
@@ -66,6 +71,8 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
       }}
     >
       <ChatHeader chat={chat} project={project} nodeLabel={nodeLabel} busy={busy} />
+      {!node && <GoalBar chat={chat} />}
+      {!node && plan && <PlanPanel chat={chat} plan={plan} onRevise={() => composer.current?.setText("/plan 수정: ")} />}
       <Timeline items={items} chatId={chat.id} busy={busy} empty={!events?.length} loading={!events} />
       {chat.status === "interrupted" && <InterruptedBanner chat={chat} />}
       {node && node !== "orch" ? (
@@ -77,7 +84,7 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
           에서 보내세요.
         </div>
       ) : (
-        <Composer ref={composer} chat={chat} busy={busy} />
+        <Composer ref={composer} chat={chat} project={project} busy={busy} />
       )}
       {dragging && (
         <div className="pointer-events-none absolute inset-2 z-20 flex flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-primary bg-primary/8 text-primary">
@@ -116,11 +123,12 @@ function ChatHeader({ chat, project, nodeLabel, busy }: { chat: Chat; project: P
         </div>
       </div>
       <div className="flex items-center gap-1.5" data-testid="orch-badge">
-        <RoleDot role="orch" />
+        <RoleDot tone="orch" />
+        <span className="text-[12px] text-muted-foreground">마스터</span>
         <ModelPicker
           compact
           agents={["claude", "codex"]}
-          ariaLabel="이 채팅의 오케스트레이터 모델"
+          ariaLabel="이 채팅의 마스터 모델"
           value={chat.orchestratorModelOverride ?? project.settings.orchestratorModel}
           inherited={chat.orchestratorModelOverride === null}
           onChange={(v) => void updateChat(chat.id, { orchestratorModelOverride: v as Project["settings"]["orchestratorModel"] })}
@@ -129,7 +137,8 @@ function ChatHeader({ chat, project, nodeLabel, busy }: { chat: Chat; project: P
         />
       </div>
       <div className="flex items-center gap-1.5">
-        <RoleDot role="claude" />
+        <RoleDot tone="claude" />
+        <span className="text-[12px] text-muted-foreground">클로드</span>
         <ModelPicker
           compact
           agents={["claude"]}
@@ -142,7 +151,8 @@ function ChatHeader({ chat, project, nodeLabel, busy }: { chat: Chat; project: P
         />
       </div>
       <div className="flex items-center gap-1.5">
-        <RoleDot role="gpt" />
+        <RoleDot tone="gpt" />
+        <span className="text-[12px] text-muted-foreground">지피티</span>
         <ModelPicker
           compact
           agents={["codex"]}
@@ -154,6 +164,7 @@ function ChatHeader({ chat, project, nodeLabel, busy }: { chat: Chat; project: P
           resetLabel={`프로젝트 값 사용 (${label("codex", project.settings.codexModel)})`}
         />
       </div>
+      <TeamChips chat={chat} />
       <ApprovalModePicker chat={chat} project={project} />
       {busy && (
         <Button
@@ -176,6 +187,35 @@ function ChatHeader({ chat, project, nodeLabel, busy }: { chat: Chat; project: P
         </Button>
       )}
     </header>
+  );
+}
+
+/** The chat's workers with their state; more workers use quota faster. */
+function TeamChips({ chat }: { chat: Chat }) {
+  const agents = useStore((s) => s.agents[chat.id]);
+  const consults = useStore((s) => s.consults[chat.id]);
+  const active = (agents ?? []).filter((a) => a.status === "active");
+  if (!active.length) return null;
+  const busy = new Set(consults?.filter((c) => c.status === "running").map((c) => c.toRole));
+  return (
+    <Tooltip content="작업자가 많을수록 사용량이 빨리 줄어요">
+      <div className="flex max-w-[40%] flex-wrap items-center gap-1" data-testid="team-chips">
+        {active.map((a) => (
+          <span
+            key={a.id}
+            className={cn(
+              "inline-flex h-6 items-center gap-1 rounded-full border px-2 text-[11.5px]",
+              busy.has(a.key) ? "border-primary/40 bg-primary/8" : "text-muted-foreground",
+            )}
+            data-testid="team-chip"
+            data-state={busy.has(a.key) ? "working" : "idle"}
+          >
+            {busy.has(a.key) ? <Loader2 className={cn("size-3 animate-spin", a.kind === "claude" ? "text-claude" : "text-gpt")} /> : <RoleDot tone={a.kind} />}
+            {a.nickname}
+          </span>
+        ))}
+      </div>
+    </Tooltip>
   );
 }
 
@@ -221,7 +261,7 @@ function InterruptedBanner({ chat }: { chat: Chat }) {
       <History className="size-4 shrink-0 text-warning" />
       <div className="min-w-0 flex-1 text-[13px]">
         <div className="font-medium">중단됨</div>
-        <div className="text-[12px] text-muted-foreground">이전 실행이 앱 종료로 중단됐습니다. 이어서 진행하면 오케스트레이터가 작업 폴더 상태를 확인하고 남은 작업을 마칩니다.</div>
+        <div className="text-[12px] text-muted-foreground">이전 실행이 앱 종료로 중단됐습니다. 이어서 진행하면 마스터가 작업 폴더 상태를 확인하고 남은 작업을 마칩니다.</div>
       </div>
       <Button
         size="sm"
@@ -318,7 +358,7 @@ function EmptyChat() {
       </div>
       <div className="text-[15px] font-semibold">무엇을 할까요?</div>
       <div className="max-w-md text-[13px] leading-relaxed text-muted-foreground">
-        지시를 보내면 오케스트레이터가 계획을 세우고 Claude와 GPT에게 구현과 리뷰를 나눠 맡깁니다. 이미지는 붙여넣기(Ctrl+V)나 끌어다 놓기로 첨부할 수 있어요.
+        지시를 보내면 마스터가 계획을 세우고, 일의 양에 맞춰 클로드·지피티 작업자를 꾸려 구현과 리뷰를 나눠 맡깁니다. 이미지는 붙여넣기(Ctrl+V)나 끌어다 놓기로 첨부할 수 있어요.
       </div>
     </div>
   );
@@ -327,13 +367,14 @@ function EmptyChat() {
 // ---------- Composer
 export interface ComposerHandle {
   addFiles(files: File[]): void;
+  setText(text: string): void;
 }
 
 /** Unsent text and attachments survive switching chats. */
 const drafts = new Map<number, { text: string; attachments: AttachmentRef[] }>();
 
 
-const Composer = forwardRef<ComposerHandle, { chat: Chat; busy: boolean }>(function Composer({ chat, busy }, ref) {
+const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy: boolean }>(function Composer({ chat, project, busy }, ref) {
   const toast = useStore((s) => s.toast);
   const [text, setText] = useState(() => drafts.get(chat.id)?.text ?? "");
   const [attachments, setAttachments] = useState<AttachmentRef[]>(() => drafts.get(chat.id)?.attachments ?? []);
@@ -377,10 +418,67 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; busy: boolean }>(funct
     [chat.id, toast],
   );
 
-  useImperativeHandle(ref, () => ({ addFiles: (f) => void addFiles(f) }), [addFiles]);
+  useImperativeHandle(
+    ref,
+    () => ({
+      addFiles: (f) => void addFiles(f),
+      setText: (t) => {
+        setText(t);
+        setTimeout(() => {
+          area.current?.focus();
+          area.current?.setSelectionRange(t.length, t.length);
+        }, 0);
+      },
+    }),
+    [addFiles],
+  );
+
+  // ---- slash commands
+  const [menuIndex, setMenuIndex] = useState(0);
+  const [menuClosed, setMenuClosed] = useState(false);
+  const [statusOpen, setStatusOpen] = useState(false);
+  const slashQuery = /^\/(\S*)$/.exec(text)?.[1];
+  const menu = slashQuery !== undefined && !menuClosed ? SLASH_COMMANDS.filter((c) => c.name.startsWith(slashQuery.toLowerCase())) : [];
+  useEffect(() => {
+    setMenuIndex(0);
+    if (!text.startsWith("/")) setMenuClosed(false);
+  }, [slashQuery, text]);
+
+  const runCommand = async (name: string, arg: string) => {
+    const known = SLASH_COMMANDS.find((c) => c.name === name);
+    if (!known) {
+      toast(`알 수 없는 명령: /${name}`);
+      return;
+    }
+    if (known.needsArg && !arg.trim()) {
+      toast(`/${name} 뒤에 ${known.args}을(를) 적어 주세요.`);
+      return;
+    }
+    setText("");
+    setMenuClosed(false);
+    if (name === "status" || name === "model") return setStatusOpen(true);
+    if (name === "new") {
+      await useStore.getState().createChat(chat.projectId);
+      return;
+    }
+    try {
+      await api.command(chat.id, name, arg.trim());
+    } catch (e) {
+      toast(errorMessage(e));
+      setText(`/${name}${arg ? " " + arg : ""}`);
+    }
+  };
+
+  const pickCommand = (c: SlashCommand) => {
+    if (c.args) setText(`/${c.name} `);
+    else void runCommand(c.name, "");
+  };
 
   const send = async () => {
     const t = text.trim();
+    // "/name arg" → command (attachments are not used by commands).
+    const cmd = /^\/([a-z-]+)(?:\s+([\s\S]*))?$/i.exec(t);
+    if (cmd) return void runCommand(cmd[1].toLowerCase(), cmd[2] ?? "");
     if ((!t && !attachments.length) || sending || uploading) return;
     setSending(true);
     try {
@@ -403,7 +501,29 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; busy: boolean }>(funct
 
   return (
     <div className="px-4 pt-1 pb-4">
-      <div className="mx-auto max-w-[860px] rounded-2xl border bg-card shadow-sm transition-colors focus-within:border-ring/60">
+      <StatusDialog open={statusOpen} onOpenChange={setStatusOpen} chat={chat} project={project} />
+      <div className="relative mx-auto max-w-[860px] rounded-2xl border bg-card shadow-sm transition-colors focus-within:border-ring/60">
+        {menu.length > 0 && (
+          <div role="listbox" aria-label="명령" className="absolute bottom-full left-0 z-30 mb-2 w-96 overflow-hidden rounded-xl border bg-card p-1 shadow-xl" data-testid="slash-menu">
+            {menu.map((c, i) => (
+              <button
+                key={c.name}
+                role="option"
+                aria-selected={i === menuIndex}
+                onMouseEnter={() => setMenuIndex(i)}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  pickCommand(c);
+                }}
+                className={cn("flex w-full items-baseline gap-2 rounded-lg px-2.5 py-1.5 text-left", i === menuIndex && "bg-accent")}
+              >
+                <span className="font-mono text-[13px] font-semibold">/{c.name}</span>
+                {c.args && <span className="font-mono text-[11.5px] text-muted-foreground">{c.args}</span>}
+                <span className="ml-auto truncate text-[12px] text-muted-foreground">{c.desc}</span>
+              </button>
+            ))}
+          </div>
+        )}
         {(attachments.length > 0 || uploading > 0) && (
           <div className="flex flex-wrap gap-2 px-3 pt-3" data-testid="pending-attachments">
             {attachments.map((a) => (
@@ -427,7 +547,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; busy: boolean }>(funct
           ref={area}
           value={text}
           aria-label="메시지 입력"
-          placeholder={busy ? "추가 지시를 보내면 다음 단계에 오케스트레이터에게 전달됩니다" : "지시를 입력하세요"}
+          placeholder={busy ? "추가 지시를 보내면 다음 단계에 마스터에게 전달됩니다" : "지시를 입력하세요 (/ 로 명령)"}
           className="block max-h-60 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[14px] leading-relaxed outline-none select-text placeholder:text-muted-foreground"
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => {
@@ -438,6 +558,23 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; busy: boolean }>(funct
             }
           }}
           onKeyDown={(e) => {
+            if (menu.length && !e.nativeEvent.isComposing) {
+              if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                e.preventDefault();
+                setMenuIndex((i) => (i + (e.key === "ArrowDown" ? 1 : menu.length - 1)) % menu.length);
+                return;
+              }
+              if (e.key === "Enter" || e.key === "Tab") {
+                e.preventDefault();
+                pickCommand(menu[Math.min(menuIndex, menu.length - 1)]);
+                return;
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setMenuClosed(true);
+                return;
+              }
+            }
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
               void send();

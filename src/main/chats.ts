@@ -10,6 +10,7 @@ import {
   type ApprovalDecision,
   type ApprovalRequest,
   type Chat,
+  type ChatAgent,
   type CliInfo,
   type Consult,
   type NodeId,
@@ -28,6 +29,7 @@ import { CodexDriver, CodexServer } from "./drivers/codex";
 import type { AgentDriver, AgentInput, DriverHost } from "./drivers/types";
 
 export interface Sink {
+  agents(chatId: number, agents: ChatAgent[]): void;
   event(e: TimelineEvent): void;
   chat(chat: Chat): void;
   consult(c: Consult): void;
@@ -88,6 +90,13 @@ export class ChatManager {
         };
       },
       judge: (chatId, request, input) => this.judge?.(chatId, request, input) ?? Promise.resolve(null),
+      writeScope: (chatId, role) => {
+        const s = this.writeScope?.(chatId, role);
+        if (!s) return null;
+        const chat = this.store.chat(chatId);
+        const project = chat && this.store.project(chat.projectId);
+        return project ? { ...s, folder: project.folder } : null;
+      },
     });
   }
 
@@ -150,6 +159,8 @@ export class ChatManager {
     if (parsed) this.mergeUsage({ claude: parsed });
   }
 
+  /** Set by the orchestrator: what a worker may write right now (its implement scope). */
+  writeScope?: (chatId: number, role: Role) => { globs: string[] | null; why: string } | null;
   /** Set by the orchestrator: the chat's approval judge. */
   judge?: (chatId: number, request: ApprovalRequest, input: ApprovalInput) => Promise<JudgeAnswer | null>;
   /** Quitting: processes are being torn down; don't record their exits as errors. */
@@ -187,18 +198,30 @@ export class ChatManager {
   /** Agent + model a role uses right now (orchestrator follows the project; workers may be overridden per chat). */
   roleConfig(chat: Chat, project: Project, role: Role): RoleConfig {
     if (role === "orch") return chatOrchestrator(chat, project);
-    if (role === "claude") return { agent: "claude", model: chat.claudeModelOverride ?? project.settings.claudeModel };
-    return { agent: "codex", model: chat.codexModelOverride ?? project.settings.codexModel };
+    const worker = this.store.agentByKey(chat.id, role);
+    if (worker?.kind === "gpt") return { agent: "codex", model: chat.codexModelOverride ?? project.settings.codexModel };
+    return { agent: "claude", model: chat.claudeModelOverride ?? project.settings.claudeModel };
   }
 
   private nativeIdOf(chat: Chat, role: Role, agent: AgentKind): string | null {
     if (role === "orch") return agent === "claude" ? chat.orchClaudeSessionId : chat.orchCodexThreadId;
-    return role === "claude" ? chat.claudeSessionId : chat.codexThreadId;
+    return this.store.agentByKey(chat.id, role)?.sessionId ?? null;
   }
 
-  private nativeIdPatch(role: Role, agent: AgentKind, id: string): ChatPatch {
-    if (role === "orch") return agent === "claude" ? { orchClaudeSessionId: id } : { orchCodexThreadId: id };
-    return role === "claude" ? { claudeSessionId: id } : { codexThreadId: id };
+  private saveNativeId(chatId: number, role: Role, agent: AgentKind, id: string) {
+    if (role === "orch") {
+      this.updateChat(chatId, agent === "claude" ? { orchClaudeSessionId: id } : { orchCodexThreadId: id });
+      return;
+    }
+    const w = this.store.agentByKey(chatId, role);
+    if (w) {
+      this.store.updateAgent(w.id, { sessionId: id });
+      this.agentsChanged(chatId);
+    }
+  }
+
+  agentsChanged(chatId: number) {
+    this.sink.agents(chatId, this.store.listAgents(chatId));
   }
 
   route(chatId: number, role: Role): NodeId {
@@ -251,7 +274,7 @@ export class ChatManager {
           this.updateChat(chatId, { status: final, unread: final !== "idle", touch: true });
         }
       },
-      nativeId: (id) => this.updateChat(chatId, this.nativeIdPatch(role, cfg.agent, id)),
+      nativeId: (id) => this.saveNativeId(chatId, role, cfg.agent, id),
       approve: (input) => this.approvals.request(chatId, project.folder, { ...input, role, node: this.route(chatId, role) }),
       usage: (u) => this.mergeUsage(u),
     };
@@ -273,7 +296,8 @@ export class ChatManager {
           tmpDir: this.tmpDir,
           mcpServers: () => this.toolsFor?.(this.store.chat(chatId)!, role, "claude") ?? {},
           disallowedTools: role === "orch" ? ORCH_DISALLOWED : undefined,
-          allowedTools: role === "orch" ? ["mcp__chatterbox_bridge"] : undefined,
+          // Bridge tools (master: spawn/ask/…; workers: ask/agents) never need a permission prompt.
+          allowedTools: ["mcp__chatterbox_bridge"],
         },
         host,
       );
@@ -291,6 +315,15 @@ export class ChatManager {
 
   liveDriver(chatId: number, role: Role): AgentDriver | undefined {
     return this.live.get(chatId)?.[role]?.driver;
+  }
+
+  /** Dispose one role's conversation process (a released worker). */
+  async disposeRole(chatId: number, role: Role) {
+    const slot = this.live.get(chatId);
+    const l = slot?.[role];
+    if (slot) delete slot[role];
+    this.setRoute(chatId, role, undefined);
+    await l?.driver.dispose().catch(() => undefined);
   }
 
   /** Drop a chat's drivers (deleted chat, project folder changed). */
@@ -323,17 +356,26 @@ export class ChatManager {
       await this.busySend(chat, { text, attachments });
       return;
     }
+    await this.startTurn(chatId, text, attachmentIds, () => this.sendHandler(chat, { text, attachments }));
+  }
+
+  /**
+   * Record the user's message (as shown) and start an orchestrator run. Commands (/plan, /goal …)
+   * use this with their own run; errors end the run with a visible message.
+   */
+  async startTurn(chatId: number, display: string, attachmentIds: number[], run: () => Promise<void>) {
+    const attachments = this.store.attachmentsFor(attachmentIds);
     const isFirst = !this.store.hasUserEvent(chatId);
-    const userEvent = this.store.addEvent(chatId, "orch", null, { type: "user", text, attachments });
+    const userEvent = this.store.addEvent(chatId, "orch", null, { type: "user", text: display, attachments });
     this.store.linkAttachments(attachmentIds, userEvent.id);
     this.sink.event(userEvent);
     this.updateChat(chatId, {
       status: "working",
       touch: true,
-      title: isFirst ? titleFrom(text, attachments.length) : undefined,
+      title: isFirst ? titleFrom(display, attachments.length) : undefined,
     });
     try {
-      await this.sendHandler(chat, { text, attachments });
+      await run();
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       this.emit(chatId, "orch", "orch", { type: "error", kind: "process", message });

@@ -4,6 +4,8 @@ import type { ApprovalInput, VerdictResult } from "../approvals";
 export interface AgentInput {
   text: string;
   attachments: AttachmentRef[];
+  /** Codex: run this turn read-only so every write comes back as an approval (scope checks). */
+  readOnlyTurn?: boolean;
 }
 
 /** What a driver needs from the chat that owns it. */

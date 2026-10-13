@@ -23,7 +23,7 @@ import {
   Workflow,
   X,
 } from "lucide-react";
-import { CONSULT_KIND_LABEL, ROLE_LABEL, type Chat, type ChatStatus, type NodeId, type Project, type Role } from "../../../shared/types";
+import { CONSULT_KIND_LABEL, MASTER_LABEL, roleName, roleTone, type Chat, type ChatStatus, type NodeId, type Project } from "../../../shared/types";
 import { api, cn, timeAgo } from "../lib/utils";
 import { useStore } from "../store";
 import { ProjectDialog } from "./ProjectDialog";
@@ -358,19 +358,15 @@ function ChatNode({
   const updateChat = useStore((s) => s.updateChat);
   const deleteChat = useStore((s) => s.deleteChat);
   const consults = useStore((s) => s.consults[chat.id]);
+  const agents = useStore((s) => s.agents[chat.id]);
   const active = selection?.chatId === chat.id && !selection.node;
 
-  // Load consults lazily for the tree.
+  // Load the team and consults lazily for the tree.
   useEffect(() => {
     if (expanded && !consults) void api.listConsults(chat.id).then((list) => useStore.setState((s) => ({ consults: { ...s.consults, [chat.id]: list } })));
-  }, [expanded, consults, chat.id]);
-
-  const roles = useMemo(() => {
-    const r: Role[] = ["orch"];
-    if (chat.claudeSessionId || consults?.some((c) => c.toRole === "claude")) r.push("claude");
-    if (chat.codexThreadId || consults?.some((c) => c.toRole === "gpt")) r.push("gpt");
-    return r;
-  }, [chat.claudeSessionId, chat.codexThreadId, consults]);
+    if (expanded && !agents) void api.listAgents(chat.id).then((list) => useStore.setState((s) => ({ agents: { ...s.agents, [chat.id]: list } })));
+  }, [expanded, consults, agents, chat.id]);
+  const busyWorkers = useMemo(() => new Set(consults?.filter((c) => c.status === "running").map((c) => c.toRole)), [consults]);
 
   const actions: MenuAction[] = [
     { label: "이름 변경", icon: Pencil, onSelect: () => onRename("chat", chat.id, chat.title) },
@@ -426,15 +422,23 @@ function ChatNode({
       </ItemMenus>
       {expanded && (
         <div className="ml-4 border-l py-0.5 pl-1.5">
-          {roles.map((r) => (
-            <NodeRow key={r} chatId={chat.id} node={r} label={`${ROLE_LABEL[r]} 대화`} icon={<RoleDot role={r} />} />
+          <NodeRow chatId={chat.id} node="orch" label={`${MASTER_LABEL} 대화`} icon={<RoleDot tone="orch" />} />
+          {agents?.map((a) => (
+            <NodeRow
+              key={a.id}
+              chatId={chat.id}
+              node={a.key}
+              label={a.nickname + (a.status === "released" ? " (해제)" : "")}
+              dim={a.status === "released"}
+              icon={busyWorkers.has(a.key) ? <Loader2 className={cn("size-3 animate-spin", a.kind === "claude" ? "text-claude" : "text-gpt")} /> : <RoleDot tone={a.kind} />}
+            />
           ))}
           {consults?.map((c) => (
             <NodeRow
               key={c.id}
               chatId={chat.id}
               node={`consult:${c.id}`}
-              label={`협의 ${c.seq} · ${ROLE_LABEL[c.toRole]} ${CONSULT_KIND_LABEL[c.kind]}`}
+              label={`협의 ${c.seq} · ${roleName(c.fromRole, agents)} → ${roleName(c.toRole, agents)} · ${CONSULT_KIND_LABEL[c.kind]}`}
               icon={
                 c.status === "running" ? (
                   <Loader2 className="size-3 animate-spin text-primary" />
@@ -446,7 +450,7 @@ function ChatNode({
               }
             />
           ))}
-          {roles.length === 1 && !consults?.length && (
+          {!agents?.length && !consults?.length && (
             <div className="flex h-6 items-center gap-1.5 px-2 text-[11.5px] text-muted-foreground">
               <Bot className="size-3" /> 아직 협의 없음
             </div>
@@ -457,7 +461,7 @@ function ChatNode({
   );
 }
 
-function NodeRow({ chatId, node, label, icon }: { chatId: number; node: NodeId; label: string; icon: React.ReactNode }) {
+function NodeRow({ chatId, node, label, icon, dim }: { chatId: number; node: NodeId; label: string; icon: React.ReactNode; dim?: boolean }) {
   const selection = useStore((s) => s.selection);
   const select = useStore((s) => s.select);
   const active = selection?.chatId === chatId && selection.node === node;
@@ -467,6 +471,7 @@ function NodeRow({ chatId, node, label, icon }: { chatId: number; node: NodeId; 
       className={cn(
         "flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[12.5px]",
         active ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+        dim && "opacity-50",
       )}
       onClick={() => void select({ chatId, node })}
     >

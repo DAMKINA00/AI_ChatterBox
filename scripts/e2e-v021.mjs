@@ -157,11 +157,14 @@ if (run("P")) {
   await send(page, "이 폴더의 test.js 에 assert 가 몇 개 있는지 숫자로만 답해. 작업자는 부르지 마.");
   await waitIdle(page, { timeout: 600_000 });
   const picker = page.getByLabel("이 채팅의 오케스트레이터 모델");
-  check("chat orchestrator shows the project default", (await picker.textContent()).includes("프로젝트 기본값"));
+  await picker.click();
+  const resetBefore = await page.getByRole("menuitem", { name: /프로젝트 값 사용/ }).count();
+  await page.keyboard.press("Escape");
+  check("chat orchestrator follows the project (no override)", resetBefore === 0 && /Opus/.test(await picker.textContent()));
   await picker.click();
   await page.getByRole("menuitem", { name: /GPT-6-Astra/ }).first().click();
   await page.waitForTimeout(400);
-  check("chat orchestrator override sticks", !(await picker.textContent()).includes("프로젝트 기본값") && /Astra/.test(await picker.textContent()));
+  check("chat orchestrator override sticks", /Astra/.test(await picker.textContent()));
   await send(page, "방금 내가 무엇을 물어봤고 너는 뭐라고 답했지? 한 문장으로. 작업자는 부르지 마.");
   await waitIdle(page, { timeout: 600_000 });
   const chat = (await page.evaluate(() => window.chatterbox.listChats())).find((x) => x.id === c.id);

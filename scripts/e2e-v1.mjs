@@ -110,13 +110,21 @@ await page.waitForTimeout(400);
 check("orchestrator node view opens", (await page.textContent("header")).includes("오케스트레이터 대화"));
 await page.locator('[data-testid="chat-node"] [role="treeitem"]').first().click();
 
+// The picker shows only the model name; an override is visible as a "프로젝트 값 사용" menu item.
+async function hasOverride(picker) {
+  await picker.click();
+  const n = await page.getByRole("menuitem", { name: /프로젝트 값 사용/ }).count();
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  return n > 0;
+}
 // ---- model inheritance in the chat header
 const claudePicker = page.getByLabel("이 채팅의 Claude 모델");
-check("chat shows Claude model as project default", (await claudePicker.textContent()).includes("프로젝트 기본값"));
+check("chat follows the project's Claude model (no override, no label)", !(await hasOverride(claudePicker)) && !(await claudePicker.textContent()).includes("프로젝트 기본값"));
 await claudePicker.click();
 await page.getByRole("menuitem", { name: /Sonnet/ }).first().click();
 await page.waitForTimeout(300);
-check("per-chat Claude override sticks", !(await claudePicker.textContent()).includes("프로젝트 기본값") && /Sonnet/.test(await claudePicker.textContent()));
+check("per-chat Claude override sticks", (await hasOverride(claudePicker)) && /Sonnet/.test(await claudePicker.textContent()));
 // project change: GPT model → another model; chat (not overridden) follows, Claude override stays
 const projects = await page.evaluate(() => window.chatterbox.listProjects());
 const p1 = projects.find((p) => p.name === "웹 쇼핑몰");
@@ -125,12 +133,12 @@ await page.reload();
 await page.waitForSelector('[data-testid="chat-title"]');
 const gptText = await page.getByLabel("이 채팅의 GPT 모델").textContent();
 const claudeText = await page.getByLabel("이 채팅의 Claude 모델").textContent();
-check("non-overridden GPT model follows the project change", /Sol/i.test(gptText) && gptText.includes("프로젝트 기본값"), gptText);
-check("overridden Claude model keeps the chat value", /Sonnet/.test(claudeText) && !claudeText.includes("프로젝트 기본값"), claudeText);
+check("non-overridden GPT model follows the project change", /Sol/i.test(gptText) && !(await hasOverride(page.getByLabel("이 채팅의 GPT 모델"))), gptText);
+check("overridden Claude model keeps the chat value", /Sonnet/.test(claudeText) && (await hasOverride(page.getByLabel("이 채팅의 Claude 모델"))), claudeText);
 await page.getByLabel("이 채팅의 Claude 모델").click();
 await page.getByRole("menuitem", { name: /프로젝트 값 사용/ }).click();
 await page.waitForTimeout(300);
-check("reset to project value", (await page.getByLabel("이 채팅의 Claude 모델").textContent()).includes("프로젝트 기본값"));
+check("reset to project value", /Haiku/.test(await page.getByLabel("이 채팅의 Claude 모델").textContent()) && !(await hasOverride(page.getByLabel("이 채팅의 Claude 모델"))));
 
 // ---- rename + delete through the context menu
 const thirdChat = page.locator('[data-testid="chat-node"] [role="treeitem"]').nth(1);

@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type {
   AgentKind,
   Chat,
+  ChatAgent,
   CliInfo,
   Consult,
   ModelOption,
@@ -31,6 +32,7 @@ interface State {
   projects: Project[];
   chats: Chat[];
   consults: Record<number, Consult[]>;
+  agents: Record<number, ChatAgent[]>;
   events: Record<number, TimelineEvent[]>;
   selection: Selection | null;
   expanded: Record<string, boolean>;
@@ -98,6 +100,7 @@ export const useStore = create<State>((set, get) => ({
   projects: [],
   chats: [],
   consults: {},
+  agents: {},
   events: {},
   selection: null,
   expanded: loadExpanded(),
@@ -139,6 +142,7 @@ export const useStore = create<State>((set, get) => ({
       }),
     );
     api.onUsage((usage) => set({ usage }));
+    api.onAgentsUpdated((chatId, list) => set((s) => ({ agents: { ...s.agents, [chatId]: list } })));
     api.onSelectChat((chatId) => void get().select({ chatId }));
     window.addEventListener("focus", () => {
       const sel = get().selection;
@@ -185,8 +189,12 @@ export const useStore = create<State>((set, get) => ({
       if (sel.node) get().toggle(`c${chat.id}`, true);
     }
     if (!get().events[sel.chatId]) {
-      const [events, consults] = await Promise.all([api.loadEvents(sel.chatId), api.listConsults(sel.chatId)]);
-      set((s) => ({ events: { ...s.events, [sel.chatId]: events }, consults: { ...s.consults, [sel.chatId]: consults } }));
+      const [events, consults, agents] = await Promise.all([api.loadEvents(sel.chatId), api.listConsults(sel.chatId), api.listAgents(sel.chatId)]);
+      set((s) => ({
+        events: { ...s.events, [sel.chatId]: events },
+        consults: { ...s.consults, [sel.chatId]: consults },
+        agents: { ...s.agents, [sel.chatId]: agents },
+      }));
     }
     if (chat?.unread) void api.markViewed(sel.chatId);
   },
@@ -234,7 +242,7 @@ export const useStore = create<State>((set, get) => ({
   async createChat(projectId) {
     try {
       const c = await api.createChat(projectId);
-      set((s) => ({ chats: [c, ...s.chats], events: { ...s.events, [c.id]: [] }, consults: { ...s.consults, [c.id]: [] } }));
+      set((s) => ({ chats: [c, ...s.chats], events: { ...s.events, [c.id]: [] }, consults: { ...s.consults, [c.id]: [] }, agents: { ...s.agents, [c.id]: [] } }));
       await get().select({ chatId: c.id });
       return c;
     } catch (e) {

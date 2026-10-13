@@ -152,11 +152,13 @@ function registerIpc() {
     if (store.chat(id)?.unread) chats.updateChat(id, { unread: false });
   });
   ipcMain.handle("chats:consults", (_e, id: number) => store.listConsults(id));
+  ipcMain.handle("chats:agents", (_e, id: number) => store.listAgents(id));
   ipcMain.handle("chats:events", (_e, id: number) => store.events(id));
   ipcMain.handle("chats:search", (_e, q: string) => (q.trim() ? store.searchChats(q.trim()) : []));
   ipcMain.handle("chats:send", (_e, id: number, text: string, attachmentIds: number[]) => chats.send(id, text, attachmentIds));
   ipcMain.handle("chats:stop", (_e, id: number) => orchestrator.stop(id));
   ipcMain.handle("chats:resume", (_e, id: number) => orchestrator.resume(id));
+  ipcMain.handle("chats:command", (_e, id: number, name: string, arg: string) => orchestrator.command(id, name, arg));
   ipcMain.handle("chats:dismissInterrupted", (_e, id: number) => orchestrator.dismissInterrupted(id));
   ipcMain.handle("chats:approve", (_e, id: number, approvalId: string, decision: ApprovalDecision) =>
     chats.answerApproval(id, approvalId, decision),
@@ -226,6 +228,7 @@ app.whenReady().then(async () => {
   chats = new ChatManager(
     store,
     {
+      agents: (chatId, list) => send("agents:updated", chatId, list),
       event: (e) => send("chat:event", e),
       chat: (c) => {
         send("chat:updated", c);

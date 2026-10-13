@@ -86,13 +86,13 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
 
           <div className="grid gap-3 rounded-lg border p-3.5">
             <div className="text-[12px] font-medium text-muted-foreground">모델</div>
-            <ModelRow label="오케스트레이터" hint="지시를 받아 계획하고 일을 나눕니다 (읽기 전용)">
-              <ModelPicker agents={["claude", "codex"]} value={settings.orchestratorModel} onChange={(v) => set("orchestratorModel", v as ProjectSettings["orchestratorModel"])} ariaLabel="오케스트레이터 모델" />
+            <ModelRow label="마스터" hint="지시를 받아 팀을 꾸리고 일을 나눕니다 (읽기 전용)">
+              <ModelPicker agents={["claude", "codex"]} value={settings.orchestratorModel} onChange={(v) => set("orchestratorModel", v as ProjectSettings["orchestratorModel"])} ariaLabel="마스터 모델" />
             </ModelRow>
-            <ModelRow label="Claude 작업자" hint="Claude Code로 구현·리뷰">
+            <ModelRow label="클로드 작업자" hint="클로드 N호 (Claude Code)">
               <ModelPicker agents={["claude"]} value={settings.claudeModel} onChange={(v) => set("claudeModel", v)} ariaLabel="Claude 모델" />
             </ModelRow>
-            <ModelRow label="GPT 작업자" hint="Codex로 구현·리뷰">
+            <ModelRow label="지피티 작업자" hint="지피티 N호 (Codex)">
               <ModelPicker agents={["codex"]} value={settings.codexModel} onChange={(v) => set("codexModel", v)} ariaLabel="GPT 모델" />
             </ModelRow>
           </div>
@@ -104,7 +104,7 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
                 <div className="text-[13px] font-medium">작업자 승인 요청</div>
                 <div className="text-[12px] text-muted-foreground">
                   {settings.approvalMode === "orchestrator"
-                    ? "오케스트레이터가 판단해 자동으로 허용·거부하고, 애매하거나 고위험이면 물어봅니다"
+                    ? "마스터가 판단해 자동으로 허용·거부하고, 애매하거나 고위험이면 물어봅니다"
                     : "작업자가 파일을 고치거나 명령을 실행할 때마다 직접 승인합니다"}
                 </div>
               </div>
@@ -112,7 +112,7 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
                 value={settings.approvalMode}
                 onChange={(v) => set("approvalMode", v)}
                 options={[
-                  { value: "orchestrator", label: "오케스트레이터 판단" },
+                  { value: "orchestrator", label: "마스터 판단" },
                   { value: "user", label: "직접 승인" },
                 ]}
                 ariaLabel="승인 방식"
@@ -121,7 +121,7 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
             {settings.approvalMode === "orchestrator" && (
               <div className="flex items-center justify-between gap-4">
                 <div>
-                  <div className="text-[13px] font-medium">고위험 요청도 오케스트레이터에 맡기기</div>
+                  <div className="text-[13px] font-medium">고위험 요청도 마스터에 맡기기</div>
                   <div className="text-[12px] text-muted-foreground">작업 폴더 밖 쓰기, 재귀 삭제, git push, 비밀 파일, 시스템 변경, 업로드. 끄면 이런 요청은 직접 확인합니다</div>
                 </div>
                 <Switch checked={settings.delegateHighRisk} onChange={(v) => set("delegateHighRisk", v)} label="고위험 요청도 맡기기" />
@@ -138,8 +138,12 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
               </div>
               <Switch checked={settings.reviewGate} onChange={(v) => set("reviewGate", v)} label="교차 리뷰" />
             </div>
+            <div className="grid grid-cols-2 gap-3">
+              <NumberField label="동시 클로드 작업자" suffix="명" value={settings.maxClaudeWorkers} onChange={(v) => set("maxClaudeWorkers", v)} min={1} max={6} />
+              <NumberField label="동시 지피티 작업자" suffix="명" value={settings.maxGptWorkers} onChange={(v) => set("maxGptWorkers", v)} min={1} max={6} />
+            </div>
             <div className="grid grid-cols-3 gap-3">
-              <NumberField label="지시당 협의" suffix="회" value={settings.maxConsults} onChange={(v) => set("maxConsults", v)} min={1} max={30} />
+              <NumberField label="지시당 맡기기(기본)" suffix="회" value={settings.maxConsults} onChange={(v) => set("maxConsults", v)} min={1} max={30} />
               <NumberField label="리뷰 왕복" suffix="회" value={settings.maxReviews} onChange={(v) => set("maxReviews", v)} min={0} max={10} />
               <NumberField label="지시당 시간" suffix="분" value={settings.maxMinutes} onChange={(v) => set("maxMinutes", v)} min={5} max={600} />
             </div>

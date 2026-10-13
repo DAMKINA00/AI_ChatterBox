@@ -8,6 +8,7 @@
 //  4. otherwise (or when the judge asks / fails): the inline approval card for the user.
 import { randomUUID } from "node:crypto";
 import { isAbsolute, relative, resolve } from "node:path";
+import { inScope as matchesScope } from "./scope";
 import type { AgentEvent, ApprovalDecision, ApprovalMode, ApprovalRequest, FileDiff, NodeId, Risk, Role } from "../shared/types";
 
 export type Verdict = "allow" | "allow_chat" | "deny";
@@ -45,6 +46,8 @@ export interface ApprovalHost {
   pendingChanged(chatId: number, pending: number): void;
   /** Effective approval mode + high-risk delegation for the chat. */
   mode(chatId: number): { mode: ApprovalMode; delegateHighRisk: boolean };
+  /** A worker's current write scope (implement globs, or [] = no writes during review/opinion). */
+  writeScope?(chatId: number, role: Role): { globs: string[] | null; why: string; folder: string } | null;
   /** Ask the chat's judge; null when it can't answer (no judge, timeout, malformed). */
   judge?(chatId: number, request: ApprovalRequest, input: ApprovalInput): Promise<JudgeAnswer | null>;
 }
@@ -70,6 +73,12 @@ export interface Classification {
   reason?: string;
   /** Hard floor (see above). */
   critical: boolean;
+}
+
+function relToFolder(folder: string, p: string): string | null {
+  const abs = isAbsolute(p) ? p : resolve(folder, p);
+  const rel = relative(folder, abs);
+  return rel.startsWith("..") || isAbsolute(rel) ? null : rel;
 }
 
 export function classify(input: ApprovalInput, folder: string): Classification {
@@ -144,7 +153,25 @@ export class ApprovalService {
       return { verdict: "allow" };
     }
 
-    // 3. The orchestrator decides (workers only; the orchestrator's own requests go to the user).
+    // 3. Writes outside the worker's scope (or any write during review/opinion) are denied outright.
+    if (input.writes || (input.diffs?.length ?? 0) > 0) {
+      const sc = this.host.writeScope?.(chatId, input.role);
+      if (sc?.globs) {
+        const bad = (input.paths ?? input.diffs?.map((d) => d.path) ?? []).find((p) => {
+          const rel = relToFolder(sc.folder, p);
+          return rel === null || !matchesScope(rel, sc.globs!);
+        });
+        if (bad !== undefined) {
+          const id = `ap:${randomUUID()}`;
+          const reason = `${sc.why}: ${bad}`;
+          log("deny", "once", "scope", reason);
+          this.host.emit(chatId, input.node, input.role, { type: "approval_auto", request: { ...base, id }, decision: "deny", reason });
+          return { verdict: "deny", reason: `범위 밖 쓰기라서 거부했습니다 (${reason}). 맡은 범위 안에서만 고치세요.` };
+        }
+      }
+    }
+
+    // 4. The master decides (workers only; the master's own requests go to the user).
     const { mode, delegateHighRisk } = this.host.mode(chatId);
     let judgeReason: string | undefined;
     if (mode === "orchestrator" && input.role !== "orch" && this.host.judge) {
@@ -153,7 +180,7 @@ export class ApprovalService {
       if (answer?.decision === "deny") {
         log("deny", "once", "orchestrator", answer.reason);
         this.host.emit(chatId, input.node, input.role, { type: "approval_auto", request: { ...base, id }, decision: "deny", reason: answer.reason });
-        return { verdict: "deny", reason: `오케스트레이터가 거부했습니다: ${answer.reason}` };
+        return { verdict: "deny", reason: `마스터가 거부했습니다: ${answer.reason}` };
       }
       if (answer?.decision === "allow" && (!c.critical || delegateHighRisk)) {
         log("allow", "once", "orchestrator", answer.reason);
@@ -165,12 +192,12 @@ export class ApprovalService {
       }
       judgeReason = answer
         ? answer.decision === "allow"
-          ? `오케스트레이터는 허용하려 했지만 고위험 작업(${c.reason})이라 직접 확인이 필요합니다. 판단: ${answer.reason}`
-          : `오케스트레이터 의견: ${answer.reason}`
-        : "오케스트레이터가 판단하지 못해 직접 확인이 필요합니다.";
+          ? `마스터는 허용하려 했지만 고위험 작업(${c.reason})이라 직접 확인이 필요합니다. 판단: ${answer.reason}`
+          : `마스터 의견: ${answer.reason}`
+        : "마스터가 판단하지 못해 직접 확인이 필요합니다.";
     }
 
-    // 4. Ask the user.
+    // 5. Ask the user.
     const id = `ap:${randomUUID()}`;
     const request: ApprovalRequest = { ...base, id, judgeReason };
     return new Promise((resolvePromise) => {

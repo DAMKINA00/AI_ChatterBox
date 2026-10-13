@@ -2,7 +2,7 @@
 // The orchestrator's own session is blocked inside a consult tool call while workers ask for
 // approvals, so judging happens in this side conversation. It keeps context across requests
 // (decisions so far), answers strict JSON, and anything malformed/slow falls back to the user.
-import { chatOrchestrator, ROLE_LABEL, CONSULT_KIND_LABEL, type AgentEvent, type ApprovalRequest, type ConsultKind, type Role, type UsageInfo } from "../shared/types";
+import { chatOrchestrator, roleName, CONSULT_KIND_LABEL, type AgentEvent, type ApprovalRequest, type ConsultKind, type Role, type UsageInfo } from "../shared/types";
 import type { ChatManager } from "./chats";
 import type { ApprovalInput, JudgeAnswer } from "./approvals";
 import { ClaudeDriver } from "./drivers/claude";
@@ -12,7 +12,7 @@ import { diffStatsText } from "./diffs";
 
 const JUDGE_INSTRUCTIONS = [
   "# 역할: AI_ChatterBox 승인 판단",
-  "너는 오케스트레이터를 대신해 작업자(Claude 작업자, GPT 작업자)의 승인 요청을 판단한다. 도구는 쓰지 않는다.",
+  "너는 마스터를 대신해 작업자(클로드 N호, 지피티 N호)의 승인 요청을 판단한다. 도구는 쓰지 않는다.",
   '답은 JSON 한 줄만 쓴다: {"decision":"allow"|"deny"|"ask_user","reason":"한국어 한 문장"}',
   "기준:",
   "- allow: 지금 맡긴 일에 필요하고, 작업 폴더 안에서 되돌릴 수 있는 작업. 예: 파일 생성·수정, 빌드·테스트·린트·타입 검사 실행, 프로젝트 스크립트 실행, 파일 읽기와 검색.",
@@ -31,7 +31,7 @@ interface Session {
 
 export interface JudgeContext {
   instruction?: string;
-  consult?: { role: Role; kind: ConsultKind; message: string };
+  consult?: { who: string; kind: ConsultKind; message: string; scope: string[] };
 }
 
 export class ApprovalJudge {
@@ -39,7 +39,7 @@ export class ApprovalJudge {
 
   constructor(
     private chats: ChatManager,
-    private context: (chatId: number) => JudgeContext,
+    private context: (chatId: number, role?: Role) => JudgeContext,
   ) {}
 
   private session(chatId: number): Session {
@@ -93,15 +93,15 @@ export class ApprovalJudge {
     const chat = this.chats.store.chat(chatId);
     const project = chat && this.chats.store.project(chat.projectId);
     if (!project) return null;
-    const ctx = this.context(chatId);
+    const ctx = this.context(chatId, request.role);
     const prompt = [
       "[승인 요청]",
       `작업 폴더: ${project.folder}`,
-      `요청한 작업자: ${ROLE_LABEL[request.role]}`,
+      `요청한 작업자: ${roleName(request.role, this.chats.store.listAgents(chatId))}`,
       ctx.instruction ? `사용자 지시: ${clip(ctx.instruction, 1500)}` : "사용자 지시: (알 수 없음)",
       ctx.consult
-        ? `오케스트레이터가 맡긴 일 (${CONSULT_KIND_LABEL[ctx.consult.kind]}, ${ROLE_LABEL[ctx.consult.role]}): ${clip(ctx.consult.message, 2500)}`
-        : "오케스트레이터가 맡긴 일: (없음)",
+        ? `맡은 일 (${CONSULT_KIND_LABEL[ctx.consult.kind]}, ${ctx.consult.who}${ctx.consult.scope.length ? `, 고칠 수 있는 범위: ${ctx.consult.scope.join(", ")}` : ""}): ${clip(ctx.consult.message, 2500)}`
+        : "맡은 일: (없음)",
       `작업 종류: ${request.title}`,
       `내용: ${clip(request.detail, 3000)}`,
       request.reason ? `작업자가 밝힌 이유: ${clip(request.reason, 500)}` : "",
