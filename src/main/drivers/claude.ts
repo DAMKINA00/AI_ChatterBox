@@ -29,6 +29,8 @@ export interface ClaudeEnv {
   mcpServers?: () => Record<string, unknown>;
   /** Tools the CLI must not use (the orchestrator is read-only). */
   disallowedTools?: string[];
+  /** Tools allowed without a permission prompt (the orchestrator's consult tools). */
+  allowedTools?: string[];
 }
 
 export class ClaudeDriver implements AgentDriver {
@@ -91,6 +93,7 @@ export class ClaudeDriver implements AgentDriver {
     if (this.opts.model) args.push("--model", this.opts.model);
     if (this.opts.instructions) args.push("--append-system-prompt", this.opts.instructions);
     if (this.env.disallowedTools?.length) args.push("--disallowedTools", this.env.disallowedTools.join(","));
+    if (this.env.allowedTools?.length) args.push("--allowedTools", this.env.allowedTools.join(","));
     if (this.nativeId) args.push("--resume", this.nativeId);
 
     const child = spawn(this.opts.exePath, args, {

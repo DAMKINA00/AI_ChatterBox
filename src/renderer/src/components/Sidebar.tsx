@@ -127,6 +127,13 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
   const [confirm, setConfirm] = useState<{ title: string; body: string; run: () => Promise<void> } | null>(null);
 
   const q = search.trim().toLowerCase();
+  // Message-content matches come from the main process (debounced).
+  const [contentHits, setContentHits] = useState<Set<number>>(new Set());
+  useEffect(() => {
+    if (!q) return setContentHits(new Set());
+    const t = setTimeout(() => void api.searchChats(q).then((ids) => setContentHits(new Set(ids))), 200);
+    return () => clearTimeout(t);
+  }, [q]);
   const visibleProjects = projects.filter((p) => showArchived || !p.archived);
   const working = chats.filter((c) => c.status === "working" || c.status === "approval");
 
@@ -154,7 +161,7 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="채팅 검색"
+            placeholder="채팅·메시지 검색"
             aria-label="채팅 검색"
             className="h-8 bg-background pl-8 text-[13px]"
           />
@@ -181,6 +188,7 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
             project={p}
             chats={chats.filter((c) => c.projectId === p.id && (showArchived || !c.archived))}
             query={q}
+            hits={contentHits}
             onEdit={() => setEditProject(p)}
             onRename={(kind, id, title) => setRename({ kind, id, title })}
             onConfirm={setConfirm}
@@ -238,6 +246,7 @@ function ProjectNode({
   project,
   chats,
   query,
+  hits,
   onEdit,
   onRename,
   onConfirm,
@@ -245,6 +254,7 @@ function ProjectNode({
   project: Project;
   chats: Chat[];
   query: string;
+  hits: Set<number>;
   onEdit: () => void;
   onRename: (kind: "chat" | "project", id: number, title: string) => void;
   onConfirm: (c: { title: string; body: string; run: () => Promise<void> }) => void;
@@ -254,7 +264,9 @@ function ProjectNode({
   const createChat = useStore((s) => s.createChat);
   const updateProject = useStore((s) => s.updateProject);
   const deleteProject = useStore((s) => s.deleteProject);
-  const shown = query ? chats.filter((c) => c.title.toLowerCase().includes(query) || project.name.toLowerCase().includes(query)) : chats;
+  const shown = query
+    ? chats.filter((c) => c.title.toLowerCase().includes(query) || hits.has(c.id) || project.name.toLowerCase().includes(query))
+    : chats;
   if (query && shown.length === 0) return null;
   const open = expanded || !!query;
 

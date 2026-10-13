@@ -52,6 +52,42 @@ export async function launch(dataDir) {
   return { app, page };
 }
 
+/**
+ * Launch a portable exe and attach over CDP (Playwright can't launch it directly: the portable
+ * launcher extracts to %TEMP% and starts a child process).
+ */
+export async function launchPortable(exe, dataDir, port = 9333) {
+  const { spawn } = await import("node:child_process");
+  const { chromium } = await import("playwright-core");
+  const before = countProcs("AI_ChatterBox.exe");
+  spawn(exe, [`--remote-debugging-port=${port}`], {
+    env: { ...process.env, AI_CHATTERBOX_DATA: dataDir },
+    detached: true,
+    stdio: "ignore",
+  }).unref();
+  let browser;
+  for (let i = 0; i < 180 && !browser; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`).catch(() => undefined);
+  }
+  if (!browser) throw new Error("portable exe did not start");
+  let page;
+  for (let i = 0; i < 60 && !page; i++) {
+    page = browser.contexts().flatMap((c) => c.pages()).find((p) => !p.url().startsWith("devtools"));
+    if (!page) await new Promise((r) => setTimeout(r, 250));
+  }
+  page.on("pageerror", (e) => console.log("[pageerror]", e.message));
+  await page.waitForSelector('[data-testid="sidebar"]', { timeout: 60_000 });
+  return {
+    page,
+    async close() {
+      await page.evaluate(() => window.close()).catch(() => undefined);
+      await browser.close().catch(() => undefined);
+      for (let i = 0; i < 80 && countProcs("AI_ChatterBox.exe") > before; i++) await new Promise((r) => setTimeout(r, 250));
+    },
+  };
+}
+
 export const DEFAULTS = {
   orchestratorModel: "claude:opus",
   claudeModel: "opus",
@@ -73,7 +109,9 @@ export async function waitIdle(page, { timeout = 600_000, approve, onApproval } 
     if (card && approve) {
       approvals++;
       if (onApproval) await onApproval(card, approvals);
-      const which = typeof approve === "function" ? approve(approvals) : approve;
+      let which = typeof approve === "function" ? approve(approvals) : approve;
+      // High-risk requests (outside the folder, deletes, …) can only be allowed once.
+      if (which === "chat" && (await card.$('[data-testid="approve-chat"]:disabled'))) which = "once";
       await (await card.$(`[data-testid="approve-${which}"]`)).click();
       await page.waitForTimeout(400);
     }

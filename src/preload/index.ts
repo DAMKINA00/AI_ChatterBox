@@ -23,6 +23,7 @@ const api: ChatterBoxApi = {
   markViewed: (id) => ipcRenderer.invoke("chats:viewed", id),
   listConsults: (chatId) => ipcRenderer.invoke("chats:consults", chatId),
   loadEvents: (chatId) => ipcRenderer.invoke("chats:events", chatId),
+  searchChats: (q) => ipcRenderer.invoke("chats:search", q),
   send: (chatId, text, attachmentIds) => ipcRenderer.invoke("chats:send", chatId, text, attachmentIds),
   stop: (chatId) => ipcRenderer.invoke("chats:stop", chatId),
   answerApproval: (chatId, approvalId, decision) => ipcRenderer.invoke("chats:approve", chatId, approvalId, decision),

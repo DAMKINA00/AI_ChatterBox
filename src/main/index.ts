@@ -123,12 +123,17 @@ function registerIpc() {
   ipcMain.handle("chats:list", () => store.listChats());
   ipcMain.handle("chats:create", (_e, projectId: number) => store.createChat(projectId, "새 채팅"));
   ipcMain.handle("chats:update", (_e, id: number, patch) => chats.updateChat(id, patch));
-  ipcMain.handle("chats:delete", (_e, id: number) => chats.deleteChat(id));
+  ipcMain.handle("chats:delete", async (_e, id: number) => {
+    await orchestrator.stop(id);
+    orchestrator.forget(id);
+    await chats.deleteChat(id);
+  });
   ipcMain.handle("chats:viewed", (_e, id: number) => {
     if (store.chat(id)?.unread) chats.updateChat(id, { unread: false });
   });
   ipcMain.handle("chats:consults", (_e, id: number) => store.listConsults(id));
   ipcMain.handle("chats:events", (_e, id: number) => store.events(id));
+  ipcMain.handle("chats:search", (_e, q: string) => (q.trim() ? store.searchChats(q.trim()) : []));
   ipcMain.handle("chats:send", (_e, id: number, text: string, attachmentIds: number[]) => chats.send(id, text, attachmentIds));
   ipcMain.handle("chats:stop", (_e, id: number) => orchestrator.stop(id));
   ipcMain.handle("chats:approve", (_e, id: number, approvalId: string, decision: ApprovalDecision) =>

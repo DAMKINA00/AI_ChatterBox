@@ -96,6 +96,35 @@ CREATE TABLE IF NOT EXISTS settings (
 
 type Row = Record<string, any>;
 
+/** v1 normalized events → v2 events (v1 approvals can no longer be answered). */
+function convertV1Event(e: any): AgentEvent | null {
+  switch (e?.type) {
+    case "user":
+      return { type: "user", text: String(e.text ?? ""), attachments: [] };
+    case "text":
+      return { type: "text", text: String(e.text ?? "") };
+    case "tool_call":
+      return { type: "tool_call", id: String(e.id), name: String(e.name), input: String(e.input ?? "") };
+    case "tool_result":
+      return { type: "tool_result", id: String(e.id), ok: !!e.ok, output: String(e.output ?? "") };
+    case "file_change":
+      return { type: "notice", text: `파일 변경: ${String(e.summary ?? "")}` };
+    case "approval_request":
+      return {
+        type: "approval_request",
+        request: { id: String(e.request?.id), role: "orch", title: String(e.request?.title ?? ""), detail: String(e.request?.detail ?? ""), risk: "low" },
+      };
+    case "approval_resolved":
+      return { type: "approval_resolved", id: String(e.id), decision: e.decision === "allow" ? "once" : "deny" };
+    case "turn_end":
+      return { type: "turn_end", ok: !!e.ok, error: e.error, interrupted: e.interrupted };
+    case "error":
+      return { type: "error", message: String(e.message ?? ""), kind: e.kind };
+    default:
+      return null;
+  }
+}
+
 export type ChatPatch = Partial<
   Pick<
     Chat,
@@ -162,6 +191,66 @@ export class Store {
     // A crash or kill can leave chats marked busy.
     this.db.exec("UPDATE chats SET status = 'idle' WHERE status IN ('working','approval')");
     this.db.exec("UPDATE consults SET status = 'stopped', ended_at = ended_at WHERE status = 'running'");
+    this.migrateV1();
+  }
+
+  /**
+   * v0.1 (M1) kept workspaces → sessions (one CLI each) → events. Each v1 workspace becomes a
+   * "가져온 세션" project per CLI (the orchestrator CLI must match to resume), each session a chat
+   * whose orchestrator conversation is the old CLI session.
+   */
+  private migrateV1() {
+    if (this.getSetting("migratedV1")) return;
+    const has = (t: string) => !!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(t);
+    if (!has("workspaces") || !has("sessions")) {
+      this.setSetting("migratedV1", "none");
+      return;
+    }
+    const workspaces = this.db.prepare("SELECT * FROM workspaces").all() as Row[];
+    let moved = 0;
+    this.db.exec("BEGIN");
+    try {
+      for (const ws of workspaces) {
+        const sessions = this.db.prepare("SELECT * FROM sessions WHERE workspace_id = ? ORDER BY created_at").all(ws.id) as Row[];
+        const projects: Partial<Record<"claude" | "codex", number>> = {};
+        for (const s of sessions) {
+          const agent = s.agent === "codex" ? "codex" : "claude";
+          if (!projects[agent]) {
+            const settings = { ...DEFAULT_SETTINGS, orchestratorModel: agent === "codex" ? "codex:gpt-6-astra" : "claude:opus" } as ProjectSettings;
+            projects[agent] = this.createProject(`가져온 세션 · ${ws.name} (${agent === "codex" ? "Codex" : "Claude"})`, ws.path, settings).id;
+          }
+          const r = this.db
+            .prepare(
+              "INSERT INTO chats (project_id, title, orch_claude_session_id, orch_codex_thread_id, status, created_at, last_active_at) VALUES (?, ?, ?, ?, 'idle', ?, ?)",
+            )
+            .run(projects[agent]!, s.title, agent === "claude" ? s.native_id : null, agent === "codex" ? s.native_id : null, s.created_at, s.updated_at);
+          const chatId = Number(r.lastInsertRowid);
+          if (has("events")) {
+            for (const e of this.db.prepare("SELECT * FROM events WHERE session_id = ? ORDER BY id").all(s.id) as Row[]) {
+              const ev = convertV1Event(JSON.parse(e.data));
+              if (ev) this.db.prepare("INSERT INTO chat_events (chat_id, node, role, ts, type, payload_json) VALUES (?, 'orch', ?, ?, ?, ?)").run(chatId, ev.type === "user" ? null : "orch", e.at, ev.type, JSON.stringify(ev));
+            }
+          }
+          moved++;
+        }
+      }
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      console.error("v1 migration failed", e);
+      return;
+    }
+    this.setSetting("migratedV1", String(moved));
+  }
+
+  /** Chat ids whose messages contain the text (search box). */
+  searchChats(q: string): number[] {
+    const like = `%${q.replace(/[\\%_]/g, (c) => "\\" + c)}%`;
+    return (
+      this.db
+        .prepare("SELECT DISTINCT chat_id FROM chat_events WHERE type IN ('user','text','consult_start') AND payload_json LIKE ? ESCAPE '\\' LIMIT 500")
+        .all(like) as Row[]
+    ).map((r) => r.chat_id);
   }
 
   close() {

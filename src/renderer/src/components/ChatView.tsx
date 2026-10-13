@@ -283,7 +283,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; busy: boolean }>(funct
 
   const send = async () => {
     const t = text.trim();
-    if ((!t && !attachments.length) || busy || sending || uploading) return;
+    if ((!t && !attachments.length) || sending || uploading) return;
     setSending(true);
     try {
       await api.send(
@@ -301,7 +301,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; busy: boolean }>(funct
     }
   };
 
-  const canSend = (!!text.trim() || attachments.length > 0) && !busy && !sending && !uploading;
+  const canSend = (!!text.trim() || attachments.length > 0) && !sending && !uploading;
 
   return (
     <div className="px-4 pt-1 pb-4">
@@ -329,7 +329,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; busy: boolean }>(funct
           ref={area}
           value={text}
           aria-label="메시지 입력"
-          placeholder={busy ? "작업이 끝나면 다음 지시를 보낼 수 있어요" : "지시를 입력하세요"}
+          placeholder={busy ? "추가 지시를 보내면 다음 단계에 오케스트레이터에게 전달됩니다" : "지시를 입력하세요"}
           className="block max-h-60 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[14px] leading-relaxed outline-none select-text placeholder:text-muted-foreground"
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => {
@@ -370,7 +370,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; busy: boolean }>(funct
           <div className="flex-1" />
           <Button size="sm" onClick={() => void send()} disabled={!canSend} aria-label="보내기" data-testid="send" className={cn("rounded-full px-3.5")}>
             {sending ? <Loader2 className="animate-spin" /> : <SendHorizontal />}
-            보내기
+            {busy ? "추가 지시" : "보내기"}
           </Button>
         </div>
       </div>

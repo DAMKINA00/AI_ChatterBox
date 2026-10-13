@@ -134,7 +134,7 @@ export type ApprovalDecision = "once" | "chat" | "deny";
 
 /** Normalized event stream. Every event also carries the agent that produced it (see TimelineEvent). */
 export type AgentEvent =
-  | { type: "user"; text: string; attachments: AttachmentRef[] }
+  | { type: "user"; text: string; attachments: AttachmentRef[]; queued?: boolean }
   | { type: "text_delta"; text: string }
   | { type: "text"; text: string }
   | { type: "tool_call"; id: string; name: string; input: string; diffs?: FileDiff[] }
@@ -197,6 +197,8 @@ export interface ChatterBoxApi {
   markViewed(id: number): Promise<void>;
   listConsults(chatId: number): Promise<Consult[]>;
   loadEvents(chatId: number): Promise<TimelineEvent[]>;
+  /** Chat ids whose messages contain the text. */
+  searchChats(q: string): Promise<number[]>;
   send(chatId: number, text: string, attachmentIds: number[]): Promise<void>;
   stop(chatId: number): Promise<void>;
   answerApproval(chatId: number, approvalId: string, decision: ApprovalDecision): Promise<void>;

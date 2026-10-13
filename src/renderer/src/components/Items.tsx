@@ -98,6 +98,7 @@ function ItemView({ item, chatId, nested }: { item: Item; chatId: number; nested
               ))}
             </div>
           )}
+          {item.queued && <span className="text-[11px] text-muted-foreground">작업 중 추가 지시</span>}
           {item.text && (
             <div className="max-w-[78%] rounded-2xl rounded-br-md bg-user-bubble px-3.5 py-2 whitespace-pre-wrap text-white select-text">
               {item.text}

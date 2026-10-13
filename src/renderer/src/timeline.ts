@@ -5,7 +5,7 @@
 import type { AgentEvent, ApprovalDecision, ApprovalRequest, AttachmentRef, ConsultKind, ConsultStatus, FileDiff, NodeId, Role, TimelineEvent } from "../../shared/types";
 
 export type Item =
-  | { kind: "user"; key: string; text: string; attachments: AttachmentRef[]; at: number }
+  | { kind: "user"; key: string; text: string; attachments: AttachmentRef[]; at: number; queued?: boolean }
   | { kind: "message"; key: string; role: Role; text: string; streaming: boolean; at: number }
   | { kind: "tool"; key: string; role: Role; id: string; name: string; input: string; diffs?: FileDiff[]; result?: { ok: boolean; output: string } }
   | { kind: "files"; key: string; role: Role; files: FileDiff[]; ok: boolean }
@@ -108,7 +108,7 @@ export function apply(items: Item[], e: TimelineEvent): Item[] {
   const key = e.id ? `e${e.id}` : `live-${e.node}-${role}`;
   switch (ev.type) {
     case "user":
-      return [...items, { kind: "user", key: key, text: ev.text, attachments: ev.attachments, at: e.at }];
+      return [...items, { kind: "user", key: key, text: ev.text, attachments: ev.attachments, at: e.at, queued: ev.queued }];
     case "text_delta": {
       const i = items.findLastIndex((x) => x.kind === "message" && x.streaming && x.role === role);
       if (i >= 0 && i === items.length - 1) {
@@ -124,6 +124,8 @@ export function apply(items: Item[], e: TimelineEvent): Item[] {
       return [...closeStream(items, role), { kind: "message", key: key, role, text: ev.text, streaming: false, at: e.at }];
     }
     case "tool_call":
+      // The orchestrator's consult/ask tools are shown as consult and question cards instead.
+      if (ev.name.includes("chatterbox_bridge")) return items;
       return [...closeStream(items, role), { kind: "tool", key: key, role, id: ev.id, name: ev.name, input: ev.input, diffs: ev.diffs }];
     case "tool_result": {
       const i = items.findLastIndex((x) => x.kind === "tool" && x.id === ev.id);

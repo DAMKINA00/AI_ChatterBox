@@ -204,6 +204,9 @@ export class ChatManager {
         this.emit(chatId, this.route(chatId, role), role, event);
         this.onDriverEvent?.(chatId, role, event);
         if (role === "orch" && event.type === "turn_end") this.orchTurnEnded(chatId, event);
+        // A worker that outlived the orchestrator (stop) settles the chat when it ends.
+        else if (event.type === "turn_end" && !this.isBusy(chatId) && this.store.chat(chatId)?.status === "working")
+          this.updateChat(chatId, { status: "idle" });
       },
       nativeId: (id) => this.updateChat(chatId, this.nativeIdPatch(role, cfg.agent, id)),
       approve: (input) => this.approvals.request(chatId, project.folder, { ...input, role, node: this.route(chatId, role) }),
@@ -227,6 +230,7 @@ export class ChatManager {
           tmpDir: this.tmpDir,
           mcpServers: () => this.toolsFor?.(this.store.chat(chatId)!, role, "claude") ?? {},
           disallowedTools: role === "orch" ? ORCH_DISALLOWED : undefined,
+          allowedTools: role === "orch" ? ["mcp__chatterbox_bridge"] : undefined,
         },
         host,
       );
@@ -261,11 +265,21 @@ export class ChatManager {
     await (await this.driver(chat.id, "orch")).send(input);
   };
 
+  /** Called instead of sendHandler while the chat is working (extra instructions). */
+  busySend?: (chat: Chat, input: AgentInput) => Promise<void>;
+
   async send(chatId: number, text: string, attachmentIds: number[]) {
     const chat = this.store.chat(chatId);
     if (!chat) throw new Error("채팅이 없습니다.");
-    if (this.isBusy(chatId)) throw new Error("작업이 진행 중입니다. 끝나거나 중지한 뒤 보내 주세요.");
     const attachments = this.store.attachmentsFor(attachmentIds);
+    if (chat.status === "working" || chat.status === "approval" || this.isBusy(chatId)) {
+      if (!this.busySend) throw new Error("작업이 진행 중입니다. 끝나거나 중지한 뒤 보내 주세요.");
+      const ev = this.store.addEvent(chatId, "orch", null, { type: "user", text, attachments, queued: true });
+      this.store.linkAttachments(attachmentIds, ev.id);
+      this.sink.event(ev);
+      await this.busySend(chat, { text, attachments });
+      return;
+    }
     const isFirst = !this.store.hasUserEvent(chatId);
     const userEvent = this.store.addEvent(chatId, "orch", null, { type: "user", text, attachments });
     this.store.linkAttachments(attachmentIds, userEvent.id);
@@ -286,6 +300,8 @@ export class ChatManager {
 
   /** The orchestrator's turn finished: the instruction is done. */
   orchTurnEnded(chatId: number, end: Extract<AgentEvent, { type: "turn_end" }>) {
+    // After a stop a worker may still be winding down; it settles the status when it ends.
+    if (end.interrupted && this.isBusy(chatId)) return;
     this.approvals.cancelChat(chatId);
     this.updateChat(chatId, {
       status: end.interrupted ? "idle" : end.ok ? "done" : "error",
@@ -324,6 +340,8 @@ function codexMcpConfig(servers: Record<string, any>): Record<string, unknown> {
     out[`mcp_servers.${name}.command`] = s.command;
     out[`mcp_servers.${name}.args`] = s.args ?? [];
     if (s.env) out[`mcp_servers.${name}.env`] = s.env;
+    // The orchestrator runs with approvalPolicy "never"; our own tools must not need approval.
+    out[`mcp_servers.${name}.default_tools_approval_mode`] = "approve";
     // Consults can run for a long time.
     out[`mcp_servers.${name}.tool_timeout_sec`] = 3600;
     out[`mcp_servers.${name}.startup_timeout_sec`] = 30;

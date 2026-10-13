@@ -237,6 +237,7 @@ export class CodexDriver implements AgentDriver {
   async send(input: AgentInput): Promise<void> {
     if (this._running) throw new Error("이전 응답이 아직 진행 중입니다.");
     this._running = true;
+    this.stopRequested = false;
     this.turnText = "";
     this.turnFiles.clear();
     try {
@@ -247,7 +248,7 @@ export class CodexDriver implements AgentDriver {
       items.push({ type: "text", text: (input.text || "(첨부 파일을 확인해 주세요)") + fileNote(others), text_elements: [] });
       const params: TurnStartParams = { threadId, input: items, model: this.opts.model || null };
       const r = await this.server.request<TurnStartResponse>("turn/start", params);
-      this.turnId = r.turn.id;
+      this.turnKnown(r.turn.id);
     } catch (e) {
       this._running = false;
       const message = e instanceof Error ? e.message : String(e);
@@ -269,9 +270,24 @@ export class CodexDriver implements AgentDriver {
   }
 
   async stop(): Promise<void> {
-    if (!this._running || !this.threadId || !this.turnId) return;
+    if (!this._running) return;
+    // Stop pressed before turn/start answered: interrupt as soon as the turn id is known.
+    if (!this.threadId || !this.turnId) {
+      this.stopRequested = true;
+      return;
+    }
     const params: TurnInterruptParams = { threadId: this.threadId, turnId: this.turnId };
     await this.server.request("turn/interrupt", params).catch(() => undefined);
+  }
+
+  private stopRequested = false;
+
+  private turnKnown(id: string) {
+    this.turnId = id;
+    if (this.stopRequested) {
+      this.stopRequested = false;
+      void this.stop();
+    }
   }
 
   onServerRequest(req: ServerRequest): boolean {
@@ -329,7 +345,7 @@ export class CodexDriver implements AgentDriver {
         this.onItem(n.params.item, true);
         break;
       case "turn/started":
-        this.turnId = n.params.turn.id;
+        this.turnKnown(n.params.turn.id);
         break;
       case "turn/completed": {
         const t = n.params.turn;
