@@ -50,12 +50,15 @@ export function UsageBar() {
         color="bg-gpt"
         tip={usage.codex?.primary ? `Codex 5시간 사용량 · ${resetText(usage.codex.primary.resetsAt)}` : "Codex 사용량을 불러오는 중"}
       />
-      <Bar
-        label="GPT 주간"
-        pct={usage.codex?.secondary?.usedPercent}
-        color="bg-gpt"
-        tip={usage.codex?.secondary ? `Codex 주간 사용량 · ${resetText(usage.codex.secondary.resetsAt)}` : "Codex 사용량을 불러오는 중"}
-      />
+      {/* Some plans report only one Codex window. */}
+      {(!usage.codex || usage.codex.secondary) && (
+        <Bar
+          label="GPT 주간"
+          pct={usage.codex?.secondary?.usedPercent}
+          color="bg-gpt"
+          tip={usage.codex?.secondary ? `Codex 주간 사용량 · ${resetText(usage.codex.secondary.resetsAt)}` : "Codex 사용량을 불러오는 중"}
+        />
+      )}
     </div>
   );
 }

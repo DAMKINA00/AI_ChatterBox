@@ -3,7 +3,7 @@
 // Usage: npm run build && node scripts/e2e-v1.mjs
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { makeChecks, scratchDir, launch, DEFAULTS, waitIdle, send, lastAgentText, shot, countProcs, root } from "./e2e-lib.mjs";
+import { makeChecks, scratchDir, launch, DEFAULTS, waitIdle, send, lastAgentText, shot, snapshot, leftovers, root } from "./e2e-lib.mjs";
 
 const { check, finish } = makeChecks();
 const base = scratchDir("e2e-v1");
@@ -11,7 +11,7 @@ const data = join(base, "data");
 const wsA = scratchDir("e2e-v1/shop");
 const wsB = scratchDir("e2e-v1/pipeline");
 const icon = join(root, "build", "icon.png");
-const before = { claude: countProcs("claude.exe"), codex: countProcs("codex.exe") };
+const before = snapshot();
 
 let { app, page } = await launch(data);
 
@@ -162,8 +162,8 @@ await page.getByLabel("테마 전환").click();
 // ---- restart: everything persisted, and the Claude session continues
 await app.close();
 await new Promise((r) => setTimeout(r, 1500));
-const after = { claude: countProcs("claude.exe"), codex: countProcs("codex.exe") };
-check("no CLI processes left after quit", after.claude <= before.claude && after.codex <= before.codex, JSON.stringify({ before, after }));
+const left = leftovers(before);
+check("no CLI processes left after quit", left.length === 0, left.join(", "));
 ({ app, page } = await launch(data));
 await page.waitForSelector('[data-testid="chat-title"]');
 check("last chat reopens after restart", (await page.textContent('[data-testid="chat-title"]'))?.startsWith("붙여넣은 이미지에"));

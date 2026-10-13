@@ -9,7 +9,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { join, resolve } from "node:path";
-import { makeChecks, scratchDir, launch, launchPortable, DEFAULTS, waitIdle, send, lastAgentText, shot, countProcs } from "./e2e-lib.mjs";
+import { makeChecks, scratchDir, launch, launchPortable, DEFAULTS, waitIdle, send, lastAgentText, shot, snapshot, leftovers } from "./e2e-lib.mjs";
 
 const exe = process.argv[2] ? resolve(process.argv[2]) : null;
 const { check, finish } = makeChecks();
@@ -49,7 +49,7 @@ const testsPass = () => {
   }
 };
 
-const before = { claude: countProcs("claude.exe"), codex: countProcs("codex.exe") };
+const before = snapshot();
 async function open() {
   if (exe) return launchPortable(exe, data);
   const { app, page } = await launch(data);
@@ -85,7 +85,7 @@ check("exe: tests pass after the fix", testsPass());
 check("exe: final report", (await lastAgentText(page, "orch")).length > 20);
 await page.waitForTimeout(2000);
 const usage = await page.$$eval('[data-testid="usage-bar"]', (els) => els.map((e) => e.textContent));
-check("usage shown for Claude and GPT", usage.length === 3 && !usage[0].endsWith("–") && !usage[1].endsWith("–"), usage.join(" | "));
+check("usage shown for Claude and GPT", usage.length >= 2 && !usage[0].endsWith("–") && !usage[1].endsWith("–"), usage.join(" | "));
 await shot(page, "v3-exe-scenario.png");
 
 // ---- quit, relaunch, continue
@@ -119,6 +119,6 @@ await shot(page, "v3-orchestrator-switch.png");
 
 await close();
 await new Promise((r) => setTimeout(r, 2000));
-const after = { claude: countProcs("claude.exe"), codex: countProcs("codex.exe"), app: countProcs("AI_ChatterBox.exe") };
-check("no app/CLI processes left after quit", after.claude <= before.claude && after.codex <= before.codex && after.app === 0, JSON.stringify({ before, after }));
+const left = leftovers(before, /^(claude|codex|AI_ChatterBox)\.exe$/i);
+check("no app/CLI processes left after quit", left.length === 0, left.join(", "));
 finish();

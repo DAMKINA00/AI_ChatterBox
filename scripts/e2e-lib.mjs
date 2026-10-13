@@ -28,6 +28,31 @@ export function makeChecks() {
   return { check, finish };
 }
 
+function processTable() {
+  const out = execSync(
+    'powershell -NoProfile -Command "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress"',
+    { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+  );
+  return JSON.parse(out).map((p) => ({ pid: p.ProcessId, ppid: p.ParentProcessId, name: p.Name }));
+}
+
+/** Snapshot of running processes, to find CLI processes our app left behind later. */
+export function snapshot() {
+  return new Set(processTable().map((p) => p.pid));
+}
+
+/**
+ * claude.exe / codex.exe processes that appeared after `before` and whose parent is not a
+ * pre-existing process — i.e. orphans of our app. (Other apps, like the Codex desktop app,
+ * keep spawning codex.exe from their own long-lived processes; those are ignored.)
+ */
+export function leftovers(before, names = /^(claude|codex)\.exe$/i) {
+  const table = processTable();
+  return table
+    .filter((p) => names.test(p.name) && !before.has(p.pid) && !before.has(p.ppid))
+    .map((p) => `${p.name}#${p.pid}`);
+}
+
 export function countProcs(name) {
   try {
     return execSync(`tasklist /FI "IMAGENAME eq ${name}" /NH`, { encoding: "utf8" })

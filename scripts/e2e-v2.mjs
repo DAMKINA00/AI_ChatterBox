@@ -8,7 +8,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { makeChecks, scratchDir, launch, DEFAULTS, waitIdle, send, lastAgentText, shot, countProcs } from "./e2e-lib.mjs";
+import { makeChecks, scratchDir, launch, DEFAULTS, waitIdle, send, lastAgentText, shot, snapshot, leftovers } from "./e2e-lib.mjs";
 
 const only = new Set(process.argv.slice(2));
 const run = (k) => only.size === 0 || only.has(k);
@@ -52,7 +52,7 @@ function testsPass(dir) {
   }
 }
 
-const before = { claude: countProcs("claude.exe"), codex: countProcs("codex.exe") };
+const before = snapshot();
 let { app, page } = await launch(data);
 
 async function newProject(name, folder, settings) {
@@ -140,6 +140,6 @@ if (run("D")) {
 
 await app.close();
 await new Promise((r) => setTimeout(r, 1500));
-const after = { claude: countProcs("claude.exe"), codex: countProcs("codex.exe") };
-check("no CLI processes left after quit", after.claude <= before.claude && after.codex <= before.codex, JSON.stringify({ before, after }));
+const left = leftovers(before);
+check("no CLI processes left after quit", left.length === 0, left.join(", "));
 finish();
