@@ -5,6 +5,7 @@ import { app, BrowserWindow, dialog, Menu, nativeImage, Notification, Tray } fro
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { Chat } from "../shared/types";
+import { ChatNotifications, type ChatNotice } from "./chat-notifications";
 
 export interface TrayHost {
   window(): BrowserWindow | null;
@@ -17,10 +18,12 @@ const busy = (c: Chat) => c.status === "working" || c.status === "approval";
 
 export class AppTray {
   private tray?: Tray;
-  private last = new Map<number, Chat["status"]>();
+  private notifications: ChatNotifications;
   private hiddenNoticeShown = false;
 
-  constructor(private host: TrayHost) {}
+  constructor(private host: TrayHost) {
+    this.notifications = new ChatNotifications((chat, notice) => this.notify(chat, notice), host.chats());
+  }
 
   private icon() {
     const file = app.isPackaged ? join(process.resourcesPath, "icon.png") : join(app.getAppPath(), "build", "icon.png");
@@ -55,18 +58,20 @@ export class AppTray {
 
   /** Keep the tray tooltip/menu current and notify on finish / needs-user transitions. */
   chatChanged(chat: Chat) {
-    const prev = this.last.get(chat.id);
-    this.last.set(chat.id, chat.status);
     this.refresh();
-    if (prev === chat.status) return;
+    this.notifications.chatChanged(chat);
+  }
+
+  private notify(chat: Chat, notice: ChatNotice) {
     const win = this.host.window();
     const away = !win || !win.isVisible() || !win.isFocused();
-    if (!away || !Notification.isSupported()) return;
-    let body: string | null = null;
-    if ((prev === "working" || prev === "approval") && chat.status === "done") body = "작업이 끝났습니다.";
-    else if ((prev === "working" || prev === "approval") && chat.status === "error") body = "작업 중 오류가 났습니다.";
-    else if (chat.status === "approval") body = "확인이 필요합니다 (승인 또는 질문).";
-    if (!body) return;
+    if ((notice === "error" && !away) || !Notification.isSupported()) return;
+    const body = {
+      approval: "마스터가 작업 승인 또는 답변을 기다립니다.",
+      reminder: "1분 동안 확인되지 않은 요청이 있습니다. 마스터 대화에서 확인해 주세요.",
+      done: "마스터가 전체 작업과 최종 취합을 완료했습니다.",
+      error: "작업 중 오류가 났습니다.",
+    }[notice];
     const n = new Notification({ title: chat.title, body, icon: this.icon() });
     n.on("click", () => {
       this.show();
@@ -130,6 +135,7 @@ export class AppTray {
   }
 
   destroy() {
+    this.notifications.destroy();
     this.tray?.destroy();
     this.tray = undefined;
   }

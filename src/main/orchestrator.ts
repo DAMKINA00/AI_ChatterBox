@@ -42,7 +42,7 @@ import { scopesOverlap } from "./scope";
 import { isMutatingTool, isReadCommand } from "./execution-policy";
 import type { ApprovalInput } from "./approvals";
 import { addWait, checkAsk, removeWait, type WaitGraph } from "./team";
-import { completionIssue } from "./dispatch";
+import { completionIssue, dualInvestigationIssue } from "./dispatch";
 
 const KINDS: ConsultKind[] = ["implement", "review", "opinion"];
 const MAX_DEPTH = 3;
@@ -51,8 +51,8 @@ const MAX_GOAL_TURNS = 6;
 
 const ROUTE_TOOL: ToolDef = {
   name: "route_request",
-  description: "사용자 지시마다 첫 단계로 처리 방식을 기록합니다. direct=간단한 답변·사전 확인만, delegated=소스 분석·구현·이미지·문서 제작 등 본 작업. reason에 이유를 적으세요. 팀의 모델·도구·사용량을 반환합니다. delegated면 반드시 앱 spawn/ask로 실제 작업을 맡기세요.",
-  inputSchema: { type: "object", properties: { mode: { type: "string", enum: ["direct", "delegated"] }, reason: { type: "string" } }, required: ["mode", "reason"], additionalProperties: false },
+  description: "사용자 지시마다 첫 단계로 처리 방식을 기록합니다. direct=간단한 답변·사전 확인만, delegated=본 작업 위임. 중요한 버그 수정·오류 분석은 delegated와 dualInvestigation=true로 기록하고 reason에 중요도를 판단한 이유를 적으세요. 팀의 모델·도구·사용량을 반환합니다. 위임은 앱 spawn/ask만 사용하세요.",
+  inputSchema: { type: "object", properties: { mode: { type: "string", enum: ["direct", "delegated"] }, reason: { type: "string" }, dualInvestigation: { type: "boolean", description: "중요한 버그·오류를 클로드와 지피티 양쪽이 독립 조사해야 하면 true. 수정 전 두 계열의 opinion 결과가 필요합니다." } }, required: ["mode", "reason"], additionalProperties: false },
 };
 
 const EXPRESSION_TOOL: ToolDef = {
@@ -117,7 +117,7 @@ const ASK_PARALLEL_TOOL: ToolDef = {
 const SPAWN_TOOL: ToolDef = {
   name: "spawn",
   description:
-    "작업자를 새로 만들고 닉네임을 돌려받습니다. kind=claude → 클로드 N호(Claude Code), kind=gpt → 지피티 N호(Codex). job에 맡길 역할을 한 줄로 적으세요. 일이 많으면 범위를 나눠 여러 명을 만들고, 일이 적으면 한 명으로 충분합니다.",
+    "해제된 같은 계열의 작업자를 낮은 번호부터 다시 활성화하며, 없을 때 새로 만듭니다. kind=claude → 클로드 N호(Claude Code), kind=gpt → 지피티 N호(Codex). 이전 번호·대화 기록을 유지합니다. job에 맡길 역할을 한 줄로 적으세요. 동시에 필요한 수만 확보하세요.",
   inputSchema: {
     type: "object",
     properties: { kind: { type: "string", enum: ["claude", "gpt"] }, job: { type: "string" } },
@@ -126,7 +126,7 @@ const SPAWN_TOOL: ToolDef = {
 };
 const RELEASE_TOOL: ToolDef = {
   name: "release",
-  description: "더 필요 없는 작업자를 해제합니다 (닉네임). 해제한 번호는 다시 쓰지 않습니다.",
+  description: "더 필요 없는 작업자를 해제합니다 (닉네임). 다음 spawn에서 같은 번호와 대화 기록으로 다시 활성화할 수 있습니다.",
   inputSchema: { type: "object", properties: { nickname: { type: "string" } }, required: ["nickname"] },
 };
 const AGENTS_TOOL: ToolDef = {
@@ -179,16 +179,20 @@ function masterInstructions(project: Project, agent: AgentKind): string {
   return [
     "# 역할: AI_ChatterBox 마스터",
     `너는 사용자의 지시를 받아 팀을 꾸리고 일을 나눠 맡기는 마스터다. 작업 폴더: ${project.folder}`,
-    "- 너는 배정·검토·취합 담당이다. 간단한 답변·사전 확인만 직접 하고, 소스 분석·원인 조사·구현·이미지·문서 제작 등 본 작업은 반드시 앱 작업자에게 맡긴다. 결과에 누락·모순이 있으면 보완 요청하고 최종 답변을 취합한다. 사용자가 명시적으로 직접 수행을 요구한 예외에도 기존 승인·작업 범위 규칙을 지킨다.",
+    "- 너는 배정·검토·취합 담당이다. 간단한 질문·짧은 설명·이미 주어진 정보만으로 답할 수 있는 확인은 direct로 기록한 뒤 작업자를 생성하거나 호출하지 않고 직접 답한다. 소스 분석·원인 조사·구현·이미지·문서 제작 등 본 작업은 반드시 앱 작업자에게 맡긴다. 결과에 누락·모순이 있으면 보완 요청하고 최종 답변을 취합한다. 사용자가 명시적으로 직접 수행을 요구한 예외에도 기존 승인·작업 범위 규칙을 지킨다.",
     `- 지시마다 먼저 ${t("route_request")}(mode=direct|delegated, reason=이유)를 호출한다. 반환되는 실제 사용 가능 도구·모델·사용량으로 후보를 확인한다. 도구 사용 불가/미확인은 가능하다고 가정하지 않는다.`,
     "- 모든 위임은 이 앱의 chatterbox_bridge spawn/ask/ask_parallel만 사용한다. CLI 내부 spawn_agent/Agent/Task/팀 도구나 별도 CLI 프로세스로 작업자를 만들지 않는다. 글로벌 스킬의 Luna 선호와 관계없이 앱 상단에서 선택한 클로드·지피티 모델을 사용한다.",
     `- 클로드 선호 작업: ${s.claudeStrengths}\n  주의점: ${s.claudeCautions}`,
     `- 지피티 선호 작업: ${s.gptStrengths}\n  주의점: ${s.gptCautions}`,
+    "- 기본 배정은 클로드 중심이다. 일반 분석·구현·테스트·문서는 먼저 클로드에게 맡기고, 독립 작업이 많으면 클로드 작업자를 추가해 나눈다. 지피티는 이미지 도구가 필요한 작업, 중요한 양쪽 조사·다른 관점의 검증, 사용자의 지피티 지정, 또는 클로드의 한도·실행 불가·과부하에 따른 재배정에 우선 사용한다. 매번 두 계열을 균등하게 배정하지 않는다. 프로젝트의 사용자 지정 선호와 명시적인 사용자 지시는 존중하며 예외 배정 이유를 기록한다.",
     "- 위 기준은 기본 선호이며 절대적인 우열이 아니다. 필요한 도구 사용 가능 여부를 먼저 확인하고, 사용자가 지정한 담당·선호 기준·관련 맥락·작업량·사용 한도를 고려한다. 두 계열을 매번 모두 부르지 않는다. 실패하면 원인을 반영해 재배정하고 가능한 담당자가 없으면 미완료 사유를 알린다.",
+    "- 시각 작업도 구분한다. 이미지 생성·편집은 이미지 도구가 있는 지피티에게, 모션그래픽·애니메이션의 코드·타임라인·연출 제작은 클로드에게 우선 배정한다. 모션그래픽에 새 이미지 소재가 필요하면 그 이미지 생성만 지피티에 맡기고 클로드가 결과를 통합한다.",
+    `- 중요한 버그 수정·오류 분석이라고 판단하면 ${t("route_request")}(mode=delegated, dualInvestigation=true, reason=중요도 판단 근거)를 기록한다. 예: 데이터 손실·보안·설비 안전·서비스 중단에 영향이 크거나, 반복 장애의 원인이 불확실하고 잘못 고쳤을 때 피해가 큰 경우. 사용자에게 양쪽 조사를 명시적으로 요청받은 경우도 적용한다. 단순 문구·서식 수정이나 일반 질문에 모두 호출하지 않는다.`,
+    `- 양쪽 조사: 클로드와 지피티에게 동일한 문제·증상·소스·로그·완료 기준을 주고 ${t("ask_parallel")}(각 kind=opinion)로 독립 조사시킨다. 다른 쪽 결론을 먼저 전달하거나 파일 수정을 맡기지 않는다. 각각 원인 후보·근거(파일/로그)·재현 방법·수정안·불확실성을 보고하게 한다. 두 결과가 오면 공통점과 차이를 대조하고, 충돌은 추가 증거로 확인해 마스터가 최종 원인·수정 방향을 취합한다. 이후 구현은 정한 담당자에게 맡기고 교차 리뷰 규칙을 유지한다. 한쪽을 실행할 수 없으면 양쪽 조사를 완료했다고 하지 말고 제한과 확인된 결과를 보고한다.`,
     `- 팀: ${t("spawn")}(kind=claude|gpt)로 작업자를 만든다 → 클로드 N호 / 지피티 N호. 작업자 수는 일의 양에 맞춘다: 작은 일은 한 명, 큰 일은 범위를 나눠 여러 명(동시에 클로드 최대 ${s.maxClaudeWorkers}명, 지피티 최대 ${s.maxGptWorkers}명). 다 쓴 작업자는 ${t("release")}로 해제한다. ${t("agents")}로 팀을 확인한다.`,
     `- 일 맡기기: ${t("ask")}(to=닉네임, kind, message, scope). 서로 독립적인 일은 반드시 ${t("ask_parallel")}(tasks=[…])로 한 번에 맡겨 동시에 진행한다(하나씩 기다리지 말 것). 구현(implement)은 고칠 범위(scope)를 겹치지 않게 나눈다. 리뷰·의견은 언제든 동시에 가능하다.`,
     s.reviewGate
-      ? "- 너 자신 또는 작업자가 코드를 바꾸면 끝내기 전에, 그 코드를 만들지 않은 작업자에게 리뷰를 맡긴다 (kind=review). 네가 직접 바꾼 파일도 빠짐없이 넘긴다. 지적이 나오면 고치고 다시 리뷰받는다."
+      ? "- 너 자신 또는 작업자가 코드를 바꾸면 끝내기 전에, 그 코드를 만들지 않은 작업자에게 리뷰를 맡긴다 (kind=review). 일반 변경의 리뷰는 다른 클로드 작업자도 가능하다. 중요한 오류·보안·안전 등 다른 계열 관점이 꼭 필요한 경우 지피티로 교차검증한다. 네가 직접 바꾼 파일도 빠짐없이 넘긴다. 지적이 나오면 고치고 다시 리뷰받는다."
       : "- 리뷰는 필요하다고 판단할 때만 맡긴다 (kind=review).",
     "- ask/ask_parallel의 각 배정에 reason(선택 이유)을 넣는다. 이미지 생성·편집은 requiresImage=true, kind=implement로 지피티에게 맡긴다. 배정 내용에는 목표, 제약, 산출물, 완료 기준을 포함한다.",
     "- 작업자는 이 대화를 보지 못한다. message에 목표, 관련 파일 경로, 제약, 완료 기준을 빠짐없이 적는다. 사용자가 첨부한 파일이 필요하면 attach로 경로를 넘긴다.",
@@ -218,6 +222,7 @@ function workerInstructions(a: ChatAgent): string {
 interface Instruction {
   id: number;
   mode?: "direct" | "delegated";
+  dualInvestigation?: boolean;
   repaired?: boolean;
   /** The user's instruction text (context for the approval judge). */
   text: string;
@@ -325,11 +330,15 @@ export class Orchestrator {
           if (!master) break;
           const inst = this.instructions.get(chatId);
           if (!inst || !["direct", "delegated"].includes(args.mode) || !String(args.reason ?? "").trim()) return textResult("mode와 reason을 지정하세요.", true);
+          if (args.dualInvestigation !== undefined && typeof args.dualInvestigation !== "boolean") return textResult("dualInvestigation은 true 또는 false여야 합니다.", true);
+          const dualInvestigation = !!inst.dualInvestigation || args.dualInvestigation === true;
+          if (dualInvestigation && args.mode !== "delegated") return textResult("중요 오류의 양쪽 조사는 delegated로 기록하세요.", true);
           if (inst.mode === "delegated" && args.mode === "direct") return textResult("위임할 본 작업을 직접 처리로 바꿀 수 없습니다. 가능한 작업자에게 맡기거나 미완료 사유를 보고하세요.", true);
           inst.mode = args.mode;
-          this.chats.emit(chatId, "orch", "orch", { type: "dispatch", instructionId: inst.id, mode: args.mode, reason: String(args.reason).trim() });
+          inst.dualInvestigation = dualInvestigation;
+          this.chats.emit(chatId, "orch", "orch", { type: "dispatch", instructionId: inst.id, mode: args.mode, reason: String(args.reason).trim(), dualInvestigation });
           const capabilities = await this.chats.teamCapabilities(this.chats.store.chat(chatId)!);
-          return textResult(JSON.stringify({ capabilities, team: this.agentsText(chatId), note: "사용 가능 도구·사용량은 현재 확인값이며 인증/한도 오류는 실행 시 보고됩니다. 이미지 미확인은 사용 가능으로 간주하지 마세요." }));
+          return textResult(JSON.stringify({ capabilities, team: this.agentsText(chatId), dualInvestigation, note: "사용 가능 도구·사용량은 현재 확인값이며 인증/한도 오류는 실행 시 보고됩니다. 이미지 미확인은 사용 가능으로 간주하지 마세요." }));
         }
         case "set_expression":
           if (!isAgentExpression(args.expression)) return textResult("지원하지 않는 표정입니다.", true);
@@ -398,7 +407,7 @@ export class Orchestrator {
     const a = this.chats.store.createAgent(chatId, kind, job);
     this.chats.agentsChanged(chatId);
     this.chats.emit(chatId, "orch", "orch", { type: "notice", text: `${a.nickname} 합류${job ? ` · ${job}` : ""}` });
-    return textResult(`${a.nickname}을(를) 만들었습니다. ask(to="${a.nickname}")로 일을 맡기세요.`);
+    return textResult(`${a.nickname}이(가) 준비되었습니다. ask(to="${a.nickname}")로 일을 맡기세요. 이전 기록이 있으면 유지됩니다.`);
   }
 
   private async release(chatId: number, nickname: string): Promise<ToolResult> {
@@ -406,8 +415,8 @@ export class Orchestrator {
     if (!a) return textResult(`그런 작업자가 없습니다: ${nickname}`, true);
     if (a.status === "released") return textResult(`${a.nickname}은(는) 이미 해제되었습니다.`);
     if (this.running.get(chatId)?.has(a.key)) return textResult(`${a.nickname}은(는) 아직 작업 중이라 해제할 수 없습니다.`, true);
-    this.chats.store.updateAgent(a.id, { status: "released" });
     await this.chats.disposeRole(chatId, a.key);
+    this.chats.store.updateAgent(a.id, { status: "released" });
     this.chats.agentsChanged(chatId);
     this.chats.emit(chatId, "orch", "orch", { type: "notice", text: `${a.nickname} 해제` });
     return textResult(`${a.nickname}을(를) 해제했습니다.`);
@@ -468,6 +477,10 @@ export class Orchestrator {
       return textResult(`호출이 너무 깊습니다(최대 ${MAX_DEPTH}단계). 직접 처리하거나 결과 보고에 적으세요.`, true);
     const inst = this.instructions.get(chatId);
     if (caller === "orch" && inst?.mode !== "delegated") return textResult("먼저 route_request(mode=delegated, reason=이유)로 배정 방식을 기록하세요.", true);
+    if (kind === "implement") {
+      const issue = this.investigationIssue(chatId);
+      if (issue) return textResult(issue, true);
+    }
     const supersedes = args.supersedes;
     if (supersedes !== undefined) {
       const previous = this.chats.store.consult(supersedes);
@@ -601,7 +614,6 @@ export class Orchestrator {
         })();
       });
 
-      this.running.get(chatId)?.delete(target.key);
       this.chats.setRoute(chatId, target.key, undefined);
       if (kind === "implement") this.releaseScope(chatId, consult.id);
       this.chats.agentsChanged(chatId);
@@ -612,6 +624,10 @@ export class Orchestrator {
       const finished = this.chats.store.finishConsult(consult.id, status, summary, result.files);
       this.chats.sink.consult(finished);
       this.chats.emit(chatId, this.chats.route(chatId, caller), caller, { type: "consult_end", consultId: consult.id, status, summary, files: result.files });
+      // The worker queue remains held until its native log is safely archived.
+      await this.chats.archiveWorker(chatId, target.key);
+      this.running.get(chatId)?.delete(target.key);
+      this.chats.agentsChanged(chatId);
 
       const head =
         status === "done"
@@ -635,6 +651,8 @@ export class Orchestrator {
     if (!mutation) return null;
     if (this.stopped.has(chatId)) return "작업이 중지되었습니다.";
     if (this.planning.has(chatId) || this.reviewing.has(chatId)) return "계획·리뷰 중에는 파일 수정이나 변경 명령을 실행할 수 없습니다.";
+    const investigation = this.investigationIssue(chatId);
+    if (investigation) return investigation;
     if (input.role === "orch") {
       if (this.scopeLocks.get(chatId)?.length) return "작업자가 구현 중입니다. 작업이 끝난 뒤 마스터의 직접 변경을 다시 요청하세요.";
     } else {
@@ -720,7 +738,12 @@ export class Orchestrator {
     const events = this.chats.store.events(chatId);
     const id = events.findLast((e) => e.event.type === "user")?.id ?? 0;
     const previous = restore ? events.findLast((e) => e.event.type === "dispatch" && e.event.instructionId === id)?.event : undefined;
-    return { id, mode: previous?.type === "dispatch" ? previous.mode : undefined, text, startedAt: Date.now(), asks: 0, reviews: 0, requests: new Map(), queued: [], pinned: [] };
+    return { id, mode: previous?.type === "dispatch" ? previous.mode : undefined, dualInvestigation: previous?.type === "dispatch" ? previous.dualInvestigation : undefined, text, startedAt: Date.now(), asks: 0, reviews: 0, requests: new Map(), queued: [], pinned: [] };
+  }
+
+  private investigationIssue(chatId: number): string | null {
+    const inst = this.instructions.get(chatId);
+    return inst?.dualInvestigation ? dualInvestigationIssue(inst.id, this.chats.store.listConsults(chatId), this.agents(chatId)) : null;
   }
 
   private checkCompletion(chatId: number, end: Extract<AgentEvent, { type: "turn_end" }>): Extract<AgentEvent, { type: "turn_end" }> | null {
@@ -728,7 +751,7 @@ export class Orchestrator {
     if (!inst || !end.ok || end.interrupted || this.stopped.has(chatId) || this.planning.has(chatId)) return end;
     const chat = this.chats.store.chat(chatId);
     if (!chat) return end;
-    const issue = completionIssue(inst.id, inst.mode, this.chats.store.listConsults(chatId), !!this.chats.store.project(chat.projectId)?.settings.reviewGate);
+    const issue = this.investigationIssue(chatId) ?? completionIssue(inst.id, inst.mode, this.chats.store.listConsults(chatId), !!this.chats.store.project(chat.projectId)?.settings.reviewGate);
     if (!issue) return end;
     this.chats.emit(chatId, "orch", "orch", { type: "notice", text: `완료 확인: ${issue}` });
     if (inst.repaired) return { ...end, ok: false, error: `미완료: ${issue}` };

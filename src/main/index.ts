@@ -300,6 +300,7 @@ app.on("before-quit", (e) => {
   if (win && !win.isDestroyed() && !win.isMinimized())
     store.setSetting("window", JSON.stringify({ ...win.getNormalBounds(), maximized: win.isMaximized() }));
   quitting = true;
+  tray?.destroy();
   e.preventDefault();
   orchestrator.judge
     .dispose()
@@ -312,7 +313,6 @@ app.on("before-quit", (e) => {
       } catch {
         // already closed
       }
-      tray?.destroy();
       app.quit();
     });
 });

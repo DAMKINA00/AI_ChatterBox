@@ -30,6 +30,8 @@ test("a successful CLI exit without a worker answer or artifact is not a complet
     chats.sink = { consult() {} };
     chats.agentsChanged = () => undefined;
     chats.setRoute = () => undefined;
+    let archived = false;
+    chats.archiveWorker = async () => { archived = true; };
     o.attachmentsFor = () => [];
     chats.driver = async () => ({ send: async () => {
       chats.onDriverEvent(1, "w1", { type: "text", text: answer });
@@ -40,6 +42,7 @@ test("a successful CLI exit without a worker answer or artifact is not a complet
     assert.equal(finished.status, expected);
     assert.equal(!!result.isError, expected === "error");
     assert.ok(finished.summary.trim());
+    assert.equal(archived, true);
   }
 });
 
@@ -55,6 +58,35 @@ test("master and worker implementation cannot overlap while native change is in 
   assert.ok(chats.approvalGuard(1, write));
   o.releaseScope(1, 10);
   assert.equal(chats.approvalGuard(1, write), null);
+});
+
+test("worker remains reserved until native archive finishes before its next queued consultation", async () => {
+  const { chats, orchestrator: o } = engine();
+  let nextId = 0, sends = 0, archives = 0;
+  let unblock!: () => void;
+  const firstArchive = new Promise<void>((resolve) => { unblock = resolve; });
+  chats.store.project = () => ({ settings: {} });
+  chats.store.createConsult = () => ({ id: ++nextId });
+  chats.store.finishConsult = (_id: number, status: string, summary: string) => ({ status, summary });
+  chats.sink = { consult() {} };
+  chats.agentsChanged = chats.setRoute = () => undefined;
+  chats.archiveWorker = async () => { if (++archives === 1) await firstArchive; };
+  o.attachmentsFor = () => [];
+  chats.driver = async () => ({ send: async () => {
+    sends++;
+    chats.onDriverEvent(1, "w1", { type: "text", text: "report" });
+    chats.onDriverEvent(1, "w1", { type: "turn_end", ok: true });
+  } });
+  const run = () => o.consult(1, "orch", { key: "w1", nickname: "worker" }, "opinion", "analyze", [], [], "source specialist");
+  const first = run(), second = run();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sends, 1);
+  assert.equal(o.running.get(1).has("w1"), true);
+  unblock();
+  await Promise.all([first, second]);
+  assert.equal(sends, 2);
+  assert.equal(archives, 2);
+  assert.equal(o.running.get(1).has("w1"), false);
 });
 
 test("plan, master review, worker review and idle workers cannot mutate", () => {
@@ -81,6 +113,39 @@ test("expression tool is bound to its calling role and rejects unknown expressio
   const bad = await o.call(1, "orch", "set_expression", { expression: "success" });
   assert.equal(bad.isError, true);
   assert.equal(events.length, 1);
+});
+
+test("critical routing persists on resume, cannot be downgraded, and gates writes and implementation", async () => {
+  const { chats, orchestrator: o } = engine();
+  const events: any[] = [{ id: 17, event: { type: "user", text: "critical fault" } }];
+  chats.emit = (_id: number, _node: string, _role: string, event: any) => events.push({ id: events.length + 18, event });
+  chats.store.events = () => events;
+  chats.store.listAgents = () => [
+    { key: "w1", kind: "claude", nickname: "클로드 1호", status: "active" },
+    { key: "w2", kind: "gpt", nickname: "지피티 1호", status: "active" },
+  ];
+  chats.teamCapabilities = async () => ({});
+  const reports: any[] = [];
+  chats.store.listConsults = () => reports;
+  o.instructions.set(1, { id: 17 });
+  const route = (args: any) => o.call(1, "orch", "route_request", { mode: "delegated", reason: "safety fault", ...args });
+  assert.equal((await route({ dualInvestigation: "true" })).isError, true);
+  assert.equal((await route({ dualInvestigation: true, mode: "direct" })).isError, true);
+  assert.ok(!(await route({ dualInvestigation: true })).isError);
+  assert.ok(!(await route({ dualInvestigation: false })).isError);
+  assert.equal(events.at(-1).event.dualInvestigation, true);
+  assert.equal((await route({ mode: "direct" })).isError, true);
+  const restored = o.newInstruction(1, "critical fault", true);
+  assert.equal(restored.dualInvestigation, true);
+  o.instructions.set(1, restored);
+  assert.match(chats.approvalGuard(1, write), /양쪽 조사/);
+  assert.equal(chats.approvalGuard(1, { ...write, writes: false, command: "git status" }), null);
+  const ask = await o.call(1, "orch", "ask", { to: "클로드 1호", kind: "implement", message: "fix", reason: "implement the fix" });
+  assert.equal(ask.isError, true);
+  for (const toRole of ["w1", "w2"]) reports.push({ instructionId: 17, fromRole: "orch", toRole, kind: "opinion", status: "done", responseSummary: "evidence" });
+  assert.equal(chats.approvalGuard(1, write), null);
+  events.push({ id: 99, event: { type: "user", text: "ordinary request" } });
+  assert.equal(o.newInstruction(1, "ordinary request", true).dualInvestigation, undefined);
 });
 
 test("missing completion is repaired only once on the same instruction and stopped work is not restarted", async () => {

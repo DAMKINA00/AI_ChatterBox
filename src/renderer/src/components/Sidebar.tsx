@@ -23,7 +23,7 @@ import {
   Workflow,
   X,
 } from "lucide-react";
-import { CONSULT_KIND_LABEL, MASTER_LABEL, roleName, roleTone, type Chat, type ChatStatus, type NodeId, type Project } from "../../../shared/types";
+import { CONSULT_KIND_LABEL, MASTER_LABEL, roleName, roleTone, type Chat, type ChatStatus, type Consult, type NodeId, type Project } from "../../../shared/types";
 import { api, cn, timeAgo } from "../lib/utils";
 import { useStore } from "../store";
 import { ProjectDialog } from "./ProjectDialog";
@@ -120,6 +120,8 @@ function MoreMenu({ actions, label }: { actions: MenuAction[]; label: string }) 
 export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
   const projects = useStore((s) => s.projects);
   const chats = useStore((s) => s.chats);
+  const selection = useStore((s) => s.selection);
+  const select = useStore((s) => s.select);
   const search = useStore((s) => s.search);
   const setSearch = useStore((s) => s.setSearch);
   const theme = useStore((s) => s.theme);
@@ -203,11 +205,22 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
         {working.length > 0 ? (
           <div className="space-y-1">
             {working.slice(0, 3).map((c) => (
-              <div key={c.id} className="flex items-center gap-2 text-[12px]">
+              <button
+                key={c.id}
+                type="button"
+                data-testid="working-chat"
+                data-chat-id={c.id}
+                aria-current={selection?.chatId === c.id ? "page" : undefined}
+                className={cn(
+                  "flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-[12px] transition-colors hover:bg-accent/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  selection?.chatId === c.id && "bg-accent/50 text-foreground",
+                )}
+                onClick={() => void select({ chatId: c.id })}
+              >
                 <StatusIcon status={c.status} />
-                <span className="truncate">{c.title}</span>
+                <span className="min-w-0 flex-1 truncate">{c.title}</span>
                 <span className="ml-auto shrink-0 text-muted-foreground">{c.status === "approval" ? "승인 대기" : "작업 중"}</span>
-              </div>
+              </button>
             ))}
           </div>
         ) : (
@@ -367,6 +380,12 @@ function ChatNode({
     if (expanded && !agents) void api.listAgents(chat.id).then((list) => useStore.setState((s) => ({ agents: { ...s.agents, [chat.id]: list } })));
   }, [expanded, consults, agents, chat.id]);
   const busyWorkers = useMemo(() => new Set(consults?.filter((c) => c.status === "running").map((c) => c.toRole)), [consults]);
+  const latestConsult = consults?.reduce<Consult | undefined>(
+    (latest, consult) => !latest || consult.seq > latest.seq || (consult.seq === latest.seq && consult.id > latest.id) ? consult : latest,
+    undefined,
+  );
+  const runningConsults = consults?.filter((consult) => consult.status === "running") ?? [];
+  const sidebarConsults = runningConsults.length > 0 ? runningConsults : latestConsult ? [latestConsult] : [];
 
   const actions: MenuAction[] = [
     { label: "이름 변경", icon: Pencil, onSelect: () => onRename("chat", chat.id, chat.title) },
@@ -429,21 +448,21 @@ function ChatNode({
               key={a.id}
               chatId={chat.id}
               node={a.key}
-              label={a.nickname + (a.status === "released" ? " (해제)" : "")}
+              label={a.nickname}
               dim={a.status === "released"}
               icon={busyWorkers.has(a.key) ? <Loader2 className={cn("size-3 animate-spin", a.kind === "claude" ? "text-claude" : "text-gpt")} /> : <RoleDot tone={a.kind} />}
             />
           ))}
-          {consults?.map((c) => (
+          {sidebarConsults.map((consult) => (
             <NodeRow
-              key={c.id}
+              key={consult.id}
               chatId={chat.id}
-              node={`consult:${c.id}`}
-              label={`협의 ${c.seq} · ${roleName(c.fromRole, agents)} → ${roleName(c.toRole, agents)} · ${CONSULT_KIND_LABEL[c.kind]}`}
+              node={`consult:${consult.id}`}
+              label={`협의 ${consult.seq} · ${roleName(consult.fromRole, agents)} → ${roleName(consult.toRole, agents)} · ${CONSULT_KIND_LABEL[consult.kind]}`}
               icon={
-                c.status === "running" ? (
+                consult.status === "running" ? (
                   <Loader2 className="size-3 animate-spin text-primary" />
-                ) : c.status === "done" ? (
+                ) : consult.status === "done" ? (
                   <Check className="size-3 text-success" />
                 ) : (
                   <CircleAlert className="size-3 text-muted-foreground" />

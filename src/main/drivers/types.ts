@@ -28,6 +28,8 @@ export interface AgentDriver {
   stop(): Promise<void>;
   /** Ends the backing process (stdin EOF, then kill the tree). */
   dispose(): Promise<void>;
+  /** Hide a finished worker's native conversation while preserving it for resume. */
+  archive?(): Promise<void>;
 }
 
 export interface DriverOptions {
@@ -35,6 +37,8 @@ export interface DriverOptions {
   /** Master coordinates images through GPT workers. */
   allowImages?: boolean;
   cwd: string;
+  /** Native worker list grouping; never substitutes the actual work cwd. */
+  workerSession?: { projectRoot: string; name: string };
   /** Existing native id to resume, or null for a new conversation. */
   nativeId: string | null;
   exePath: string;

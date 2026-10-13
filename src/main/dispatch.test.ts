@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { completionIssue } from "./dispatch";
+import { completionIssue, dualInvestigationIssue } from "./dispatch";
 import { DEFAULT_SETTINGS, type Consult } from "../shared/types";
 import { Store } from "./db";
 
@@ -31,6 +31,20 @@ test("dispatch completion requires a recorded route and exempts direct work", ()
   assert.match(completionIssue(1, undefined, [], false) ?? "", /처리 방식이 기록되지 않았습니다/);
   assert.equal(completionIssue(1, "direct", [], true), null);
   assert.match(completionIssue(1, "delegated", [], false) ?? "", /실제로 배정된 작업이 없습니다/);
+});
+
+test("critical investigations require actual independent reports from both families for this instruction", () => {
+  const agents = [{ key: "w1", kind: "claude" }, { key: "w2", kind: "gpt" }, { key: "w3", kind: "claude" }] as const;
+  const team = [...agents];
+  const first = consult(1, { instructionId: 8, toRole: "w1" });
+  const second = consult(2, { instructionId: 8, toRole: "w2" });
+  assert.match(dualInvestigationIssue(8, [], team)!, /클로드·지피티/);
+  assert.match(dualInvestigationIssue(8, [first, { ...second, toRole: "w3" }], team)!, /지피티/);
+  for (const patch of [
+    { instructionId: 7 }, { status: "running" }, { status: "error" }, { responseSummary: " " },
+    { kind: "implement" }, { kind: "review" }, { fromRole: "w1" }, { toRole: "w99" },
+  ] as Partial<Consult>[]) assert.match(dualInvestigationIssue(8, [first, { ...second, ...patch }], team)!, /지피티/);
+  assert.equal(dualInvestigationIssue(8, [first, second], team), null);
 });
 
 test("only consults for the current instruction can satisfy delegated completion", () => {
@@ -122,6 +136,65 @@ test("instruction, reason, and supersedes metadata migrate and survive database 
     assert.deepEqual(consults.map((c) => c.filesChanged), [[], ["src/parser.ts"]]);
   } finally {
     store?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("untouched worker preferences adopt Claude-first defaults while custom preferences survive reload", () => {
+  const root = mkdtempSync(join(tmpdir(), "aichatterbox-preferences-"));
+  const file = join(root, "db.sqlite");
+  let store: Store | undefined;
+  try {
+    store = new Store(file);
+    const project = store.createProject("test", root, {
+      ...DEFAULT_SETTINGS,
+      claudeStrengths: "소스 구조·동작 흐름 분석, 원인 조사. 구현·테스트·문서 작성은 맥락에 따라 배정.",
+      gptStrengths: "이미지 생성·편집, 시각 자료 제작. 구현·테스트·문서 작성은 맥락에 따라 배정.",
+      gptCautions: "프로젝트 사용자 지정 기준",
+    });
+    store.close();
+    store = new Store(file);
+    const settings = store.project(project.id)!.settings;
+    assert.equal(settings.claudeStrengths, DEFAULT_SETTINGS.claudeStrengths);
+    assert.equal(settings.gptStrengths, DEFAULT_SETTINGS.gptStrengths);
+    assert.equal(settings.gptCautions, "프로젝트 사용자 지정 기준");
+  } finally {
+    store?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("released workers reuse their identity and session in number order without replacing history", () => {
+  const root = mkdtempSync(join(tmpdir(), "aichatterbox-reuse-"));
+  const file = join(root, "db.sqlite");
+  let store = new Store(file);
+  try {
+    const project = store.createProject("test", root, DEFAULT_SETTINGS);
+    const chat = store.createChat(project.id, "test");
+    const first = store.createAgent(chat.id, "claude", "first job");
+    const second = store.createAgent(chat.id, "claude", "second job");
+    const gpt = store.createAgent(chat.id, "gpt", "image");
+    store.updateAgent(second.id, { status: "released" });
+    store.updateAgent(first.id, { status: "released", sessionId: "existing-claude-session" });
+    store.updateAgent(gpt.id, { status: "released" });
+    store.addEvent(chat.id, first.key, first.key, { type: "text", text: "first worker history" });
+    store.close();
+    store = new Store(file);
+    const reused = store.createAgent(chat.id, "claude", "new job");
+    assert.equal(reused.id, first.id);
+    assert.equal(reused.key, first.key);
+    assert.equal(reused.number, 1);
+    assert.equal(reused.sessionId, "existing-claude-session");
+    assert.equal(reused.status, "active");
+    assert.equal(reused.job, "new job");
+    assert.equal(store.createAgent(chat.id, "claude", "parallel job").id, second.id);
+    assert.equal(store.createAgent(chat.id, "claude", "extra concurrent job").number, 3);
+    assert.equal(store.createAgent(chat.id, "gpt", "new image").id, gpt.id);
+    assert.equal(store.events(chat.id)[0].role, first.key);
+    const otherChat = store.createChat(project.id, "other");
+    assert.notEqual(store.createAgent(otherChat.id, "claude", "separate").id, first.id);
+  } finally {
+    store.close();
     rmSync(root, { recursive: true, force: true });
   }
 });

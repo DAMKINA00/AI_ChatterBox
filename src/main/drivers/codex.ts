@@ -1,6 +1,9 @@
 // Codex driver: one shared `codex app-server` process (JSON-RPC over stdio, one JSON object per line),
 // one CodexDriver per thread.
 import { spawn, type ChildProcess } from "node:child_process";
+import { mkdirSync } from "node:fs";
+import type { ProjectListResponse } from "../codex-schema/v2/ProjectListResponse";
+import type { ProjectCreateParams } from "../codex-schema/v2/ProjectCreateParams";
 import type { FileDiff, ModelOption, UsageInfo, TokenCounts, AgentMetrics } from "../../shared/types";
 import { readLines, shutdown } from "../proc";
 import { classifyWindow, type UsageWindow } from "../../shared/usage";
@@ -23,7 +26,7 @@ import type {
   RateLimitSnapshot,
 } from "../codex-schema/v2";
 
-type Method = ClientRequest["method"];
+type Method = ClientRequest["method"] | "project/list" | "project/create";
 
 // App workers own all delegation; native children have no app approval/history route.
 export const APP_CODEX_CONFIG = { "features.multi_agent": false, "features.multi_agent_v2": false, "features.multi_agent_v2_dynamic_tools": false };
@@ -39,6 +42,7 @@ export class CodexServer {
   readonly loaded = new Set<string>();
   stderrTail = "";
   onUsage?: (u: UsageInfo) => void;
+  private workerProject?: Promise<string>;
 
   constructor(private exePath: string) {}
 
@@ -63,8 +67,8 @@ export class CodexServer {
     child.on("exit", (code) => fail(`codex app-server 종료됨 (code ${code})`));
     this.ready = (async () => {
       await this.request<InitializeResponse>("initialize", {
-        clientInfo: { name: "ai_chatterbox", title: "AI_ChatterBox", version: "0.3.2" },
-        capabilities: { experimentalApi: false, requestAttestation: false },
+        clientInfo: { name: "ai_chatterbox", title: "AI_ChatterBox", version: "0.3.3" },
+        capabilities: { experimentalApi: true, requestAttestation: false },
       });
       this.write({ method: "initialized" });
     })();
@@ -109,6 +113,23 @@ export class CodexServer {
     await this.ensure();
     const r = await this.request<any>("account/rateLimits/read", {}).catch(() => null);
     if (r?.rateLimits) this.onUsage?.(toUsage(r.rateLimits));
+  }
+
+  /** The native project is display metadata; thread cwd always stays the user's project. */
+  agentProject(root: string): Promise<string> {
+    return this.workerProject ??= (async () => {
+      let cursor: string | null = null;
+      do {
+        const page: ProjectListResponse = await this.request("project/list", { cursor, limit: 100 });
+        const found = page.data.find((p) => p.name === "AI AGENT");
+        if (found) return found.id;
+        cursor = page.nextCursor;
+      } while (cursor);
+      mkdirSync(root, { recursive: true });
+      const params: ProjectCreateParams = { name: "AI AGENT", roots: [{ path: root }], metadata: { owner: "AI_ChatterBox" }, idempotencyKey: "ai-chatterbox-workers-v1" };
+      const result = await this.request<{ project: { id: string } }>("project/create", params);
+      return result.project.id;
+    })().catch((error) => { this.workerProject = undefined; throw error; });
   }
 
   private onLine(line: string) {
@@ -213,6 +234,11 @@ export class CodexDriver implements AgentDriver {
 
   private async ensureThread(): Promise<string> {
     await this.server.ensure();
+    let projectId: string | undefined;
+    if (this.opts.workerSession) {
+      try { projectId = await this.server.agentProject(this.opts.workerSession.projectRoot); }
+      catch (error) { this.host.emit({ type: "notice", text: `Codex AI AGENT 분류를 적용하지 못했습니다: ${error instanceof Error ? error.message : String(error)}` }); }
+    }
     let config: Record<string, unknown> = { ...this.opts.codexConfig, ...APP_CODEX_CONFIG,
       ...(this.opts.allowImages === false || this.noWrites ? { "features.image_generation": false } : {}) };
     if (this.opts.readOnly && !this.judgeConfigured) {
@@ -225,8 +251,9 @@ export class CodexDriver implements AgentDriver {
       this.judgeConfigured = true;
     }
     if (!this.threadId) {
-      const params: ThreadStartParams = {
+      const params: ThreadStartParams & { projectId?: string } = {
         cwd: this.opts.cwd,
+        projectId,
         ...this.policy(),
         model: this.opts.model || null,
         developerInstructions: this.opts.instructions ?? null,
@@ -241,6 +268,7 @@ export class CodexDriver implements AgentDriver {
     } else if (!this.server.loaded.has(this.threadId)) {
       const params: ThreadResumeParams = {
         threadId: this.threadId,
+        cwd: this.opts.cwd,
         excludeTurns: true,
         ...this.policy(),
         model: this.opts.model || null,
@@ -249,6 +277,10 @@ export class CodexDriver implements AgentDriver {
       };
       this.server.attach(this.threadId, this);
       try {
+        // Unarchive before resume, including after a restart. Writer conflicts use the same fork recovery.
+        if (this.opts.workerSession) await this.server.request("thread/unarchive", { threadId: this.threadId });
+        if (projectId) await this.server.request("thread/metadata/update", { threadId: this.threadId, projectId });
+        if (this.opts.workerSession) await this.server.request("thread/name/set", { threadId: this.threadId, name: this.opts.workerSession.name });
         await this.server.request("thread/resume", params);
         this.server.loaded.add(this.threadId);
       } catch (e) {
@@ -558,6 +590,20 @@ export class CodexDriver implements AgentDriver {
   }
 
   async dispose(): Promise<void> {
-    if (this.threadId) { this.server.detach(this.threadId); this.server.loaded.delete(this.threadId); }
+    if (this.threadId) {
+      if (this.server.loaded.has(this.threadId)) await this.server.request("thread/unsubscribe", { threadId: this.threadId });
+      this.server.detach(this.threadId);
+      this.server.loaded.delete(this.threadId);
+    }
+  }
+
+  async archive(): Promise<void> {
+    if (!this.opts.workerSession || !this.threadId || this._running) return;
+    // New logs are buffered until the first turn ends; naming earlier can hit an empty rollout.
+    await this.server.request("thread/name/set", { threadId: this.threadId, name: this.opts.workerSession.name })
+      .catch((error) => this.host.emit({ type: "notice", text: `Codex 작업자 이름 저장 실패: ${error instanceof Error ? error.message : String(error)}` }));
+    if (this.server.loaded.has(this.threadId)) await this.server.request("thread/unsubscribe", { threadId: this.threadId });
+    this.server.loaded.delete(this.threadId);
+    await this.server.request("thread/archive", { threadId: this.threadId });
   }
 }

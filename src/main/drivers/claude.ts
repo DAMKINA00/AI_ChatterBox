@@ -9,6 +9,7 @@ import { READ_ONLY_TOOLS } from "../approvals";
 import { isReadCommand } from "../execution-policy";
 import { readLines, shutdown } from "../proc";
 import { fileNote, IMAGE_MIMES, MAX_IMAGE_BYTES, type AgentDriver, type AgentInput, type DriverHost, type DriverOptions } from "./types";
+import { ClaudeSessionArchive } from "./claude-archive";
 
 const AUTH_HINT =
   "Claude Code에 로그인되어 있지 않습니다. 터미널에서 claude 를 실행하고 /login 으로 로그인한 뒤 다시 시도하세요.";
@@ -67,6 +68,7 @@ export class ClaudeDriver implements AgentDriver {
   }
 
   private start(): ChildProcess {
+    if (this.opts.workerSession && this.nativeId) new ClaudeSessionArchive().restore(this.nativeId);
     const { key, url } = this.env.bridge.register({
       tools: [
         {
@@ -106,6 +108,7 @@ export class ClaudeDriver implements AgentDriver {
       "--settings", JSON.stringify({ permissions: { ask: [...WRITE_TOOLS, ...SHELL_TOOLS] } }),
     ];
     if (this.opts.model) args.push("--model", this.opts.model);
+    if (this.opts.workerSession) args.push("--name", this.opts.workerSession.name);
     if (this.opts.instructions) args.push("--append-system-prompt", this.opts.instructions);
     const disallowed = [...NATIVE_AGENT_TOOLS, ...(this.env.disallowedTools ?? []), ...(this.noWrites ? [...WRITE_TOOLS] : [])];
     if (disallowed.length) args.push("--disallowedTools", disallowed.join(","));
@@ -296,6 +299,12 @@ export class ClaudeDriver implements AgentDriver {
     this._running = false;
     if (child) await shutdown(child);
     if (this.bridgeKey) this.env.bridge.unregister(this.bridgeKey);
+  }
+
+  async archive(): Promise<void> {
+    if (!this.opts.workerSession || !this.nativeId || this._running) return;
+    await this.dispose();
+    new ClaudeSessionArchive().archive(this.nativeId);
   }
 
   /** Model the process was started with; a different one needs a restart (resume keeps the session). */

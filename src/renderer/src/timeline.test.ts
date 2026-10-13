@@ -16,6 +16,19 @@ function liveEvent(node: NodeId, role: Role | null, payload: AgentEvent, at: num
 
 const emptyAttachments = [];
 
+test("master conversation relays worker approvals and resolutions while preserving original request roles", () => {
+  const events = [
+    event("consult:1", "w1", { type: "approval_request", request: { id: "a1", role: "w1", title: "Write", detail: "one", risk: "low" } }),
+    event("consult:2", "w2", { type: "approval_request", request: { id: "a2", role: "w2", title: "PowerShell", detail: "two", risk: "high" } }),
+    event("consult:1", "w1", { type: "approval_resolved", id: "a1", decision: "once" }),
+  ];
+  for (const view of [undefined, "orch"] as const) {
+    const items = buildItems(events, view, true).filter((item) => item.kind === "approval");
+    assert.deepEqual(items.map((item) => [item.request.role, item.request.id, item.decision]), [["w1", "a1", "once"], ["w2", "a2", undefined]]);
+  }
+  assert.equal(buildItems(events, "w1", true).filter((item) => item.kind === "approval").length, 1);
+});
+
 test("expression metadata stays attached to the next message for parallel consult roles", () => {
   const events: TimelineEvent[] = [
     event("orch", "orch", { type: "consult_start", consultId: 1, kind: "implement", from: "orch", to: "w1", request: "one", attachments: emptyAttachments }),
@@ -238,4 +251,9 @@ test("consult reasons and summaries stay with their own worker and request", () 
 test("dispatch decisions appear as readable timeline notices", () => {
   const items = buildItems([event("orch", "orch", { type: "dispatch", instructionId: 4, mode: "delegated", reason: "image creation needs the image tool" })], undefined, false);
   assert.deepEqual(items.filter((x) => x.kind === "notice").map((x) => x.text), ["마스터가 작업을 나눕니다 · image creation needs the image tool"]);
+});
+
+test("critical routing explains that both families investigate without changing legacy notices", () => {
+  const items = buildItems([event("orch", "orch", { type: "dispatch", instructionId: 5, mode: "delegated", reason: "safety impact", dualInvestigation: true })], undefined, false);
+  assert.ok(items.some((x) => x.kind === "notice" && x.text.includes("클로드와 지피티") && x.text.includes("safety impact")));
 });

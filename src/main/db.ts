@@ -157,11 +157,24 @@ export type ChatPatch = Partial<
   > & { touch: boolean }
 >;
 
+function projectSettings(json: string): ProjectSettings {
+  const saved = JSON.parse(json);
+  // Update untouched 0.3.2 defaults while preserving user-written preferences.
+  const previous = {
+    claudeStrengths: "소스 구조·동작 흐름 분석, 원인 조사. 구현·테스트·문서 작성은 맥락에 따라 배정.",
+    claudeCautions: "이미지 생성은 이미지 도구를 사용할 수 있는 지피티에게 맡깁니다. 성능 우열은 작업마다 다를 수 있습니다.",
+    gptStrengths: "이미지 생성·편집, 시각 자료 제작. 구현·테스트·문서 작성은 맥락에 따라 배정.",
+    gptCautions: "이미지 생성 도구의 실제 사용 가능 여부를 확인합니다. 소스 분석은 기본적으로 클로드를 우선 고려합니다.",
+  };
+  for (const [key, value] of Object.entries(previous)) if (saved[key] === value) delete saved[key];
+  return { ...DEFAULT_SETTINGS, ...saved };
+}
+
 const toProject = (r: Row): Project => ({
   id: r.id,
   name: r.name,
   folder: r.folder,
-  settings: { ...DEFAULT_SETTINGS, ...JSON.parse(r.settings_json) },
+  settings: projectSettings(r.settings_json),
   createdAt: r.created_at,
   archived: !!r.archived,
 });
@@ -290,7 +303,12 @@ export class Store {
     return a && a.chatId === chatId ? a : undefined;
   }
   createAgent(chatId: number, kind: "claude" | "gpt", job: string): ChatAgent {
-    // Numbers are never reused within a chat.
+    // Reactivate the same identity/session so previous conversations keep their owner.
+    const reusable = this.db.prepare("SELECT id FROM agents WHERE chat_id = ? AND kind = ? AND status = 'released' ORDER BY number, id LIMIT 1").get(chatId, kind) as Row | undefined;
+    if (reusable) {
+      this.updateAgent(reusable.id, { status: "active", job });
+      return this.agent(reusable.id)!;
+    }
     const n = ((this.db.prepare("SELECT MAX(number) m FROM agents WHERE chat_id = ? AND kind = ?").get(chatId, kind) as Row).m ?? 0) + 1;
     const r = this.db
       .prepare("INSERT INTO agents (chat_id, kind, number, nickname, job, status, created_at) VALUES (?, ?, ?, ?, ?, 'active', ?)")

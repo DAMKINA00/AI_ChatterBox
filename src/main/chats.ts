@@ -334,6 +334,10 @@ export class ChatManager {
       instructions,
       readOnly: false,
       allowImages: role !== "orch",
+      workerSession: role === "orch" ? undefined : {
+        projectRoot: join(this.tmpDir, "..", "AI AGENT"),
+        name: `[AI AGENT] ${project.name} · ${chat.title} · ${this.store.agentByKey(chatId, role)?.nickname ?? role}`,
+      },
       tokenBaseline: this.store.events(chatId).findLast((e) => e.role === role && e.event.type === "agent_usage" && e.event.metrics.nativeId === this.nativeIdOf(chat, role, cfg.agent))?.event,
     };
     const baseline = opts.tokenBaseline;
@@ -366,6 +370,16 @@ export class ChatManager {
 
   liveDriver(chatId: number, role: Role): AgentDriver | undefined {
     return this.live.get(chatId)?.[role]?.driver;
+  }
+
+  async archiveWorker(chatId: number, role: Role): Promise<void> {
+    if (role === "orch") return;
+    const driver = this.liveDriver(chatId, role);
+    if (!driver || driver.running) return;
+    try { await driver.archive?.(); }
+    catch (error) {
+      this.emit(chatId, role, role, { type: "notice", text: `CLI 대화 보관 실패: ${error instanceof Error ? error.message : String(error)}. ChatterBox 기록은 유지됩니다.` });
+    }
   }
 
   /** Dispose one role's conversation process (a released worker). */

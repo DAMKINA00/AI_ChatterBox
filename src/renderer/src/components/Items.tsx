@@ -245,6 +245,9 @@ function ToolCard({ item, nested }: { item: Extract<Item, { kind: "tool" }>; nes
 function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval" }>; chatId: number }) {
   const { request: r, decision } = item;
   const [busy, setBusy] = useState(false);
+  const selection = useStore((s) => s.selection);
+  const select = useStore((s) => s.select);
+  const masterView = !selection?.node || selection.node === "orch";
   const toast = useStore((s) => s.toast);
   const answer = async (d: "once" | "chat" | "deny") => {
     setBusy(true);
@@ -262,6 +265,7 @@ function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval"
     <div
       data-testid="approval"
       data-state={status ? "done" : "pending"}
+      data-request-role={r.role}
       className={cn(
         "space-y-2.5 rounded-xl border p-3",
         status ? "bg-card/60 opacity-80" : high ? "border-destructive/50 bg-destructive/8" : "border-warning/50 bg-warning/8",
@@ -270,7 +274,7 @@ function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval"
       <div className="flex items-center gap-2">
         {high ? <ShieldAlert className="size-4 text-destructive" /> : <Hand className="size-4 text-warning" />}
         <span className="text-[13px] font-semibold">승인 요청</span>
-        <RoleName chatId={chatId} role={r.role} size={24} />
+        <RoleName chatId={chatId} role="orch" size={24} />
         <Badge className="font-mono">{r.title}</Badge>
         {high && <Badge className="border-destructive/40 text-destructive">위험 · {r.riskReason}</Badge>}
         {status && (
@@ -280,6 +284,12 @@ function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval"
           </span>
         )}
       </div>
+      {r.role !== "orch" && (
+        <div className="flex items-center gap-2 text-[12.5px] text-muted-foreground" data-testid="approval-source">
+          <span>마스터가 전달한 작업자 요청</span>
+          <RoleName chatId={chatId} role={r.role} size={24} />
+        </div>
+      )}
       {r.judgeReason && (
         <div className="flex items-start gap-1.5 rounded-md bg-orch/10 px-2.5 py-1.5 text-[12.5px] select-text" data-testid="judge-reason">
           <RoleDot tone="orch" className="mt-1.5" />
@@ -292,7 +302,10 @@ function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval"
       ) : (
         <pre className="max-h-56 overflow-auto rounded-md bg-code-bg p-2.5 font-mono text-[12px] whitespace-pre-wrap select-text">{r.detail}</pre>
       )}
-      {!status && (
+      {!status && !masterView && (
+        <Button size="sm" onClick={() => void select({ chatId, node: "orch" })} data-testid="approval-open-master">마스터 대화에서 확인</Button>
+      )}
+      {!status && masterView && (
         <div className="flex flex-wrap gap-2">
           <Button size="sm" onClick={() => answer("once")} disabled={busy} data-testid="approve-once">
             이번만 허용
@@ -358,13 +371,20 @@ function ConsultTargetName({ chatId, role }: { chatId: number; role: Role }) {
 const STATUS_LABEL = { running: "진행 중", done: "완료", error: "오류", stopped: "중지됨", limited: "한도 도달" } as const;
 
 function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }>; chatId: number }) {
-  const [open, setOpen] = useState<boolean | null>(null);
-  const expanded = open ?? item.status === "running";
+  const [expanded, setExpanded] = useState(false);
   const select = useStore((s) => s.select);
+  const requestBrief = item.request.split("\n").find((line) => line.trim())?.trim() ?? "(요청 내용 없음)";
   return (
     <div className="overflow-hidden rounded-xl border bg-card" data-testid="consult-card" data-status={item.status}>
       <div className="flex items-center gap-2 px-3 py-2">
-        <button className="flex min-w-0 flex-1 items-center gap-2 text-left" onClick={() => setOpen(!expanded)}>
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          data-testid="consult-request-toggle"
+          aria-expanded={expanded}
+          aria-label={`요청 ${expanded ? "접기" : "펼치기"}`}
+          onClick={() => setExpanded(!expanded)}
+        >
           <ChevronRight className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", expanded && "rotate-90")} />
           <RoleName chatId={chatId} role={item.from} size={24} />
           <ArrowRight className="size-3.5 text-muted-foreground" />
@@ -375,7 +395,11 @@ function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }
               {item.scope.join(", ").slice(0, 40)}
             </span>
           )}
-          <span className="min-w-0 flex-1 truncate text-[12.5px] text-muted-foreground">{item.request.split("\n")[0]}</span>
+          <span className="shrink-0 text-[11px] text-muted-foreground">요청</span>
+          <span data-testid="consult-request-brief" className="min-w-0 flex-1 truncate text-[12.5px] text-muted-foreground">
+            {requestBrief}
+          </span>
+          {item.attachments.length > 0 && <span className="shrink-0 text-[11px] text-muted-foreground">첨부 {item.attachments.length}개</span>}
         </button>
         {item.files && item.files.length > 0 && <Badge>파일 {item.files.length}개</Badge>}
         <span className={cn("flex items-center gap-1 text-[12px]", item.status === "done" ? "text-success" : item.status === "running" ? "text-primary" : "text-muted-foreground")}>
@@ -398,32 +422,36 @@ function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }
         </div>
       )}
       {expanded && (
-        <div className="space-y-3 border-t bg-background/40 p-3">
+        <div className="border-t bg-background/40 p-3" data-testid="consult-request-details">
           <div className="rounded-lg border bg-card px-3 py-2">
             <div className="mb-1 text-[11px] font-medium text-muted-foreground">요청</div>
-            <Markdown text={item.request} className="text-[13px]" />
+            <div data-testid="consult-request-body">
+              <Markdown text={item.request} className="text-[13px]" />
+            </div>
             {item.attachments.length > 0 && (
-              <div className="mt-2 flex flex-wrap gap-1.5">
+              <div className="mt-2 flex flex-wrap gap-1.5" data-testid="consult-request-attachments">
                 {item.attachments.map((a) => (
                   <AttachmentChip key={a.id} a={a} />
                 ))}
               </div>
             )}
           </div>
-          {item.children.length > 0 ? (
-            <ItemList items={item.children} chatId={chatId} nested />
-          ) : (
-            item.status === "running" && (
-              <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
-                <Loader2 className="size-3.5 animate-spin" /> <ConsultTargetName chatId={chatId} role={item.to} /> 작업 시작 중…
-              </div>
-            )
-          )}
-          {item.files && item.files.length > 0 && (
-            <div className="text-[12px] text-muted-foreground">
-              변경한 파일: <span className="font-mono">{item.files.join(", ")}</span>
-            </div>
-          )}
+        </div>
+      )}
+      {item.children.length > 0 ? (
+        <div className="border-t p-3" data-testid="consult-progress">
+          <ItemList items={item.children} chatId={chatId} nested />
+        </div>
+      ) : (
+        item.status === "running" && (
+          <div className="flex items-center gap-2 border-t p-3 text-[12px] text-muted-foreground" data-testid="consult-progress">
+            <Loader2 className="size-3.5 animate-spin" /> <ConsultTargetName chatId={chatId} role={item.to} /> 작업 시작 중…
+          </div>
+        )
+      )}
+      {item.files && item.files.length > 0 && (
+        <div className="border-t px-3 py-2 text-[12px] text-muted-foreground">
+          변경한 파일: <span className="font-mono">{item.files.join(", ")}</span>
         </div>
       )}
     </div>

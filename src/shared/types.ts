@@ -45,7 +45,7 @@ export interface ChatAgent {
   /** Role key used in events: `w${id}` */
   key: Role;
   kind: WorkerKind;
-  /** Per chat and kind, never reused. */
+  /** Stable per chat/kind; reactivation keeps the same worker identity and number. */
   number: number;
   /** "클로드 2호" */
   nickname: string;
@@ -120,10 +120,10 @@ export const APPROVAL_MODE_LABEL: Record<ApprovalMode, string> = {
 
 /** Prefills the new-project form only. */
 export const DEFAULT_SETTINGS: ProjectSettings = {
-  claudeStrengths: "소스 구조·동작 흐름 분석, 원인 조사. 구현·테스트·문서 작성은 맥락에 따라 배정.",
-  claudeCautions: "이미지 생성은 이미지 도구를 사용할 수 있는 지피티에게 맡깁니다. 성능 우열은 작업마다 다를 수 있습니다.",
-  gptStrengths: "이미지 생성·편집, 시각 자료 제작. 구현·테스트·문서 작성은 맥락에 따라 배정.",
-  gptCautions: "이미지 생성 도구의 실제 사용 가능 여부를 확인합니다. 소스 분석은 기본적으로 클로드를 우선 고려합니다.",
+  claudeStrengths: "일반 업무의 기본 담당. 소스 분석·원인 조사·구현·테스트·문서 작성과 모션그래픽·애니메이션 제작을 우선 배정합니다.",
+  claudeCautions: "이미지는 도구를 사용할 수 있는 지피티에게 맡깁니다. 중요한 버그·오류는 지피티와 각각 조사합니다. 사용 한도·작업량으로 지연되면 재배정합니다.",
+  gptStrengths: "이미지 생성·편집, 중요한 버그·오류의 독립 조사 및 필요한 교차검증.",
+  gptCautions: "일반 분석·구현·테스트·문서와 모션그래픽은 클로드 우선입니다. 이미지 도구가 필요하거나 교차검증의 필요성이 크거나 클로드가 실행 불가·과부하일 때 배정합니다.",
   orchestratorModel: "claude:opus",
   claudeModel: "opus",
   codexModel: "gpt-6-astra",
@@ -242,7 +242,7 @@ export type ApprovalDecision = "once" | "chat" | "deny";
 /** Normalized event stream. Every event also carries the agent that produced it (see TimelineEvent). */
 export type AgentEvent =
   | { type: "agent_usage"; metrics: AgentMetrics }
-  | { type: "dispatch"; instructionId: number; mode: "direct" | "delegated"; reason: string }
+  | { type: "dispatch"; instructionId: number; mode: "direct" | "delegated"; reason: string; dualInvestigation?: boolean }
   | { type: "image_generation"; id: string; status: "running" | "done" | "error"; prompt?: string; attachment?: AttachmentRef; error?: string }
   | { type: "expression"; expression: AgentExpression }
   | { type: "user"; text: string; attachments: AttachmentRef[]; queued?: boolean }

@@ -1,4 +1,11 @@
-import type { Consult } from "../shared/types";
+import type { ChatAgent, Consult } from "../shared/types";
+
+/** Critical diagnoses need both families' actual reports before editing or completing. */
+export function dualInvestigationIssue(id: number, all: Consult[], agents: Pick<ChatAgent, "key" | "kind">[]): string | null {
+  const reports = all.filter((c) => c.instructionId === id && c.fromRole === "orch" && c.kind === "opinion" && c.status === "done" && c.responseSummary?.trim());
+  const missing = (["claude", "gpt"] as const).filter((kind) => !reports.some((c) => agents.some((a) => a.key === c.toRole && a.kind === kind)));
+  return missing.length ? `중요 오류의 양쪽 조사가 필요합니다: ${missing.map((k) => k === "claude" ? "클로드" : "지피티").join("·")}의 opinion 조사 결과가 없습니다. 같은 문제·자료를 독립적으로 조사시킨 뒤 두 결과의 공통점·차이·근거를 비교해 취합하세요. 사용 불가·한도·실패로 조사할 수 없으면 미완료 사유를 보고하세요.` : null;
+}
 
 /** Only persisted work for this instruction can satisfy its completion gate. */
 export function completionIssue(id: number, mode: "direct" | "delegated" | undefined, all: Consult[], reviewGate: boolean): string | null {

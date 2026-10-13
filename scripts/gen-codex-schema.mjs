@@ -25,5 +25,5 @@ const codex =
 console.log(`codex: ${codex}`);
 spawnSync(codex, ["--version"], { stdio: "inherit" });
 rmSync(out, { recursive: true, force: true });
-const r = spawnSync(codex, ["app-server", "generate-ts", "--out", out], { stdio: "inherit" });
+const r = spawnSync(codex, ["app-server", "generate-ts", "--experimental", "--out", out], { stdio: "inherit" });
 process.exit(r.status ?? 1);

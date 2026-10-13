@@ -49,7 +49,7 @@ function belongs(e: TimelineEvent, view: View, consultTargets: Map<number, Role>
     if (cId !== null) return "child";
     return "top";
   }
-  if (view === "orch") return e.role === "orch" || e.role === null ? "top" : false;
+  if (view === "orch") return ev.type === "approval_request" || ev.type === "approval_resolved" || e.role === "orch" || e.role === null ? "top" : false;
   if (isWorkerKey(view)) {
     if ((ev.type === "consult_start" || ev.type === "consult_end") && consultTarget(e, consultTargets) === view) return "top";
     return e.role === view ? "top" : false;
@@ -296,7 +296,7 @@ export function apply(items: Item[], e: TimelineEvent, expression?: AgentExpress
     case "dispatch":
       return [
         ...closeStream(items, role, node),
-        { kind: "notice", key, tone: "info", text: `${ev.mode === "direct" ? "마스터가 직접 처리합니다" : "마스터가 작업을 나눕니다"} · ${ev.reason}` },
+        { kind: "notice", key, tone: "info", text: `${ev.dualInvestigation ? "중요 오류 · 클로드와 지피티가 각각 조사합니다" : ev.mode === "direct" ? "마스터가 직접 처리합니다" : "마스터가 작업을 나눕니다"} · ${ev.reason}` },
       ];
     case "image_generation": {
       const existingIndex = items.findIndex((x) => x.kind === "image" && x.role === role && x.node === node && x.id === ev.id);
