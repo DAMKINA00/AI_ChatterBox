@@ -1,2 +1,5 @@
 node_modules/
 .scratch/
+out/
+dist/
+release/
