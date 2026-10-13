@@ -10,5 +10,6 @@
     "noEmit": true,
     "types": []
   },
-  "include": ["src/renderer/src/**/*.ts", "src/renderer/src/**/*.tsx", "src/shared/**/*.ts"]
+  "include": ["src/renderer/src/**/*.ts", "src/renderer/src/**/*.tsx", "src/shared/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"]
 }

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { FolderOpen } from "lucide-react";
 import { DEFAULT_SETTINGS, type Project, type ProjectSettings } from "../../../shared/types";
-import { api } from "../lib/utils";
+import { api, cn } from "../lib/utils";
 import { useStore } from "../store";
 import { ModelPicker } from "./ModelPicker";
 import { Button, Dialog, DialogContent, DialogFooter, Input, Label, Switch } from "./ui";
@@ -98,6 +98,38 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
           </div>
 
           <div className="grid gap-3 rounded-lg border p-3.5">
+            <div className="text-[12px] font-medium text-muted-foreground">승인</div>
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <div className="text-[13px] font-medium">작업자 승인 요청</div>
+                <div className="text-[12px] text-muted-foreground">
+                  {settings.approvalMode === "orchestrator"
+                    ? "오케스트레이터가 판단해 자동으로 허용·거부하고, 애매하거나 고위험이면 물어봅니다"
+                    : "작업자가 파일을 고치거나 명령을 실행할 때마다 직접 승인합니다"}
+                </div>
+              </div>
+              <Segmented
+                value={settings.approvalMode}
+                onChange={(v) => set("approvalMode", v)}
+                options={[
+                  { value: "orchestrator", label: "오케스트레이터 판단" },
+                  { value: "user", label: "직접 승인" },
+                ]}
+                ariaLabel="승인 방식"
+              />
+            </div>
+            {settings.approvalMode === "orchestrator" && (
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <div className="text-[13px] font-medium">고위험 요청도 오케스트레이터에 맡기기</div>
+                  <div className="text-[12px] text-muted-foreground">작업 폴더 밖 쓰기, 재귀 삭제, git push, 비밀 파일, 시스템 변경, 업로드. 끄면 이런 요청은 직접 확인합니다</div>
+                </div>
+                <Switch checked={settings.delegateHighRisk} onChange={(v) => set("delegateHighRisk", v)} label="고위험 요청도 맡기기" />
+              </div>
+            )}
+          </div>
+
+          <div className="grid gap-3 rounded-lg border p-3.5">
             <div className="text-[12px] font-medium text-muted-foreground">협업 규칙</div>
             <div className="flex items-center justify-between gap-4">
               <div>
@@ -124,6 +156,41 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
         </form>
       </DialogContent>
     </Dialog>
+  );
+}
+
+export function Segmented<T extends string>({
+  value,
+  onChange,
+  options,
+  ariaLabel,
+  size = "default",
+}: {
+  value: T;
+  onChange: (v: T) => void;
+  options: { value: T; label: string }[];
+  ariaLabel: string;
+  size?: "default" | "sm";
+}) {
+  return (
+    <div role="radiogroup" aria-label={ariaLabel} className="inline-flex shrink-0 rounded-lg border bg-muted p-0.5">
+      {options.map((o) => (
+        <button
+          key={o.value}
+          type="button"
+          role="radio"
+          aria-checked={value === o.value}
+          onClick={() => onChange(o.value)}
+          className={cn(
+            "rounded-md px-2.5 font-medium whitespace-nowrap transition-colors",
+            size === "sm" ? "h-6 text-[12px]" : "h-7 text-[12.5px]",
+            value === o.value ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
   );
 }
 

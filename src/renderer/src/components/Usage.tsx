@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { pickUsage, type UsageDisplay } from "../../../shared/usage";
 import { api, cn } from "../lib/utils";
 import { useStore } from "../store";
 import { Tooltip } from "./ui";
@@ -12,53 +13,39 @@ function resetText(ts?: number | null) {
   return h >= 24 ? `${Math.floor(h / 24)}일 ${h % 24}시간 뒤 초기화` : `${h}시간 ${m}분 뒤 초기화`;
 }
 
-function Bar({ label, pct, tip, color }: { label: string; pct?: number; tip: string; color: string }) {
-  const v = pct === undefined ? undefined : Math.max(0, Math.min(100, pct));
+function Bar({ name, d, color }: { name: string; d: UsageDisplay | null; color: string }) {
+  const tip = d
+    ? [`${name} ${d.window} 남은 사용량 ${Math.round(d.remaining)}%`, resetText(d.resetsAt), d.warn ? "5시간 한도가 거의 찼습니다" : d.note]
+        .filter(Boolean)
+        .join(" · ")
+    : `${name}를 한 번 쓰면 표시됩니다`;
   return (
     <Tooltip content={tip}>
       <div className="flex items-center gap-2 text-[11px] text-muted-foreground" data-testid="usage-bar">
-        <span className="w-[72px] shrink-0 whitespace-nowrap">{label}</span>
+        <span className="w-[86px] shrink-0 whitespace-nowrap">
+          {name} <span className={cn(d?.warn && "font-semibold text-destructive")}>{d ? d.window : ""}</span>
+        </span>
         <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
-          {v !== undefined && <div className={cn("h-full rounded-full", v >= 90 ? "bg-destructive" : color)} style={{ width: `${v}%` }} />}
+          {d && <div className={cn("h-full rounded-full", d.warn ? "bg-destructive" : color)} style={{ width: `${d.remaining}%` }} />}
         </div>
-        <span className="w-8 text-right tabular-nums">{v === undefined ? "–" : `${Math.round(v)}%`}</span>
+        <span className={cn("w-9 text-right tabular-nums", d?.warn && "text-destructive")}>{d ? `${Math.round(d.remaining)}%` : "–"}</span>
       </div>
     </Tooltip>
   );
 }
 
-/** Rate-limit usage: Claude from stream-json rate_limit_event, Codex from account/rateLimits. */
+/** Remaining usage: weekly by default, the 5-hour window when it has ≤ 10% left. */
 export function UsageBar() {
   const usage = useStore((s) => s.usage);
   useEffect(() => {
     const t = setInterval(() => void api.usage().then((u) => useStore.setState({ usage: u })), 5 * 60 * 1000);
     return () => clearInterval(t);
   }, []);
-  const claude = usage.claude?.fiveHour;
-  const claudePct = claude === undefined ? undefined : claude <= 1 ? claude * 100 : claude;
   return (
     <div className="space-y-1">
-      <Bar
-        label="Claude 5시간"
-        pct={claudePct}
-        color="bg-claude"
-        tip={claudePct === undefined ? "Claude를 한 번 쓰면 표시됩니다" : `Claude 5시간 사용량 · ${resetText(usage.claude?.resetsAt)}`}
-      />
-      <Bar
-        label="GPT 5시간"
-        pct={usage.codex?.primary?.usedPercent}
-        color="bg-gpt"
-        tip={usage.codex?.primary ? `Codex 5시간 사용량 · ${resetText(usage.codex.primary.resetsAt)}` : "Codex 사용량을 불러오는 중"}
-      />
-      {/* Some plans report only one Codex window. */}
-      {(!usage.codex || usage.codex.secondary) && (
-        <Bar
-          label="GPT 주간"
-          pct={usage.codex?.secondary?.usedPercent}
-          color="bg-gpt"
-          tip={usage.codex?.secondary ? `Codex 주간 사용량 · ${resetText(usage.codex.secondary.resetsAt)}` : "Codex 사용량을 불러오는 중"}
-        />
-      )}
+      <div className="text-[11px] font-medium text-muted-foreground">남은 사용량</div>
+      <Bar name="Claude" d={pickUsage(usage.claude)} color="bg-claude" />
+      <Bar name="GPT" d={pickUsage(usage.codex)} color="bg-gpt" />
     </div>
   );
 }

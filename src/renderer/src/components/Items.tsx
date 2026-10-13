@@ -133,6 +133,8 @@ function ItemView({ item, chatId, nested }: { item: Item; chatId: number; nested
       );
     case "approval":
       return <ApprovalCard item={item} chatId={chatId} />;
+    case "auto":
+      return <AutoApproval item={item} />;
     case "consult":
       return <ConsultCard item={item} chatId={chatId} />;
     case "ask":
@@ -245,6 +247,12 @@ function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval"
           </span>
         )}
       </div>
+      {r.judgeReason && (
+        <div className="flex items-start gap-1.5 rounded-md bg-orch/10 px-2.5 py-1.5 text-[12.5px] select-text" data-testid="judge-reason">
+          <RoleDot role="orch" className="mt-1.5" />
+          {r.judgeReason}
+        </div>
+      )}
       {r.reason && <div className="text-[12.5px] text-muted-foreground select-text">{r.reason}</div>}
       {r.diffs?.length ? (
         <DiffList files={r.diffs} defaultOpen={!status} />
@@ -269,6 +277,40 @@ function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval"
           <Button size="sm" variant="outline" onClick={() => answer("deny")} disabled={busy} data-testid="approve-deny">
             거부
           </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** An approval the orchestrator answered: one compact line, details on click. */
+function AutoApproval({ item }: { item: Extract<Item, { kind: "auto" }> }) {
+  const [open, setOpen] = useState(false);
+  const r = item.request;
+  const allowed = item.decision === "allow";
+  const brief = r.detail.split("\n").find((l) => l.trim() && l.trim() !== "{")?.trim() ?? "";
+  return (
+    <div className="text-[12px]" data-testid="auto-approval" data-decision={item.decision}>
+      <button
+        className="flex w-full min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-muted-foreground hover:bg-accent/60"
+        onClick={() => setOpen(!open)}
+      >
+        {allowed ? <ShieldCheck className="size-3.5 shrink-0 text-success" /> : <X className="size-3.5 shrink-0 text-destructive" />}
+        <span className={cn("shrink-0 font-medium", allowed ? "text-success" : "text-destructive")}>
+          오케스트레이터 {allowed ? "승인" : "거부"}
+        </span>
+        <span className="shrink-0">· {ROLE_LABEL[r.role]} · {r.title}</span>
+        <span className="min-w-0 truncate font-mono">{brief}</span>
+        <span className="min-w-0 shrink truncate">— {item.reason}</span>
+      </button>
+      {open && (
+        <div className="mt-1 ml-6 space-y-1.5">
+          {r.diffs?.length ? (
+            <DiffList files={r.diffs} />
+          ) : (
+            <pre className="max-h-48 overflow-auto rounded-md bg-code-bg p-2 font-mono text-[12px] whitespace-pre-wrap select-text">{r.detail}</pre>
+          )}
+          {r.riskReason && <div className="text-muted-foreground">자동 분류: {r.riskReason}</div>}
         </div>
       )}
     </div>

@@ -4,10 +4,11 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
-  parseOrchestrator,
+  chatOrchestrator,
   type AgentEvent,
   type AgentKind,
   type ApprovalDecision,
+  type ApprovalRequest,
   type Chat,
   type CliInfo,
   type Consult,
@@ -19,7 +20,7 @@ import {
 } from "../shared/types";
 import type { ChatPatch, Store } from "./db";
 import { LocalBridge } from "./local-bridge";
-import { ApprovalService } from "./approvals";
+import { ApprovalService, type ApprovalInput, type JudgeAnswer } from "./approvals";
 import { findClaude, findCodex } from "./locate";
 import { ClaudeDriver } from "./drivers/claude";
 import { CodexDriver, CodexServer } from "./drivers/codex";
@@ -54,7 +55,7 @@ export class ChatManager {
   readonly approvals: ApprovalService;
   private live = new Map<number, Partial<Record<Role, Live>>>();
   private codexServer?: CodexServer;
-  private tmpDir: string;
+  readonly tmpDir: string;
   private usageState: UsageInfo = {};
   /** Where a role's events currently go (its own node, or a consult it is serving). */
   private routes = new Map<number, Partial<Record<Role, NodeId>>>();
@@ -67,11 +68,25 @@ export class ChatManager {
   ) {
     this.tmpDir = join(dataDir, "tmp");
     mkdirSync(this.tmpDir, { recursive: true });
+    try {
+      this.usageState = JSON.parse(store.getSetting("usage") ?? "{}");
+    } catch {
+      this.usageState = {};
+    }
     this.approvals = new ApprovalService({
-      emitRequest: (chatId, node, role, request) => this.emit(chatId, node, role, { type: "approval_request", request }),
-      emitResolved: (chatId, node, role, id, decision) => this.emit(chatId, node, role, { type: "approval_resolved", id, decision }),
-      log: (chatId, role, action, risk, decision, scope) => this.store.logApproval(chatId, role, action, risk, decision, scope),
+      emit: (chatId, node, role, event) => this.emit(chatId, node, role, event),
+      log: (chatId, role, action, risk, decision, scope, by, reason) =>
+        this.store.logApproval(chatId, role, action, risk, decision, scope, by, reason),
       pendingChanged: (chatId, pending) => this.refreshStatus(chatId, pending),
+      mode: (chatId) => {
+        const chat = this.store.chat(chatId);
+        const project = chat && this.store.project(chat.projectId);
+        return {
+          mode: chat?.approvalModeOverride ?? project?.settings.approvalMode ?? "orchestrator",
+          delegateHighRisk: !!project?.settings.delegateHighRisk,
+        };
+      },
+      judge: (chatId, request, input) => this.judge?.(chatId, request, input) ?? Promise.resolve(null),
     });
   }
 
@@ -110,16 +125,29 @@ export class ChatManager {
   }
 
   mergeUsage(u: UsageInfo) {
-    this.usageState = { ...this.usageState, ...u };
+    // Updates can be partial (one window only); keep the windows they don't mention.
+    for (const k of ["claude", "codex"] as const) {
+      const next = u[k];
+      if (!next) continue;
+      const cur = this.usageState[k] ?? {};
+      this.usageState = { ...this.usageState, [k]: { fiveHour: next.fiveHour ?? cur.fiveHour, weekly: next.weekly ?? cur.weekly } };
+    }
+    // Remember the last values so the sidebar isn't empty on the next launch.
+    if (!this.disposing) this.store.setSetting("usage", JSON.stringify(this.usageState));
     this.sink.usage(this.usageState);
   }
   usage(): UsageInfo {
     return this.usageState;
   }
 
+  /** Set by the orchestrator: the chat's approval judge. */
+  judge?: (chatId: number, request: ApprovalRequest, input: ApprovalInput) => Promise<JudgeAnswer | null>;
+  /** Quitting: processes are being torn down; don't record their exits as errors. */
+  private disposing = false;
+
   // ---------- events and status
   emit(chatId: number, node: NodeId, role: Role | null, event: AgentEvent): void {
-    if (!this.store.chat(chatId)) return; // deleted meanwhile
+    if (this.disposing || !this.store.chat(chatId)) return; // quitting, or deleted meanwhile
     const e: TimelineEvent = TRANSIENT.has(event.type)
       ? { id: 0, chatId, node, role, at: Date.now(), event }
       : this.store.addEvent(chatId, node, role, event);
@@ -127,6 +155,8 @@ export class ChatManager {
   }
 
   updateChat(chatId: number, patch: ChatPatch): Chat {
+    // While quitting, keep the stored status ("working" → "interrupted" on next launch).
+    if (this.disposing) return this.store.chat(chatId)!;
     const chat = this.store.updateChat(chatId, patch);
     this.sink.chat(chat);
     return chat;
@@ -146,7 +176,7 @@ export class ChatManager {
   // ---------- roles and drivers
   /** Agent + model a role uses right now (orchestrator follows the project; workers may be overridden per chat). */
   roleConfig(chat: Chat, project: Project, role: Role): RoleConfig {
-    if (role === "orch") return parseOrchestrator(project.settings.orchestratorModel);
+    if (role === "orch") return chatOrchestrator(chat, project);
     if (role === "claude") return { agent: "claude", model: chat.claudeModelOverride ?? project.settings.claudeModel };
     return { agent: "codex", model: chat.codexModelOverride ?? project.settings.codexModel };
   }
@@ -204,9 +234,12 @@ export class ChatManager {
         this.emit(chatId, this.route(chatId, role), role, event);
         this.onDriverEvent?.(chatId, role, event);
         if (role === "orch" && event.type === "turn_end") this.orchTurnEnded(chatId, event);
-        // A worker that outlived the orchestrator (stop) settles the chat when it ends.
-        else if (event.type === "turn_end" && !this.isBusy(chatId) && this.store.chat(chatId)?.status === "working")
-          this.updateChat(chatId, { status: "idle" });
+        // A worker that outlived the orchestrator settles the chat when it ends.
+        else if (event.type === "turn_end" && !this.isBusy(chatId) && this.store.chat(chatId)?.status === "working") {
+          const final = this.pendingFinal.get(chatId) ?? "idle";
+          this.pendingFinal.delete(chatId);
+          this.updateChat(chatId, { status: final, unread: final !== "idle", touch: true });
+        }
       },
       nativeId: (id) => this.updateChat(chatId, this.nativeIdPatch(role, cfg.agent, id)),
       approve: (input) => this.approvals.request(chatId, project.folder, { ...input, role, node: this.route(chatId, role) }),
@@ -299,9 +332,16 @@ export class ChatManager {
   }
 
   /** The orchestrator's turn finished: the instruction is done. */
+  /** Final status to apply once still-running workers finish (orchestrator ended first). */
+  private pendingFinal = new Map<number, "done" | "error" | "idle">();
+
   orchTurnEnded(chatId: number, end: Extract<AgentEvent, { type: "turn_end" }>) {
-    // After a stop a worker may still be winding down; it settles the status when it ends.
-    if (end.interrupted && this.isBusy(chatId)) return;
+    // A worker is still running (stop winding down, or a consult the orchestrator lost track of):
+    // keep showing "working" until it ends.
+    if (this.isBusy(chatId)) {
+      this.pendingFinal.set(chatId, end.interrupted ? "idle" : end.ok ? "done" : "error");
+      return;
+    }
     this.approvals.cancelChat(chatId);
     this.updateChat(chatId, {
       status: end.interrupted ? "idle" : end.ok ? "done" : "error",
@@ -325,6 +365,7 @@ export class ChatManager {
   }
 
   async dispose() {
+    this.disposing = true;
     const all = [...this.live.values()].flatMap((s) => Object.values(s));
     this.live.clear();
     await Promise.all(all.map((l) => l?.driver.dispose().catch(() => undefined)));
@@ -343,7 +384,7 @@ function codexMcpConfig(servers: Record<string, any>): Record<string, unknown> {
     // The orchestrator runs with approvalPolicy "never"; our own tools must not need approval.
     out[`mcp_servers.${name}.default_tools_approval_mode`] = "approve";
     // Consults can run for a long time.
-    out[`mcp_servers.${name}.tool_timeout_sec`] = 3600;
+    out[`mcp_servers.${name}.tool_timeout_sec`] = 24 * 3600;
     out[`mcp_servers.${name}.startup_timeout_sec`] = 30;
   }
   return out;

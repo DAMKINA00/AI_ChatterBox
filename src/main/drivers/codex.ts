@@ -3,6 +3,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { FileDiff, ModelOption, UsageInfo } from "../../shared/types";
 import { readLines, shutdown } from "../proc";
+import { classifyWindow, type UsageWindow } from "../../shared/usage";
 import { fileNote, IMAGE_MIMES, type AgentDriver, type AgentInput, type DriverHost, type DriverOptions } from "./types";
 import type { RequestId, ServerNotification, ServerRequest, InitializeResponse, ClientRequest } from "../codex-schema";
 import type {
@@ -142,12 +143,13 @@ export class CodexServer {
 }
 
 function toUsage(r: RateLimitSnapshot): UsageInfo {
-  return {
-    codex: {
-      primary: r.primary ? { usedPercent: r.primary.usedPercent, resetsAt: r.primary.resetsAt } : undefined,
-      secondary: r.secondary ? { usedPercent: r.secondary.usedPercent, resetsAt: r.secondary.resetsAt } : undefined,
-    },
-  };
+  const out: { fiveHour?: UsageWindow; weekly?: UsageWindow } = {};
+  for (const w of [r.primary, r.secondary]) {
+    if (!w) continue;
+    const kind = classifyWindow(w.windowDurationMins) ?? (w === r.primary ? "fiveHour" : "weekly");
+    out[kind] = { usedPercent: w.usedPercent, resetsAt: w.resetsAt };
+  }
+  return { codex: out };
 }
 
 /** Strip Codex's Windows wrapper: "powershell.exe" -Command '…' → … */
@@ -200,12 +202,13 @@ export class CodexDriver implements AgentDriver {
         model: this.opts.model || null,
         developerInstructions: this.opts.instructions ?? null,
         config: (this.opts.codexConfig as ThreadStartParams["config"]) ?? null,
+        ephemeral: this.opts.ephemeral ?? null,
       };
       const r = await this.server.request<ThreadStartResponse>("thread/start", params);
       this.threadId = r.thread.id;
       this.server.attach(this.threadId, this);
       this.server.loaded.add(this.threadId);
-      this.host.nativeId(this.threadId);
+      if (!this.opts.ephemeral) this.host.nativeId(this.threadId);
     } else if (!this.server.loaded.has(this.threadId)) {
       const params: ThreadResumeParams = {
         threadId: this.threadId,
@@ -304,7 +307,7 @@ export class CodexDriver implements AgentDriver {
             command: cmd,
             paths: p.cwd ? [p.cwd] : [],
           })
-          .then((v) => {
+          .then(({ verdict: v }) => {
             const decision: CommandExecutionApprovalDecision = v === "deny" ? "decline" : v === "allow_chat" ? "acceptForSession" : "accept";
             this.server.respond(req.id, { decision });
           });
@@ -321,8 +324,9 @@ export class CodexDriver implements AgentDriver {
             key: "fileChange",
             paths: [...diffs.map((d) => d.path), ...(p.grantRoot ? [p.grantRoot] : [])],
             diffs,
+            writes: true,
           })
-          .then((v) => {
+          .then(({ verdict: v }) => {
             const decision: FileChangeApprovalDecision = v === "deny" ? "decline" : v === "allow_chat" ? "acceptForSession" : "accept";
             this.server.respond(req.id, { decision });
           });

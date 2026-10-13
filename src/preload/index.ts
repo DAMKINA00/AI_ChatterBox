@@ -26,6 +26,8 @@ const api: ChatterBoxApi = {
   searchChats: (q) => ipcRenderer.invoke("chats:search", q),
   send: (chatId, text, attachmentIds) => ipcRenderer.invoke("chats:send", chatId, text, attachmentIds),
   stop: (chatId) => ipcRenderer.invoke("chats:stop", chatId),
+  resume: (chatId) => ipcRenderer.invoke("chats:resume", chatId),
+  dismissInterrupted: (chatId) => ipcRenderer.invoke("chats:dismissInterrupted", chatId),
   answerApproval: (chatId, approvalId, decision) => ipcRenderer.invoke("chats:approve", chatId, approvalId, decision),
   answerAskUser: (chatId, askId, answer) => ipcRenderer.invoke("chats:answerAsk", chatId, askId, answer),
 
@@ -46,6 +48,7 @@ const api: ChatterBoxApi = {
   onChatUpdated: (cb) => on("chat:updated", cb),
   onConsultUpdated: (cb) => on("consult:updated", cb),
   onUsage: (cb) => on("usage", cb),
+  onSelectChat: (cb) => on("select-chat", cb),
 };
 
 contextBridge.exposeInMainWorld("chatterbox", api);

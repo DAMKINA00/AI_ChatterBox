@@ -1,12 +1,33 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ImagePlus, Loader2, Paperclip, SendHorizontal, Square, Workflow } from "lucide-react";
-import { parseOrchestrator, ROLE_LABEL, CONSULT_KIND_LABEL, type AttachmentRef, type Chat, type NodeId, type Project } from "../../../shared/types";
+import { ArrowDown, Check, ChevronDown, History, ImagePlus, Loader2, Paperclip, RotateCcw, SendHorizontal, ShieldCheck, Square, Workflow, X } from "lucide-react";
+import {
+  APPROVAL_MODE_LABEL,
+  parseOrchestrator,
+  ROLE_LABEL,
+  CONSULT_KIND_LABEL,
+  type ApprovalMode,
+  type AttachmentRef,
+  type Chat,
+  type NodeId,
+  type Project,
+} from "../../../shared/types";
 import { api, cn, errorMessage } from "../lib/utils";
 import { useStore } from "../store";
 import { buildItems } from "../timeline";
 import { AttachmentChip, ItemList, RoleDot } from "./Items";
 import { ModelPicker, useModelLabel } from "./ModelPicker";
-import { Badge, Button, Kbd, Tooltip } from "./ui";
+import {
+  Badge,
+  Button,
+  DropdownMenu,
+  DropdownMenuCheckItem,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+  Kbd,
+  Tooltip,
+} from "./ui";
 import { StatusIcon } from "./Sidebar";
 
 export function ChatView({ chat, project, node }: { chat: Chat; project: Project; node?: NodeId }) {
@@ -46,6 +67,7 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
     >
       <ChatHeader chat={chat} project={project} nodeLabel={nodeLabel} busy={busy} />
       <Timeline items={items} chatId={chat.id} busy={busy} empty={!events?.length} loading={!events} />
+      {chat.status === "interrupted" && <InterruptedBanner chat={chat} />}
       {node && node !== "orch" ? (
         <div className="border-t px-6 py-2.5 text-center text-[12px] text-muted-foreground">
           {nodeLabel} 기록입니다. 지시는{" "}
@@ -93,12 +115,19 @@ function ChatHeader({ chat, project, nodeLabel, busy }: { chat: Chat; project: P
           </div>
         </div>
       </div>
-      <Tooltip content="오케스트레이터 모델은 프로젝트 설정에서 바꿉니다">
-        <Badge className="h-7 gap-1.5 px-2 text-[12px] font-normal" data-testid="orch-badge">
-          <RoleDot role="orch" />
-          오케스트레이터 · {label(orch.agent, orch.model)}
-        </Badge>
-      </Tooltip>
+      <div className="flex items-center gap-1.5" data-testid="orch-badge">
+        <RoleDot role="orch" />
+        <ModelPicker
+          compact
+          agents={["claude", "codex"]}
+          ariaLabel="이 채팅의 오케스트레이터 모델"
+          value={chat.orchestratorModelOverride ?? project.settings.orchestratorModel}
+          inherited={chat.orchestratorModelOverride === null}
+          onChange={(v) => void updateChat(chat.id, { orchestratorModelOverride: v as Project["settings"]["orchestratorModel"] })}
+          onReset={() => void updateChat(chat.id, { orchestratorModelOverride: null })}
+          resetLabel={`프로젝트 값 사용 (${orch.agent === "claude" ? "Claude" : "GPT"} · ${label(orch.agent, orch.model)})`}
+        />
+      </div>
       <div className="flex items-center gap-1.5">
         <RoleDot role="claude" />
         <ModelPicker
@@ -125,6 +154,7 @@ function ChatHeader({ chat, project, nodeLabel, busy }: { chat: Chat; project: P
           resetLabel={`프로젝트 값 사용 (${label("codex", project.settings.codexModel)})`}
         />
       </div>
+      <ApprovalModePicker chat={chat} project={project} />
       {busy && (
         <Button
           size="sm"
@@ -146,6 +176,71 @@ function ChatHeader({ chat, project, nodeLabel, busy }: { chat: Chat; project: P
         </Button>
       )}
     </header>
+  );
+}
+
+function ApprovalModePicker({ chat, project }: { chat: Chat; project: Project }) {
+  const updateChat = useStore((s) => s.updateChat);
+  const mode: ApprovalMode = chat.approvalModeOverride ?? project.settings.approvalMode;
+  const inherited = chat.approvalModeOverride === null;
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" size="xs" aria-label="이 채팅의 승인 방식" className="font-normal">
+          <ShieldCheck className="text-muted-foreground" />
+          {mode === "orchestrator" ? "자동 승인" : "직접 승인"}
+          {inherited && <span className="text-[11px] text-muted-foreground">(프로젝트 기본값)</span>}
+          <ChevronDown className="opacity-60" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-64">
+        <DropdownMenuItem disabled={inherited} onSelect={() => void updateChat(chat.id, { approvalModeOverride: null })}>
+          <RotateCcw />
+          프로젝트 값 사용 ({APPROVAL_MODE_LABEL[project.settings.approvalMode]})
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        {(["orchestrator", "user"] as const).map((m) => (
+          <DropdownMenuCheckItem key={m} checked={mode === m} onSelect={() => void updateChat(chat.id, { approvalModeOverride: m })}>
+            {APPROVAL_MODE_LABEL[m]}
+          </DropdownMenuCheckItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/** The app was quit or crashed mid-run: offer to continue. */
+function InterruptedBanner({ chat }: { chat: Chat }) {
+  const toast = useStore((s) => s.toast);
+  const [busy, setBusy] = useState(false);
+  return (
+    <div className="mx-auto mb-2 flex w-[min(860px,calc(100%-32px))] items-center gap-3 rounded-xl border border-warning/50 bg-warning/10 px-3.5 py-2.5" data-testid="interrupted">
+      <History className="size-4 shrink-0 text-warning" />
+      <div className="min-w-0 flex-1 text-[13px]">
+        <div className="font-medium">중단됨</div>
+        <div className="text-[12px] text-muted-foreground">이전 실행이 앱 종료로 중단됐습니다. 이어서 진행하면 오케스트레이터가 작업 폴더 상태를 확인하고 남은 작업을 마칩니다.</div>
+      </div>
+      <Button
+        size="sm"
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          try {
+            await api.resume(chat.id);
+          } catch (e) {
+            toast(errorMessage(e));
+          } finally {
+            setBusy(false);
+          }
+        }}
+        data-testid="resume"
+      >
+        {busy ? <Loader2 className="animate-spin" /> : <Check />} 이어서 진행
+      </Button>
+      <Button size="icon-sm" variant="ghost" aria-label="중단 표시 닫기" onClick={() => void api.dismissInterrupted(chat.id)}>
+        <X />
+      </Button>
+    </div>
   );
 }
 

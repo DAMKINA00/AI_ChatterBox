@@ -135,6 +135,8 @@ export type ChatPatch = Partial<
     | "codexThreadId"
     | "claudeModelOverride"
     | "codexModelOverride"
+    | "approvalModeOverride"
+    | "orchestratorModelOverride"
     | "status"
     | "unread"
     | "archived"
@@ -159,6 +161,8 @@ const toChat = (r: Row): Chat => ({
   codexThreadId: r.codex_thread_id,
   claudeModelOverride: r.claude_model_override,
   codexModelOverride: r.codex_model_override,
+  approvalModeOverride: r.approval_mode_override ?? null,
+  orchestratorModelOverride: r.orchestrator_model_override ?? null,
   status: r.status,
   unread: !!r.unread,
   archived: !!r.archived,
@@ -188,10 +192,23 @@ export class Store {
     this.db = new DatabaseSync(file);
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
     this.db.exec(SCHEMA);
-    // A crash or kill can leave chats marked busy.
-    this.db.exec("UPDATE chats SET status = 'idle' WHERE status IN ('working','approval')");
-    this.db.exec("UPDATE consults SET status = 'stopped', ended_at = ended_at WHERE status = 'running'");
+    this.addColumns();
+    // The app was quit or crashed mid-run: those chats can be resumed ("이어서 진행").
+    this.db.exec("UPDATE chats SET status = 'interrupted' WHERE status IN ('working','approval')");
+    this.db.exec("UPDATE consults SET status = 'stopped', ended_at = COALESCE(ended_at, started_at) WHERE status = 'running'");
     this.migrateV1();
+  }
+
+  /** Columns added after 0.2.0 (CREATE TABLE IF NOT EXISTS doesn't add them to existing DBs). */
+  private addColumns() {
+    const add = (table: string, column: string, ddl: string) => {
+      const cols = (this.db.prepare(`PRAGMA table_info(${table})`).all() as Row[]).map((c) => c.name);
+      if (!cols.includes(column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+    };
+    add("chats", "approval_mode_override", "approval_mode_override TEXT");
+    add("chats", "orchestrator_model_override", "orchestrator_model_override TEXT");
+    add("approvals", "decided_by", "decided_by TEXT NOT NULL DEFAULT 'user'");
+    add("approvals", "reason", "reason TEXT");
   }
 
   /**
@@ -310,7 +327,7 @@ export class Store {
     this.db
       .prepare(
         `UPDATE chats SET title = ?, orch_claude_session_id = ?, orch_codex_thread_id = ?, claude_session_id = ?, codex_thread_id = ?,
-         claude_model_override = ?, codex_model_override = ?, status = ?, unread = ?, archived = ?, last_active_at = ? WHERE id = ?`,
+         claude_model_override = ?, codex_model_override = ?, approval_mode_override = ?, orchestrator_model_override = ?, status = ?, unread = ?, archived = ?, last_active_at = ? WHERE id = ?`,
       )
       .run(
         pick("title"),
@@ -320,6 +337,8 @@ export class Store {
         pick("codexThreadId"),
         pick("claudeModelOverride"),
         pick("codexModelOverride"),
+        pick("approvalModeOverride"),
+        pick("orchestratorModelOverride"),
         patch.status ?? c.status,
         (patch.unread ?? c.unread) ? 1 : 0,
         (patch.archived ?? c.archived) ? 1 : 0,
@@ -392,10 +411,10 @@ export class Store {
   }
 
   // ---- approvals log
-  logApproval(chatId: number, agent: Role, action: unknown, risk: string, decision: string, scope: string) {
+  logApproval(chatId: number, agent: Role, action: unknown, risk: string, decision: string, scope: string, decidedBy = "user", reason?: string) {
     this.db
-      .prepare("INSERT INTO approvals (chat_id, agent, action_json, risk, decision, scope, ts) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .run(chatId, agent, JSON.stringify(action), risk, decision, scope, Date.now());
+      .prepare("INSERT INTO approvals (chat_id, agent, action_json, risk, decision, scope, ts, decided_by, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(chatId, agent, JSON.stringify(action), risk, decision, scope, Date.now(), decidedBy, reason ?? null);
   }
 
   // ---- settings

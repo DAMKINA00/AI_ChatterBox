@@ -49,3 +49,15 @@ export function claudeToolPaths(input: any): string[] {
   if (!input || typeof input !== "object") return [];
   return ["file_path", "path", "notebook_path"].map((k) => input[k]).filter((v): v is string => typeof v === "string");
 }
+
+/** "+3 −1" for a unified diff. */
+export function diffStatsText(diff: string): string {
+  let add = 0;
+  let del = 0;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("+")) add++;
+    else if (line.startsWith("-")) del++;
+  }
+  return `+${add} −${del}`;
+}

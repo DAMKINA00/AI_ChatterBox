@@ -7,17 +7,27 @@ import { ChatManager } from "./chats";
 import { AttachmentStore } from "./attachments";
 import { listClaudeModels } from "./drivers/claude";
 import { Orchestrator } from "./orchestrator";
+import { AppTray } from "./tray";
+import { ensureOnlyInstance } from "./instance-guard";
 
 // Data lives in %APPDATA%\AI_ChatterBox unless overridden (the e2e scripts use scratch folders).
 const dataDir = process.env.AI_CHATTERBOX_DATA ?? join(app.getPath("appData"), "AI_ChatterBox");
 mkdirSync(dataDir, { recursive: true });
 app.setPath("userData", join(dataDir, "electron"));
+app.setAppUserModelId("net.damkina.aichatterbox");
+
+// One instance per data folder: a second launch just shows the running window (e.g. from the tray).
+if (!app.requestSingleInstanceLock()) {
+  app.exit(0);
+}
+app.on("second-instance", () => tray?.show());
 
 // Attachment thumbnails are served from cbx://attachment/<id>.
 protocol.registerSchemesAsPrivileged([{ scheme: "cbx", privileges: { standard: true, secure: true, supportFetchAPI: true } }]);
 
 let win: BrowserWindow | null = null;
 let quitting = false;
+let tray: AppTray | undefined;
 let store: Store;
 let chats: ChatManager;
 let attachments: AttachmentStore;
@@ -77,7 +87,11 @@ function createWindow() {
   };
   win.on("resize", persist);
   win.on("move", persist);
-  win.on("close", persist);
+  win.on("close", (e) => {
+    persist();
+    // Closing the window while work runs keeps everything going in the tray.
+    if (!quitting && tray?.hideIfBusy()) e.preventDefault();
+  });
   // Links in chat open in the browser, never inside the app.
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/.test(url)) void shell.openExternal(url);
@@ -136,6 +150,8 @@ function registerIpc() {
   ipcMain.handle("chats:search", (_e, q: string) => (q.trim() ? store.searchChats(q.trim()) : []));
   ipcMain.handle("chats:send", (_e, id: number, text: string, attachmentIds: number[]) => chats.send(id, text, attachmentIds));
   ipcMain.handle("chats:stop", (_e, id: number) => orchestrator.stop(id));
+  ipcMain.handle("chats:resume", (_e, id: number) => orchestrator.resume(id));
+  ipcMain.handle("chats:dismissInterrupted", (_e, id: number) => orchestrator.dismissInterrupted(id));
   ipcMain.handle("chats:approve", (_e, id: number, approvalId: string, decision: ApprovalDecision) =>
     chats.answerApproval(id, approvalId, decision),
   );
@@ -186,6 +202,11 @@ function registerIpc() {
 let orchestrator: Orchestrator;
 
 app.whenReady().then(async () => {
+  // Never open the DB next to another running instance (e.g. 0.2.0, which has no single-instance lock).
+  if (!(await ensureOnlyInstance(app.getPath("userData"), join(dataDir, "chatterbox.db")))) {
+    app.exit(0);
+    return;
+  }
   store = new Store(join(dataDir, "chatterbox.db"));
   attachments = new AttachmentStore(join(dataDir, "attachments"), store);
   nativeTheme.themeSource = (store.getSetting("theme") as Theme) ?? "dark";
@@ -199,7 +220,10 @@ app.whenReady().then(async () => {
     store,
     {
       event: (e) => send("chat:event", e),
-      chat: (c) => send("chat:updated", c),
+      chat: (c) => {
+        send("chat:updated", c);
+        tray?.chatChanged(c);
+      },
       consult: (c) => send("consult:updated", c),
       usage: (u) => send("usage", u),
     },
@@ -210,6 +234,13 @@ app.whenReady().then(async () => {
   orchestrator = new Orchestrator(chats);
   await chats.start();
   registerIpc();
+  tray = new AppTray({
+    window: () => (win && !win.isDestroyed() ? win : null),
+    createWindow,
+    chats: () => store.listChats(),
+    quit: () => app.quit(),
+  });
+  tray.start();
   createWindow();
 });
 
@@ -221,8 +252,10 @@ app.on("before-quit", (e) => {
     store.setSetting("window", JSON.stringify({ ...win.getNormalBounds(), maximized: win.isMaximized() }));
   quitting = true;
   e.preventDefault();
-  chats
+  orchestrator.judge
     .dispose()
+    .catch(() => undefined)
+    .then(() => chats.dispose())
     .catch(() => undefined)
     .finally(() => {
       try {
@@ -230,8 +263,10 @@ app.on("before-quit", (e) => {
       } catch {
         // already closed
       }
+      tray?.destroy();
       app.quit();
     });
 });
 
+// The window only really closes when nothing is running (otherwise it hides to the tray).
 app.on("window-all-closed", () => app.quit());

@@ -8,6 +8,7 @@ import { existsSync, statSync } from "node:fs";
 import { basename } from "node:path";
 import {
   AGENT_LABEL,
+  chatOrchestrator,
   CONSULT_KIND_LABEL,
   ROLE_LABEL,
   type AgentEvent,
@@ -22,6 +23,7 @@ import type { ChatManager } from "./chats";
 import { bridgeServerConfig, textResult, type ToolDef, type ToolResult } from "./local-bridge";
 import { mimeOf } from "./attachments";
 import type { AgentInput } from "./drivers/types";
+import { ApprovalJudge } from "./judge";
 
 const KINDS: ConsultKind[] = ["implement", "review", "opinion"];
 
@@ -84,6 +86,8 @@ function workerInstructions(role: "claude" | "gpt"): string {
 }
 
 interface Instruction {
+  /** The user's instruction text (context for the approval judge). */
+  text: string;
   startedAt: number;
   consults: number;
   reviews: number;
@@ -97,6 +101,8 @@ interface Instruction {
 interface Running {
   consultId: number;
   role: Role;
+  kind: ConsultKind;
+  message: string;
   text: string;
   files: Set<string>;
   pendingFiles: Map<string, string[]>;
@@ -110,8 +116,17 @@ export class Orchestrator {
   private locks = new Map<number, Promise<unknown>>();
   private asks = new Map<string, { chatId: number; resolve: (a: string) => void }>();
   private stopped = new Set<number>();
+  readonly judge: ApprovalJudge;
 
   constructor(private chats: ChatManager) {
+    this.judge = new ApprovalJudge(chats, (chatId) => {
+      const r = this.running.get(chatId);
+      return {
+        instruction: this.instructions.get(chatId)?.text,
+        consult: r ? { role: r.role, kind: r.kind, message: r.message } : undefined,
+      };
+    });
+    chats.judge = (chatId, request, input) => this.judge.decide(chatId, request, input);
     chats.instructionsFor = (_chat, project, role, agent) =>
       role === "orch" ? orchestratorInstructions(project, agent) : workerInstructions(role);
     chats.toolsFor = (chat, role) => (role === "orch" ? { chatterbox_bridge: this.bridgeFor(chat.id) } : undefined);
@@ -151,11 +166,71 @@ export class Orchestrator {
   }
 
   // ---------- user instructions
+  /**
+   * The chat's orchestrator moved to the other CLI (Claude ↔ GPT): that CLI has its own (new) session,
+   * so hand it a short summary of the chat so far.
+   */
+  private handover(chat: Chat): string {
+    const project = this.chats.store.project(chat.projectId)!;
+    const { agent } = chatOrchestrator(chat, project);
+    const key = `orchAgent:${chat.id}`;
+    const prev = this.chats.store.getSetting(key);
+    this.chats.store.setSetting(key, agent);
+    if (!prev || prev === agent) return "";
+    const lines: string[] = [];
+    for (const e of this.chats.store.events(chat.id)) {
+      const ev = e.event;
+      if (ev.type === "user" && ev.text) lines.push(`사용자: ${clipText(ev.text, 500)}`);
+      else if (ev.type === "text" && e.role === "orch") lines.push(`오케스트레이터: ${clipText(ev.text, 500)}`);
+      else if (ev.type === "consult_end")
+        lines.push(`협의 결과(${ev.status}): ${clipText(ev.summary, 400)}${ev.files.length ? ` · 변경: ${ev.files.join(", ")}` : ""}`);
+    }
+    const recent = lines.slice(-16).join("\n").slice(-6000);
+    const name = (a: string) => (a === "claude" ? "Claude" : "GPT");
+    this.chats.emit(chat.id, "orch", null, { type: "notice", text: `오케스트레이터가 ${name(agent)}로 바뀌어 지금까지의 요약을 넘깁니다` });
+    return `[AI_ChatterBox] 이 채팅의 오케스트레이터가 ${name(prev)}에서 ${name(agent)}로 바뀌었습니다. 지금까지의 대화 요약:\n${recent}\n\n---\n`;
+  }
+
   private async instruct(chat: Chat, input: AgentInput) {
     this.stopped.delete(chat.id);
-    this.instructions.set(chat.id, { startedAt: Date.now(), consults: 0, reviews: 0, requests: new Map(), queued: [], pinned: [] });
+    const prefix = this.handover(chat);
+    if (prefix) input = { ...input, text: prefix + input.text };
+    this.instructions.set(chat.id, { text: input.text, startedAt: Date.now(), consults: 0, reviews: 0, requests: new Map(), queued: [], pinned: [] });
     const driver = await this.chats.driver(chat.id, "orch");
     await driver.send({ ...input, text: input.text + attachmentNote(input.attachments) });
+  }
+
+  /**
+   * Continue a run the app quit or crashed in the middle of: the orchestrator session resumes
+   * (claude --resume / thread/resume) and is told to check the folder and finish; workers resume
+   * their own sessions on the next consult.
+   */
+  async resume(chatId: number) {
+    const chat = this.chats.store.chat(chatId);
+    if (!chat || chat.status !== "interrupted") return;
+    const last = [...this.chats.store.events(chatId)]
+      .reverse()
+      .find((e) => e.event.type === "user" && !e.event.queued)?.event as { text: string } | undefined;
+    const original = last?.text ?? "";
+    this.chats.emit(chatId, "orch", null, { type: "notice", text: "중단된 작업을 이어서 진행합니다" });
+    this.chats.updateChat(chatId, { status: "working", touch: true });
+    this.stopped.delete(chatId);
+    this.instructions.set(chatId, { text: original, startedAt: Date.now(), consults: 0, reviews: 0, requests: new Map(), queued: [], pinned: [] });
+    const note =
+      "[AI_ChatterBox] 이전 실행이 앱 종료로 중단됐습니다. 작업 폴더의 현재 상태(git status, git diff, 파일 내용)를 확인하고, " +
+      "아래 원래 지시의 남은 작업을 이어서 끝낸 뒤 결과를 보고하세요. 이미 끝난 부분은 다시 하지 마세요.\n\n원래 지시:\n" +
+      (original || "(기록 없음)");
+    try {
+      await (await this.chats.driver(chatId, "orch")).send({ text: this.handover(chat) + note, attachments: [] });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      this.chats.emit(chatId, "orch", "orch", { type: "error", kind: "process", message });
+      this.chats.orchTurnEnded(chatId, { type: "turn_end", ok: false, error: message });
+    }
+  }
+
+  dismissInterrupted(chatId: number) {
+    if (this.chats.store.chat(chatId)?.status === "interrupted") this.chats.updateChat(chatId, { status: "idle" });
   }
 
   /** The user typed while the team was working: hand it to the orchestrator at the next boundary. */
@@ -225,6 +300,8 @@ export class Orchestrator {
       const r: Running = {
         consultId: consult.id,
         role,
+        kind,
+        message,
         text: "",
         files: new Set(),
         pendingFiles: new Map(),
@@ -359,11 +436,17 @@ export class Orchestrator {
   }
 
   forget(chatId: number) {
+    this.judge.forget(chatId);
     const reg = this.bridgeKeys.get(chatId);
     if (reg) this.chats.bridge.unregister(reg.key);
     this.bridgeKeys.delete(chatId);
     this.instructions.delete(chatId);
   }
+}
+
+function clipText(s: string, n: number) {
+  const t = s.replace(/\s+/g, " ").trim();
+  return t.length > n ? t.slice(0, n) + "…" : t;
 }
 
 function kindPrefix(kind: ConsultKind): string {

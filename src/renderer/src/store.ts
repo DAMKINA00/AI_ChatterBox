@@ -139,6 +139,7 @@ export const useStore = create<State>((set, get) => ({
       }),
     );
     api.onUsage((usage) => set({ usage }));
+    api.onSelectChat((chatId) => void get().select({ chatId }));
     window.addEventListener("focus", () => {
       const sel = get().selection;
       if (sel && get().chats.find((c) => c.id === sel.chatId)?.unread) void api.markViewed(sel.chatId);

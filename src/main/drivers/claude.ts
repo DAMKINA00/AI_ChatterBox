@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { bridgeServerConfig, textResult, type LocalBridge } from "../local-bridge";
 import { claudeToolDiffs, claudeToolPaths } from "../diffs";
+import { READ_ONLY_TOOLS } from "../approvals";
 import { readLines, shutdown } from "../proc";
 import { fileNote, IMAGE_MIMES, MAX_IMAGE_BYTES, type AgentDriver, type AgentInput, type DriverHost, type DriverOptions } from "./types";
 
@@ -13,6 +14,7 @@ const AUTH_HINT =
 
 /** Read-only tools Claude's default permission mode already allows; never routed to us. */
 const SHELL_TOOLS = new Set(["Bash", "PowerShell"]);
+const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 
 interface PermissionRequest {
   tool_name: string;
@@ -31,6 +33,11 @@ export interface ClaudeEnv {
   disallowedTools?: string[];
   /** Tools allowed without a permission prompt (the orchestrator's consult tools). */
   allowedTools?: string[];
+  /** Built-in tool set (--tools); [] = no tools at all (the approval judge). */
+  tools?: string[];
+  /** Load only our MCP servers, not the user's. */
+  strictMcp?: boolean;
+  extraArgs?: string[];
 }
 
 export class ClaudeDriver implements AgentDriver {
@@ -94,6 +101,9 @@ export class ClaudeDriver implements AgentDriver {
     if (this.opts.instructions) args.push("--append-system-prompt", this.opts.instructions);
     if (this.env.disallowedTools?.length) args.push("--disallowedTools", this.env.disallowedTools.join(","));
     if (this.env.allowedTools?.length) args.push("--allowedTools", this.env.allowedTools.join(","));
+    if (this.env.tools) args.push("--tools", this.env.tools.join(","));
+    if (this.env.strictMcp) args.push("--strict-mcp-config");
+    if (this.env.extraArgs) args.push(...this.env.extraArgs);
     if (this.nativeId) args.push("--resume", this.nativeId);
 
     const child = spawn(this.opts.exePath, args, {
@@ -175,9 +185,12 @@ export class ClaudeDriver implements AgentDriver {
         }
         break;
       case "rate_limit_event": {
-        const info = ev.rate_limit_info ?? {};
-        const five = info.unifiedWindows?.five_hour;
-        this.host.usage?.({ claude: { fiveHour: five?.utilization, resetsAt: five?.resetsAt ?? info.resetsAt, status: info.status } });
+        const w = ev.rate_limit_info?.unifiedWindows ?? {};
+        // utilization is 0–1
+        const win = (x: any) => (x && typeof x.utilization === "number" ? { usedPercent: x.utilization * 100, resetsAt: x.resetsAt } : undefined);
+        const fiveHour = win(w.five_hour);
+        const weekly = win(w.seven_day);
+        if (fiveHour || weekly) this.host.usage?.({ claude: { fiveHour, weekly } });
         break;
       }
       case "result": {
@@ -197,7 +210,7 @@ export class ClaudeDriver implements AgentDriver {
   private async onPermission(req: PermissionRequest): Promise<PermissionResult> {
     const input: any = req.input ?? {};
     const command = SHELL_TOOLS.has(req.tool_name) && typeof input.command === "string" ? input.command : undefined;
-    const verdict = await this.host.approve({
+    const { verdict, reason } = await this.host.approve({
       title: req.tool_name,
       detail: command ?? formatInput(req.tool_name, input),
       reason: typeof input.description === "string" ? input.description : undefined,
@@ -205,9 +218,11 @@ export class ClaudeDriver implements AgentDriver {
       command,
       paths: claudeToolPaths(input),
       diffs: claudeToolDiffs(req.tool_name, input, this.opts.cwd),
+      readOnly: READ_ONLY_TOOLS.has(req.tool_name),
+      writes: WRITE_TOOLS.has(req.tool_name),
     });
     return verdict === "deny"
-      ? { behavior: "deny", message: "사용자가 AI_ChatterBox에서 거부했습니다." }
+      ? { behavior: "deny", message: reason ?? "AI_ChatterBox에서 거부되었습니다." }
       : { behavior: "allow", updatedInput: req.input };
   }
 

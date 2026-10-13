@@ -10,6 +10,7 @@ export type Item =
   | { kind: "tool"; key: string; role: Role; id: string; name: string; input: string; diffs?: FileDiff[]; result?: { ok: boolean; output: string } }
   | { kind: "files"; key: string; role: Role; files: FileDiff[]; ok: boolean }
   | { kind: "approval"; key: string; request: ApprovalRequest; decision?: ApprovalDecision | "auto" | "expired" }
+  | { kind: "auto"; key: string; request: ApprovalRequest; decision: "allow" | "deny"; reason: string; reused?: boolean }
   | {
       kind: "consult";
       key: string;
@@ -138,6 +139,8 @@ export function apply(items: Item[], e: TimelineEvent): Item[] {
       return [...closeStream(items, role), { kind: "files", key: key, role, files: ev.files, ok: ev.ok }];
     case "approval_request":
       return [...closeStream(items, role), { kind: "approval", key: key, request: ev.request }];
+    case "approval_auto":
+      return [...closeStream(items, role), { kind: "auto", key: key, request: ev.request, decision: ev.decision, reason: ev.reason, reused: ev.reused }];
     case "approval_resolved":
       return items.map((x) => (x.kind === "approval" && x.request.id === ev.id ? { ...x, decision: ev.decision } : x));
     case "consult_start":

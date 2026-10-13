@@ -1,5 +1,5 @@
 import type { AgentEvent, AgentKind, AttachmentRef, UsageInfo } from "../../shared/types";
-import type { ApprovalInput, Verdict } from "../approvals";
+import type { ApprovalInput, VerdictResult } from "../approvals";
 
 export interface AgentInput {
   text: string;
@@ -11,7 +11,7 @@ export interface DriverHost {
   emit(event: AgentEvent): void;
   /** Claude session_id / Codex thread id, once known. */
   nativeId(id: string): void;
-  approve(input: Omit<ApprovalInput, "role" | "node">): Promise<Verdict>;
+  approve(input: Omit<ApprovalInput, "role" | "node">): Promise<VerdictResult>;
   usage?(u: UsageInfo): void;
 }
 
@@ -39,6 +39,8 @@ export interface DriverOptions {
   readOnly?: boolean;
   /** Codex thread config overrides (e.g. mcp_servers for the orchestrator's tools). */
   codexConfig?: Record<string, unknown>;
+  /** Don't keep the conversation on disk (the approval judge). */
+  ephemeral?: boolean;
 }
 
 export const IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);

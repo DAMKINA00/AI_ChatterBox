@@ -8,6 +8,7 @@ import {
   CircleAlert,
   FolderOpen,
   FolderClosed,
+  History,
   Hand,
   Loader2,
   MessageSquare,
@@ -55,6 +56,8 @@ export function StatusIcon({ status, unread }: { status: ChatStatus; unread?: bo
       return <Hand className="size-3.5 shrink-0 animate-pulse-dot text-warning" aria-label="승인 필요" />;
     case "error":
       return <CircleAlert className="size-3.5 shrink-0 text-destructive" aria-label="오류" />;
+    case "interrupted":
+      return <History className="size-3.5 shrink-0 text-warning" aria-label="중단됨" />;
     case "done":
       return unread ? (
         <span className="size-2 shrink-0 rounded-full bg-primary" aria-label="새 결과" />

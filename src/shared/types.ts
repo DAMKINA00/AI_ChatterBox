@@ -1,4 +1,5 @@
 // Types shared by main, preload and renderer.
+import type { ProviderUsage } from "./usage";
 
 export type AgentKind = "claude" | "codex";
 
@@ -12,6 +13,11 @@ export const WORKER_AGENT: Record<"claude" | "gpt", AgentKind> = { claude: "clau
 
 /** Orchestrator model, encoded as "<agent>:<model id>", e.g. "claude:opus" or "codex:gpt-6-astra". */
 export type OrchestratorModel = `${AgentKind}:${string}`;
+
+/** The orchestrator model a chat uses (its own override, else the project's). */
+export function chatOrchestrator(chat: { orchestratorModelOverride: string | null }, project: { settings: { orchestratorModel: string } }) {
+  return parseOrchestrator(chat.orchestratorModelOverride ?? project.settings.orchestratorModel);
+}
 
 export function parseOrchestrator(m: string): { agent: AgentKind; model: string } {
   const i = m.indexOf(":");
@@ -33,7 +39,17 @@ export interface ProjectSettings {
   maxReviews: number;
   /** Minutes per user instruction before the lead is told to wrap up. */
   maxMinutes: number;
+  /** Who answers workers' approval requests. */
+  approvalMode: ApprovalMode;
+  /** Let the orchestrator also allow high-risk requests (otherwise they go to the user). */
+  delegateHighRisk: boolean;
 }
+
+export type ApprovalMode = "orchestrator" | "user";
+export const APPROVAL_MODE_LABEL: Record<ApprovalMode, string> = {
+  orchestrator: "오케스트레이터 자동 판단",
+  user: "매번 직접 승인",
+};
 
 /** Prefills the new-project form only. */
 export const DEFAULT_SETTINGS: ProjectSettings = {
@@ -44,6 +60,8 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   maxConsults: 8,
   maxReviews: 3,
   maxMinutes: 60,
+  approvalMode: "orchestrator",
+  delegateHighRisk: false,
 };
 
 export interface Project {
@@ -55,7 +73,8 @@ export interface Project {
   archived: boolean;
 }
 
-export type ChatStatus = "idle" | "working" | "approval" | "done" | "error";
+/** interrupted = the app was quit or crashed mid-run; the chat offers "이어서 진행". */
+export type ChatStatus = "idle" | "working" | "approval" | "done" | "error" | "interrupted";
 
 export interface Chat {
   id: number;
@@ -67,9 +86,12 @@ export interface Chat {
   /** Worker conversations. */
   claudeSessionId: string | null;
   codexThreadId: string | null;
-  /** Per-chat worker model overrides; null = follow the project. */
+  /** Per-chat model overrides; null = follow the project. */
+  orchestratorModelOverride: OrchestratorModel | null;
   claudeModelOverride: string | null;
   codexModelOverride: string | null;
+  /** Per-chat approval mode; null = follow the project. */
+  approvalModeOverride: ApprovalMode | null;
   status: ChatStatus;
   unread: boolean;
   archived: boolean;
@@ -128,6 +150,8 @@ export interface ApprovalRequest {
   risk: Risk;
   riskReason?: string;
   diffs?: FileDiff[];
+  /** Why the orchestrator handed this one to the user. */
+  judgeReason?: string;
 }
 
 export type ApprovalDecision = "once" | "chat" | "deny";
@@ -142,6 +166,8 @@ export type AgentEvent =
   | { type: "file_change"; id: string; files: FileDiff[]; ok: boolean }
   | { type: "approval_request"; request: ApprovalRequest }
   | { type: "approval_resolved"; id: string; decision: ApprovalDecision | "auto" | "expired" }
+  /** An approval the orchestrator (or a remembered decision) answered without the user. */
+  | { type: "approval_auto"; request: ApprovalRequest; decision: "allow" | "deny"; reason: string; reused?: boolean }
   | { type: "consult_start"; consultId: number; kind: ConsultKind; from: Role; to: Role; request: string; attachments: AttachmentRef[] }
   | { type: "consult_end"; consultId: number; status: ConsultStatus; summary: string; files: string[] }
   | { type: "ask_user"; id: string; question: string; options: string[] }
@@ -174,9 +200,10 @@ export interface ModelOption {
 
 export type Theme = "dark" | "light";
 
+/** Rate-limit usage per provider (see shared/usage.ts for what is displayed). */
 export interface UsageInfo {
-  claude?: { fiveHour?: number; resetsAt?: number; status?: string };
-  codex?: { primary?: { usedPercent: number; resetsAt?: number | null }; secondary?: { usedPercent: number; resetsAt?: number | null } };
+  claude?: ProviderUsage;
+  codex?: ProviderUsage;
 }
 
 export interface ChatterBoxApi {
@@ -191,7 +218,14 @@ export interface ChatterBoxApi {
   createChat(projectId: number): Promise<Chat>;
   updateChat(
     id: number,
-    patch: { title?: string; archived?: boolean; claudeModelOverride?: string | null; codexModelOverride?: string | null },
+    patch: {
+      title?: string;
+      archived?: boolean;
+      orchestratorModelOverride?: OrchestratorModel | null;
+      claudeModelOverride?: string | null;
+      codexModelOverride?: string | null;
+      approvalModeOverride?: ApprovalMode | null;
+    },
   ): Promise<Chat>;
   deleteChat(id: number): Promise<void>;
   markViewed(id: number): Promise<void>;
@@ -201,6 +235,9 @@ export interface ChatterBoxApi {
   searchChats(q: string): Promise<number[]>;
   send(chatId: number, text: string, attachmentIds: number[]): Promise<void>;
   stop(chatId: number): Promise<void>;
+  /** Continue a run the app quit or crashed in the middle of. */
+  resume(chatId: number): Promise<void>;
+  dismissInterrupted(chatId: number): Promise<void>;
   answerApproval(chatId: number, approvalId: string, decision: ApprovalDecision): Promise<void>;
   answerAskUser(chatId: number, askId: string, answer: string): Promise<void>;
   // attachments
@@ -221,4 +258,6 @@ export interface ChatterBoxApi {
   onChatUpdated(cb: (chat: Chat) => void): () => void;
   onConsultUpdated(cb: (consult: Consult) => void): () => void;
   onUsage(cb: (u: UsageInfo) => void): () => void;
+  /** Main asks to show a chat (tray notification clicked). */
+  onSelectChat(cb: (chatId: number) => void): () => void;
 }
