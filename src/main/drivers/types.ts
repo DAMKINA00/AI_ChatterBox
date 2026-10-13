@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentKind, AttachmentRef, UsageInfo } from "../../shared/types";
+import type { AgentEvent, AgentKind, AttachmentRef, UsageInfo, TokenCounts } from "../../shared/types";
 import type { ApprovalInput, VerdictResult } from "../approvals";
 
 export interface AgentInput {
@@ -10,6 +10,7 @@ export interface AgentInput {
 
 /** What a driver needs from the chat that owns it. */
 export interface DriverHost {
+  image?(image: { id: string; path?: string; base64?: string }): AttachmentRef;
   emit(event: AgentEvent): void;
   /** Claude session_id / Codex thread id, once known. */
   nativeId(id: string): void;
@@ -30,6 +31,9 @@ export interface AgentDriver {
 }
 
 export interface DriverOptions {
+  tokenBaseline?: TokenCounts;
+  /** Master coordinates images through GPT workers. */
+  allowImages?: boolean;
   cwd: string;
   /** Existing native id to resume, or null for a new conversation. */
   nativeId: string | null;

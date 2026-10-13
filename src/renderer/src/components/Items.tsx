@@ -21,6 +21,7 @@ import { api, cn, errorMessage, formatBytes } from "../lib/utils";
 import { useStore } from "../store";
 import type { Item } from "../timeline";
 import { Markdown, CopyButton } from "./Markdown";
+import { FileLink } from "./FileLink";
 import { DiffList, Stats } from "./DiffView";
 import { AgentAvatar, type AvatarSize } from "./AgentAvatar";
 import { Badge, Button, Input } from "./ui";
@@ -59,15 +60,21 @@ export function AttachmentChip({ a, onRemove }: { a: AttachmentRef; onRemove?: (
       data-testid="attachment"
     >
       {isImage ? (
-        <button onClick={() => api.openPath(a.path)} className="block" aria-label={`${a.name} 열기`}>
-          <img src={`cbx://attachment/${a.id}`} alt={a.name} className="size-16 object-cover" draggable={false} />
-        </button>
+        <div className="flex min-w-0 items-center gap-2">
+          <button type="button" onClick={() => void api.openPath(a.path).catch((e) => useStore.getState().toast(errorMessage(e)))} className="block shrink-0" aria-label={`${a.name} 열기`}>
+            <img src={`cbx://attachment/${a.id}`} alt={a.name} className="size-16 object-cover" draggable={false} />
+          </button>
+          <div className="min-w-0 py-2 pr-3">
+            <FileLink href={a.path}>{a.name}</FileLink>
+            <div className="text-[11px] text-muted-foreground">{formatBytes(a.size)}</div>
+          </div>
+        </div>
       ) : (
-        <button onClick={() => api.openPath(a.path)} className="flex items-center gap-2 py-2 pr-3 pl-2.5 text-left">
+        <div className="flex items-center gap-2 py-2 pr-3 pl-2.5 text-left">
           <FileText className="size-4 text-muted-foreground" />
-          <span className="max-w-40 truncate">{a.name}</span>
+          <span className="max-w-40 truncate"><FileLink href={a.path}>{a.name}</FileLink></span>
           <span className="text-muted-foreground">{formatBytes(a.size)}</span>
-        </button>
+        </div>
       )}
       {onRemove && (
         <button
@@ -143,6 +150,8 @@ function ItemView({ item, chatId, nested }: { item: Item; chatId: number; nested
       return <AutoApproval item={item} chatId={chatId} />;
     case "consult":
       return <ConsultCard item={item} chatId={chatId} />;
+    case "image":
+      return <ImageCard item={item} chatId={chatId} />;
     case "ask":
       return <AskCard item={item} chatId={chatId} />;
     case "notice":
@@ -168,6 +177,24 @@ export function Notice({ tone, children }: { tone: "error" | "auth" | "info"; ch
     >
       {tone === "auth" ? <KeyRound className="mt-0.5 size-4 shrink-0 text-warning" /> : <CircleAlert className="mt-0.5 size-4 shrink-0 text-destructive" />}
       <div className="min-w-0 break-words whitespace-pre-wrap">{children}</div>
+    </div>
+  );
+}
+
+function ImageCard({ item, chatId }: { item: Extract<Item, { kind: "image" }>; chatId: number }) {
+  return (
+    <div className="space-y-2 rounded-lg border bg-card px-3 py-2" data-testid="image-generation" data-role={item.role} data-status={item.status}>
+      <div className="flex items-center gap-2 text-[12.5px]">
+        <RoleName chatId={chatId} role={item.role} size={24} />
+        <span className="font-medium">이미지 생성</span>
+        <span className={cn("ml-auto flex items-center gap-1 text-[12px]", item.status === "done" ? "text-success" : item.status === "error" ? "text-destructive" : "text-primary")}>
+          {item.status === "running" ? <Loader2 className="size-3.5 animate-spin" /> : item.status === "done" ? <Check className="size-3.5" /> : <AlertTriangle className="size-3.5" />}
+          {item.status === "running" ? "생성 중" : item.status === "done" ? "완료" : "오류"}
+        </span>
+      </div>
+      {item.prompt && <Markdown text={item.prompt} className="text-[12px] text-muted-foreground" />}
+      {item.error && <div className="text-[12.5px] text-destructive select-text">{item.error}</div>}
+      {item.attachment && <AttachmentChip a={item.attachment} />}
     </div>
   );
 }
@@ -359,6 +386,17 @@ function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }
           열기
         </Button>
       </div>
+      {item.reason && (
+        <div className="border-t px-3 py-1.5 text-[11.5px] text-muted-foreground select-text" data-testid="consult-reason">
+          배정 이유 · {item.reason}
+        </div>
+      )}
+      {item.status !== "running" && item.summary?.trim() && (
+        <div className="border-t px-3 py-2 text-[12px]" data-testid="consult-summary">
+          <div className="mb-1 text-[11px] font-medium text-muted-foreground">결과 요약</div>
+          <Markdown text={item.summary} className="text-[12.5px]" />
+        </div>
+      )}
       {expanded && (
         <div className="space-y-3 border-t bg-background/40 p-3">
           <div className="rounded-lg border bg-card px-3 py-2">

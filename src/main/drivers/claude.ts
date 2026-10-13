@@ -16,6 +16,7 @@ const AUTH_HINT =
 /** Read-only tools Claude's default permission mode already allows; never routed to us. */
 const SHELL_TOOLS = new Set(["Bash", "PowerShell"]);
 const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
+export const NATIVE_AGENT_TOOLS = ["Agent", "Task", "TeamCreate", "TeamDelete", "SendMessage"];
 
 interface PermissionRequest {
   tool_name: string;
@@ -42,6 +43,8 @@ export interface ClaudeEnv {
 }
 
 export class ClaudeDriver implements AgentDriver {
+  private startedAt = 0;
+  private metricsTurnId = "";
   readonly agent = "claude" as const;
   private child?: ChildProcess;
   private nativeId: string | null;
@@ -104,7 +107,7 @@ export class ClaudeDriver implements AgentDriver {
     ];
     if (this.opts.model) args.push("--model", this.opts.model);
     if (this.opts.instructions) args.push("--append-system-prompt", this.opts.instructions);
-    const disallowed = [...(this.env.disallowedTools ?? []), ...(this.noWrites ? [...WRITE_TOOLS] : [])];
+    const disallowed = [...NATIVE_AGENT_TOOLS, ...(this.env.disallowedTools ?? []), ...(this.noWrites ? [...WRITE_TOOLS] : [])];
     if (disallowed.length) args.push("--disallowedTools", disallowed.join(","));
     if (this.env.allowedTools?.length) args.push("--allowedTools", this.env.allowedTools.join(","));
     if (this.env.tools) args.push("--tools", this.env.tools.join(","));
@@ -211,6 +214,15 @@ export class ClaudeDriver implements AgentDriver {
         break;
       }
       case "result": {
+        if (ev.usage) {
+          const u = ev.usage;
+          const number = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0;
+          const cached = number(u.cache_read_input_tokens), written = number(u.cache_creation_input_tokens);
+          this.host.emit({ type: "agent_usage", metrics: {
+            turnId: this.metricsTurnId, inputTokens: number(u.input_tokens) + cached + written, outputTokens: number(u.output_tokens),
+            cachedInputTokens: cached, cacheWriteInputTokens: written, elapsedMs: Date.now() - this.startedAt, model: this.opts.model,
+          } });
+        }
         this._running = false;
         const interrupted = this.stopping;
         this.stopping = false;
@@ -247,6 +259,8 @@ export class ClaudeDriver implements AgentDriver {
 
   async send(input: AgentInput): Promise<void> {
     if (this._running) throw new Error("이전 응답이 아직 진행 중입니다.");
+    this.startedAt = Date.now();
+    this.metricsTurnId = randomUUID();
     if (this.noWrites !== !!input.noWrites) {
       await this.dispose();
       this.noWrites = !!input.noWrites;

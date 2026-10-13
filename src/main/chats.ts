@@ -26,6 +26,7 @@ import { findClaude, findCodex } from "./locate";
 import { ClaudeDriver, claudeUsageText } from "./drivers/claude";
 import { parseClaudeUsageText } from "../shared/usage";
 import { CodexDriver, CodexServer } from "./drivers/codex";
+import { AttachmentStore } from "./attachments";
 import type { AgentDriver, AgentInput, DriverHost } from "./drivers/types";
 
 export interface Sink {
@@ -43,6 +44,7 @@ interface Live {
   driver: AgentDriver;
   agent: AgentKind;
   model: string;
+  instructions?: string;
 }
 
 export interface RoleConfig {
@@ -57,6 +59,7 @@ export class ChatManager {
   private codexServer?: CodexServer;
   readonly tmpDir: string;
   private usageState: UsageInfo = {};
+  private attachments: AttachmentStore;
   /** Where a role's events currently go (its own node, or a consult it is serving). */
   private routes = new Map<number, Partial<Record<Role, NodeId>>>();
 
@@ -66,6 +69,7 @@ export class ChatManager {
     dataDir: string,
     readonly bridgeScript: string,
   ) {
+    this.attachments = new AttachmentStore(join(dataDir, "attachments"), store);
     this.tmpDir = join(dataDir, "tmp");
     mkdirSync(this.tmpDir, { recursive: true });
     try {
@@ -120,6 +124,41 @@ export class ChatManager {
     const exe = findClaude(this.store.getSetting("claudePath"));
     if (!exe) throw new Error(this.cliInfo()[0].error);
     return exe;
+  }
+
+  async teamCapabilities(chat: Chat) {
+    const project = this.store.project(chat.projectId)!;
+    const installed = this.cliInfo();
+    const gptModel = chat.codexModelOverride ?? project.settings.codexModel;
+    let imageGeneration: boolean | null = null;
+    let codexAuthenticated: boolean | null = null;
+    if (installed.find((c) => c.agent === "codex")?.path) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          (async () => {
+            const s = this.codex();
+            await s.ensure();
+            const [caps, config, models, account] = await Promise.all([
+              s.request<any>("modelProvider/capabilities/read", {}),
+              s.request<any>("config/read", { cwd: project.folder, includeLayers: false }),
+              s.request<any>("model/list", { includeHidden: true }),
+              s.request<any>("account/read", { refreshToken: false }),
+            ]);
+            codexAuthenticated = !!account.account || account.requiresOpenaiAuth === false;
+            const model = models.data?.find((m: any) => m.id === gptModel || m.model === gptModel);
+            imageGeneration = !!caps.imageGeneration && config.config?.features?.image_generation !== false
+              && account.account?.planType !== "free" && !!codexAuthenticated && !!model?.inputModalities?.includes("image");
+          })(),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("capabilities timeout")), 15000); }),
+        ]);
+      } catch { /* Unknown is not a confirmed capability. */ }
+      finally { if (timer) clearTimeout(timer); }
+    }
+    return {
+      claude: { installed: !!installed.find((c) => c.agent === "claude")?.path, model: chat.claudeModelOverride ?? project.settings.claudeModel, imageGeneration: false, authentication: "실행 시 확인", usage: this.usageState.claude },
+      gpt: { installed: !!installed.find((c) => c.agent === "codex")?.path, model: gptModel, imageGeneration, authenticated: codexAuthenticated, usage: this.usageState.codex },
+    };
   }
 
   codex(): CodexServer {
@@ -237,6 +276,7 @@ export class ChatManager {
 
   /** Hooks for the orchestrator. */
   onDriverEvent?: (chatId: number, role: Role, event: AgentEvent) => void;
+  beforeMasterEnd?: (chatId: number, event: Extract<AgentEvent, { type: "turn_end" }>) => Extract<AgentEvent, { type: "turn_end" }> | null;
   instructionsFor?: (chat: Chat, project: Project, role: Role, agent: AgentKind) => string | undefined;
   /** Extra MCP servers for a role: Claude --mcp-config entries and the same entries as Codex config. */
   toolsFor?: (chat: Chat, role: Role, agent: AgentKind) => Record<string, any> | undefined;
@@ -249,11 +289,12 @@ export class ChatManager {
     const chat = this.store.chat(chatId)!;
     const project = this.store.project(chat.projectId)!;
     const cfg = this.roleConfig(chat, project, role);
+    const instructions = this.instructionsFor?.(chat, project, role, cfg.agent);
     const slot = this.live.get(chatId) ?? {};
     this.live.set(chatId, slot);
     const cur = slot[role];
     if (cur && !cur.driver.running) {
-      if (cur.agent !== cfg.agent || (cur.agent === "claude" && cur.model !== cfg.model)) {
+      if (cur.agent !== cfg.agent || cur.instructions !== instructions || (cur.agent === "claude" && cur.model !== cfg.model)) {
         await cur.driver.dispose();
         delete slot[role];
       } else if (cur.agent === "codex" && cur.model !== cfg.model) {
@@ -265,6 +306,11 @@ export class ChatManager {
 
     const host: DriverHost = {
       emit: (event) => {
+        if (role === "orch" && event.type === "turn_end" && this.beforeMasterEnd) {
+          const checked = this.beforeMasterEnd(chatId, event);
+          if (!checked) return;
+          event = checked;
+        }
         this.emit(chatId, this.route(chatId, role), role, event);
         this.onDriverEvent?.(chatId, role, event);
         if (role === "orch" && event.type === "turn_end") this.orchTurnEnded(chatId, event);
@@ -278,19 +324,24 @@ export class ChatManager {
       nativeId: (id) => this.saveNativeId(chatId, role, cfg.agent, id),
       approve: (input) => this.approvals.request(chatId, project.folder, { ...input, role, node: this.route(chatId, role) }),
       usage: (u) => this.mergeUsage(u),
+      image: (image) => this.attachments.generatedImage(chatId, image),
     };
     const opts = {
       cwd: project.folder,
       nativeId: this.nativeIdOf(chat, role, cfg.agent),
       exePath: "",
       model: cfg.model || undefined,
-      instructions: this.instructionsFor?.(chat, project, role, cfg.agent),
+      instructions,
       readOnly: false,
+      allowImages: role !== "orch",
+      tokenBaseline: this.store.events(chatId).findLast((e) => e.role === role && e.event.type === "agent_usage" && e.event.metrics.nativeId === this.nativeIdOf(chat, role, cfg.agent))?.event,
     };
+    const baseline = opts.tokenBaseline;
+    const driverOpts = { ...opts, tokenBaseline: baseline?.type === "agent_usage" ? baseline.metrics.total : undefined };
     let driver: AgentDriver;
     if (cfg.agent === "claude") {
       driver = new ClaudeDriver(
-        { ...opts, exePath: this.claudeExe() },
+        { ...driverOpts, exePath: this.claudeExe() },
         {
           bridge: this.bridge,
           bridgeScript: this.bridgeScript,
@@ -304,12 +355,12 @@ export class ChatManager {
     } else {
       const servers = this.toolsFor?.(chat, role, "codex");
       driver = new CodexDriver(
-        { ...opts, codexConfig: servers ? codexMcpConfig(servers) : undefined },
+        { ...driverOpts, codexConfig: servers ? codexMcpConfig(servers) : undefined },
         this.codex(),
         host,
       );
     }
-    slot[role] = { driver, agent: cfg.agent, model: cfg.model };
+    slot[role] = { driver, agent: cfg.agent, model: cfg.model, instructions };
     return driver;
   }
 

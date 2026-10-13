@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, protocol, shell, nativeTheme, screen } from "electron";
-import { mkdirSync, readFileSync, existsSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readFileSync, existsSync, statSync, copyFileSync } from "node:fs";
+import { join, basename, resolve } from "node:path";
 import type { AgentKind, ApprovalDecision, ModelOption, ProjectSettings, Theme } from "../shared/types";
 import { Store } from "./db";
 import { ChatManager } from "./chats";
@@ -9,6 +9,7 @@ import { listClaudeModels } from "./drivers/claude";
 import { Orchestrator } from "./orchestrator";
 import { AppTray } from "./tray";
 import { ensureOnlyInstance } from "./instance-guard";
+import { mayOpenDocument, resolveLink } from "./file-links";
 
 // Data lives in %APPDATA%\AI_ChatterBox. Tests point AI_CHATTERBOX_DATA at scratch folders; the packaged
 // app only honours it with an explicit --test-data flag, so a stray variable can never hide real data.
@@ -210,7 +211,40 @@ function registerIpc() {
     void chats.refreshClaudeUsage();
     return chats.usage();
   });
-  ipcMain.handle("shell:openPath", (_e, p: string) => shell.openPath(p));
+  ipcMain.handle("shell:openPath", async (_e, p: string) => {
+    if (typeof p !== "string" || !existsSync(p)) throw new Error("파일이나 폴더를 찾을 수 없습니다.");
+    if (!mayOpenDocument(p)) throw new Error("실행 파일은 탐색기에서 확인해 주세요.");
+    const error = await shell.openPath(p);
+    if (error) throw new Error(error);
+  });
+  ipcMain.handle("shell:link", async (_e, chatId: number, href: string, action: string) => {
+    if (!["open", "reveal", "save"].includes(action)) throw new Error("지원하지 않는 파일 작업입니다.");
+    const chat = store.chat(chatId);
+    const project = chat && store.project(chat.projectId);
+    if (!project) throw new Error("대화의 프로젝트를 찾을 수 없습니다.");
+    const link = resolveLink(href, project.folder);
+    if ("url" in link) {
+      if (action !== "open") throw new Error("웹 파일은 브라우저에서 다운로드해 주세요.");
+      await shell.openExternal(link.url);
+      return {};
+    }
+    const path = link.path;
+    if (!existsSync(path)) throw new Error(`파일이나 폴더를 찾을 수 없습니다: ${path}`);
+    if (action === "reveal") shell.showItemInFolder(path);
+    else if (action === "open") {
+      if (!mayOpenDocument(path)) throw new Error("실행 파일은 ‘탐색기에서 보기’로 확인해 주세요.");
+      const error = await shell.openPath(path);
+      if (error) throw new Error(error);
+    } else {
+      if (!statSync(path).isFile()) throw new Error("폴더는 탐색기에서 복사해 주세요.");
+      const options = { title: "다른 이름으로 저장", defaultPath: basename(path) };
+      const selected = win ? await dialog.showSaveDialog(win, options) : await dialog.showSaveDialog(options);
+      if (selected.canceled || !selected.filePath) return { canceled: true };
+      if (resolve(selected.filePath).toLowerCase() !== resolve(path).toLowerCase()) copyFileSync(path, selected.filePath);
+      return { path: selected.filePath };
+    }
+    return { path };
+  });
 }
 
 let orchestrator: Orchestrator;

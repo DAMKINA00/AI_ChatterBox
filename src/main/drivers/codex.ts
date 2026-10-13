@@ -1,7 +1,7 @@
 // Codex driver: one shared `codex app-server` process (JSON-RPC over stdio, one JSON object per line),
 // one CodexDriver per thread.
 import { spawn, type ChildProcess } from "node:child_process";
-import type { FileDiff, ModelOption, UsageInfo } from "../../shared/types";
+import type { FileDiff, ModelOption, UsageInfo, TokenCounts, AgentMetrics } from "../../shared/types";
 import { readLines, shutdown } from "../proc";
 import { classifyWindow, type UsageWindow } from "../../shared/usage";
 import { fileNote, IMAGE_MIMES, type AgentDriver, type AgentInput, type DriverHost, type DriverOptions } from "./types";
@@ -25,6 +25,9 @@ import type {
 
 type Method = ClientRequest["method"];
 
+// App workers own all delegation; native children have no app approval/history route.
+export const APP_CODEX_CONFIG = { "features.multi_agent": false, "features.multi_agent_v2": false, "features.multi_agent_v2_dynamic_tools": false };
+
 /** Routes app-server traffic to the CodexDriver that owns each thread. */
 export class CodexServer {
   private child?: ChildProcess;
@@ -42,7 +45,7 @@ export class CodexServer {
   ensure(): Promise<void> {
     if (this.ready && this.child) return this.ready;
     this.loaded.clear();
-    const child = spawn(this.exePath, ["app-server"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    const child = spawn(this.exePath, ["app-server", ...Object.entries(APP_CODEX_CONFIG).flatMap(([k, v]) => ["-c", `${k}=${v}`])], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     this.child = child;
     child.stderr!.setEncoding("utf8");
     child.stderr!.on("data", (d: string) => (this.stderrTail = (this.stderrTail + d).slice(-4000)));
@@ -60,7 +63,7 @@ export class CodexServer {
     child.on("exit", (code) => fail(`codex app-server 종료됨 (code ${code})`));
     this.ready = (async () => {
       await this.request<InitializeResponse>("initialize", {
-        clientInfo: { name: "ai_chatterbox", title: "AI_ChatterBox", version: "0.3.1" },
+        clientInfo: { name: "ai_chatterbox", title: "AI_ChatterBox", version: "0.3.2" },
         capabilities: { experimentalApi: false, requestAttestation: false },
       });
       this.write({ method: "initialized" });
@@ -178,6 +181,12 @@ export interface CodexTurnResult {
 }
 
 export class CodexDriver implements AgentDriver {
+  private startedAt = 0;
+  private tokenTotal?: TokenCounts;
+  private tokenBase?: TokenCounts;
+  private metrics?: AgentMetrics;
+  private noWrites = false;
+  private imageFailure?: string;
   readonly agent = "codex" as const;
   private threadId: string | null;
   private turnId?: string;
@@ -194,6 +203,7 @@ export class CodexDriver implements AgentDriver {
     private host: DriverHost,
   ) {
     this.threadId = opts.nativeId;
+    this.tokenTotal = opts.tokenBaseline ?? (opts.nativeId ? undefined : { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0 });
     if (this.threadId) server.attach(this.threadId, this);
   }
 
@@ -203,9 +213,11 @@ export class CodexDriver implements AgentDriver {
 
   private async ensureThread(): Promise<string> {
     await this.server.ensure();
+    let config: Record<string, unknown> = { ...this.opts.codexConfig, ...APP_CODEX_CONFIG,
+      ...(this.opts.allowImages === false || this.noWrites ? { "features.image_generation": false } : {}) };
     if (this.opts.readOnly && !this.judgeConfigured) {
       const inherited = await this.server.request<any>("config/read", { includeLayers: false, cwd: this.opts.cwd });
-      const config: Record<string, unknown> = { ...this.opts.codexConfig, "web_search": "disabled", "project_doc_max_bytes": 0 };
+      config = { ...config, "web_search": "disabled", "project_doc_max_bytes": 0 };
       for (const feature of ["shell_tool", "multi_agent", "multi_agent_v2", "apps", "plugins", "browser_use", "computer_use", "image_generation", "view_image", "hooks", "tool_suggest", "sleep_tool"])
         config[`features.${feature}`] = false;
       for (const name of Object.keys(inherited?.config?.mcp_servers ?? {})) config[`mcp_servers.${name}.enabled`] = false;
@@ -218,7 +230,7 @@ export class CodexDriver implements AgentDriver {
         ...this.policy(),
         model: this.opts.model || null,
         developerInstructions: this.opts.instructions ?? null,
-        config: (this.opts.codexConfig as ThreadStartParams["config"]) ?? null,
+        config: config as ThreadStartParams["config"],
         ephemeral: this.opts.ephemeral ?? null,
       };
       const r = await this.server.request<ThreadStartResponse>("thread/start", params);
@@ -233,7 +245,7 @@ export class CodexDriver implements AgentDriver {
         ...this.policy(),
         model: this.opts.model || null,
         developerInstructions: this.opts.instructions ?? null,
-        config: (this.opts.codexConfig as ThreadResumeParams["config"]) ?? null,
+        config: config as ThreadResumeParams["config"],
       };
       this.server.attach(this.threadId, this);
       try {
@@ -251,7 +263,7 @@ export class CodexDriver implements AgentDriver {
           ...this.policy(),
           model: this.opts.model || null,
           developerInstructions: this.opts.instructions ?? null,
-          config: (this.opts.codexConfig as ThreadForkParams["config"]) ?? null,
+          config: config as ThreadForkParams["config"],
           excludeTurns: true,
         };
         const r = await this.server.request<ThreadForkResponse>("thread/fork", fork);
@@ -289,6 +301,14 @@ export class CodexDriver implements AgentDriver {
     this.stopRequested = false;
     this.turnText = "";
     this.turnFiles.clear();
+    this.startedAt = Date.now();
+    this.tokenBase = this.tokenTotal;
+    this.metrics = undefined;
+    this.imageFailure = undefined;
+    if (this.noWrites !== !!input.noWrites) {
+      this.noWrites = !!input.noWrites;
+      if (this.threadId) this.server.loaded.delete(this.threadId);
+    }
     try {
       const threadId = await this.ensureThread();
       const images = input.attachments.filter((a) => IMAGE_MIMES.has(a.mime));
@@ -402,6 +422,19 @@ export class CodexDriver implements AgentDriver {
 
   onNotification(n: ServerNotification) {
     switch (n.method) {
+      case "thread/tokenUsage/updated": {
+        if (!this._running || (this.turnId && this.turnId !== n.params.turnId)) break;
+        const { total, last } = n.params.tokenUsage;
+        const fields = ["inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteInputTokens"] as const;
+        const reset = this.tokenBase && fields.some((k) => total[k] < this.tokenBase![k]);
+        const approximate = !this.tokenBase || !!reset || this.metrics?.approximate;
+        if (!this.tokenBase || reset) this.tokenBase = Object.fromEntries(fields.map((k) => [k, Math.max(0, total[k] - last[k])])) as unknown as TokenCounts;
+        this.tokenTotal = { ...total };
+        const counts = Object.fromEntries(fields.map((k) => [k, Math.max(0, total[k] - this.tokenBase![k])])) as unknown as TokenCounts;
+        this.metrics = { ...counts, turnId: n.params.turnId, elapsedMs: Date.now() - this.startedAt, model: this.opts.model, approximate, total, nativeId: this.threadId ?? undefined };
+        this.host.emit({ type: "agent_usage", metrics: this.metrics });
+        break;
+      }
       case "item/agentMessage/delta":
         this.host.emit({ type: "text_delta", text: n.params.delta });
         break;
@@ -426,13 +459,14 @@ export class CodexDriver implements AgentDriver {
         const t = n.params.turn;
         if (this.turnId && t.id !== this.turnId) break;
         this._running = false;
+        if (this.metrics) this.host.emit({ type: "agent_usage", metrics: { ...this.metrics, elapsedMs: Date.now() - this.startedAt } });
         this.turnId = undefined;
-        this.host.emit({ type: "turn_end", ok: t.status === "completed", interrupted: t.status === "interrupted", error: t.error?.message });
+        this.host.emit({ type: "turn_end", ok: t.status === "completed" && !this.imageFailure, interrupted: t.status === "interrupted", error: this.imageFailure ?? t.error?.message });
         this.finishTurn({
           text: this.turnText.trim(),
           files: [...this.turnFiles],
-          status: t.status === "inProgress" ? "failed" : t.status,
-          error: t.error?.message,
+          status: t.status === "inProgress" || this.imageFailure ? "failed" : t.status,
+          error: this.imageFailure ?? t.error?.message,
         });
         break;
       }
@@ -444,6 +478,31 @@ export class CodexDriver implements AgentDriver {
 
   private onItem(item: ThreadItem, done: boolean) {
     switch (item.type) {
+      case "imageGeneration": {
+        if (!done) {
+          this.host.emit({ type: "image_generation", id: item.id, status: "running", prompt: item.revisedPrompt ?? undefined });
+          break;
+        }
+        try {
+          if (item.failure || item.status === "failed" || item.status === "cancelled")
+            throw new Error(item.failure?.type ?? `이미지 생성 ${item.status}`);
+          const attachment = this.host.image?.({ id: item.id, path: item.savedPath, base64: item.result });
+          if (!attachment) throw new Error("이미지 결과 파일을 저장하지 못했습니다.");
+          this.turnFiles.add(attachment.path);
+          this.host.emit({ type: "image_generation", id: item.id, status: "done", prompt: item.revisedPrompt ?? undefined, attachment });
+        } catch (e) {
+          this.imageFailure = e instanceof Error ? e.message : String(e);
+          this.host.emit({ type: "image_generation", id: item.id, status: "error", error: this.imageFailure });
+        }
+        break;
+      }
+      case "collabAgentToolCall":
+      case "subAgentActivity":
+        if (!done) {
+          this.host.emit({ type: "error", message: "앱 외부의 내부 작업자 호출이 감지되었습니다. 이 호출의 전체 대화는 앱에 저장되지 않습니다. 앱의 spawn/ask를 사용하세요." });
+          void this.stop();
+        }
+        break;
       case "agentMessage":
         if (done && item.text) {
           this.turnText = item.text; // the last message of a turn is its answer
@@ -499,6 +558,6 @@ export class CodexDriver implements AgentDriver {
   }
 
   async dispose(): Promise<void> {
-    if (this.threadId) this.server.detach(this.threadId);
+    if (this.threadId) { this.server.detach(this.threadId); this.server.loaded.delete(this.threadId); }
   }
 }

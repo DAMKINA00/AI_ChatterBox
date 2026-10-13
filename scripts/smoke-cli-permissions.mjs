@@ -57,13 +57,14 @@ try {
     // A new user instruction authorizes the next phase; the prior phase explicitly prohibited delegation.
     const instruction = o.instructions.get(c.id);
     if (instruction) instruction.text = `이제 ${provider} 작업자를 만들어 ${provider}-worker.txt 파일 생성·수정·내용 확인을 맡기세요. 다른 파일은 변경하지 마세요.`;
+    await o.call(c.id, "orch", "route_request", { mode: "delegated", reason: `${provider} 작업자에게 파일 수정 작업을 배정합니다.` });
     await o.call(c.id, "orch", "spawn", { kind: provider === "claude" ? "claude" : "gpt", job: "권한 테스트" });
     const w = db.listAgents(c.id)[0];
     const workerFile = `${provider}-worker.txt`;
     const start = events.length;
     let timer;
     const result = await Promise.race([
-      o.call(c.id, "orch", "ask", { to: w.nickname, kind: "implement", scope: [workerFile], message: patchHint + `${workerFile} 파일에 FIRST를 생성한 뒤 SECOND로 수정하고 셸 명령으로 내용을 읽어 확인하세요. set_expression(confident) 후 짧게 완료를 보고하세요. 다른 파일은 수정하지 마세요.` }),
+      o.call(c.id, "orch", "ask", { to: w.nickname, kind: "implement", reason: `${provider} 작업자의 구현 작업과 적합한 승인 범위를 확인합니다.`, scope: [workerFile], message: patchHint + `${workerFile} 파일에 FIRST를 생성한 뒤 SECOND로 수정하고 셸 명령으로 내용을 읽어 확인하세요. set_expression(confident) 후 짧게 완료를 보고하세요. 다른 파일은 수정하지 마세요.` }),
       new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("worker timeout")), 240_000); }),
     ]).finally(() => clearTimeout(timer));
     check(`${provider} worker turn completes`, !result.isError);

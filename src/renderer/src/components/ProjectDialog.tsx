@@ -26,7 +26,7 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
     if (!open) return;
     setName(project?.name ?? "");
     setFolder(project?.folder ?? "");
-    setSettings(project?.settings ?? DEFAULT_SETTINGS);
+    setSettings(project ? { ...DEFAULT_SETTINGS, ...project.settings } : DEFAULT_SETTINGS);
   }, [open]);
 
   const set = <K extends keyof ProjectSettings>(k: K, v: ProjectSettings[K]) => setSettings((s) => ({ ...s, [k]: v }));
@@ -96,6 +96,61 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
             <ModelRow label="지피티 작업자" hint="지피티 N호 (Codex)">
               <ModelPicker agents={["codex"]} value={settings.codexModel} onChange={(v) => set("codexModel", v)} ariaLabel="GPT 모델" />
             </ModelRow>
+          </div>
+
+          <div className="grid gap-3 rounded-lg border p-3.5">
+            <div>
+              <div className="text-[12px] font-medium text-muted-foreground">작업자 배정 참고</div>
+              <div className="text-[11.5px] text-muted-foreground">마스터가 작업을 나눌 때 각 작업자의 강점과 주의점을 참고합니다.</div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="grid content-start gap-2 rounded-md border p-2.5">
+                <div className="text-[13px] font-medium">클로드 작업자</div>
+                <label className="grid gap-1.5">
+                  <span className="text-[11.5px] text-muted-foreground">잘 맡는 작업</span>
+                  <textarea
+                    rows={3}
+                    value={settings.claudeStrengths}
+                    onChange={(e) => set("claudeStrengths", e.target.value)}
+                    aria-label="클로드가 잘 맡는 작업"
+                    className="min-h-20 w-full resize-y rounded-md border border-input bg-transparent px-2.5 py-2 text-[12px] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+                  />
+                </label>
+                <label className="grid gap-1.5">
+                  <span className="text-[11.5px] text-muted-foreground">주의할 점</span>
+                  <textarea
+                    rows={3}
+                    value={settings.claudeCautions}
+                    onChange={(e) => set("claudeCautions", e.target.value)}
+                    aria-label="클로드 작업자 주의점"
+                    className="min-h-20 w-full resize-y rounded-md border border-input bg-transparent px-2.5 py-2 text-[12px] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+                  />
+                </label>
+              </div>
+              <div className="grid content-start gap-2 rounded-md border p-2.5">
+                <div className="text-[13px] font-medium">지피티 작업자</div>
+                <label className="grid gap-1.5">
+                  <span className="text-[11.5px] text-muted-foreground">잘 맡는 작업</span>
+                  <textarea
+                    rows={3}
+                    value={settings.gptStrengths}
+                    onChange={(e) => set("gptStrengths", e.target.value)}
+                    aria-label="지피티가 잘 맡는 작업"
+                    className="min-h-20 w-full resize-y rounded-md border border-input bg-transparent px-2.5 py-2 text-[12px] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+                  />
+                </label>
+                <label className="grid gap-1.5">
+                  <span className="text-[11.5px] text-muted-foreground">주의할 점</span>
+                  <textarea
+                    rows={3}
+                    value={settings.gptCautions}
+                    onChange={(e) => set("gptCautions", e.target.value)}
+                    aria-label="지피티 작업자 주의점"
+                    className="min-h-20 w-full resize-y rounded-md border border-input bg-transparent px-2.5 py-2 text-[12px] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+                  />
+                </label>
+              </div>
+            </div>
           </div>
 
           <div className="grid gap-3 rounded-lg border p-3.5">

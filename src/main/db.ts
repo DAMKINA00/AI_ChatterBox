@@ -185,6 +185,9 @@ const toChat = (r: Row): Chat => ({
   lastActiveAt: r.last_active_at,
 });
 const toConsult = (r: Row): Consult => ({
+  supersedes: r.supersedes ?? undefined,
+  instructionId: r.instruction_id ?? undefined,
+  reason: r.reason ?? undefined,
   id: r.id,
   chatId: r.chat_id,
   seq: r.seq,
@@ -312,6 +315,9 @@ export class Store {
     add("chats", "orchestrator_model_override", "orchestrator_model_override TEXT");
     add("chats", "goal_json", "goal_json TEXT");
     add("consults", "scope_json", "scope_json TEXT");
+    add("consults", "instruction_id", "instruction_id INTEGER");
+    add("consults", "reason", "reason TEXT");
+    add("consults", "supersedes", "supersedes INTEGER");
     add("approvals", "decided_by", "decided_by TEXT NOT NULL DEFAULT 'user'");
     add("approvals", "reason", "reason TEXT");
   }
@@ -468,11 +474,11 @@ export class Store {
     const r = this.db.prepare("SELECT * FROM consults WHERE id = ?").get(id);
     return r ? toConsult(r) : undefined;
   }
-  createConsult(chatId: number, from: Role, to: Role, kind: ConsultKind, request: string, scope: string[] = []): Consult {
+  createConsult(chatId: number, from: Role, to: Role, kind: ConsultKind, request: string, scope: string[] = [], instructionId?: number, reason?: string, supersedes?: number): Consult {
     const seq = ((this.db.prepare("SELECT MAX(seq) m FROM consults WHERE chat_id = ?").get(chatId) as Row).m ?? 0) + 1;
     const r = this.db
-      .prepare("INSERT INTO consults (chat_id, seq, from_role, to_role, kind, request, status, started_at, scope_json) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)")
-      .run(chatId, seq, from, to, kind, request, Date.now(), JSON.stringify(scope));
+      .prepare("INSERT INTO consults (chat_id, seq, from_role, to_role, kind, request, status, started_at, scope_json, instruction_id, reason, supersedes) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)")
+      .run(chatId, seq, from, to, kind, request, Date.now(), JSON.stringify(scope), instructionId ?? null, reason ?? null, supersedes ?? null);
     return this.consult(Number(r.lastInsertRowid))!;
   }
   finishConsult(id: number, status: ConsultStatus, summary: string, files: string[]): Consult {

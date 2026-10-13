@@ -20,6 +20,29 @@ function engine() {
 }
 const write: any = { role: "orch", node: "orch", title: "Write", detail: "a", key: "Write", writes: true, paths: ["a"] };
 
+test("a successful CLI exit without a worker answer or artifact is not a completed consult", async () => {
+  for (const [answer, files, expected] of [["  ", [], "error"], ["", ["diagram.png"], "done"], ["Analysis result", [], "done"]] as const) {
+    const { chats, orchestrator: o } = engine();
+    let finished: any;
+    chats.store.project = () => ({ settings: {} });
+    chats.store.createConsult = () => ({ id: 1 });
+    chats.store.finishConsult = (_id: number, status: string, summary: string) => (finished = { status, summary });
+    chats.sink = { consult() {} };
+    chats.agentsChanged = () => undefined;
+    chats.setRoute = () => undefined;
+    o.attachmentsFor = () => [];
+    chats.driver = async () => ({ send: async () => {
+      chats.onDriverEvent(1, "w1", { type: "text", text: answer });
+      for (const path of files) chats.onDriverEvent(1, "w1", { type: "image_generation", status: "done", attachment: { path } });
+      chats.onDriverEvent(1, "w1", { type: "turn_end", ok: true });
+    } });
+    const result = await o.consult(1, "orch", { key: "w1", nickname: "worker" }, "opinion", "analyze", [], [], "source specialist");
+    assert.equal(finished.status, expected);
+    assert.equal(!!result.isError, expected === "error");
+    assert.ok(finished.summary.trim());
+  }
+});
+
 test("master and worker implementation cannot overlap while native change is in flight", async () => {
   const { chats, orchestrator: o } = engine();
   chats.onDriverEvent(1, "orch", { type: "tool_call", id: "patch", name: "파일 변경", input: "a" });
@@ -58,6 +81,27 @@ test("expression tool is bound to its calling role and rejects unknown expressio
   const bad = await o.call(1, "orch", "set_expression", { expression: "success" });
   assert.equal(bad.isError, true);
   assert.equal(events.length, 1);
+});
+
+test("missing completion is repaired only once on the same instruction and stopped work is not restarted", async () => {
+  const { chats, orchestrator: o } = engine();
+  chats.store.project = () => ({ settings: { reviewGate: false } });
+  chats.store.listConsults = () => [];
+  const sent: string[] = [];
+  chats.driver = async () => ({ send: async (input: { text: string }) => sent.push(input.text) });
+  const inst = { id: 17, mode: "delegated", text: "analyze", asks: 2, queued: [], pinned: [] };
+  o.instructions.set(1, inst);
+  assert.equal(chats.beforeMasterEnd(1, { type: "turn_end", ok: true }), null);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(sent.length, 1);
+  assert.equal(o.instructions.get(1), inst);
+  assert.equal(inst.asks, 2);
+  assert.equal(chats.beforeMasterEnd(1, { type: "turn_end", ok: true }).ok, false);
+  o.instructions.set(1, { ...inst, repaired: false });
+  assert.equal(chats.beforeMasterEnd(1, { type: "turn_end", ok: true }), null);
+  o.stopped.add(1);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(sent.length, 1);
 });
 
 test("failed master startup ends the review restriction and permits a later ordinary turn", async () => {

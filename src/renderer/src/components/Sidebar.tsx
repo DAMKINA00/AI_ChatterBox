@@ -414,6 +414,7 @@ function ChatNode({
           </button>
           <StatusIcon status={chat.status} unread={chat.unread} />
           <span className={cn("min-w-0 flex-1 truncate", chat.unread && "font-semibold")}>{chat.title}</span>
+          <span className="shrink-0 rounded border px-1 text-[9.5px] text-muted-foreground">전체 대화</span>
           <span className="shrink-0 text-[11px] text-muted-foreground group-hover:hidden">{timeAgo(chat.lastActiveAt)}</span>
           <span className="hidden group-hover:block">
             <MoreMenu actions={actions} label={`${chat.title} 메뉴`} />

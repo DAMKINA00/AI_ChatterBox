@@ -42,11 +42,18 @@ import { scopesOverlap } from "./scope";
 import { isMutatingTool, isReadCommand } from "./execution-policy";
 import type { ApprovalInput } from "./approvals";
 import { addWait, checkAsk, removeWait, type WaitGraph } from "./team";
+import { completionIssue } from "./dispatch";
 
 const KINDS: ConsultKind[] = ["implement", "review", "opinion"];
 const MAX_DEPTH = 3;
 const MAX_ASKS_CAP = 24;
 const MAX_GOAL_TURNS = 6;
+
+const ROUTE_TOOL: ToolDef = {
+  name: "route_request",
+  description: "사용자 지시마다 첫 단계로 처리 방식을 기록합니다. direct=간단한 답변·사전 확인만, delegated=소스 분석·구현·이미지·문서 제작 등 본 작업. reason에 이유를 적으세요. 팀의 모델·도구·사용량을 반환합니다. delegated면 반드시 앱 spawn/ask로 실제 작업을 맡기세요.",
+  inputSchema: { type: "object", properties: { mode: { type: "string", enum: ["direct", "delegated"] }, reason: { type: "string" } }, required: ["mode", "reason"], additionalProperties: false },
+};
 
 const EXPRESSION_TOOL: ToolDef = {
   name: "set_expression",
@@ -68,10 +75,13 @@ const ASK_TOOL = (forMaster: boolean): ToolDef => ({
       to: { type: "string", description: "받는 작업자 닉네임 (예: 클로드 1호, 지피티 2호)" },
       message: { type: "string" },
       kind: { type: "string", enum: KINDS },
+      reason: { type: "string", description: "이 작업자를 선택한 이유. 마스터 배정 시 필수." },
+      requiresImage: { type: "boolean", description: "실제 이미지 생성·편집 도구가 필요한 작업이면 true" },
+      supersedes: { type: "integer", description: "이 배정으로 보완할 실패한 협의 id" },
       scope: { type: "array", items: { type: "string" } },
       ...(forMaster ? { attach: { type: "array", items: { type: "string" }, description: "함께 보낼 파일 절대경로 (사용자 첨부 이미지 등)" } } : {}),
     },
-    required: ["to", "message", "kind"],
+    required: ["to", "message", "kind", ...(forMaster ? ["reason"] : [])],
   },
 });
 const ASK_PARALLEL_TOOL: ToolDef = {
@@ -90,9 +100,13 @@ const ASK_PARALLEL_TOOL: ToolDef = {
             to: { type: "string" },
             message: { type: "string" },
             kind: { type: "string", enum: KINDS },
+            reason: { type: "string" },
+            requiresImage: { type: "boolean" },
+            supersedes: { type: "integer" },
+            attach: { type: "array", items: { type: "string" } },
             scope: { type: "array", items: { type: "string" } },
           },
-          required: ["to", "message", "kind"],
+          required: ["to", "message", "kind", "reason"],
         },
       },
     },
@@ -165,20 +179,25 @@ function masterInstructions(project: Project, agent: AgentKind): string {
   return [
     "# 역할: AI_ChatterBox 마스터",
     `너는 사용자의 지시를 받아 팀을 꾸리고 일을 나눠 맡기는 마스터다. 작업 폴더: ${project.folder}`,
-    "- 너도 승인 설정에 따라 파일을 직접 고치고 명령을 실행할 수 있다. 작은 일은 직접 처리하고, 작업자 구현과 동시에 직접 변경하지 않는다. 승인된 관리자 작업은 현재 앱의 Windows 권한으로 실행한다.",
+    "- 너는 배정·검토·취합 담당이다. 간단한 답변·사전 확인만 직접 하고, 소스 분석·원인 조사·구현·이미지·문서 제작 등 본 작업은 반드시 앱 작업자에게 맡긴다. 결과에 누락·모순이 있으면 보완 요청하고 최종 답변을 취합한다. 사용자가 명시적으로 직접 수행을 요구한 예외에도 기존 승인·작업 범위 규칙을 지킨다.",
+    `- 지시마다 먼저 ${t("route_request")}(mode=direct|delegated, reason=이유)를 호출한다. 반환되는 실제 사용 가능 도구·모델·사용량으로 후보를 확인한다. 도구 사용 불가/미확인은 가능하다고 가정하지 않는다.`,
+    "- 모든 위임은 이 앱의 chatterbox_bridge spawn/ask/ask_parallel만 사용한다. CLI 내부 spawn_agent/Agent/Task/팀 도구나 별도 CLI 프로세스로 작업자를 만들지 않는다. 글로벌 스킬의 Luna 선호와 관계없이 앱 상단에서 선택한 클로드·지피티 모델을 사용한다.",
+    `- 클로드 선호 작업: ${s.claudeStrengths}\n  주의점: ${s.claudeCautions}`,
+    `- 지피티 선호 작업: ${s.gptStrengths}\n  주의점: ${s.gptCautions}`,
+    "- 위 기준은 기본 선호이며 절대적인 우열이 아니다. 필요한 도구 사용 가능 여부를 먼저 확인하고, 사용자가 지정한 담당·선호 기준·관련 맥락·작업량·사용 한도를 고려한다. 두 계열을 매번 모두 부르지 않는다. 실패하면 원인을 반영해 재배정하고 가능한 담당자가 없으면 미완료 사유를 알린다.",
     `- 팀: ${t("spawn")}(kind=claude|gpt)로 작업자를 만든다 → 클로드 N호 / 지피티 N호. 작업자 수는 일의 양에 맞춘다: 작은 일은 한 명, 큰 일은 범위를 나눠 여러 명(동시에 클로드 최대 ${s.maxClaudeWorkers}명, 지피티 최대 ${s.maxGptWorkers}명). 다 쓴 작업자는 ${t("release")}로 해제한다. ${t("agents")}로 팀을 확인한다.`,
     `- 일 맡기기: ${t("ask")}(to=닉네임, kind, message, scope). 서로 독립적인 일은 반드시 ${t("ask_parallel")}(tasks=[…])로 한 번에 맡겨 동시에 진행한다(하나씩 기다리지 말 것). 구현(implement)은 고칠 범위(scope)를 겹치지 않게 나눈다. 리뷰·의견은 언제든 동시에 가능하다.`,
     s.reviewGate
       ? "- 너 자신 또는 작업자가 코드를 바꾸면 끝내기 전에, 그 코드를 만들지 않은 작업자에게 리뷰를 맡긴다 (kind=review). 네가 직접 바꾼 파일도 빠짐없이 넘긴다. 지적이 나오면 고치고 다시 리뷰받는다."
       : "- 리뷰는 필요하다고 판단할 때만 맡긴다 (kind=review).",
-    "- 질문·설명·간단한 확인처럼 파일을 바꿀 필요가 없는 지시는 작업자를 만들지 말고 직접 답한다.",
+    "- ask/ask_parallel의 각 배정에 reason(선택 이유)을 넣는다. 이미지 생성·편집은 requiresImage=true, kind=implement로 지피티에게 맡긴다. 배정 내용에는 목표, 제약, 산출물, 완료 기준을 포함한다.",
     "- 작업자는 이 대화를 보지 못한다. message에 목표, 관련 파일 경로, 제약, 완료 기준을 빠짐없이 적는다. 사용자가 첨부한 파일이 필요하면 attach로 경로를 넘긴다.",
     `- 여러 단계 작업은 ${t("checklist")}로 단계와 담당(닉네임)을 등록하고, 단계를 시작·완료할 때마다 갱신한다.`,
     `- 채팅에 목표(/goal)가 있으면 그 목표를 향해 일하고, 한 단계를 마칠 때마다 ${t("update_goal")}로 진행을 보고한다. 다 이루면 status=complete.`,
     `- 꼭 필요한 결정만 ${t("ask_user")}로 묻는다.`,
     `- 사용자에게 대사를 쓰기 전에 ${t("set_expression")}(expression=감정)으로 표정을 지정한다. 감정: ${AGENT_EXPRESSIONS.join(", ")}. 기술적 내용과 말투를 억지로 바꾸지 않는다.`,
     `- 한도: 지시 하나당 일 맡기기 횟수는 작업자 수에 따라 늘어난다(최대 ${MAX_ASKS_CAP}회), 리뷰 ${s.maxReviews}회, ${s.maxMinutes}분. 한도에 걸리면 그때까지의 결과로 보고한다.`,
-    "- 마지막에는 항상 한국어로 보고한다: 누가 무엇을 했는지, 바뀐 파일, 리뷰 결과, 남은 문제.",
+    "- 마지막에는 항상 한국어로 취합한다: 담당별 결과, 산출물 링크, 검증·리뷰 결과, 남은 문제. 돌아오지 않았거나 실패한 결과를 완료했다고 말하지 않는다. 생성 이미지 파일 경로도 최종 답변에 포함한다.",
   ].join("\n");
 }
 
@@ -186,6 +205,7 @@ function workerInstructions(a: ChatAgent): string {
   return [
     `# 역할: AI_ChatterBox ${a.nickname} (${a.kind === "claude" ? "Claude" : "GPT"} 작업자)`,
     `너는 마스터가 이끄는 팀의 작업자 "${a.nickname}"이다.${a.job ? ` 맡은 역할: ${a.job}` : ""}`,
+    "- 너의 모델은 앱이 지정한다. 네이티브 spawn_agent/Agent/Task 또는 별도 CLI로 하위 작업자를 생성하지 않는다. 추가 인력이 필요하면 결과 보고에서 마스터에게 요청한다. 기존 팀과의 질문은 앱 ask만 사용한다.",
     "- 구현 지시(implement): 지정된 범위(scope) 안의 파일만 고친다. 범위 밖 쓰기는 거부된다. 가능하면 빌드·테스트로 확인한다.",
     "- 리뷰 지시(review)·의견 지시(opinion): 파일을 고치지 않는다. 리뷰는 버그, 빠진 처리, 개선점을 심각도와 함께 보고하고, 문제가 없으면 분명히 말한다.",
     "- 다른 작업자에게 확인할 것이 있으면 ask(to=닉네임)로 직접 묻는다. 팀 목록은 agents. 마스터에게는 ask를 쓰지 말고 결과 보고에 질문을 적는다.",
@@ -196,6 +216,9 @@ function workerInstructions(a: ChatAgent): string {
 
 // ---------- state
 interface Instruction {
+  id: number;
+  mode?: "direct" | "delegated";
+  repaired?: boolean;
   /** The user's instruction text (context for the approval judge). */
   text: string;
   startedAt: number;
@@ -244,6 +267,7 @@ export class Orchestrator {
   readonly judge: ApprovalJudge;
 
   constructor(private chats: ChatManager) {
+    chats.beforeMasterEnd = (chatId, event) => this.checkCompletion(chatId, event);
     this.judge = new ApprovalJudge(chats, (chatId, role) => {
       const r = role ? this.running.get(chatId)?.get(role) : undefined;
       return {
@@ -281,7 +305,7 @@ export class Orchestrator {
       reg = this.chats.bridge.register(
         {
           tools: master
-            ? [SPAWN_TOOL, ASK_TOOL(true), ASK_PARALLEL_TOOL, RELEASE_TOOL, AGENTS_TOOL, CHECKLIST_TOOL, GOAL_TOOL, ASK_USER_TOOL, EXPRESSION_TOOL]
+            ? [ROUTE_TOOL, SPAWN_TOOL, ASK_TOOL(true), ASK_PARALLEL_TOOL, RELEASE_TOOL, AGENTS_TOOL, CHECKLIST_TOOL, GOAL_TOOL, ASK_USER_TOOL, EXPRESSION_TOOL]
             : [ASK_TOOL(false), AGENTS_TOOL, EXPRESSION_TOOL],
           call: (name, args) => this.call(chatId, role, name, args),
         },
@@ -297,6 +321,16 @@ export class Orchestrator {
     const master = caller === "orch";
     try {
       switch (name) {
+        case "route_request": {
+          if (!master) break;
+          const inst = this.instructions.get(chatId);
+          if (!inst || !["direct", "delegated"].includes(args.mode) || !String(args.reason ?? "").trim()) return textResult("mode와 reason을 지정하세요.", true);
+          if (inst.mode === "delegated" && args.mode === "direct") return textResult("위임할 본 작업을 직접 처리로 바꿀 수 없습니다. 가능한 작업자에게 맡기거나 미완료 사유를 보고하세요.", true);
+          inst.mode = args.mode;
+          this.chats.emit(chatId, "orch", "orch", { type: "dispatch", instructionId: inst.id, mode: args.mode, reason: String(args.reason).trim() });
+          const capabilities = await this.chats.teamCapabilities(this.chats.store.chat(chatId)!);
+          return textResult(JSON.stringify({ capabilities, team: this.agentsText(chatId), note: "사용 가능 도구·사용량은 현재 확인값이며 인증/한도 오류는 실행 시 보고됩니다. 이미지 미확인은 사용 가능으로 간주하지 마세요." }));
+        }
         case "set_expression":
           if (!isAgentExpression(args.expression)) return textResult("지원하지 않는 표정입니다.", true);
           this.chats.emit(chatId, this.chats.route(chatId, caller), caller, { type: "expression", expression: args.expression });
@@ -355,6 +389,8 @@ export class Orchestrator {
     const chat = this.chats.store.chat(chatId)!;
     const project = this.chats.store.project(chat.projectId)!;
     if (this.planning.has(chatId)) return textResult("지금은 계획 모드입니다. 작업자를 만들지 말고 계획만 세우세요.", true);
+    if (!this.chats.cliInfo().find((c) => c.agent === (kind === "gpt" ? "codex" : "claude"))?.path)
+      return textResult(`${WORKER_KIND_LABEL[kind]} CLI가 설치되지 않았습니다. 사용 가능한 작업자를 선택하거나 미완료 사유를 보고하세요.`, true);
     const max = kind === "claude" ? project.settings.maxClaudeWorkers : project.settings.maxGptWorkers;
     const active = this.agents(chatId).filter((a) => a.kind === kind && a.status === "active").length;
     if (active >= max)
@@ -403,6 +439,8 @@ export class Orchestrator {
     const scope: string[] = kind === "implement" && Array.isArray(args.scope) ? args.scope.map(String).filter(Boolean) : [];
     const attach: string[] = Array.isArray(args.attach) ? args.attach.map(String) : [];
     const callerName = this.name(chatId, caller);
+    const reason = String(args.reason ?? "").trim();
+    if (caller === "orch" && !reason) return textResult("작업자를 선택한 이유(reason)를 적으세요.", true);
     if (kind === "implement" && (this.reviewing.has(chatId) || (caller !== "orch" && this.running.get(chatId)?.get(caller)?.kind !== "implement")))
       return textResult("리뷰·의견 요청에서는 다른 작업자에게 구현을 맡길 수 없습니다.", true);
 
@@ -414,6 +452,11 @@ export class Orchestrator {
       return textResult(`그런 작업자가 없습니다: "${to}". 지금 팀: ${names.join(", ") || "(없음 — 마스터가 spawn으로 만듭니다)"}`, true);
     }
     if (target.status === "released") return textResult(`${target.nickname}은(는) 해제되었습니다.`, true);
+    if (args.requiresImage) {
+      if (target.kind !== "gpt" || kind !== "implement") return textResult("이미지 생성은 지피티에게 implement로 맡기세요.", true);
+      const caps = await this.chats.teamCapabilities(this.chats.store.chat(chatId)!);
+      if (caps.gpt.imageGeneration !== true) return textResult("선택된 지피티의 이미지 생성 도구 사용을 확인하지 못했습니다. 모델·로그인·도구 설정을 확인하고 미완료 사유를 보고하세요.", true);
+    }
     const refusal = checkAsk(this.graph(chatId), caller, target.key, MAX_DEPTH);
     if (refusal === "self") return textResult("자기 자신에게는 맡길 수 없습니다.", true);
     if (refusal === "cycle") {
@@ -423,7 +466,15 @@ export class Orchestrator {
     }
     if (refusal === "depth")
       return textResult(`호출이 너무 깊습니다(최대 ${MAX_DEPTH}단계). 직접 처리하거나 결과 보고에 적으세요.`, true);
-    return this.consult(chatId, caller, target, kind, message, scope, attach);
+    const inst = this.instructions.get(chatId);
+    if (caller === "orch" && inst?.mode !== "delegated") return textResult("먼저 route_request(mode=delegated, reason=이유)로 배정 방식을 기록하세요.", true);
+    const supersedes = args.supersedes;
+    if (supersedes !== undefined) {
+      const previous = this.chats.store.consult(supersedes);
+      if (!Number.isSafeInteger(supersedes) || !previous || previous.chatId !== chatId || previous.instructionId !== inst?.id || ["running", "done"].includes(previous.status))
+        return textResult("supersedes는 이번 지시에서 실패·중단된 협의 id여야 합니다.", true);
+    }
+    return this.consult(chatId, caller, target, kind, message, scope, attach, reason, supersedes);
   }
 
   private limitCheck(chatId: number, project: Project, target: Role, kind: ConsultKind, message: string): string | null {
@@ -463,7 +514,7 @@ export class Orchestrator {
     for (const f of w) f();
   }
 
-  private async consult(chatId: number, caller: Role, target: ChatAgent, kind: ConsultKind, message: string, scope: string[], attach: string[]): Promise<ToolResult> {
+  private async consult(chatId: number, caller: Role, target: ChatAgent, kind: ConsultKind, message: string, scope: string[], attach: string[], reason: string, supersedes?: number): Promise<ToolResult> {
     const chat = this.chats.store.chat(chatId)!;
     const project = this.chats.store.project(chat.projectId)!;
     const callerName = this.name(chatId, caller);
@@ -488,7 +539,7 @@ export class Orchestrator {
     try {
       await prev; // the target finishes its current turn first
       const attachments = this.attachmentsFor(chatId, attach);
-      const consult = this.chats.store.createConsult(chatId, caller, target.key, kind, message, scope);
+      const consult = this.chats.store.createConsult(chatId, caller, target.key, kind, message, scope, inst?.id, reason, supersedes);
       this.chats.sink.consult(consult);
       const node = `consult:${consult.id}` as NodeId;
       // The card goes where the caller is (master's timeline, or inside the calling worker's consult).
@@ -501,6 +552,8 @@ export class Orchestrator {
         request: message,
         attachments,
         scope,
+        reason,
+        instructionId: inst?.id,
       });
       if (kind === "implement") await this.acquireScope(chatId, consult.id, scope);
       this.chats.setRoute(chatId, target.key, node);
@@ -553,8 +606,9 @@ export class Orchestrator {
       if (kind === "implement") this.releaseScope(chatId, consult.id);
       this.chats.agentsChanged(chatId);
       const timedOut = inst ? Date.now() - inst.startedAt > project.settings.maxMinutes * 60_000 : false;
-      const status = this.stopped.has(chatId) ? "stopped" : result.interrupted && timedOut ? "limited" : result.ok ? "done" : result.interrupted ? "stopped" : "error";
-      const summary = result.text || result.error || "(답변 없음)";
+      const hasResult = !!result.text.trim() || result.files.length > 0;
+      const status = this.stopped.has(chatId) ? "stopped" : result.interrupted && timedOut ? "limited" : result.ok && hasResult ? "done" : result.interrupted ? "stopped" : "error";
+      const summary = result.text.trim() || result.error || (result.files.length ? `산출물 ${result.files.length}개를 생성·수정했습니다.` : "작업자의 응답과 산출물이 없습니다.");
       const finished = this.chats.store.finishConsult(consult.id, status, summary, result.files);
       this.chats.sink.consult(finished);
       this.chats.emit(chatId, this.chats.route(chatId, caller), caller, { type: "consult_end", consultId: consult.id, status, summary, files: result.files });
@@ -568,7 +622,7 @@ export class Orchestrator {
               ? `[${target.nickname}: 시간 한도에 걸려 중단했습니다. 지금까지의 결과로 보고하세요.]`
               : `[${target.nickname}: 오류 — ${result.error ?? "실패"}]`;
       const files = result.files.length ? `\n\n변경된 파일:\n${result.files.map((f) => `- ${f}`).join("\n")}` : "\n\n변경된 파일: 없음";
-      return textResult(`${head}\n${result.text || "(답변 없음)"}${files}${caller === "orch" ? this.takeQueued(chatId) : ""}`, status !== "done");
+      return textResult(`${head} 협의 id=${consult.id}\n${summary}${files}${caller === "orch" ? this.takeQueued(chatId) : ""}`, status !== "done");
     } finally {
       removeWait(this.graph(chatId), caller, target.key);
       done();
@@ -652,6 +706,9 @@ export class Orchestrator {
           if (f.movePath) r.files.add(f.movePath);
         }
         break;
+      case "image_generation":
+        if (event.status === "done" && event.attachment) r.files.add(event.attachment.path);
+        break;
       case "turn_end":
         r.resolve({ ok: event.ok, interrupted: event.interrupted, error: event.error });
         break;
@@ -659,6 +716,40 @@ export class Orchestrator {
   }
 
   // ---------- user instructions
+  private newInstruction(chatId: number, text: string, restore = false): Instruction {
+    const events = this.chats.store.events(chatId);
+    const id = events.findLast((e) => e.event.type === "user")?.id ?? 0;
+    const previous = restore ? events.findLast((e) => e.event.type === "dispatch" && e.event.instructionId === id)?.event : undefined;
+    return { id, mode: previous?.type === "dispatch" ? previous.mode : undefined, text, startedAt: Date.now(), asks: 0, reviews: 0, requests: new Map(), queued: [], pinned: [] };
+  }
+
+  private checkCompletion(chatId: number, end: Extract<AgentEvent, { type: "turn_end" }>): Extract<AgentEvent, { type: "turn_end" }> | null {
+    const inst = this.instructions.get(chatId);
+    if (!inst || !end.ok || end.interrupted || this.stopped.has(chatId) || this.planning.has(chatId)) return end;
+    const chat = this.chats.store.chat(chatId);
+    if (!chat) return end;
+    const issue = completionIssue(inst.id, inst.mode, this.chats.store.listConsults(chatId), !!this.chats.store.project(chat.projectId)?.settings.reviewGate);
+    if (!issue) return end;
+    this.chats.emit(chatId, "orch", "orch", { type: "notice", text: `완료 확인: ${issue}` });
+    if (inst.repaired) return { ...end, ok: false, error: `미완료: ${issue}` };
+    inst.repaired = true;
+    // Resume the same instruction once. Do not reset its limits or lose its queued user input.
+    setTimeout(() => {
+      if (this.stopped.has(chatId) || this.instructions.get(chatId) !== inst || !this.chats.store.chat(chatId)) return;
+      void (async () => {
+        try {
+          const driver = await this.chats.driver(chatId, "orch");
+          await driver.send({ text: `[앱 완료 검사 — 보완 1회] ${issue}\n본 작업은 앱 작업자에게 배정해야 합니다. 실제 결과를 검토하고 취합하세요. 더 진행할 수 없으면 미완료 사유를 분명히 보고하세요.${this.takeQueued(chatId)}`, attachments: [], noWrites: this.reviewing.has(chatId) });
+        } catch (e) {
+          const message = String(e);
+          this.chats.emit(chatId, "orch", "orch", { type: "error", message });
+          this.chats.orchTurnEnded(chatId, { type: "turn_end", ok: false, error: message });
+        }
+      })();
+    }, 0);
+    return null;
+  }
+
   /** The master moved to the other CLI (Claude ↔ GPT): hand its new session a summary of the chat so far. */
   private handover(chat: Chat): string {
     const project = this.chats.store.project(chat.projectId)!;
@@ -687,9 +778,9 @@ export class Orchestrator {
     this.stopped.delete(chat.id);
     const prefix = this.handover(chat);
     if (prefix) input = { ...input, text: prefix + input.text };
-    this.instructions.set(chat.id, { text: input.text, startedAt: Date.now(), asks: 0, reviews: 0, requests: new Map(), queued: [], pinned: [] });
+    this.instructions.set(chat.id, this.newInstruction(chat.id, input.text));
     const driver = await this.chats.driver(chat.id, "orch");
-    await driver.send({ ...input, text: input.text + attachmentNote(input.attachments), noWrites: this.planning.has(chat.id) || this.reviewing.has(chat.id) });
+    await driver.send({ ...input, text: input.text + attachmentNote(input.attachments) + (this.planning.has(chat.id) ? "" : "\n\n[앱 협업 규칙] 먼저 route_request로 처리 방식을 기록하세요. 본 작업은 앱 spawn/ask로 배정하고 reason에 담당 선택 이유를 적으세요. CLI 내부 에이전트는 사용하지 마세요."), noWrites: this.planning.has(chat.id) || this.reviewing.has(chat.id) });
   }
 
   /** Start a master turn with prepared text (same bookkeeping as a normal instruction). */
@@ -714,12 +805,14 @@ export class Orchestrator {
     this.chats.emit(chatId, "orch", null, { type: "notice", text: "중단된 작업을 이어서 진행합니다" });
     this.chats.updateChat(chatId, { status: "working", touch: true });
     this.stopped.delete(chatId);
-    this.instructions.set(chatId, { text: original, startedAt: Date.now(), asks: 0, reviews: 0, requests: new Map(), queued: [], pinned: [] });
+    this.instructions.set(chatId, this.newInstruction(chatId, original, true));
     const team = this.agents(chatId).filter((a) => a.status === "active").map((a) => a.nickname).join(", ");
     const note =
       "[AI_ChatterBox] 이전 실행이 앱 종료로 중단됐습니다. 작업 폴더의 현재 상태(git status, git diff, 파일 내용)를 확인하고, " +
       `아래 원래 지시의 남은 작업을 이어서 끝낸 뒤 결과를 보고하세요. 이미 끝난 부분은 다시 하지 마세요.${team ? ` 팀(${team})은 그대로 남아 있습니다.` : ""}\n\n원래 지시:\n` +
       (original || "(기록 없음)");
+    if (!this.agents(chatId).length && (chat.orchCodexThreadId || chat.orchClaudeSessionId))
+      this.chats.emit(chatId, "orch", null, { type: "notice", text: "이전 버전의 CLI 내부 작업자 대화는 앱에 저장되지 않았을 수 있습니다. 새 배정부터 앱 작업자 기록으로 표시합니다." });
     try {
       await (await this.chats.driver(chatId, "orch")).send({ text: this.handover(chat) + note, attachments: [], noWrites: this.planning.has(chatId) || this.reviewing.has(chatId) });
     } catch (e) {

@@ -23,11 +23,13 @@ export type Item =
       attachments: AttachmentRef[];
       status: ConsultStatus;
       scope?: string[];
+      reason?: string;
       summary?: string;
       files?: string[];
       children: Item[];
       at: number;
     }
+  | { kind: "image"; key: string; role: Role; node: NodeId; id: string; status: "running" | "done" | "error"; prompt?: string; attachment?: AttachmentRef; error?: string }
   | { kind: "ask"; key: string; id: string; question: string; options: string[]; answer?: string }
   | { kind: "notice"; key: string; tone: "error" | "auth" | "info"; text: string };
 
@@ -227,6 +229,8 @@ export function apply(items: Item[], e: TimelineEvent, expression?: AgentExpress
   // Stable keys keep React state (open cards) across rebuilds; live deltas have no id yet.
   const key = e.id ? `e${e.id}` : `live-${e.node}-${role}`;
   switch (ev.type) {
+    case "agent_usage":
+      return items;
     case "expression":
       return items;
     case "user":
@@ -279,6 +283,7 @@ export function apply(items: Item[], e: TimelineEvent, expression?: AgentExpress
           request: ev.request,
           attachments: ev.attachments ?? [],
           scope: ev.scope,
+          reason: ev.reason,
           status: "running",
           children: [],
           at: e.at,
@@ -288,6 +293,24 @@ export function apply(items: Item[], e: TimelineEvent, expression?: AgentExpress
       return items.map((x) =>
         x.kind === "consult" && x.consultId === ev.consultId ? { ...x, status: ev.status, summary: ev.summary, files: ev.files } : x,
       );
+    case "dispatch":
+      return [
+        ...closeStream(items, role, node),
+        { kind: "notice", key, tone: "info", text: `${ev.mode === "direct" ? "마스터가 직접 처리합니다" : "마스터가 작업을 나눕니다"} · ${ev.reason}` },
+      ];
+    case "image_generation": {
+      const existingIndex = items.findIndex((x) => x.kind === "image" && x.role === role && x.node === node && x.id === ev.id);
+      if (existingIndex >= 0) {
+        const existing = items[existingIndex] as Extract<Item, { kind: "image" }>;
+        const copy = items.slice();
+        copy[existingIndex] = { ...existing, status: ev.status, prompt: ev.prompt ?? existing.prompt, attachment: ev.attachment ?? existing.attachment, error: ev.error };
+        return copy;
+      }
+      return [
+        ...closeStream(items, role, node),
+        { kind: "image", key: e.id ? key : `live-image-${node}-${role}-${ev.id}`, role, node, id: ev.id, status: ev.status, prompt: ev.prompt, attachment: ev.attachment, error: ev.error },
+      ];
+    }
     case "ask_user":
       return [...closeStream(items, role, node), { kind: "ask", key: key, id: ev.id, question: ev.question, options: ev.options }];
     case "ask_user_answer":

@@ -3,7 +3,9 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { Check, Copy } from "lucide-react";
-import { api, cn } from "../lib/utils";
+import { cn } from "../lib/utils";
+import { safeLinkHref } from "../../../shared/links";
+import { FileLink } from "./FileLink";
 
 function textOf(node: ReactNode): string {
   if (typeof node === "string" || typeof node === "number") return String(node);
@@ -55,30 +57,12 @@ export const Markdown = memo(function Markdown({ text, className }: { text: stri
   return (
     <div className={cn("prose-chat", className)}>
       <ReactMarkdown
+        urlTransform={safeLinkHref}
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
         components={{
           pre: Pre,
-          a: ({ href, children }) => (
-            <a
-              href={href}
-              target="_blank"
-              rel="noreferrer"
-              title={href}
-              onClick={(e) => {
-                // Agents link to local files ("D:/x/calc.js:3", "/D:/x/calc.js"); open those with the OS.
-                if (!href || /^https?:/i.test(href)) return;
-                e.preventDefault();
-                const path = decodeURI(href)
-                  .replace(/^file:\/\/\/?/i, "")
-                  .replace(/^\/(?=[A-Za-z]:)/, "")
-                  .replace(/(:\d+)+$/, "");
-                void api.openPath(path);
-              }}
-            >
-              {children}
-            </a>
-          ),
+          a: ({ href, children }) => <FileLink href={href ?? ""}>{children}</FileLink>,
           table: ({ children }) => (
             <div className="overflow-x-auto">
               <table>{children}</table>

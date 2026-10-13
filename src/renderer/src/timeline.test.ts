@@ -95,6 +95,23 @@ test("interleaved role deltas update their own open message in place", () => {
   );
 });
 
+test("agent usage snapshots do not close a live message", () => {
+  const items = buildItems(
+    [
+      liveEvent("w1", "w1", { type: "text_delta", text: "still writing" }, 1),
+      liveEvent(
+        "w1",
+        "w1",
+        { type: "agent_usage", metrics: { turnId: "turn-1", inputTokens: 2, outputTokens: 1, cachedInputTokens: 0, cacheWriteInputTokens: 0, elapsedMs: 1000 } },
+        2,
+      ),
+    ],
+    "w1",
+    true,
+  );
+  assert.deepEqual(items.filter((x) => x.kind === "message").map((x) => [x.text, x.streaming]), [["still writing", true]]);
+});
+
 test("nested bridge events close a stream and history closes nested items", () => {
   const events: TimelineEvent[] = [
     event("orch", "orch", { type: "consult_start", consultId: 20, kind: "implement", from: "orch", to: "w1", request: "parent", attachments: emptyAttachments }),
@@ -150,4 +167,75 @@ test("live stream keys stay unique after an interrupted turn restarts", () => {
   assert.equal(messages.length, 2);
   assert.notEqual(messages[0].key, messages[1].key);
   assert.deepEqual(messages.map((x) => [x.text, x.streaming]), [["partial", false], ["next", true]]);
+});
+
+test("image status events upsert by role, node, and generation id when replayed", () => {
+  const output = { id: 901, name: "result.png", mime: "image/png", size: 12, path: "C:/result.png" };
+  const events: TimelineEvent[] = [
+    event("orch", "orch", { type: "consult_start", consultId: 31, kind: "implement", from: "orch", to: "w1", request: "first", attachments: emptyAttachments }),
+    event("orch", "orch", { type: "consult_start", consultId: 32, kind: "implement", from: "orch", to: "w2", request: "second", attachments: emptyAttachments }),
+    event("orch", "orch", { type: "consult_start", consultId: 33, kind: "implement", from: "orch", to: "w1", request: "third", attachments: emptyAttachments }),
+    event("consult:31", "w1", { type: "image_generation", id: "same-job", status: "running", prompt: "first image" }),
+    event("consult:32", "w2", { type: "image_generation", id: "same-job", status: "running", prompt: "second image" }),
+    event("consult:33", "w1", { type: "image_generation", id: "same-job", status: "running", prompt: "third image" }),
+    event("consult:31", "w1", { type: "image_generation", id: "same-job", status: "done", attachment: output }),
+    event("consult:32", "w2", { type: "image_generation", id: "same-job", status: "error", error: "provider failed" }),
+  ];
+
+  const replayed = buildItems(events, undefined, false);
+  const first = replayed.find((x) => x.kind === "consult" && x.consultId === 31)!;
+  const second = replayed.find((x) => x.kind === "consult" && x.consultId === 32)!;
+  const third = replayed.find((x) => x.kind === "consult" && x.consultId === 33)!;
+  assert.equal(first.kind, "consult");
+  assert.equal(second.kind, "consult");
+  assert.equal(third.kind, "consult");
+  const firstImages = first.children.filter((x) => x.kind === "image");
+  const secondImages = second.children.filter((x) => x.kind === "image");
+  const thirdImages = third.children.filter((x) => x.kind === "image");
+  assert.equal(firstImages.length, 1);
+  assert.equal(secondImages.length, 1);
+  assert.equal(thirdImages.length, 1);
+  assert.deepEqual([firstImages[0].role, firstImages[0].node, firstImages[0].status], ["w1", "consult:31", "done"]);
+  assert.equal(firstImages[0].attachment?.id, output.id);
+  assert.deepEqual([secondImages[0].role, secondImages[0].node, secondImages[0].status], ["w2", "consult:32", "error"]);
+  assert.equal(secondImages[0].error, "provider failed");
+  assert.deepEqual([thirdImages[0].role, thirdImages[0].node, thirdImages[0].status], ["w1", "consult:33", "running"]);
+
+  const liveImages = buildItems(
+    [
+      liveEvent("w1", "w1", { type: "image_generation", id: "live-one", status: "running" }, 1),
+      liveEvent("w1", "w1", { type: "image_generation", id: "live-two", status: "running" }, 2),
+      liveEvent("w1", "w1", { type: "image_generation", id: "live-one", status: "done", attachment: output }, 3),
+    ],
+    "w1",
+    true,
+  ).filter((x) => x.kind === "image");
+  assert.equal(liveImages.length, 2);
+  assert.notEqual(liveImages[0].key, liveImages[1].key);
+  assert.deepEqual(liveImages.map((x) => [x.id, x.status]), [["live-one", "done"], ["live-two", "running"]]);
+});
+
+test("consult reasons and summaries stay with their own worker and request", () => {
+  const events: TimelineEvent[] = [
+    event("orch", "orch", { type: "consult_start", consultId: 40, kind: "implement", from: "orch", to: "w1", request: "implement the parser", attachments: emptyAttachments, reason: "Claude has the code context" }),
+    event("orch", "orch", { type: "consult_start", consultId: 41, kind: "review", from: "orch", to: "w2", request: "review the parser", attachments: emptyAttachments, reason: "GPT can independently review it" }),
+    event("consult:40", "w1", { type: "text", text: "parser implementation" }),
+    event("consult:41", "w2", { type: "text", text: "parser review" }),
+    event("orch", "orch", { type: "consult_end", consultId: 40, status: "done", summary: "parser implemented", files: ["parser.ts"] }),
+    event("orch", "orch", { type: "consult_end", consultId: 41, status: "done", summary: "review complete", files: [] }),
+  ];
+  const items = buildItems(events, undefined, false);
+  const first = items.find((x) => x.kind === "consult" && x.consultId === 40)!;
+  const second = items.find((x) => x.kind === "consult" && x.consultId === 41)!;
+  assert.equal(first.kind, "consult");
+  assert.equal(second.kind, "consult");
+  assert.deepEqual([first.request, first.reason, first.summary], ["implement the parser", "Claude has the code context", "parser implemented"]);
+  assert.deepEqual([second.request, second.reason, second.summary], ["review the parser", "GPT can independently review it", "review complete"]);
+  assert.deepEqual(first.children.filter((x) => x.kind === "message").map((x) => [x.role, x.text]), [["w1", "parser implementation"]]);
+  assert.deepEqual(second.children.filter((x) => x.kind === "message").map((x) => [x.role, x.text]), [["w2", "parser review"]]);
+});
+
+test("dispatch decisions appear as readable timeline notices", () => {
+  const items = buildItems([event("orch", "orch", { type: "dispatch", instructionId: 4, mode: "delegated", reason: "image creation needs the image tool" })], undefined, false);
+  assert.deepEqual(items.filter((x) => x.kind === "notice").map((x) => x.text), ["마스터가 작업을 나눕니다 · image creation needs the image tool"]);
 });

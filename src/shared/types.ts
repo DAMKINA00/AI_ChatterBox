@@ -3,6 +3,22 @@ import type { ProviderUsage } from "./usage";
 
 export type AgentKind = "claude" | "codex";
 
+export interface TokenCounts {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteInputTokens: number;
+}
+export interface AgentMetrics extends TokenCounts {
+  turnId: string;
+  elapsedMs: number;
+  model?: string;
+  approximate?: boolean;
+  /** Native thread cumulative counters, used only as a resume baseline. */
+  nativeId?: string;
+  total?: TokenCounts;
+}
+
 export const AGENT_EXPRESSIONS = ["neutral", "thinking", "speaking", "happy", "confident", "surprised", "embarrassed", "worried", "sad", "angry", "tired", "waiting"] as const;
 export type AgentExpression = (typeof AGENT_EXPRESSIONS)[number];
 export function isAgentExpression(value: unknown): value is AgentExpression {
@@ -70,6 +86,10 @@ export function parseOrchestrator(m: string): { agent: AgentKind; model: string 
 }
 
 export interface ProjectSettings {
+  claudeStrengths: string;
+  claudeCautions: string;
+  gptStrengths: string;
+  gptCautions: string;
   orchestratorModel: OrchestratorModel;
   /** Claude worker --model value (alias or id). */
   claudeModel: string;
@@ -100,6 +120,10 @@ export const APPROVAL_MODE_LABEL: Record<ApprovalMode, string> = {
 
 /** Prefills the new-project form only. */
 export const DEFAULT_SETTINGS: ProjectSettings = {
+  claudeStrengths: "소스 구조·동작 흐름 분석, 원인 조사. 구현·테스트·문서 작성은 맥락에 따라 배정.",
+  claudeCautions: "이미지 생성은 이미지 도구를 사용할 수 있는 지피티에게 맡깁니다. 성능 우열은 작업마다 다를 수 있습니다.",
+  gptStrengths: "이미지 생성·편집, 시각 자료 제작. 구현·테스트·문서 작성은 맥락에 따라 배정.",
+  gptCautions: "이미지 생성 도구의 실제 사용 가능 여부를 확인합니다. 소스 분석은 기본적으로 클로드를 우선 고려합니다.",
   orchestratorModel: "claude:opus",
   claudeModel: "opus",
   codexModel: "gpt-6-astra",
@@ -155,6 +179,11 @@ export type ConsultStatus = "running" | "done" | "error" | "stopped" | "limited"
 export const CONSULT_KIND_LABEL: Record<ConsultKind, string> = { implement: "구현", review: "리뷰", opinion: "의견" };
 
 export interface Consult {
+  /** Failed assignment this retry/reassignment replaces. */
+  supersedes?: number;
+  /** User instruction event id; absent in records before 0.3.2. */
+  instructionId?: number;
+  reason?: string;
   id: number;
   chatId: number;
   seq: number;
@@ -212,6 +241,9 @@ export type ApprovalDecision = "once" | "chat" | "deny";
 
 /** Normalized event stream. Every event also carries the agent that produced it (see TimelineEvent). */
 export type AgentEvent =
+  | { type: "agent_usage"; metrics: AgentMetrics }
+  | { type: "dispatch"; instructionId: number; mode: "direct" | "delegated"; reason: string }
+  | { type: "image_generation"; id: string; status: "running" | "done" | "error"; prompt?: string; attachment?: AttachmentRef; error?: string }
   | { type: "expression"; expression: AgentExpression }
   | { type: "user"; text: string; attachments: AttachmentRef[]; queued?: boolean }
   | { type: "text_delta"; text: string }
@@ -223,7 +255,7 @@ export type AgentEvent =
   | { type: "approval_resolved"; id: string; decision: ApprovalDecision | "auto" | "expired" }
   /** An approval the orchestrator (or a remembered decision) answered without the user. */
   | { type: "approval_auto"; request: ApprovalRequest; decision: "allow" | "deny"; reason: string; reused?: boolean }
-  | { type: "consult_start"; consultId: number; kind: ConsultKind; from: Role; to: Role; request: string; attachments: AttachmentRef[]; scope?: string[] }
+  | { type: "consult_start"; consultId: number; kind: ConsultKind; from: Role; to: Role; request: string; attachments: AttachmentRef[]; scope?: string[]; instructionId?: number; reason?: string }
   | { type: "consult_end"; consultId: number; status: ConsultStatus; summary: string; files: string[] }
   | { type: "ask_user"; id: string; question: string; options: string[] }
   | { type: "ask_user_answer"; id: string; answer: string }
@@ -338,6 +370,7 @@ export interface ChatterBoxApi {
   setTheme(theme: Theme): Promise<void>;
   usage(): Promise<UsageInfo>;
   openPath(path: string): Promise<void>;
+  linkAction(chatId: number, href: string, action: "open" | "reveal" | "save"): Promise<{ canceled?: boolean; path?: string }>;
   // push events
   onEvent(cb: (e: TimelineEvent) => void): () => void;
   onChatUpdated(cb: (chat: Chat) => void): () => void;

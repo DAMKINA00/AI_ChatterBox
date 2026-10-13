@@ -24,6 +24,7 @@ import { GoalBar, PlanPanel } from "./PlanGoal";
 import { SLASH_COMMANDS, StatusDialog, type SlashCommand } from "./Commands";
 import { AttachmentChip, ItemList, RoleDot } from "./Items";
 import { AgentAvatar } from "./AgentAvatar";
+import { AgentUsage } from "./AgentUsage";
 import { ModelPicker, useModelLabel } from "./ModelPicker";
 import {
   Badge,
@@ -214,41 +215,50 @@ function TeamChips({ chat }: { chat: Chat }) {
       }),
     [agents],
   );
-  if (!ordered.length) return null;
   const active = ordered.filter((a) => a.status === "active");
   const released = ordered.filter((a) => a.status === "released");
   return (
-    <Tooltip content="작업자가 많을수록 사용량이 빨리 줄어요">
-      <div className="border-b px-4 py-2" data-testid="team-chips">
-        <div className="flex items-center gap-2 overflow-x-auto whitespace-nowrap">
-          {active.map((a) => (
-            <WorkerChip
-              key={a.id}
-              agent={a}
-              selected={selection?.chatId === chat.id && selection.node === a.key}
-              status={workerStatus(a.key, events, consults)}
-              expression={latestExpression(events ?? [], a.key)}
-              onSelect={() => void select({ chatId: chat.id, node: a.key })}
-            />
-          ))}
-          {released.length > 0 && (
-            <div className="ml-1 flex items-center gap-1.5 border-l pl-2 text-[11px] text-muted-foreground" data-testid="released-workers">
-              <span>해제됨</span>
-              {released.map((a) => (
-                <WorkerChip
-                  key={a.id}
-                  agent={a}
-                  selected={selection?.chatId === chat.id && selection.node === a.key}
-                  status={workerStatus(a.key, events, consults)}
-                  expression={latestExpression(events ?? [], a.key)}
-                  onSelect={() => void select({ chatId: chat.id, node: a.key })}
-                />
-              ))}
-            </div>
-          )}
-        </div>
+    <div className="border-b px-4 py-2" data-testid={ordered.length > 0 ? "team-chips" : undefined}>
+      {ordered.length > 0 && (
+        <Tooltip content="작업자가 많을수록 사용량이 빨리 줄어요">
+          <div className="flex items-center gap-2 overflow-x-auto whitespace-nowrap">
+            {active.map((a) => (
+              <WorkerChip
+                key={a.id}
+                agent={a}
+                selected={selection?.chatId === chat.id && selection.node === a.key}
+                status={workerStatus(a.key, events, consults)}
+                expression={latestExpression(events ?? [], a.key)}
+                onSelect={() => void select({ chatId: chat.id, node: a.key })}
+              />
+            ))}
+            {released.length > 0 && (
+              <div className="ml-1 flex items-center gap-1.5 border-l pl-2 text-[11px] text-muted-foreground" data-testid="released-workers">
+                <span>해제됨</span>
+                {released.map((a) => (
+                  <WorkerChip
+                    key={a.id}
+                    agent={a}
+                    selected={selection?.chatId === chat.id && selection.node === a.key}
+                    status={workerStatus(a.key, events, consults)}
+                    expression={latestExpression(events ?? [], a.key)}
+                    onSelect={() => void select({ chatId: chat.id, node: a.key })}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        </Tooltip>
+      )}
+      <div className={cn("flex items-center gap-x-3 overflow-x-auto whitespace-nowrap", ordered.length > 0 && "mt-2 border-t pt-1.5")} data-testid="agent-usage-list">
+        <AgentUsage events={events ?? []} role="orch" label={MASTER_LABEL} />
+        {ordered.map((agent) => (
+          <span key={agent.id} className={cn("shrink-0", agent.status === "released" && "opacity-50 grayscale")}>
+            <AgentUsage events={events ?? []} role={agent.key} label={agent.nickname} />
+          </span>
+        ))}
       </div>
-    </Tooltip>
+    </div>
   );
 }
 

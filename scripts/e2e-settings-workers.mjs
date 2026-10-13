@@ -124,7 +124,7 @@ try {
   );
   check(
     "worker chips overflow horizontally when the team is large",
-    await page.locator('[data-testid="team-chips"] > div').evaluate((el) => el.scrollWidth > el.clientWidth),
+    await page.locator('[data-testid="team-chips"] > div:not([data-testid="agent-usage-list"])').evaluate((el) => el.scrollWidth > el.clientWidth),
   );
 
   // Expression metadata reaches messages and the role avatars.

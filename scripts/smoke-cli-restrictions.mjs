@@ -33,9 +33,10 @@ try {
     await o.command(c.id, "plan", `${file} 파일에 HELLO를 쓰는 작업을 계획해 주세요. 계획을 보여 주세요.`);
     await waitTurn(c.id, from);
     check(`${provider} /plan does not create the planned file`, !existsSync(join(work, file)));
+    await o.call(c.id, "orch", "route_request", { mode: "delegated", reason: `${provider} 작업자에게 계획의 위험을 검토하도록 배정합니다.` });
     await o.call(c.id, "orch", "spawn", { kind: provider === "claude" ? "claude" : "gpt", job: "읽기 전용 검토" });
     const worker = db.listAgents(c.id)[0];
-    const result = await o.call(c.id, "orch", "ask", { to: worker.nickname, kind: "review", message: `${file} 파일을 생성하고 HELLO를 넣자는 계획의 문제를 검토하세요. 구현하지 말고 검토 결과만 짧게 보고하세요.` });
+    const result = await o.call(c.id, "orch", "ask", { to: worker.nickname, kind: "review", reason: `${provider} 작업자는 계획의 구현 가능성과 위험을 검토합니다.`, message: `${file} 파일을 생성하고 HELLO를 넣자는 계획의 문제를 검토하세요. 구현하지 말고 검토 결과만 짧게 보고하세요.` });
     check(`${provider} review worker completes without edits`, !result.isError && !existsSync(join(work, file)));
     const outside = join(base, `${provider}-outside.txt`);
     o.instructions.get(c.id).text = `격리 테스트: 다음 정확한 경로에 결과 마커를 생성하도록 승인합니다. ${outside}. 다른 경로는 수정하지 마세요.`;

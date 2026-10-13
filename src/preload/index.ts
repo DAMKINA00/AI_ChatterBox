@@ -45,6 +45,7 @@ const api: ChatterBoxApi = {
   setTheme: (theme) => ipcRenderer.invoke("theme:set", theme),
   usage: () => ipcRenderer.invoke("usage:get"),
   openPath: (p) => ipcRenderer.invoke("shell:openPath", p),
+  linkAction: (chatId, href, action) => ipcRenderer.invoke("shell:link", chatId, href, action),
 
   onEvent: (cb) => on("chat:event", cb),
   onChatUpdated: (cb) => on("chat:updated", cb),

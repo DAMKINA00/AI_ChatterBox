@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CodexDriver } from "./codex";
-import { ClaudeDriver } from "./claude";
+import { ClaudeDriver, NATIVE_AGENT_TOOLS } from "./claude";
 
 const opts = { cwd: process.cwd(), nativeId: null, exePath: "unused" };
 function codex(readOnly = false) {
@@ -20,12 +20,31 @@ test("Codex every execution role can request approval; plan restriction resets o
   await f.driver.send({ text: "plan", attachments: [], noWrites: true });
   assert.equal(f.calls[0].params.approvalPolicy, "on-request");
   assert.equal(f.calls[0].params.approvalsReviewer, "user");
+  assert.equal(f.calls[0].params.config["features.multi_agent"], false);
+  assert.equal(f.calls[0].params.config["features.multi_agent_v2"], false);
   assert.equal(f.calls.at(-1)!.params.approvalPolicy, "never");
   f.driver.onNotification({ method: "turn/completed", params: { threadId: "thread", turn: { id: "turn", status: "completed" } } } as any);
   await f.driver.send({ text: "implement", attachments: [] });
+  assert.equal(f.calls.find((c) => c.method === "thread/resume")!.params.config["features.image_generation"], undefined);
   assert.equal(f.calls.at(-1)!.params.approvalPolicy, "on-request");
   assert.equal(f.calls.at(-1)!.params.approvalsReviewer, "user");
   assert.equal(f.calls.at(-1)!.params.sandboxPolicy.type, "readOnly");
+});
+
+test("Codex token snapshots use turn deltas, preserve cache and do not count duplicates", async () => {
+  const f = codex();
+  await f.driver.send({ text: "hello", attachments: [] });
+  const total = { totalTokens: 120, inputTokens: 100, outputTokens: 20, cachedInputTokens: 50, cacheWriteInputTokens: 0, reasoningOutputTokens: 0 };
+  const notify = () => f.driver.onNotification({ method: "thread/tokenUsage/updated", params: { threadId: "thread", turnId: "turn", tokenUsage: { total, last: total } } } as any);
+  notify(); notify();
+  assert.equal(f.events.at(-1).metrics.outputTokens, 20);
+  assert.equal(f.events.at(-1).metrics.cachedInputTokens, 50);
+  f.driver.onNotification({ method: "turn/completed", params: { threadId: "thread", turn: { id: "turn", status: "completed" } } } as any);
+  await f.driver.send({ text: "again", attachments: [] });
+  total.inputTokens += 40; total.outputTokens += 10;
+  notify();
+  assert.equal(f.events.at(-1).metrics.outputTokens, 10);
+  assert.equal(f.events.at(-1).metrics.inputTokens, 40);
 });
 
 test("Codex judge disables executable tools and cannot escalate", async () => {
@@ -36,6 +55,20 @@ test("Codex judge disables executable tools and cannot escalate", async () => {
   for (const name of ["shell_tool", "multi_agent", "apps", "plugins", "browser_use", "computer_use"])
     assert.equal(start.config[`features.${name}`], false);
   assert.equal(start.config.web_search, "disabled");
+});
+
+test("native Claude delegation is excluded from normal driver tool sets", () => {
+  for (const tool of ["Agent", "Task", "TeamCreate", "SendMessage"]) assert.ok(NATIVE_AGENT_TOOLS.includes(tool));
+});
+
+test("image failure prevents a successful worker turn; readonly turns disable native image generation", async () => {
+  const f = codex();
+  await f.driver.send({ text: "readonly", attachments: [], noWrites: true });
+  assert.equal(f.calls.find((c) => c.method === "thread/start")!.params.config["features.image_generation"], false);
+  f.driver.onNotification({ method: "item/completed", params: { threadId: "thread", turnId: "turn", item: { type: "imageGeneration", id: "img", status: "failed", result: "", failure: { type: "usageLimitExceeded" } } } } as any);
+  f.driver.onNotification({ method: "turn/completed", params: { threadId: "thread", turn: { id: "turn", status: "completed" } } } as any);
+  assert.equal(f.events.find((e) => e.type === "image_generation")?.status, "error");
+  assert.equal(f.events.at(-1).ok, false);
 });
 
 test("Codex never grants session-wide native approval that bypasses changed app settings", async () => {
