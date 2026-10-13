@@ -1,6 +1,6 @@
 // Central approval policy for every agent:
 //  1. read-only tools → allowed silently (no judge, no card)
-//  2. remembered decisions (user's "이 채팅 동안 허용", or an identical action the judge already allowed)
+//  2. current scope / execution restrictions, before any remembered decision
 //  3. approval mode "orchestrator": the chat's judge (orchestrator model) decides allow / deny / ask_user.
 //     Hard-floor actions (outside the folder, recursive deletes, git push, secrets, system changes,
 //     uploads) are never auto-allowed unless the project delegates high-risk requests too;
@@ -9,6 +9,7 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute, relative, resolve } from "node:path";
 import { inScope as matchesScope } from "./scope";
+import { isReadCommand } from "./execution-policy";
 import type { AgentEvent, ApprovalDecision, ApprovalMode, ApprovalRequest, FileDiff, NodeId, Risk, Role } from "../shared/types";
 
 export type Verdict = "allow" | "allow_chat" | "deny";
@@ -46,6 +47,8 @@ export interface ApprovalHost {
   pendingChanged(chatId: number, pending: number): void;
   /** Effective approval mode + high-risk delegation for the chat. */
   mode(chatId: number): { mode: ApprovalMode; delegateHighRisk: boolean };
+  /** Runtime restrictions (planning, review, or a concurrent implementation). */
+  guard?(chatId: number, input: ApprovalInput): string | null;
   /** A worker's current write scope (implement globs, or [] = no writes during review/opinion). */
   writeScope?(chatId: number, role: Role): { globs: string[] | null; why: string; folder: string } | null;
   /** Ask the chat's judge; null when it can't answer (no judge, timeout, malformed). */
@@ -113,25 +116,60 @@ export class ApprovalService {
   private chatAllow = new Map<number, Set<string>>();
   /** Exact actions the judge already allowed, per chat. */
   private judged = new Map<number, Set<string>>();
+  private versions = new Map<number, number>();
 
   constructor(private host: ApprovalHost) {}
 
+  invalidate(chatId: number) {
+    this.chatAllow.delete(chatId);
+    this.judged.delete(chatId);
+    this.cancelChat(chatId);
+  }
+
+  private restriction(chatId: number, input: ApprovalInput): string | null {
+    const blocked = this.host.guard?.(chatId, input);
+    if (blocked) return blocked;
+    if (!input.writes && !input.diffs?.length) return null;
+    const sc = this.host.writeScope?.(chatId, input.role);
+    if (!sc?.globs) return null;
+    const paths = [...(input.paths ?? []), ...(input.diffs?.flatMap((d) => d.movePath ? [d.path, d.movePath] : [d.path]) ?? [])];
+    if (!sc.globs.length || !paths.length) return `${sc.why}: 쓰기 범위를 확인할 수 없거나 수정이 금지되어 있습니다.`;
+    const bad = paths.find((p) => {
+      const rel = relToFolder(sc.folder, p);
+      return rel === null || !matchesScope(rel, sc.globs!);
+    });
+    return bad === undefined ? null : `${sc.why}: ${bad}`;
+  }
+
   async request(chatId: number, folder: string, input: ApprovalInput): Promise<VerdictResult> {
+    const version = this.versions.get(chatId) ?? 0;
     const c = classify(input, folder);
     const log = (decision: string, scope: string, by: string, reason?: string) =>
       this.host.log(chatId, input.role, input, c.risk, decision, scope, by, reason);
 
-    // 1. Reads (Claude asks for reads outside its cwd, e.g. a user skill file).
+    const blocked = this.restriction(chatId, input);
+    if (blocked) {
+      log("deny", "once", "scope", blocked);
+      this.host.emit(chatId, input.node, input.role, {
+        type: "approval_auto", request: { id: `ap:${randomUUID()}`, role: input.role, title: input.title, detail: input.detail, risk: c.risk },
+        decision: "deny", reason: blocked,
+      });
+      return { verdict: "deny", reason: blocked };
+    }
+    const { mode, delegateHighRisk } = this.host.mode(chatId);
+    // A shell can touch paths not present in its request metadata. Reassess it for every task.
+    const reusable = c.risk === "low" && (!input.command || isReadCommand(input.command));
+    // Reads (Claude asks for reads outside its cwd, e.g. a user skill file).
     if (input.readOnly && !(c.critical && c.reason?.startsWith("자격"))) {
       log("allow", "read-only", "auto");
       return { verdict: "allow" };
     }
     // 2. Remembered decisions.
-    if (!c.critical && this.chatAllow.get(chatId)?.has(`${input.role}:${input.key}`)) {
+    if (reusable && this.chatAllow.get(chatId)?.has(`${input.role}:${input.key}`)) {
       log("allow", "chat", "user-memo");
       return { verdict: "allow" };
     }
-    const exact = `${input.role}|${input.title}|${input.detail}`;
+    const exact = JSON.stringify([input.role, input.title, input.detail, input.command, input.paths, input.diffs, input.writes]);
     const base: Omit<ApprovalRequest, "id"> = {
       role: input.role,
       title: input.title,
@@ -141,7 +179,7 @@ export class ApprovalService {
       riskReason: c.reason,
       diffs: input.diffs,
     };
-    if (this.judged.get(chatId)?.has(exact)) {
+    if (mode === "orchestrator" && reusable && this.judged.get(chatId)?.has(exact)) {
       log("allow", "once", "orchestrator-memo");
       this.host.emit(chatId, input.node, input.role, {
         type: "approval_auto",
@@ -153,30 +191,14 @@ export class ApprovalService {
       return { verdict: "allow" };
     }
 
-    // 3. Writes outside the worker's scope (or any write during review/opinion) are denied outright.
-    if (input.writes || (input.diffs?.length ?? 0) > 0) {
-      const sc = this.host.writeScope?.(chatId, input.role);
-      if (sc?.globs) {
-        const bad = (input.paths ?? input.diffs?.map((d) => d.path) ?? []).find((p) => {
-          const rel = relToFolder(sc.folder, p);
-          return rel === null || !matchesScope(rel, sc.globs!);
-        });
-        if (bad !== undefined) {
-          const id = `ap:${randomUUID()}`;
-          const reason = `${sc.why}: ${bad}`;
-          log("deny", "once", "scope", reason);
-          this.host.emit(chatId, input.node, input.role, { type: "approval_auto", request: { ...base, id }, decision: "deny", reason });
-          return { verdict: "deny", reason: `범위 밖 쓰기라서 거부했습니다 (${reason}). 맡은 범위 안에서만 고치세요.` };
-        }
-      }
-    }
-
-    // 4. The master decides (workers only; the master's own requests go to the user).
-    const { mode, delegateHighRisk } = this.host.mode(chatId);
+    // A separate, tool-less judge handles both the master and the workers.
     let judgeReason: string | undefined;
-    if (mode === "orchestrator" && input.role !== "orch" && this.host.judge) {
+    if (mode === "orchestrator" && this.host.judge) {
       const id = `ap:${randomUUID()}`;
       const answer = await this.host.judge(chatId, { ...base, id }, input).catch(() => null);
+      if ((this.versions.get(chatId) ?? 0) !== version) return { verdict: "deny", reason: "작업이 중지되었거나 승인 설정이 변경되었습니다. 다시 요청하세요." };
+      const changed = this.restriction(chatId, input);
+      if (changed) return { verdict: "deny", reason: changed };
       if (answer?.decision === "deny") {
         log("deny", "once", "orchestrator", answer.reason);
         this.host.emit(chatId, input.node, input.role, { type: "approval_auto", request: { ...base, id }, decision: "deny", reason: answer.reason });
@@ -185,7 +207,7 @@ export class ApprovalService {
       if (answer?.decision === "allow" && (!c.critical || delegateHighRisk)) {
         log("allow", "once", "orchestrator", answer.reason);
         const set = this.judged.get(chatId) ?? new Set<string>();
-        set.add(exact);
+        if (reusable) set.add(exact);
         this.judged.set(chatId, set);
         this.host.emit(chatId, input.node, input.role, { type: "approval_auto", request: { ...base, id }, decision: "allow", reason: answer.reason });
         return { verdict: "allow" };
@@ -211,6 +233,8 @@ export class ApprovalService {
     const p = this.pending.get(id);
     if (!p || p.chatId !== chatId) return;
     this.pending.delete(id);
+    const blocked = this.restriction(chatId, p.input);
+    if (blocked) decision = "deny";
     // High-risk actions can only be allowed once.
     const effective: ApprovalDecision = decision === "chat" && p.risk === "high" ? "once" : decision;
     if (effective === "chat") {
@@ -223,13 +247,14 @@ export class ApprovalService {
     this.host.pendingChanged(chatId, this.pendingCount(chatId));
     p.resolve(
       effective === "deny"
-        ? { verdict: "deny", reason: "사용자가 AI_ChatterBox에서 거부했습니다." }
+        ? { verdict: "deny", reason: blocked ?? "사용자가 AI_ChatterBox에서 거부했습니다." }
         : { verdict: effective === "chat" ? "allow_chat" : "allow" },
     );
   }
 
   /** Deny everything still waiting in a chat (stop, process exit, quit). */
   cancelChat(chatId: number, role?: Role) {
+    this.versions.set(chatId, (this.versions.get(chatId) ?? 0) + 1);
     for (const [id, p] of [...this.pending]) {
       if (p.chatId !== chatId || (role && p.role !== role)) continue;
       this.pending.delete(id);

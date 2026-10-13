@@ -1,4 +1,4 @@
-// Collaboration engine: one master (마스터, read-only, Claude or Codex) and a pool of workers
+// Collaboration engine: one master (마스터, Claude or Codex) and a pool of workers
 // (클로드 N호 / 지피티 N호) the master spawns and releases as the work needs. Everyone talks through
 // the Bridge MCP server:
 //   master:  spawn · ask · release · agents · checklist · update_goal · ask_user
@@ -13,6 +13,8 @@ import { existsSync, statSync } from "node:fs";
 import { basename, isAbsolute, relative, resolve as resolvePath } from "node:path";
 import {
   chatOrchestrator,
+  AGENT_EXPRESSIONS,
+  isAgentExpression,
   CONSULT_KIND_LABEL,
   MASTER_LABEL,
   WORKER_KIND_LABEL,
@@ -37,12 +39,20 @@ import { mimeOf } from "./attachments";
 import type { AgentInput } from "./drivers/types";
 import { ApprovalJudge } from "./judge";
 import { scopesOverlap } from "./scope";
+import { isMutatingTool, isReadCommand } from "./execution-policy";
+import type { ApprovalInput } from "./approvals";
 import { addWait, checkAsk, removeWait, type WaitGraph } from "./team";
 
 const KINDS: ConsultKind[] = ["implement", "review", "opinion"];
 const MAX_DEPTH = 3;
 const MAX_ASKS_CAP = 24;
 const MAX_GOAL_TURNS = 6;
+
+const EXPRESSION_TOOL: ToolDef = {
+  name: "set_expression",
+  description: "다음 대사의 감정에 맞는 얼굴 표정을 지정합니다. 본문은 그대로 쓰고 대사 전 한 번만 호출하세요. 사실 판단이나 작업 성공 여부를 바꾸지 않습니다.",
+  inputSchema: { type: "object", properties: { expression: { type: "string", enum: [...AGENT_EXPRESSIONS] } }, required: ["expression"], additionalProperties: false },
+};
 
 // ---------- tool definitions
 const ASK_TOOL = (forMaster: boolean): ToolDef => ({
@@ -155,17 +165,18 @@ function masterInstructions(project: Project, agent: AgentKind): string {
   return [
     "# 역할: AI_ChatterBox 마스터",
     `너는 사용자의 지시를 받아 팀을 꾸리고 일을 나눠 맡기는 마스터다. 작업 폴더: ${project.folder}`,
-    "- 너는 읽기 전용이다. 파일을 직접 고치거나 명령으로 무언가를 바꾸지 않는다. 코드를 읽고 검색하는 것은 괜찮다.",
+    "- 너도 승인 설정에 따라 파일을 직접 고치고 명령을 실행할 수 있다. 작은 일은 직접 처리하고, 작업자 구현과 동시에 직접 변경하지 않는다. 승인된 관리자 작업은 현재 앱의 Windows 권한으로 실행한다.",
     `- 팀: ${t("spawn")}(kind=claude|gpt)로 작업자를 만든다 → 클로드 N호 / 지피티 N호. 작업자 수는 일의 양에 맞춘다: 작은 일은 한 명, 큰 일은 범위를 나눠 여러 명(동시에 클로드 최대 ${s.maxClaudeWorkers}명, 지피티 최대 ${s.maxGptWorkers}명). 다 쓴 작업자는 ${t("release")}로 해제한다. ${t("agents")}로 팀을 확인한다.`,
     `- 일 맡기기: ${t("ask")}(to=닉네임, kind, message, scope). 서로 독립적인 일은 반드시 ${t("ask_parallel")}(tasks=[…])로 한 번에 맡겨 동시에 진행한다(하나씩 기다리지 말 것). 구현(implement)은 고칠 범위(scope)를 겹치지 않게 나눈다. 리뷰·의견은 언제든 동시에 가능하다.`,
     s.reviewGate
-      ? "- 코드가 바뀌면 끝내기 전에, 그 코드를 만들지 않은 작업자에게 리뷰를 맡긴다 (kind=review). 지적이 나오면 고치게 하고 필요하면 다시 리뷰받는다."
+      ? "- 너 자신 또는 작업자가 코드를 바꾸면 끝내기 전에, 그 코드를 만들지 않은 작업자에게 리뷰를 맡긴다 (kind=review). 네가 직접 바꾼 파일도 빠짐없이 넘긴다. 지적이 나오면 고치고 다시 리뷰받는다."
       : "- 리뷰는 필요하다고 판단할 때만 맡긴다 (kind=review).",
     "- 질문·설명·간단한 확인처럼 파일을 바꿀 필요가 없는 지시는 작업자를 만들지 말고 직접 답한다.",
     "- 작업자는 이 대화를 보지 못한다. message에 목표, 관련 파일 경로, 제약, 완료 기준을 빠짐없이 적는다. 사용자가 첨부한 파일이 필요하면 attach로 경로를 넘긴다.",
     `- 여러 단계 작업은 ${t("checklist")}로 단계와 담당(닉네임)을 등록하고, 단계를 시작·완료할 때마다 갱신한다.`,
     `- 채팅에 목표(/goal)가 있으면 그 목표를 향해 일하고, 한 단계를 마칠 때마다 ${t("update_goal")}로 진행을 보고한다. 다 이루면 status=complete.`,
     `- 꼭 필요한 결정만 ${t("ask_user")}로 묻는다.`,
+    `- 사용자에게 대사를 쓰기 전에 ${t("set_expression")}(expression=감정)으로 표정을 지정한다. 감정: ${AGENT_EXPRESSIONS.join(", ")}. 기술적 내용과 말투를 억지로 바꾸지 않는다.`,
     `- 한도: 지시 하나당 일 맡기기 횟수는 작업자 수에 따라 늘어난다(최대 ${MAX_ASKS_CAP}회), 리뷰 ${s.maxReviews}회, ${s.maxMinutes}분. 한도에 걸리면 그때까지의 결과로 보고한다.`,
     "- 마지막에는 항상 한국어로 보고한다: 누가 무엇을 했는지, 바뀐 파일, 리뷰 결과, 남은 문제.",
   ].join("\n");
@@ -179,6 +190,7 @@ function workerInstructions(a: ChatAgent): string {
     "- 리뷰 지시(review)·의견 지시(opinion): 파일을 고치지 않는다. 리뷰는 버그, 빠진 처리, 개선점을 심각도와 함께 보고하고, 문제가 없으면 분명히 말한다.",
     "- 다른 작업자에게 확인할 것이 있으면 ask(to=닉네임)로 직접 묻는다. 팀 목록은 agents. 마스터에게는 ask를 쓰지 말고 결과 보고에 질문을 적는다.",
     "- 끝나면 한국어로 짧게 보고한다: 한 일, 바뀐 파일, 확인 방법과 결과, 남은 문제.",
+    `- 대사 전에 set_expression 도구로 감정을 지정한다 (${AGENT_EXPRESSIONS.join(", ")}). Claude에서는 mcp__chatterbox_bridge__set_expression. 기술적 내용과 말투는 그대로 유지한다.`,
   ].join("\n");
 }
 
@@ -225,6 +237,9 @@ export class Orchestrator {
   private stopped = new Set<number>();
   /** /plan: the master is only planning (no asks) / running an approved plan. */
   private planning = new Set<number>();
+  private reviewing = new Set<number>();
+  /** Master native tool calls which may still be changing the workspace. */
+  private masterActions = new Map<number, Set<string>>();
   private planRunning = new Set<number>();
   readonly judge: ApprovalJudge;
 
@@ -238,6 +253,7 @@ export class Orchestrator {
     });
     chats.judge = (chatId, request, input) => this.judge.decide(chatId, request, input);
     chats.writeScope = (chatId, role) => this.writeScope(chatId, role);
+    chats.approvalGuard = (chatId, input) => this.guardApproval(chatId, input);
     chats.instructionsFor = (chat, project, role, agent) => {
       if (role === "orch") return masterInstructions(project, agent);
       const a = chats.store.agentByKey(chat.id, role);
@@ -265,8 +281,8 @@ export class Orchestrator {
       reg = this.chats.bridge.register(
         {
           tools: master
-            ? [SPAWN_TOOL, ASK_TOOL(true), ASK_PARALLEL_TOOL, RELEASE_TOOL, AGENTS_TOOL, CHECKLIST_TOOL, GOAL_TOOL, ASK_USER_TOOL]
-            : [ASK_TOOL(false), AGENTS_TOOL],
+            ? [SPAWN_TOOL, ASK_TOOL(true), ASK_PARALLEL_TOOL, RELEASE_TOOL, AGENTS_TOOL, CHECKLIST_TOOL, GOAL_TOOL, ASK_USER_TOOL, EXPRESSION_TOOL]
+            : [ASK_TOOL(false), AGENTS_TOOL, EXPRESSION_TOOL],
           call: (name, args) => this.call(chatId, role, name, args),
         },
         id,
@@ -281,6 +297,10 @@ export class Orchestrator {
     const master = caller === "orch";
     try {
       switch (name) {
+        case "set_expression":
+          if (!isAgentExpression(args.expression)) return textResult("지원하지 않는 표정입니다.", true);
+          this.chats.emit(chatId, this.chats.route(chatId, caller), caller, { type: "expression", expression: args.expression });
+          return textResult("표정을 반영했습니다.");
         case "ask":
           return await this.askTool(chatId, caller, args);
         case "ask_parallel": {
@@ -383,6 +403,8 @@ export class Orchestrator {
     const scope: string[] = kind === "implement" && Array.isArray(args.scope) ? args.scope.map(String).filter(Boolean) : [];
     const attach: string[] = Array.isArray(args.attach) ? args.attach.map(String) : [];
     const callerName = this.name(chatId, caller);
+    if (kind === "implement" && (this.reviewing.has(chatId) || (caller !== "orch" && this.running.get(chatId)?.get(caller)?.kind !== "implement")))
+      return textResult("리뷰·의견 요청에서는 다른 작업자에게 구현을 맡길 수 없습니다.", true);
 
     if (to === MASTER_LABEL || to === "마스터" || to.toLowerCase() === "master")
       return textResult("마스터는 지금 팀의 결과를 기다리고 있어 바로 답할 수 없습니다(교착 방지). 질문은 결과 보고에 적어 주세요.", true);
@@ -426,7 +448,7 @@ export class Orchestrator {
     for (;;) {
       if (this.stopped.has(chatId)) return;
       const held = this.scopeLocks.get(chatId) ?? [];
-      if (!held.some((h) => scopesOverlap(h.scope, scope))) {
+      if (!this.masterActions.get(chatId)?.size && !held.some((h) => scopesOverlap(h.scope, scope))) {
         held.push({ consultId, scope });
         this.scopeLocks.set(chatId, held);
         return;
@@ -518,7 +540,7 @@ export class Orchestrator {
             await driver.send({
               text: kindPrefix(kind, callerName, scope) + message,
               attachments,
-              readOnlyTurn: kind !== "implement" || scope.length > 0,
+              noWrites: kind !== "implement",
             });
           } catch (e) {
             r.resolve({ ok: false, error: e instanceof Error ? e.message : String(e) });
@@ -554,7 +576,22 @@ export class Orchestrator {
   }
 
   /** Writes a worker may make right now: its implement scope, nothing during review/opinion. */
+  private guardApproval(chatId: number, input: ApprovalInput): string | null {
+    const mutation = !!input.writes || !!input.diffs?.length || (!!input.command && !isReadCommand(input.command));
+    if (!mutation) return null;
+    if (this.stopped.has(chatId)) return "작업이 중지되었습니다.";
+    if (this.planning.has(chatId) || this.reviewing.has(chatId)) return "계획·리뷰 중에는 파일 수정이나 변경 명령을 실행할 수 없습니다.";
+    if (input.role === "orch") {
+      if (this.scopeLocks.get(chatId)?.length) return "작업자가 구현 중입니다. 작업이 끝난 뒤 마스터의 직접 변경을 다시 요청하세요.";
+    } else {
+      const r = this.running.get(chatId)?.get(input.role);
+      if (!r || r.kind !== "implement") return "구현을 맡은 동안에만 파일 수정이나 변경 명령을 실행할 수 있습니다.";
+    }
+    return null;
+  }
+
   private writeScope(chatId: number, role: Role): { globs: string[] | null; why: string } | null {
+    if (role === "orch" && (this.planning.has(chatId) || this.reviewing.has(chatId))) return { globs: [], why: "계획·리뷰 중에는 수정할 수 없습니다" };
     if (!isWorkerKey(role)) return null;
     const r = this.running.get(chatId)?.get(role);
     if (!r) return null;
@@ -564,7 +601,19 @@ export class Orchestrator {
 
   /** Collect each running consult's answer and changed files from the worker's events. */
   private observe(chatId: number, role: Role, event: AgentEvent) {
+    if (role === "orch") {
+      if (event.type === "tool_call" && isMutatingTool(event.name, event.input, !!event.diffs?.length)) {
+        const active = this.masterActions.get(chatId) ?? new Set<string>();
+        active.add(event.id);
+        this.masterActions.set(chatId, active);
+      } else if (event.type === "tool_result" || event.type === "file_change" || event.type === "turn_end") {
+        if (event.type === "turn_end") this.masterActions.delete(chatId);
+        else this.masterActions.get(chatId)?.delete(event.id);
+        if (!this.masterActions.get(chatId)?.size) this.releaseScope(chatId, -1);
+      }
+    }
     if (role === "orch" && event.type === "turn_end") {
+      this.reviewing.delete(chatId);
       this.afterMasterTurn(chatId, event);
       // Extra instructions that arrived after the master's last ask become the next turn.
       const inst = this.instructions.get(chatId);
@@ -589,7 +638,7 @@ export class Orchestrator {
         r.text = event.text;
         break;
       case "tool_call":
-        if (event.diffs?.length) r.pendingFiles.set(event.id, event.diffs.map((d) => d.path));
+        if (event.diffs?.length) r.pendingFiles.set(event.id, event.diffs.flatMap((d) => d.movePath ? [d.path, d.movePath] : [d.path]));
         break;
       case "tool_result": {
         const files = r.pendingFiles.get(event.id);
@@ -598,7 +647,10 @@ export class Orchestrator {
         break;
       }
       case "file_change":
-        if (event.ok) for (const f of event.files) r.files.add(f.path);
+        if (event.ok) for (const f of event.files) {
+          r.files.add(f.path);
+          if (f.movePath) r.files.add(f.movePath);
+        }
         break;
       case "turn_end":
         r.resolve({ ok: event.ok, interrupted: event.interrupted, error: event.error });
@@ -637,7 +689,7 @@ export class Orchestrator {
     if (prefix) input = { ...input, text: prefix + input.text };
     this.instructions.set(chat.id, { text: input.text, startedAt: Date.now(), asks: 0, reviews: 0, requests: new Map(), queued: [], pinned: [] });
     const driver = await this.chats.driver(chat.id, "orch");
-    await driver.send({ ...input, text: input.text + attachmentNote(input.attachments) });
+    await driver.send({ ...input, text: input.text + attachmentNote(input.attachments), noWrites: this.planning.has(chat.id) || this.reviewing.has(chat.id) });
   }
 
   /** Start a master turn with prepared text (same bookkeeping as a normal instruction). */
@@ -656,6 +708,9 @@ export class Orchestrator {
     if (!chat || chat.status !== "interrupted") return;
     const last = [...this.chats.store.events(chatId)].reverse().find((e) => e.event.type === "user" && !e.event.queued)?.event as { text: string } | undefined;
     const original = last?.text ?? "";
+    // Runtime mode sets are empty after restart; restore the interrupted command's restriction.
+    if (/^\/plan(?:\s|$)/.test(original)) this.planning.add(chatId);
+    if (/^\/review(?:\s|$)/.test(original)) this.reviewing.add(chatId);
     this.chats.emit(chatId, "orch", null, { type: "notice", text: "중단된 작업을 이어서 진행합니다" });
     this.chats.updateChat(chatId, { status: "working", touch: true });
     this.stopped.delete(chatId);
@@ -666,9 +721,11 @@ export class Orchestrator {
       `아래 원래 지시의 남은 작업을 이어서 끝낸 뒤 결과를 보고하세요. 이미 끝난 부분은 다시 하지 마세요.${team ? ` 팀(${team})은 그대로 남아 있습니다.` : ""}\n\n원래 지시:\n` +
       (original || "(기록 없음)");
     try {
-      await (await this.chats.driver(chatId, "orch")).send({ text: this.handover(chat) + note, attachments: [] });
+      await (await this.chats.driver(chatId, "orch")).send({ text: this.handover(chat) + note, attachments: [], noWrites: this.planning.has(chatId) || this.reviewing.has(chatId) });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
+      this.planning.delete(chatId);
+      this.reviewing.delete(chatId);
       this.chats.emit(chatId, "orch", "orch", { type: "error", kind: "process", message });
       this.chats.orchTurnEnded(chatId, { type: "turn_end", ok: false, error: message });
     }
@@ -758,6 +815,7 @@ export class Orchestrator {
       }
       case "review": {
         needIdle();
+        this.reviewing.add(chatId);
         const text =
           "현재 작업 폴더의 커밋되지 않은 변경(git status, git diff)을 리뷰해 줘. 변경을 직접 만들지 않은 작업자에게 kind=review로 맡기고(없으면 만들어서), 지적 사항을 심각도와 함께 정리해 보고해." +
           (arg ? ` 추가 요청: ${arg}` : "");
@@ -885,6 +943,9 @@ export class Orchestrator {
       this.bridgeKeys.delete(id);
     }
     this.instructions.delete(chatId);
+    this.masterActions.delete(chatId);
+    this.reviewing.delete(chatId);
+    this.planning.delete(chatId);
   }
 }
 

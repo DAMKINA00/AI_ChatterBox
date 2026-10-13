@@ -66,6 +66,7 @@ export function Label({ className, ...props }: React.LabelHTMLAttributes<HTMLLab
 export function Switch({ checked, onChange, id, label }: { checked: boolean; onChange: (v: boolean) => void; id?: string; label?: string }) {
   return (
     <button
+      type="button"
       id={id}
       role="switch"
       aria-checked={checked}

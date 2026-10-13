@@ -39,9 +39,6 @@ export interface Sink {
 /** Live-only events (not persisted). */
 const TRANSIENT = new Set<AgentEvent["type"]>(["text_delta"]);
 
-/** Tools the read-only orchestrator may not use (Claude). */
-const ORCH_DISALLOWED = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "PowerShell"];
-
 interface Live {
   driver: AgentDriver;
   agent: AgentKind;
@@ -90,6 +87,7 @@ export class ChatManager {
         };
       },
       judge: (chatId, request, input) => this.judge?.(chatId, request, input) ?? Promise.resolve(null),
+      guard: (chatId, input) => this.approvalGuard?.(chatId, input) ?? null,
       writeScope: (chatId, role) => {
         const s = this.writeScope?.(chatId, role);
         if (!s) return null;
@@ -161,6 +159,7 @@ export class ChatManager {
 
   /** Set by the orchestrator: what a worker may write right now (its implement scope). */
   writeScope?: (chatId: number, role: Role) => { globs: string[] | null; why: string } | null;
+  approvalGuard?: (chatId: number, input: import("./approvals").ApprovalInput) => string | null;
   /** Set by the orchestrator: the chat's approval judge. */
   judge?: (chatId: number, request: ApprovalRequest, input: ApprovalInput) => Promise<JudgeAnswer | null>;
   /** Quitting: processes are being torn down; don't record their exits as errors. */
@@ -179,6 +178,8 @@ export class ChatManager {
     // While quitting, keep the stored status ("working" → "interrupted" on next launch).
     if (this.disposing) return this.store.chat(chatId)!;
     const chat = this.store.updateChat(chatId, patch);
+    if (patch.approvalModeOverride !== undefined || patch.orchestratorModelOverride !== undefined)
+      this.approvals.invalidate(chatId);
     this.sink.chat(chat);
     return chat;
   }
@@ -284,7 +285,7 @@ export class ChatManager {
       exePath: "",
       model: cfg.model || undefined,
       instructions: this.instructionsFor?.(chat, project, role, cfg.agent),
-      readOnly: role === "orch",
+      readOnly: false,
     };
     let driver: AgentDriver;
     if (cfg.agent === "claude") {
@@ -295,7 +296,6 @@ export class ChatManager {
           bridgeScript: this.bridgeScript,
           tmpDir: this.tmpDir,
           mcpServers: () => this.toolsFor?.(this.store.chat(chatId)!, role, "claude") ?? {},
-          disallowedTools: role === "orch" ? ORCH_DISALLOWED : undefined,
           // Bridge tools (master: spawn/ask/…; workers: ask/agents) never need a permission prompt.
           allowedTools: ["mcp__chatterbox_bridge"],
         },
@@ -378,8 +378,12 @@ export class ChatManager {
       await run();
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
+      await this.disposeRole(chatId, "orch");
       this.emit(chatId, "orch", "orch", { type: "error", kind: "process", message });
-      this.orchTurnEnded(chatId, { type: "turn_end", ok: false, error: message });
+      const end = { type: "turn_end", ok: false, error: message } as const;
+      this.emit(chatId, "orch", "orch", end);
+      this.onDriverEvent?.(chatId, "orch", end);
+      this.orchTurnEnded(chatId, end);
     }
   }
 
@@ -433,7 +437,7 @@ function codexMcpConfig(servers: Record<string, any>): Record<string, unknown> {
     out[`mcp_servers.${name}.command`] = s.command;
     out[`mcp_servers.${name}.args`] = s.args ?? [];
     if (s.env) out[`mcp_servers.${name}.env`] = s.env;
-    // The orchestrator runs with approvalPolicy "never"; our own tools must not need approval.
+    // App-owned bridge tools enforce their role and scope rules themselves.
     out[`mcp_servers.${name}.default_tools_approval_mode`] = "approve";
     // Consults can run for a long time.
     out[`mcp_servers.${name}.tool_timeout_sec`] = 24 * 3600;

@@ -68,11 +68,11 @@ function DiffFile({ file, defaultOpen }: { file: FileDiff; defaultOpen: boolean 
       <button
         className="flex w-full items-center gap-2 bg-card px-3 py-1.5 text-left text-[12.5px] hover:bg-accent"
         onClick={() => setOpen(!open)}
-        title={file.path}
+        title={file.movePath ? `${file.path} → ${file.movePath}` : file.path}
       >
         <ChevronRight className={cn("size-3.5 text-muted-foreground transition-transform", open && "rotate-90")} />
         <Icon className="size-3.5 text-muted-foreground" />
-        <span className="min-w-0 flex-1 truncate font-mono">{shortPath(file.path)}</span>
+        <span className="min-w-0 flex-1 truncate font-mono">{shortPath(file.path)}{file.movePath && ` → ${shortPath(file.movePath)}`}</span>
         <Stats diff={file.diff} />
       </button>
       {open && <DiffBody diff={file.diff} />}

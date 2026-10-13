@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { bridgeServerConfig, textResult, type LocalBridge } from "../local-bridge";
 import { claudeToolDiffs, claudeToolPaths } from "../diffs";
 import { READ_ONLY_TOOLS } from "../approvals";
+import { isReadCommand } from "../execution-policy";
 import { readLines, shutdown } from "../proc";
 import { fileNote, IMAGE_MIMES, MAX_IMAGE_BYTES, type AgentDriver, type AgentInput, type DriverHost, type DriverOptions } from "./types";
 
@@ -29,7 +30,7 @@ export interface ClaudeEnv {
   tmpDir: string;
   /** Extra MCP servers to load (e.g. the orchestrator's consult tools). */
   mcpServers?: () => Record<string, unknown>;
-  /** Tools the CLI must not use (the orchestrator is read-only). */
+  /** Tools the CLI must not use in this session. */
   disallowedTools?: string[];
   /** Tools allowed without a permission prompt (the orchestrator's consult tools). */
   allowedTools?: string[];
@@ -46,6 +47,7 @@ export class ClaudeDriver implements AgentDriver {
   private nativeId: string | null;
   private _running = false;
   private stopping = false;
+  private noWrites = false;
   private bridgeKey?: string;
   private toolInputs = new Map<string, { name: string; input: any }>();
 
@@ -96,10 +98,14 @@ export class ClaudeDriver implements AgentDriver {
       "--include-partial-messages",
       "--mcp-config", mcpFile,
       "--permission-prompt-tool", "mcp__chatterbox_approver__approve",
+      "--permission-mode", this.noWrites || this.opts.readOnly ? "plan" : "default",
+      // Ask rules precede user allow rules. Keep every mutation behind the app's current policy.
+      "--settings", JSON.stringify({ permissions: { ask: [...WRITE_TOOLS, ...SHELL_TOOLS] } }),
     ];
     if (this.opts.model) args.push("--model", this.opts.model);
     if (this.opts.instructions) args.push("--append-system-prompt", this.opts.instructions);
-    if (this.env.disallowedTools?.length) args.push("--disallowedTools", this.env.disallowedTools.join(","));
+    const disallowed = [...(this.env.disallowedTools ?? []), ...(this.noWrites ? [...WRITE_TOOLS] : [])];
+    if (disallowed.length) args.push("--disallowedTools", disallowed.join(","));
     if (this.env.allowedTools?.length) args.push("--allowedTools", this.env.allowedTools.join(","));
     if (this.env.tools) args.push("--tools", this.env.tools.join(","));
     if (this.env.strictMcp) args.push("--strict-mcp-config");
@@ -221,6 +227,8 @@ export class ClaudeDriver implements AgentDriver {
   private async onPermission(req: PermissionRequest): Promise<PermissionResult> {
     const input: any = req.input ?? {};
     const command = SHELL_TOOLS.has(req.tool_name) && typeof input.command === "string" ? input.command : undefined;
+    if ((this.noWrites || this.opts.readOnly) && (WRITE_TOOLS.has(req.tool_name) || (command && !isReadCommand(command))))
+      return { behavior: "deny", message: "계획·리뷰·판단 세션에서는 파일 수정이나 변경 명령을 실행할 수 없습니다." };
     const { verdict, reason } = await this.host.approve({
       title: req.tool_name,
       detail: command ?? formatInput(req.tool_name, input),
@@ -239,6 +247,10 @@ export class ClaudeDriver implements AgentDriver {
 
   async send(input: AgentInput): Promise<void> {
     if (this._running) throw new Error("이전 응답이 아직 진행 중입니다.");
+    if (this.noWrites !== !!input.noWrites) {
+      await this.dispose();
+      this.noWrites = !!input.noWrites;
+    }
     if (!this.child) this.child = this.start();
     this._running = true;
     const images = input.attachments.filter((a) => IMAGE_MIMES.has(a.mime) && a.size <= MAX_IMAGE_BYTES);

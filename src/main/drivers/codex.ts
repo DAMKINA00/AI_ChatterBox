@@ -60,7 +60,7 @@ export class CodexServer {
     child.on("exit", (code) => fail(`codex app-server 종료됨 (code ${code})`));
     this.ready = (async () => {
       await this.request<InitializeResponse>("initialize", {
-        clientInfo: { name: "ai_chatterbox", title: "AI_ChatterBox", version: "0.2.0" },
+        clientInfo: { name: "ai_chatterbox", title: "AI_ChatterBox", version: "0.3.1" },
         capabilities: { experimentalApi: false, requestAttestation: false },
       });
       this.write({ method: "initialized" });
@@ -167,7 +167,7 @@ export function innerCommand(cmd: string): string {
 }
 
 function toDiffs(changes: FileUpdateChange[]): FileDiff[] {
-  return changes.map((c) => ({ path: c.path, kind: c.kind.type, diff: c.diff }));
+  return changes.map((c) => ({ path: c.path, kind: c.kind.type, diff: c.diff, ...(c.kind.type === "update" && c.kind.move_path ? { movePath: c.kind.move_path } : {}) }));
 }
 
 export interface CodexTurnResult {
@@ -203,6 +203,15 @@ export class CodexDriver implements AgentDriver {
 
   private async ensureThread(): Promise<string> {
     await this.server.ensure();
+    if (this.opts.readOnly && !this.judgeConfigured) {
+      const inherited = await this.server.request<any>("config/read", { includeLayers: false, cwd: this.opts.cwd });
+      const config: Record<string, unknown> = { ...this.opts.codexConfig, "web_search": "disabled", "project_doc_max_bytes": 0 };
+      for (const feature of ["shell_tool", "multi_agent", "multi_agent_v2", "apps", "plugins", "browser_use", "computer_use", "image_generation", "view_image", "hooks", "tool_suggest", "sleep_tool"])
+        config[`features.${feature}`] = false;
+      for (const name of Object.keys(inherited?.config?.mcp_servers ?? {})) config[`mcp_servers.${name}.enabled`] = false;
+      this.opts.codexConfig = config;
+      this.judgeConfigured = true;
+    }
     if (!this.threadId) {
       const params: ThreadStartParams = {
         cwd: this.opts.cwd,
@@ -260,11 +269,13 @@ export class CodexDriver implements AgentDriver {
     return this.threadId;
   }
 
-  /** Orchestrator: read-only sandbox and no escalation requests. Workers: workspace writes, ask for the rest. */
-  private policy(): Pick<ThreadStartParams, "approvalPolicy" | "sandbox"> {
+  private judgeConfigured = false;
+
+  /** The judge cannot escalate. Other roles route writes through the client's approval gate. */
+  private policy(): Pick<ThreadStartParams, "approvalPolicy" | "approvalsReviewer" | "sandbox"> {
     return this.opts.readOnly
-      ? { approvalPolicy: "never", sandbox: "read-only" }
-      : { approvalPolicy: "on-request", sandbox: "workspace-write" };
+      ? { approvalPolicy: "never", approvalsReviewer: "user", sandbox: "read-only" }
+      : { approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: "read-only" };
   }
 
   /** Model for the next turn (turn/start applies it to this and later turns). */
@@ -288,12 +299,10 @@ export class CodexDriver implements AgentDriver {
         threadId,
         input: items,
         model: this.opts.model || null,
-        // Scoped work: read-only turn, so file writes ask for approval and are checked against the scope.
-        sandboxPolicy: this.opts.readOnly
-          ? null
-          : input.readOnlyTurn
-            ? { type: "readOnly", networkAccess: false }
-            : { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false },
+        // The OS token may be elevated; sandbox writes still require our approval on every role.
+        approvalPolicy: this.opts.readOnly || input.noWrites ? "never" : "on-request",
+        approvalsReviewer: "user",
+        sandboxPolicy: { type: "readOnly", networkAccess: false },
       };
       const r = await this.server.request<TurnStartResponse>("turn/start", params);
       this.turnKnown(r.turn.id);
@@ -356,9 +365,9 @@ export class CodexDriver implements AgentDriver {
             paths: p.cwd ? [p.cwd] : [],
           })
           .then(({ verdict: v }) => {
-            const decision: CommandExecutionApprovalDecision = v === "deny" ? "decline" : v === "allow_chat" ? "acceptForSession" : "accept";
+            const decision: CommandExecutionApprovalDecision = v === "deny" ? "decline" : "accept";
             this.server.respond(req.id, { decision });
-          });
+          }).catch(() => this.server.respond(req.id, { decision: "decline" }));
         return true;
       }
       case "item/fileChange/requestApproval": {
@@ -367,19 +376,25 @@ export class CodexDriver implements AgentDriver {
         void this.host
           .approve({
             title: "파일 변경",
-            detail: diffs.map((d) => `${d.kind} ${d.path}`).join("\n") || p.grantRoot || "",
+            detail: diffs.map((d) => `${d.kind} ${d.path}${d.movePath ? ` → ${d.movePath}` : ""}`).join("\n") || p.grantRoot || "",
             reason: p.reason ?? undefined,
             key: "fileChange",
-            paths: [...diffs.map((d) => d.path), ...(p.grantRoot ? [p.grantRoot] : [])],
+            // grantRoot describes the approval root, not an additional file being modified.
+            paths: diffs.length ? diffs.flatMap((d) => d.movePath ? [d.path, d.movePath] : [d.path]) : p.grantRoot ? [p.grantRoot] : [],
             diffs,
             writes: true,
           })
           .then(({ verdict: v }) => {
-            const decision: FileChangeApprovalDecision = v === "deny" ? "decline" : v === "allow_chat" ? "acceptForSession" : "accept";
+            const decision: FileChangeApprovalDecision = v === "deny" ? "decline" : "accept";
             this.server.respond(req.id, { decision });
-          });
+          }).catch(() => this.server.respond(req.id, { decision: "decline" }));
         return true;
       }
+      case "item/permissions/requestApproval":
+        // A broad grant would bypass later scope/policy checks. Approve the concrete command or patch instead.
+        this.server.respond(req.id, { permissions: {}, scope: "turn" });
+        this.host.emit({ type: "notice", text: "권한 일괄 부여 대신 실제 파일 변경·명령별로 승인합니다." });
+        return true;
       default:
         return false;
     }
@@ -448,8 +463,13 @@ export class CodexDriver implements AgentDriver {
       case "fileChange": {
         const diffs = toDiffs(item.changes);
         this.fileItems.set(item.id, diffs);
+        if (!done) this.host.emit({ type: "tool_call", id: item.id, name: "파일 변경", input: diffs.map((d) => d.path).join("\n"), diffs });
         if (done) {
-          if (item.status === "completed") for (const d of diffs) this.turnFiles.add(d.path);
+          if (item.status === "completed") for (const d of diffs) {
+            this.turnFiles.add(d.path);
+            if (d.movePath) this.turnFiles.add(d.movePath);
+          }
+          this.host.emit({ type: "tool_result", id: item.id, ok: item.status === "completed", output: item.status === "completed" ? "파일 변경 적용" : "파일 변경 미적용" });
           this.host.emit({ type: "file_change", id: item.id, files: diffs, ok: item.status === "completed" });
         }
         break;

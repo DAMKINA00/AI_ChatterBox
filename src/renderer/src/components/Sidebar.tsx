@@ -495,9 +495,13 @@ function RenameDialog({ value, onClose }: { value: { kind: "chat" | "project"; i
             onSubmit={async (e) => {
               e.preventDefault();
               if (!text.trim()) return;
-              if (value.kind === "chat") await updateChat(value.id, { title: text.trim() });
-              else await updateProject(value.id, { name: text.trim() });
-              onClose();
+              if (value.kind === "chat") {
+                await updateChat(value.id, { title: text.trim() });
+                onClose();
+              } else {
+                const saved = await updateProject(value.id, { name: text.trim() });
+                if (saved) onClose();
+              }
             }}
           >
             <Input autoFocus value={text} onChange={(e) => setText(e.target.value)} aria-label="새 이름" />

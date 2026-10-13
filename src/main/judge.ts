@@ -12,12 +12,13 @@ import { diffStatsText } from "./diffs";
 
 const JUDGE_INSTRUCTIONS = [
   "# 역할: AI_ChatterBox 승인 판단",
-  "너는 마스터를 대신해 작업자(클로드 N호, 지피티 N호)의 승인 요청을 판단한다. 도구는 쓰지 않는다.",
+  "너는 별도의 승인 판단 세션으로 마스터와 작업자(클로드 N호, 지피티 N호)의 요청을 판단한다. 도구는 쓰지 않는다.",
   '답은 JSON 한 줄만 쓴다: {"decision":"allow"|"deny"|"ask_user","reason":"한국어 한 문장"}',
   "기준:",
   "- allow: 지금 맡긴 일에 필요하고, 작업 폴더 안에서 되돌릴 수 있는 작업. 예: 파일 생성·수정, 빌드·테스트·린트·타입 검사 실행, 프로젝트 스크립트 실행, 파일 읽기와 검색.",
   "- deny: 맡긴 일과 무관하거나 해로운 작업. 예: 작업 폴더 전체나 홈 폴더 삭제, 비밀·자격 증명 읽기나 외부 전송, 리뷰·의견 요청인데 파일을 고치려는 작업.",
-  "- ask_user: 사용자가 결정해야 하는 작업. 예: 작업 폴더 밖에 쓰기, git push나 기록 변경, 전역 패키지 설치처럼 환경을 바꾸는 작업, 판단이 애매한 경우.",
+  "- 고위험 위임이 켜졌으면: 사용자가 명시한 작업을 수행하는 데 필요하고 범위가 분명한 작업 폴더 밖 쓰기, git push, 환경·시스템 변경 등도 allow 가능하다. 위임은 무조건 허용이 아니다. 사용자 지시와 무관한 작업은 deny, 대상·결과가 불명확하면 ask_user.",
+  "- 고위험 위임이 꺼졌으면: 작업 폴더 밖 쓰기, git push나 기록 변경, 전역 설치·시스템 변경은 ask_user. 판단이 애매하거나 사용자 선택이 필요하면 항상 ask_user.",
   "이유는 짧고 구체적으로 쓴다 (예: '테스트 실행, 작업 폴더 안').",
 ].join("\n");
 
@@ -46,7 +47,7 @@ export class ApprovalJudge {
     const chat = this.chats.store.chat(chatId)!;
     const project = this.chats.store.project(chat.projectId)!;
     const { agent, model } = chatOrchestrator(chat, project);
-    const key = `${agent}:${model}:${project.folder}`;
+    const key = `${agent}:${model}:${project.folder}:${project.settings.delegateHighRisk}`;
     const cur = this.sessions.get(chatId);
     if (cur && cur.key === key) return cur;
     if (cur) void cur.driver.dispose();
@@ -55,6 +56,11 @@ export class ApprovalJudge {
     const host = {
       emit: (e: AgentEvent) => {
         if (e.type === "text") s.text = e.text;
+        else if (e.type === "tool_call") {
+          // A judge must answer from the supplied action, never investigate with tools.
+          s.done?.(false);
+          void s.driver.stop();
+        }
         else if (e.type === "turn_end") s.done?.(!!e.ok);
       },
       nativeId: () => undefined,
@@ -84,7 +90,7 @@ export class ApprovalJudge {
   decide(chatId: number, request: ApprovalRequest, input: ApprovalInput): Promise<JudgeAnswer | null> {
     const s = this.session(chatId);
     // One question at a time per chat.
-    const run = s.queue.then(() => this.ask(chatId, s, request, input));
+    const run = s.queue.then(() => this.sessions.get(chatId) === s ? this.ask(chatId, s, request, input) : null);
     s.queue = run.catch(() => undefined);
     return run;
   }
@@ -97,7 +103,8 @@ export class ApprovalJudge {
     const prompt = [
       "[승인 요청]",
       `작업 폴더: ${project.folder}`,
-      `요청한 작업자: ${roleName(request.role, this.chats.store.listAgents(chatId))}`,
+      `고위험 위임: ${project.settings.delegateHighRisk ? "켜짐 (사용자 지시 범위 안에서 판단)" : "꺼짐 (직접 사용자 확인)"}`,
+      `요청한 역할: ${roleName(request.role, this.chats.store.listAgents(chatId))}`,
       ctx.instruction ? `사용자 지시: ${clip(ctx.instruction, 1500)}` : "사용자 지시: (알 수 없음)",
       ctx.consult
         ? `맡은 일 (${CONSULT_KIND_LABEL[ctx.consult.kind]}, ${ctx.consult.who}${ctx.consult.scope.length ? `, 고칠 수 있는 범위: ${ctx.consult.scope.join(", ")}` : ""}): ${clip(ctx.consult.message, 2500)}`
@@ -115,20 +122,29 @@ export class ApprovalJudge {
 
     s.text = "";
     const ended = new Promise<boolean>((resolve) => (s.done = resolve));
-    const timeout = new Promise<false>((resolve) =>
-      setTimeout(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<false>((resolve) => {
+      timer = setTimeout(() => {
         void s.driver.stop();
         resolve(false);
-      }, 120_000),
-    );
+      }, 120_000);
+    });
+    let completed = false;
     try {
-      await s.driver.send({ text: prompt, attachments: [] });
+      const ok = await Promise.race([s.driver.send({ text: prompt, attachments: [] }).then(() => ended), timeout]);
+      completed = ok;
+      return ok ? parseAnswer(s.text) : null;
     } catch {
       return null;
+    } finally {
+      clearTimeout(timer);
+      s.done = undefined;
+      if (!completed) {
+        if (this.sessions.get(chatId) === s) this.sessions.delete(chatId);
+        await s.driver.stop().catch(() => undefined);
+        await s.driver.dispose().catch(() => undefined);
+      }
     }
-    const ok = await Promise.race([ended, timeout]);
-    s.done = undefined;
-    return ok ? parseAnswer(s.text) : null;
   }
 
   forget(chatId: number) {

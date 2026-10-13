@@ -1,23 +1,29 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, Check, ChevronDown, History, ImagePlus, Loader2, Paperclip, RotateCcw, SendHorizontal, ShieldCheck, Square, Workflow, X } from "lucide-react";
+import { ArrowDown, Check, ChevronDown, CircleAlert, History, ImagePlus, Loader2, Paperclip, RotateCcw, SendHorizontal, ShieldCheck, Square, Workflow, X } from "lucide-react";
 import {
   APPROVAL_MODE_LABEL,
   parseOrchestrator,
   roleName,
   MASTER_LABEL,
   CONSULT_KIND_LABEL,
+  type AgentExpression,
   type ApprovalMode,
   type AttachmentRef,
   type Chat,
+  type ChatAgent,
+  type Consult,
   type NodeId,
   type Project,
+  type Role,
+  type TimelineEvent,
 } from "../../../shared/types";
 import { api, cn, errorMessage } from "../lib/utils";
 import { useStore } from "../store";
-import { buildItems, planOf } from "../timeline";
+import { buildItems, latestExpression, planOf } from "../timeline";
 import { GoalBar, PlanPanel } from "./PlanGoal";
 import { SLASH_COMMANDS, StatusDialog, type SlashCommand } from "./Commands";
 import { AttachmentChip, ItemList, RoleDot } from "./Items";
+import { AgentAvatar } from "./AgentAvatar";
 import { ModelPicker, useModelLabel } from "./ModelPicker";
 import {
   Badge,
@@ -70,7 +76,8 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
         composer.current?.addFiles([...e.dataTransfer.files]);
       }}
     >
-      <ChatHeader chat={chat} project={project} nodeLabel={nodeLabel} busy={busy} />
+      <ChatHeader chat={chat} project={project} nodeLabel={nodeLabel} busy={busy} masterExpression={latestExpression(events ?? [], "orch")} />
+      <TeamChips chat={chat} />
       {!node && <GoalBar chat={chat} />}
       {!node && plan && <PlanPanel chat={chat} plan={plan} onRevise={() => composer.current?.setText("/plan 수정: ")} />}
       <Timeline items={items} chatId={chat.id} busy={busy} empty={!events?.length} loading={!events} />
@@ -96,7 +103,7 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
   );
 }
 
-function ChatHeader({ chat, project, nodeLabel, busy }: { chat: Chat; project: Project; nodeLabel: string | null; busy: boolean }) {
+function ChatHeader({ chat, project, nodeLabel, busy, masterExpression }: { chat: Chat; project: Project; nodeLabel: string | null; busy: boolean; masterExpression: AgentExpression }) {
   const updateChat = useStore((s) => s.updateChat);
   const toast = useStore((s) => s.toast);
   const label = useModelLabel();
@@ -123,6 +130,7 @@ function ChatHeader({ chat, project, nodeLabel, busy }: { chat: Chat; project: P
         </div>
       </div>
       <div className="flex items-center gap-1.5" data-testid="orch-badge">
+        <AgentAvatar kind="orch" expression={masterExpression} size={24} alt="마스터 캐릭터" />
         <RoleDot tone="orch" />
         <span className="text-[12px] text-muted-foreground">마스터</span>
         <ModelPicker
@@ -137,6 +145,7 @@ function ChatHeader({ chat, project, nodeLabel, busy }: { chat: Chat; project: P
         />
       </div>
       <div className="flex items-center gap-1.5">
+        <AgentAvatar kind="claude" size={24} alt="클로드 캐릭터" />
         <RoleDot tone="claude" />
         <span className="text-[12px] text-muted-foreground">클로드</span>
         <ModelPicker
@@ -151,6 +160,7 @@ function ChatHeader({ chat, project, nodeLabel, busy }: { chat: Chat; project: P
         />
       </div>
       <div className="flex items-center gap-1.5">
+        <AgentAvatar kind="gpt" size={24} alt="지피티 캐릭터" />
         <RoleDot tone="gpt" />
         <span className="text-[12px] text-muted-foreground">지피티</span>
         <ModelPicker
@@ -164,7 +174,6 @@ function ChatHeader({ chat, project, nodeLabel, busy }: { chat: Chat; project: P
           resetLabel={`프로젝트 값 사용 (${label("codex", project.settings.codexModel)})`}
         />
       </div>
-      <TeamChips chat={chat} />
       <ApprovalModePicker chat={chat} project={project} />
       {busy && (
         <Button
@@ -194,28 +203,135 @@ function ChatHeader({ chat, project, nodeLabel, busy }: { chat: Chat; project: P
 function TeamChips({ chat }: { chat: Chat }) {
   const agents = useStore((s) => s.agents[chat.id]);
   const consults = useStore((s) => s.consults[chat.id]);
-  const active = (agents ?? []).filter((a) => a.status === "active");
-  if (!active.length) return null;
-  const busy = new Set(consults?.filter((c) => c.status === "running").map((c) => c.toRole));
+  const events = useStore((s) => s.events[chat.id]);
+  const selection = useStore((s) => s.selection);
+  const select = useStore((s) => s.select);
+  const ordered = useMemo(
+    () =>
+      [...(agents ?? [])].sort((a, b) => {
+        const status = (a.status === "active" ? 0 : 1) - (b.status === "active" ? 0 : 1);
+        return status || a.createdAt - b.createdAt || a.id - b.id;
+      }),
+    [agents],
+  );
+  if (!ordered.length) return null;
+  const active = ordered.filter((a) => a.status === "active");
+  const released = ordered.filter((a) => a.status === "released");
   return (
     <Tooltip content="작업자가 많을수록 사용량이 빨리 줄어요">
-      <div className="flex max-w-[40%] flex-wrap items-center gap-1" data-testid="team-chips">
-        {active.map((a) => (
-          <span
-            key={a.id}
-            className={cn(
-              "inline-flex h-6 items-center gap-1 rounded-full border px-2 text-[11.5px]",
-              busy.has(a.key) ? "border-primary/40 bg-primary/8" : "text-muted-foreground",
-            )}
-            data-testid="team-chip"
-            data-state={busy.has(a.key) ? "working" : "idle"}
-          >
-            {busy.has(a.key) ? <Loader2 className={cn("size-3 animate-spin", a.kind === "claude" ? "text-claude" : "text-gpt")} /> : <RoleDot tone={a.kind} />}
-            {a.nickname}
-          </span>
-        ))}
+      <div className="border-b px-4 py-2" data-testid="team-chips">
+        <div className="flex items-center gap-2 overflow-x-auto whitespace-nowrap">
+          {active.map((a) => (
+            <WorkerChip
+              key={a.id}
+              agent={a}
+              selected={selection?.chatId === chat.id && selection.node === a.key}
+              status={workerStatus(a.key, events, consults)}
+              expression={latestExpression(events ?? [], a.key)}
+              onSelect={() => void select({ chatId: chat.id, node: a.key })}
+            />
+          ))}
+          {released.length > 0 && (
+            <div className="ml-1 flex items-center gap-1.5 border-l pl-2 text-[11px] text-muted-foreground" data-testid="released-workers">
+              <span>해제됨</span>
+              {released.map((a) => (
+                <WorkerChip
+                  key={a.id}
+                  agent={a}
+                  selected={selection?.chatId === chat.id && selection.node === a.key}
+                  status={workerStatus(a.key, events, consults)}
+                  expression={latestExpression(events ?? [], a.key)}
+                  onSelect={() => void select({ chatId: chat.id, node: a.key })}
+                />
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </Tooltip>
+  );
+}
+
+type WorkerStatus = "working" | "approval" | "error" | "idle";
+
+const WORKER_STATUS_LABEL: Record<WorkerStatus, string> = { working: "작업 중", approval: "승인 대기", error: "오류", idle: "대기" };
+
+function workerStatus(role: Role, events: TimelineEvent[] | undefined, consults: Consult[] | undefined): WorkerStatus {
+  const pending = new Set<string>();
+  let state: WorkerStatus = "idle";
+  for (const e of events ?? []) {
+    if (e.event.type === "approval_request" && e.event.request.role === role) pending.add(e.event.request.id);
+    else if (e.event.type === "approval_resolved") pending.delete(e.event.id);
+    if (e.role !== role) continue;
+    switch (e.event.type) {
+      case "error":
+        state = "error";
+        break;
+      case "turn_end":
+        state = e.event.interrupted || e.event.ok ? "idle" : "error";
+        break;
+      case "text_delta":
+      case "tool_call":
+      case "tool_result":
+      case "file_change":
+      case "consult_start":
+        state = "working";
+        break;
+      case "approval_resolved":
+        state = "working";
+        break;
+    }
+  }
+  if (pending.size) return "approval";
+  if (consults?.some((c) => c.toRole === role && c.status === "running")) return "working";
+  const latestConsult = consults
+    ?.filter((c) => c.toRole === role)
+    .sort((a, b) => (a.endedAt ?? a.startedAt) - (b.endedAt ?? b.startedAt))
+    .at(-1);
+  if (latestConsult?.status === "error") return "error";
+  return state;
+}
+
+function WorkerChip({
+  agent,
+  selected,
+  status,
+  expression,
+  onSelect,
+}: {
+  agent: ChatAgent;
+  selected: boolean;
+  status: WorkerStatus;
+  expression: AgentExpression;
+  onSelect: () => void;
+}) {
+  const released = agent.status === "released";
+  return (
+    <button
+      type="button"
+      className={cn(
+        "inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border px-2 text-[11.5px] transition-colors",
+        selected ? "border-primary bg-primary/10 text-foreground" : status === "working" ? "border-primary/40 bg-primary/8" : "text-muted-foreground",
+        released && "text-muted-foreground opacity-60 grayscale",
+      )}
+      data-testid="team-chip"
+      data-state={status}
+      data-role={agent.key}
+      data-selected={selected}
+      aria-pressed={selected}
+      aria-label={`${agent.nickname} ${WORKER_STATUS_LABEL[status]} 기록 열기`}
+      onClick={onSelect}
+    >
+      <AgentAvatar kind={agent.kind} expression={expression} size={32} alt={`${agent.nickname} 캐릭터`} className={released ? "grayscale" : undefined} />
+      <RoleDot tone={agent.kind} />
+      <span>{agent.nickname}</span>
+      <Badge className={cn("h-5 px-1.5 text-[10px] font-normal", status === "working" && "border-primary/30 text-primary", status === "approval" && "border-warning/40 text-warning", status === "error" && "border-destructive/40 text-destructive")}>
+        {status === "working" && <Loader2 className="size-3 animate-spin" />}
+        {status === "approval" && <ShieldCheck className="size-3" />}
+        {status === "error" && <CircleAlert className="size-3" />}
+        {WORKER_STATUS_LABEL[status]}
+      </Badge>
+    </button>
   );
 }
 

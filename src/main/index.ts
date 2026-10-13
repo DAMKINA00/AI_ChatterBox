@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, protocol, shell, nativeTheme, screen } from "electron";
-import { mkdirSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentKind, ApprovalDecision, ModelOption, ProjectSettings, Theme } from "../shared/types";
 import { Store } from "./db";
@@ -123,8 +123,13 @@ function registerIpc() {
     return store.createProject(input.name.trim() || "새 프로젝트", input.folder, input.settings);
   });
   ipcMain.handle("projects:update", async (_e, id: number, patch) => {
+    if (patch.folder !== undefined && (!patch.folder || !existsSync(patch.folder) || !statSync(patch.folder).isDirectory()))
+      throw new Error("작업 폴더가 없습니다.");
     const before = store.project(id);
     const p = store.updateProject(id, patch);
+    if (patch.settings || patch.folder) {
+      for (const c of store.listChats().filter((c) => c.projectId === id)) chats.approvals.invalidate(c.id);
+    }
     // A new folder means new working directories for every CLI conversation.
     if (before && patch.folder && patch.folder !== before.folder)
       for (const c of store.listChats().filter((c) => c.projectId === id)) await chats.resetDrivers(c.id);

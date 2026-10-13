@@ -1,7 +1,7 @@
 {
   "name": "ai-chatterbox",
   "productName": "AI_ChatterBox",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Desktop chat front-end for Claude Code and Codex",
   "main": "out/main/index.js",
@@ -11,6 +11,8 @@
     "build": "electron-vite build",
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test": "node scripts/test-unit.mjs",
+    "test:ui": "electron-vite build && node scripts/e2e-settings-workers.mjs",
     "codex:schema": "node scripts/gen-codex-schema.mjs",
     "e2e:v1": "electron-vite build && node scripts/e2e-v1.mjs",
     "dist": "electron-vite build && electron-builder --win portable --x64"
@@ -36,6 +38,7 @@
       "out/main/bridge-mcp.js"
     ],
     "win": {
+      "requestedExecutionLevel": "requireAdministrator",
       "icon": "build/icon.png",
       "target": [
         {
@@ -47,6 +50,7 @@
       ]
     },
     "portable": {
+      "requestExecutionLevel": "admin",
       "artifactName": "AI_ChatterBox-${version}-portable.exe"
     }
   },

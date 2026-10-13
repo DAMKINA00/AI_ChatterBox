@@ -3,6 +3,12 @@ import type { ProviderUsage } from "./usage";
 
 export type AgentKind = "claude" | "codex";
 
+export const AGENT_EXPRESSIONS = ["neutral", "thinking", "speaking", "happy", "confident", "surprised", "embarrassed", "worried", "sad", "angry", "tired", "waiting"] as const;
+export type AgentExpression = (typeof AGENT_EXPRESSIONS)[number];
+export function isAgentExpression(value: unknown): value is AgentExpression {
+  return typeof value === "string" && (AGENT_EXPRESSIONS as readonly string[]).includes(value);
+}
+
 export const AGENT_LABEL: Record<AgentKind, string> = { claude: "Claude", codex: "Codex" };
 
 /**
@@ -178,6 +184,8 @@ export interface AttachmentRef {
 
 export interface FileDiff {
   path: string;
+  /** Rename destination; both source and destination must pass scope checks. */
+  movePath?: string;
   kind: "add" | "update" | "delete";
   /** Unified diff text (may be empty when unknown). */
   diff: string;
@@ -204,6 +212,7 @@ export type ApprovalDecision = "once" | "chat" | "deny";
 
 /** Normalized event stream. Every event also carries the agent that produced it (see TimelineEvent). */
 export type AgentEvent =
+  | { type: "expression"; expression: AgentExpression }
   | { type: "user"; text: string; attachments: AttachmentRef[]; queued?: boolean }
   | { type: "text_delta"; text: string }
   | { type: "text"; text: string }

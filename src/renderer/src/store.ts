@@ -54,7 +54,7 @@ interface State {
   loadModels(agent: AgentKind): Promise<void>;
 
   createProject(input: { name: string; folder: string; settings: ProjectSettings }): Promise<Project | null>;
-  updateProject(id: number, patch: Parameters<typeof api.updateProject>[1]): Promise<void>;
+  updateProject(id: number, patch: Parameters<typeof api.updateProject>[1]): Promise<boolean>;
   deleteProject(id: number): Promise<void>;
   createChat(projectId: number): Promise<Chat | null>;
   updateChat(id: number, patch: Parameters<typeof api.updateChat>[1]): Promise<void>;
@@ -224,8 +224,10 @@ export const useStore = create<State>((set, get) => ({
     try {
       const p = await api.updateProject(id, patch);
       set((s) => ({ projects: s.projects.map((x) => (x.id === id ? p : x)) }));
+      return true;
     } catch (e) {
       get().toast(errorMessage(e));
+      return false;
     }
   },
   async deleteProject(id) {

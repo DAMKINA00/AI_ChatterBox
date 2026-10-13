@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI ChatterBox character gallery</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: "Segoe UI", "Pretendard", system-ui, sans-serif;
+        background: #f3f4f6;
+        color: #18202b;
+      }
+
+      * { box-sizing: border-box; }
+      body { margin: 0; }
+      main { max-width: 1180px; margin: 0 auto; padding: 40px 28px 56px; }
+      h1, h2, h3, p { margin: 0; }
+      h1 { font-size: 28px; letter-spacing: -0.02em; }
+      h2 { font-size: 18px; }
+      h3 { font-size: 14px; }
+      .intro { margin: 10px 0 28px; color: #5b6470; font-size: 14px; }
+      .role-section { margin-top: 26px; }
+      .role-heading { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
+      .role-heading span { color: #6a7480; font-size: 12px; font-weight: 400; }
+      .expression-grid { display: grid; grid-template-columns: repeat(6, minmax(120px, 1fr)); gap: 12px; }
+      figure { margin: 0; }
+      .expression-card { display: grid; justify-items: center; gap: 8px; padding: 14px 8px 12px; border: 1px solid #dce1e7; border-radius: 14px; background: #fff; box-shadow: 0 2px 8px rgb(31 41 55 / 5%); }
+      .expression-card img { display: block; width: 128px; height: 128px; object-fit: contain; }
+      figcaption { color: #46515d; font-size: 12px; }
+      .samples { margin-top: 46px; }
+      .samples > h2 { margin-bottom: 12px; }
+      .surface-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+      .surface { min-height: 190px; padding: 18px; border: 1px solid #dce1e7; border-radius: 16px; }
+      .surface h3 { margin-bottom: 16px; }
+      .light { background: #fff; color: #18202b; }
+      .dark { border-color: #303946; background: #111722; color: #eef2f7; }
+      .sample-groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+      .sample-group { display: grid; gap: 8px; }
+      .sample-group strong { font-size: 12px; font-weight: 600; }
+      .sample-row { display: flex; align-items: end; gap: 5px; min-height: 52px; }
+      .sample-row img { display: block; object-fit: contain; }
+      .s24 { width: 24px; height: 24px; }
+      .s32 { width: 32px; height: 32px; }
+      .s36 { width: 36px; height: 36px; }
+      .size-label { color: #7c8793; font-size: 10px; }
+      .dark .size-label { color: #9ba7b5; }
+
+      @media (max-width: 900px) {
+        .expression-grid { grid-template-columns: repeat(4, minmax(120px, 1fr)); }
+      }
+
+      @media (max-width: 620px) {
+        main { padding: 28px 16px 40px; }
+        .expression-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+        .surface-grid, .sample-groups { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Character expression gallery</h1>
+      <p class="intro">Renderer character assets. Every expression is shown at 128px; the samples below show the header, worker chip, and message sizes on light and dark surfaces.</p>
+
+      <section class="role-section" aria-labelledby="orch-heading">
+        <div class="role-heading"><h2 id="orch-heading">Orchestrator</h2><span>orch</span></div>
+        <div class="expression-grid">
+          <figure class="expression-card"><img src="../src/renderer/public/characters/orch/neutral.png" width="128" height="128" alt="orch neutral" /><figcaption>neutral</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/orch/thinking.png" width="128" height="128" alt="orch thinking" /><figcaption>thinking</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/orch/speaking.png" width="128" height="128" alt="orch speaking" /><figcaption>speaking</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/orch/happy.png" width="128" height="128" alt="orch happy" /><figcaption>happy</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/orch/confident.png" width="128" height="128" alt="orch confident" /><figcaption>confident</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/orch/surprised.png" width="128" height="128" alt="orch surprised" /><figcaption>surprised</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/orch/embarrassed.png" width="128" height="128" alt="orch embarrassed" /><figcaption>embarrassed</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/orch/worried.png" width="128" height="128" alt="orch worried" /><figcaption>worried</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/orch/sad.png" width="128" height="128" alt="orch sad" /><figcaption>sad</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/orch/angry.png" width="128" height="128" alt="orch angry" /><figcaption>angry</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/orch/tired.png" width="128" height="128" alt="orch tired" /><figcaption>tired</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/orch/waiting.png" width="128" height="128" alt="orch waiting" /><figcaption>waiting</figcaption></figure>
+        </div>
+      </section>
+
+      <section class="role-section" aria-labelledby="claude-heading">
+        <div class="role-heading"><h2 id="claude-heading">Claude worker</h2><span>claude</span></div>
+        <div class="expression-grid">
+          <figure class="expression-card"><img src="../src/renderer/public/characters/claude/neutral.png" width="128" height="128" alt="claude neutral" /><figcaption>neutral</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/claude/thinking.png" width="128" height="128" alt="claude thinking" /><figcaption>thinking</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/claude/speaking.png" width="128" height="128" alt="claude speaking" /><figcaption>speaking</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/claude/happy.png" width="128" height="128" alt="claude happy" /><figcaption>happy</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/claude/confident.png" width="128" height="128" alt="claude confident" /><figcaption>confident</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/claude/surprised.png" width="128" height="128" alt="claude surprised" /><figcaption>surprised</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/claude/embarrassed.png" width="128" height="128" alt="claude embarrassed" /><figcaption>embarrassed</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/claude/worried.png" width="128" height="128" alt="claude worried" /><figcaption>worried</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/claude/sad.png" width="128" height="128" alt="claude sad" /><figcaption>sad</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/claude/angry.png" width="128" height="128" alt="claude angry" /><figcaption>angry</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/claude/tired.png" width="128" height="128" alt="claude tired" /><figcaption>tired</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/claude/waiting.png" width="128" height="128" alt="claude waiting" /><figcaption>waiting</figcaption></figure>
+        </div>
+      </section>
+
+      <section class="role-section" aria-labelledby="gpt-heading">
+        <div class="role-heading"><h2 id="gpt-heading">GPT worker</h2><span>gpt</span></div>
+        <div class="expression-grid">
+          <figure class="expression-card"><img src="../src/renderer/public/characters/gpt/neutral.png" width="128" height="128" alt="gpt neutral" /><figcaption>neutral</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/gpt/thinking.png" width="128" height="128" alt="gpt thinking" /><figcaption>thinking</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/gpt/speaking.png" width="128" height="128" alt="gpt speaking" /><figcaption>speaking</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/gpt/happy.png" width="128" height="128" alt="gpt happy" /><figcaption>happy</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/gpt/confident.png" width="128" height="128" alt="gpt confident" /><figcaption>confident</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/gpt/surprised.png" width="128" height="128" alt="gpt surprised" /><figcaption>surprised</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/gpt/embarrassed.png" width="128" height="128" alt="gpt embarrassed" /><figcaption>embarrassed</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/gpt/worried.png" width="128" height="128" alt="gpt worried" /><figcaption>worried</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/gpt/sad.png" width="128" height="128" alt="gpt sad" /><figcaption>sad</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/gpt/angry.png" width="128" height="128" alt="gpt angry" /><figcaption>angry</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/gpt/tired.png" width="128" height="128" alt="gpt tired" /><figcaption>tired</figcaption></figure>
+          <figure class="expression-card"><img src="../src/renderer/public/characters/gpt/waiting.png" width="128" height="128" alt="gpt waiting" /><figcaption>waiting</figcaption></figure>
+        </div>
+      </section>
+
+      <section class="samples" aria-labelledby="samples-heading">
+        <h2 id="samples-heading">Renderer size samples</h2>
+        <div class="surface-grid">
+          <article class="surface light">
+            <h3>Light background</h3>
+            <div class="sample-groups">
+              <div class="sample-group"><strong>orch · happy</strong><div class="sample-row"><img class="s24" src="../src/renderer/public/characters/orch/happy.png" alt="orch happy 24px" /><span class="size-label">24</span><img class="s32" src="../src/renderer/public/characters/orch/happy.png" alt="orch happy 32px" /><span class="size-label">32</span><img class="s36" src="../src/renderer/public/characters/orch/happy.png" alt="orch happy 36px" /><span class="size-label">36</span></div></div>
+              <div class="sample-group"><strong>claude · thinking</strong><div class="sample-row"><img class="s24" src="../src/renderer/public/characters/claude/thinking.png" alt="claude thinking 24px" /><span class="size-label">24</span><img class="s32" src="../src/renderer/public/characters/claude/thinking.png" alt="claude thinking 32px" /><span class="size-label">32</span><img class="s36" src="../src/renderer/public/characters/claude/thinking.png" alt="claude thinking 36px" /><span class="size-label">36</span></div></div>
+              <div class="sample-group"><strong>gpt · speaking</strong><div class="sample-row"><img class="s24" src="../src/renderer/public/characters/gpt/speaking.png" alt="gpt speaking 24px" /><span class="size-label">24</span><img class="s32" src="../src/renderer/public/characters/gpt/speaking.png" alt="gpt speaking 32px" /><span class="size-label">32</span><img class="s36" src="../src/renderer/public/characters/gpt/speaking.png" alt="gpt speaking 36px" /><span class="size-label">36</span></div></div>
+            </div>
+          </article>
+          <article class="surface dark">
+            <h3>Dark background</h3>
+            <div class="sample-groups">
+              <div class="sample-group"><strong>orch · happy</strong><div class="sample-row"><img class="s24" src="../src/renderer/public/characters/orch/happy.png" alt="orch happy 24px" /><span class="size-label">24</span><img class="s32" src="../src/renderer/public/characters/orch/happy.png" alt="orch happy 32px" /><span class="size-label">32</span><img class="s36" src="../src/renderer/public/characters/orch/happy.png" alt="orch happy 36px" /><span class="size-label">36</span></div></div>
+              <div class="sample-group"><strong>claude · thinking</strong><div class="sample-row"><img class="s24" src="../src/renderer/public/characters/claude/thinking.png" alt="claude thinking 24px" /><span class="size-label">24</span><img class="s32" src="../src/renderer/public/characters/claude/thinking.png" alt="claude thinking 32px" /><span class="size-label">32</span><img class="s36" src="../src/renderer/public/characters/claude/thinking.png" alt="claude thinking 36px" /><span class="size-label">36</span></div></div>
+              <div class="sample-group"><strong>gpt · speaking</strong><div class="sample-row"><img class="s24" src="../src/renderer/public/characters/gpt/speaking.png" alt="gpt speaking 24px" /><span class="size-label">24</span><img class="s32" src="../src/renderer/public/characters/gpt/speaking.png" alt="gpt speaking 32px" /><span class="size-label">32</span><img class="s36" src="../src/renderer/public/characters/gpt/speaking.png" alt="gpt speaking 36px" /><span class="size-label">36</span></div></div>
+            </div>
+          </article>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

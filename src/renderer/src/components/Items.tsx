@@ -16,12 +16,13 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { CONSULT_KIND_LABEL, MASTER_LABEL, roleName, roleTone, type AttachmentRef, type Role } from "../../../shared/types";
+import { CONSULT_KIND_LABEL, MASTER_LABEL, roleName, roleTone, type AgentExpression, type AttachmentRef, type Role } from "../../../shared/types";
 import { api, cn, errorMessage, formatBytes } from "../lib/utils";
 import { useStore } from "../store";
 import type { Item } from "../timeline";
 import { Markdown, CopyButton } from "./Markdown";
 import { DiffList, Stats } from "./DiffView";
+import { AgentAvatar, type AvatarSize } from "./AgentAvatar";
 import { Badge, Button, Input } from "./ui";
 
 export type Tone = "orch" | "claude" | "gpt";
@@ -38,10 +39,11 @@ export function useRole(chatId: number, role: Role | null | undefined) {
   return { name: roleName(role, agents), tone: roleTone(role, agents) as Tone };
 }
 
-export function RoleName({ chatId, role }: { chatId: number; role: Role }) {
+export function RoleName({ chatId, role, size = 24, expression }: { chatId: number; role: Role; size?: AvatarSize; expression?: AgentExpression | string | null }) {
   const { name, tone } = useRole(chatId, role);
   return (
     <span className={cn("inline-flex items-center gap-1.5 text-[12px] font-semibold whitespace-nowrap", TONE_TEXT[tone])} data-testid="role-name">
+      <AgentAvatar kind={tone} expression={expression} size={size} alt={`${name} 캐릭터`} />
       <RoleDot tone={tone} />
       {name}
     </span>
@@ -112,8 +114,8 @@ function ItemView({ item, chatId, nested }: { item: Item; chatId: number; nested
       );
     case "message":
       return (
-        <div className="flex flex-col gap-1" data-testid="agent-message" data-role={item.role}>
-          {!nested && <RoleName chatId={chatId} role={item.role} />}
+        <div className="flex flex-col gap-1" data-testid="agent-message" data-role={item.role} data-expression={item.expression}>
+          <RoleName chatId={chatId} role={item.role} size={36} expression={item.expression} />
           <div className={cn("group relative", nested ? "" : "pl-3.5")}>
             <Markdown text={item.text} />
             {item.streaming && <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse-dot rounded-sm bg-primary align-text-bottom" />}
@@ -241,7 +243,7 @@ function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval"
       <div className="flex items-center gap-2">
         {high ? <ShieldAlert className="size-4 text-destructive" /> : <Hand className="size-4 text-warning" />}
         <span className="text-[13px] font-semibold">승인 요청</span>
-        <RoleName chatId={chatId} role={r.role} />
+        <RoleName chatId={chatId} role={r.role} size={24} />
         <Badge className="font-mono">{r.title}</Badge>
         {high && <Badge className="border-destructive/40 text-destructive">위험 · {r.riskReason}</Badge>}
         {status && (
@@ -337,9 +339,9 @@ function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }
       <div className="flex items-center gap-2 px-3 py-2">
         <button className="flex min-w-0 flex-1 items-center gap-2 text-left" onClick={() => setOpen(!expanded)}>
           <ChevronRight className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", expanded && "rotate-90")} />
-          <RoleName chatId={chatId} role={item.from} />
+          <RoleName chatId={chatId} role={item.from} size={24} />
           <ArrowRight className="size-3.5 text-muted-foreground" />
-          <RoleName chatId={chatId} role={item.to} />
+          <RoleName chatId={chatId} role={item.to} size={24} />
           <Badge>{CONSULT_KIND_LABEL[item.consultKind]}</Badge>
           {item.scope && item.scope.length > 0 && (
             <span className="shrink-0 font-mono text-[11px] text-muted-foreground" title={item.scope.join(", ")}>

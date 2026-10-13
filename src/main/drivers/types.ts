@@ -4,8 +4,8 @@ import type { ApprovalInput, VerdictResult } from "../approvals";
 export interface AgentInput {
   text: string;
   attachments: AttachmentRef[];
-  /** Codex: run this turn read-only so every write comes back as an approval (scope checks). */
-  readOnlyTurn?: boolean;
+  /** Enforced planning/review turn: never grant mutations or shell escalation. */
+  noWrites?: boolean;
 }
 
 /** What a driver needs from the chat that owns it. */
@@ -37,7 +37,7 @@ export interface DriverOptions {
   model?: string;
   /** Extra system instructions (Claude --append-system-prompt / Codex developerInstructions). */
   instructions?: string;
-  /** Read-only conversation (the orchestrator): no edits, no shell writes. */
+  /** Tool-less approval judge: no edits or shell escalation. */
   readOnly?: boolean;
   /** Codex thread config overrides (e.g. mcp_servers for the orchestrator's tools). */
   codexConfig?: Record<string, unknown>;

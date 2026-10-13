@@ -27,7 +27,7 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
     setName(project?.name ?? "");
     setFolder(project?.folder ?? "");
     setSettings(project?.settings ?? DEFAULT_SETTINGS);
-  }, [open, project]);
+  }, [open]);
 
   const set = <K extends keyof ProjectSettings>(k: K, v: ProjectSettings[K]) => setSettings((s) => ({ ...s, [k]: v }));
 
@@ -39,11 +39,12 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
   };
 
   const submit = async () => {
+    if (busy) return;
     setBusy(true);
     try {
       if (project) {
-        await updateProject(project.id, { name: name.trim() || project.name, folder, settings });
-        onOpenChange(false);
+        const saved = await updateProject(project.id, { name: name.trim() || project.name, folder, settings });
+        if (saved) onOpenChange(false);
       } else {
         const p = await createProject({ name: name.trim(), folder, settings });
         if (p) {
@@ -86,7 +87,7 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
 
           <div className="grid gap-3 rounded-lg border p-3.5">
             <div className="text-[12px] font-medium text-muted-foreground">모델</div>
-            <ModelRow label="마스터" hint="지시를 받아 팀을 꾸리고 일을 나눕니다 (읽기 전용)">
+            <ModelRow label="마스터" hint="지시를 받아 팀을 꾸리고 일을 나눕니다 (승인 설정에 따라 파일 수정·명령 실행)">
               <ModelPicker agents={["claude", "codex"]} value={settings.orchestratorModel} onChange={(v) => set("orchestratorModel", v as ProjectSettings["orchestratorModel"])} ariaLabel="마스터 모델" />
             </ModelRow>
             <ModelRow label="클로드 작업자" hint="클로드 N호 (Claude Code)">
