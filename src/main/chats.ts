@@ -22,7 +22,8 @@ import type { ChatPatch, Store } from "./db";
 import { LocalBridge } from "./local-bridge";
 import { ApprovalService, type ApprovalInput, type JudgeAnswer } from "./approvals";
 import { findClaude, findCodex } from "./locate";
-import { ClaudeDriver } from "./drivers/claude";
+import { ClaudeDriver, claudeUsageText } from "./drivers/claude";
+import { parseClaudeUsageText } from "../shared/usage";
 import { CodexDriver, CodexServer } from "./drivers/codex";
 import type { AgentDriver, AgentInput, DriverHost } from "./drivers/types";
 
@@ -138,6 +139,15 @@ export class ChatManager {
   }
   usage(): UsageInfo {
     return this.usageState;
+  }
+
+  /** Claude reports limits only inside a model turn; ask its local /usage command instead (0 tokens). */
+  async refreshClaudeUsage() {
+    const exe = findClaude(this.store.getSetting("claudePath"));
+    if (!exe) return;
+    const text = await claudeUsageText(exe, this.tmpDir).catch(() => null);
+    const parsed = text ? parseClaudeUsageText(text) : null;
+    if (parsed) this.mergeUsage({ claude: parsed });
   }
 
   /** Set by the orchestrator: the chat's approval judge. */

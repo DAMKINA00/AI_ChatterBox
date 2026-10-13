@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ChevronDown, Loader2, PencilLine, RotateCcw } from "lucide-react";
 import { AGENT_LABEL, type AgentKind } from "../../../shared/types";
 import { cn } from "../lib/utils";
+import { latestModels } from "../../../shared/models";
 import { useStore } from "../store";
 import {
   Button,
@@ -69,15 +70,15 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
             <span className="flex min-w-0 items-center gap-1.5 truncate">
               {encoded && <span className="text-muted-foreground">{AGENT_LABEL[current.agent]} ·</span>}
               <span className="truncate">{label(current.agent, current.id)}</span>
-              {inherited && <span className="text-[11px] text-muted-foreground">(프로젝트 기본값)</span>}
             </span>
             <ChevronDown className="opacity-60" />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="w-72">
-          {onReset && (
+          {/* Only a chat that overrides the project value can go back to it. */}
+          {onReset && !inherited && (
             <>
-              <DropdownMenuItem onSelect={onReset} disabled={inherited}>
+              <DropdownMenuItem onSelect={onReset}>
                 <RotateCcw />
                 {resetLabel ?? "프로젝트 값 사용"}
               </DropdownMenuItem>
@@ -94,21 +95,18 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
                 </div>
               )}
               {errors[a] && <div className="px-2 py-1.5 text-[12px] text-destructive">{errors[a]}</div>}
-              {models[a]?.map((m) => (
-                <DropdownMenuCheckItem
-                  key={m.id}
-                  checked={current.agent === a && current.id === m.id}
-                  onSelect={() => onChange(make(a, m.id))}
-                >
-                  <span className="flex-1 truncate">{m.label}</span>
-                  <span className="font-mono text-[11px] text-muted-foreground">{m.id}</span>
-                </DropdownMenuCheckItem>
-              ))}
-              {current.agent === a && current.id && models[a] && !models[a]!.some((m) => m.id === current.id) && (
-                <DropdownMenuCheckItem checked onSelect={() => undefined}>
-                  <span className="flex-1 truncate font-mono">{current.id}</span>
-                </DropdownMenuCheckItem>
-              )}
+              {models[a] &&
+                latestModels(a, models[a]!, current.agent === a ? [current.id] : []).map((m) => (
+                  <DropdownMenuCheckItem
+                    key={m.id}
+                    checked={current.agent === a && current.id === m.id}
+                    onSelect={() => onChange(make(a, m.id))}
+                  >
+                    <span className="flex-1 truncate">{m.label}</span>
+                    {m.old && <span className="text-[11px] text-warning">이전 버전</span>}
+                    <span className="font-mono text-[11px] text-muted-foreground">{m.id}</span>
+                  </DropdownMenuCheckItem>
+                ))}
               <DropdownMenuItem
                 onSelect={() => {
                   setCustomText(current.agent === a ? current.id : "");

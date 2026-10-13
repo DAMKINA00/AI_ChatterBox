@@ -18,12 +18,12 @@ function Bar({ name, d, color }: { name: string; d: UsageDisplay | null; color: 
     ? [`${name} ${d.window} 남은 사용량 ${Math.round(d.remaining)}%`, resetText(d.resetsAt), d.warn ? "5시간 한도가 거의 찼습니다" : d.note]
         .filter(Boolean)
         .join(" · ")
-    : `${name}를 한 번 쓰면 표시됩니다`;
+    : "아직 정보 없음 (첫 응답 후 표시)";
   return (
     <Tooltip content={tip}>
       <div className="flex items-center gap-2 text-[11px] text-muted-foreground" data-testid="usage-bar">
         <span className="w-[86px] shrink-0 whitespace-nowrap">
-          {name} <span className={cn(d?.warn && "font-semibold text-destructive")}>{d ? d.window : ""}</span>
+          {name} <span className={cn(d?.warn && "font-semibold text-destructive")}>{d ? d.window : "정보 없음"}</span>
         </span>
         <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
           {d && <div className={cn("h-full rounded-full", d.warn ? "bg-destructive" : color)} style={{ width: `${d.remaining}%` }} />}

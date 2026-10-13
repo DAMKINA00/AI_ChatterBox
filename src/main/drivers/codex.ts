@@ -11,6 +11,8 @@ import type {
   ThreadStartParams,
   ThreadStartResponse,
   ThreadResumeParams,
+  ThreadForkParams,
+  ThreadForkResponse,
   TurnStartParams,
   TurnStartResponse,
   TurnInterruptParams,
@@ -91,7 +93,13 @@ export class CodexServer {
   async models(): Promise<ModelOption[]> {
     await this.ensure();
     const r = await this.request<any>("model/list", {});
-    return (r.data ?? []).map((m: any) => ({ id: m.id, label: m.displayName ?? m.id, isDefault: !!m.isDefault }));
+    return (r.data ?? []).map((m: any) => ({
+      id: m.id,
+      label: m.displayName ?? m.id,
+      isDefault: !!m.isDefault,
+      hidden: !!m.hidden,
+      deprecated: !!m.upgrade,
+    }));
   }
 
   async readUsage(): Promise<void> {
@@ -219,8 +227,35 @@ export class CodexDriver implements AgentDriver {
         config: (this.opts.codexConfig as ThreadResumeParams["config"]) ?? null,
       };
       this.server.attach(this.threadId, this);
-      await this.server.request("thread/resume", params);
-      this.server.loaded.add(this.threadId);
+      try {
+        await this.server.request("thread/resume", params);
+        this.server.loaded.add(this.threadId);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        // Another program (usually the Codex desktop app, which lists our threads) holds the writer
+        // lock. Continue on a fork: same history, new thread id.
+        if (!/active writer|thread-store conflict/i.test(msg)) throw e;
+        const old = this.threadId;
+        const fork: ThreadForkParams = {
+          threadId: old,
+          cwd: this.opts.cwd,
+          ...this.policy(),
+          model: this.opts.model || null,
+          developerInstructions: this.opts.instructions ?? null,
+          config: (this.opts.codexConfig as ThreadForkParams["config"]) ?? null,
+          excludeTurns: true,
+        };
+        const r = await this.server.request<ThreadForkResponse>("thread/fork", fork);
+        this.server.detach(old);
+        this.threadId = r.thread.id;
+        this.server.attach(this.threadId, this);
+        this.server.loaded.add(this.threadId);
+        this.host.nativeId(this.threadId);
+        this.host.emit({
+          type: "notice",
+          text: "다른 프로그램(Codex 앱 등)이 이 대화를 열고 있어서, 같은 기록을 복사한 새 대화로 이어서 진행합니다.",
+        });
+      }
     }
     return this.threadId;
   }
@@ -254,8 +289,11 @@ export class CodexDriver implements AgentDriver {
       this.turnKnown(r.turn.id);
     } catch (e) {
       this._running = false;
-      const message = e instanceof Error ? e.message : String(e);
-      this.host.emit({ type: "error", kind: "process", message: `${message} ${this.server.stderrTail.slice(-500)}`.trim() });
+      const raw = e instanceof Error ? e.message : String(e);
+      const message = /active writer|thread-store conflict/i.test(raw)
+        ? "다른 프로그램(Codex 앱 등)이 이 대화를 열고 있습니다. Codex 앱에서 이 대화를 닫은 뒤 다시 보내 주세요."
+        : raw;
+      this.host.emit({ type: "error", kind: "process", message: message === raw ? `${raw} ${this.server.stderrTail.slice(-300)}`.trim() : message });
       this.host.emit({ type: "turn_end", ok: false, error: message });
       this.finishTurn({ text: "", files: [], status: "failed", error: message });
     }

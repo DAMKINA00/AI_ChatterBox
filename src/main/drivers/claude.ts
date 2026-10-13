@@ -267,6 +267,38 @@ export class ClaudeDriver implements AgentDriver {
   }
 }
 
+/**
+ * Claude's rate-limit usage without a model turn: the local "/usage" command answers from the CLI
+ * (0 tokens). Returns its text, or null.
+ */
+export async function claudeUsageText(exePath: string, cwd: string): Promise<string | null> {
+  const child = spawn(
+    exePath,
+    ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--tools", "", "--strict-mcp-config", "--no-session-persistence"],
+    { cwd, stdio: ["pipe", "pipe", "ignore"], windowsHide: true },
+  );
+  try {
+    return await new Promise<string | null>((resolve) => {
+      const t = setTimeout(() => resolve(null), 30000);
+      readLines(child, (l) => {
+        try {
+          const ev = JSON.parse(l);
+          if (ev.type === "result") {
+            clearTimeout(t);
+            resolve(typeof ev.result === "string" ? ev.result : null);
+          }
+        } catch {
+          // ignore
+        }
+      });
+      child.on("error", () => resolve(null));
+      child.stdin!.write(JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: "/usage" }] } }) + "\n");
+    });
+  } finally {
+    await shutdown(child, 2000);
+  }
+}
+
 /** Model list from the CLI itself (stream-json control_request "initialize" → response.models). */
 export async function listClaudeModels(exePath: string, cwd: string): Promise<{ value: string; displayName: string; description?: string }[]> {
   const child = spawn(exePath, ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"], {

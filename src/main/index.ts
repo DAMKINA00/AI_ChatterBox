@@ -10,8 +10,13 @@ import { Orchestrator } from "./orchestrator";
 import { AppTray } from "./tray";
 import { ensureOnlyInstance } from "./instance-guard";
 
-// Data lives in %APPDATA%\AI_ChatterBox unless overridden (the e2e scripts use scratch folders).
-const dataDir = process.env.AI_CHATTERBOX_DATA ?? join(app.getPath("appData"), "AI_ChatterBox");
+// Data lives in %APPDATA%\AI_ChatterBox. Tests point AI_CHATTERBOX_DATA at scratch folders; the packaged
+// app only honours it with an explicit --test-data flag, so a stray variable can never hide real data.
+const testDataAllowed = !app.isPackaged || process.argv.includes("--test-data");
+const testData = testDataAllowed ? process.env.AI_CHATTERBOX_DATA : undefined;
+const dataDir = testData ?? join(app.getPath("appData"), "AI_ChatterBox");
+/** e2e runs: keep the window off-screen so it can't be mistaken for the real app. */
+const hideTestWindow = !!testData && process.env.AI_CHATTERBOX_HIDE === "1";
 mkdirSync(dataDir, { recursive: true });
 app.setPath("userData", join(dataDir, "electron"));
 app.setAppUserModelId("net.damkina.aichatterbox");
@@ -56,13 +61,14 @@ function savedBounds(): Bounds {
 }
 
 function createWindow() {
-  const b = savedBounds();
+  const b = hideTestWindow ? { x: -4000, y: 40, width: 1320, height: 860 } : savedBounds();
   const theme = (store.getSetting("theme") as Theme) ?? "dark";
   win = new BrowserWindow({
     ...b,
     minWidth: 900,
     minHeight: 560,
-    title: "AI_ChatterBox",
+    title: testData ? "AI_ChatterBox [자동 테스트 데이터]" : "AI_ChatterBox",
+    skipTaskbar: hideTestWindow,
     backgroundColor: theme === "dark" ? "#0b0d12" : "#ffffff",
     autoHideMenuBar: true,
     show: false,
@@ -73,11 +79,11 @@ function createWindow() {
       sandbox: true,
     },
   });
-  if (b.maximized) win.maximize();
+  if ("maximized" in b && b.maximized) win.maximize();
   win.once("ready-to-show", () => win?.show());
   const persist = () => {
     // The store is closed during quit; never throw from a window event (Electron shows a blocking error box).
-    if (!win || win.isDestroyed() || win.isMinimized() || quitting) return;
+    if (!win || win.isDestroyed() || win.isMinimized() || quitting || hideTestWindow) return;
     try {
       const n = win.getNormalBounds();
       store.setSetting("window", JSON.stringify({ ...n, maximized: win.isMaximized() }));
@@ -194,6 +200,7 @@ function registerIpc() {
       .codex()
       .readUsage()
       .catch(() => undefined);
+    void chats.refreshClaudeUsage();
     return chats.usage();
   });
   ipcMain.handle("shell:openPath", (_e, p: string) => shell.openPath(p));

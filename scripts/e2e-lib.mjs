@@ -67,8 +67,8 @@ export function countProcs(name) {
 export async function launch(dataDir) {
   const exe = process.env.E2E_EXE;
   const app = await electron.launch({
-    ...(exe ? { executablePath: exe, args: [] } : { args: [root] }),
-    env: { ...process.env, AI_CHATTERBOX_DATA: dataDir },
+    ...(exe ? { executablePath: exe, args: ["--test-data"] } : { args: [root] }),
+    env: { ...process.env, AI_CHATTERBOX_DATA: dataDir, AI_CHATTERBOX_HIDE: "1" },
   });
   const page = await app.firstWindow();
   page.on("pageerror", (e) => console.log("[pageerror]", e.message));
@@ -85,8 +85,8 @@ export async function launchPortable(exe, dataDir, port = 9333) {
   const { spawn } = await import("node:child_process");
   const { chromium } = await import("playwright-core");
   const before = countProcs("AI_ChatterBox.exe");
-  spawn(exe, [`--remote-debugging-port=${port}`], {
-    env: { ...process.env, AI_CHATTERBOX_DATA: dataDir },
+  spawn(exe, [`--remote-debugging-port=${port}`, "--test-data"], {
+    env: { ...process.env, AI_CHATTERBOX_DATA: dataDir, AI_CHATTERBOX_HIDE: "1" },
     detached: true,
     stdio: "ignore",
   }).unref();
@@ -124,7 +124,7 @@ export const DEFAULTS = {
 };
 
 /** Wait for the selected chat's turn to finish. Optionally answer approvals: "once" | "chat" | "deny". */
-export async function waitIdle(page, { timeout = 600_000, approve, onApproval } = {}) {
+export async function waitIdle(page, { timeout = 600_000, approve, onApproval, answer, onAsk } = {}) {
   await page.waitForSelector('[data-testid="working"]', { timeout: 30_000 }).catch(() => undefined);
   const end = Date.now() + timeout;
   let approvals = 0;
@@ -138,6 +138,14 @@ export async function waitIdle(page, { timeout = 600_000, approve, onApproval } 
       // High-risk requests (outside the folder, deletes, …) can only be allowed once.
       if (which === "chat" && (await card.$('[data-testid="approve-chat"]:disabled'))) which = "once";
       await (await card.$(`[data-testid="approve-${which}"]`)).click();
+      await page.waitForTimeout(400);
+    }
+    // The orchestrator's ask_user question (a card with a free-text answer box).
+    const ask = await page.$('[data-testid="ask-card"]:has(input)');
+    if (ask && answer) {
+      if (onAsk) await onAsk(ask);
+      await (await ask.$("input")).fill(answer);
+      await (await ask.$('button[type="submit"]')).click();
       await page.waitForTimeout(400);
     }
     await page.waitForTimeout(300);

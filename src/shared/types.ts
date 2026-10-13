@@ -196,6 +196,10 @@ export interface ModelOption {
   id: string;
   label: string;
   isDefault?: boolean;
+  /** The CLI hides it from pickers. */
+  hidden?: boolean;
+  /** The CLI offers an upgrade (a newer model replaces it). */
+  deprecated?: boolean;
 }
 
 export type Theme = "dark" | "light";

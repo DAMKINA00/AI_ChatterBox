@@ -189,16 +189,19 @@ function ApprovalModePicker({ chat, project }: { chat: Chat; project: Project })
         <Button variant="outline" size="xs" aria-label="이 채팅의 승인 방식" className="font-normal">
           <ShieldCheck className="text-muted-foreground" />
           {mode === "orchestrator" ? "자동 승인" : "직접 승인"}
-          {inherited && <span className="text-[11px] text-muted-foreground">(프로젝트 기본값)</span>}
           <ChevronDown className="opacity-60" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-64">
-        <DropdownMenuItem disabled={inherited} onSelect={() => void updateChat(chat.id, { approvalModeOverride: null })}>
-          <RotateCcw />
-          프로젝트 값 사용 ({APPROVAL_MODE_LABEL[project.settings.approvalMode]})
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
+        {!inherited && (
+          <>
+            <DropdownMenuItem onSelect={() => void updateChat(chat.id, { approvalModeOverride: null })}>
+              <RotateCcw />
+              프로젝트 값 사용 ({APPROVAL_MODE_LABEL[project.settings.approvalMode]})
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+          </>
+        )}
         {(["orchestrator", "user"] as const).map((m) => (
           <DropdownMenuCheckItem key={m} checked={mode === m} onSelect={() => void updateChat(chat.id, { approvalModeOverride: m })}>
             {APPROVAL_MODE_LABEL[m]}

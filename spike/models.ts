@@ -1,4 +1,4 @@
-// Lists the models codex app-server offers (model/list) to pick exact ids.
+﻿// Lists the models codex app-server offers (model/list) to pick exact ids.
 import { spawn } from "node:child_process";
 import { findCodex, readLines } from "./common.ts";
 
@@ -18,6 +18,7 @@ const req = (method: string, params: unknown) =>
 await req("initialize", { clientInfo: { name: "spike", title: null, version: "0" }, capabilities: { experimentalApi: false, requestAttestation: false } });
 child.stdin!.write(JSON.stringify({ method: "initialized" }) + "\n");
 const r = await req("model/list", {});
-for (const m of r.data ?? r.models ?? []) console.log(JSON.stringify({ id: m.id, model: m.model, displayName: m.displayName, isDefault: m.isDefault, efforts: m.supportedReasoningEfforts?.map((e: any) => e.reasoningEffort ?? e) }));
+for (const m of r.data ?? r.models ?? []) console.log(JSON.stringify({ id: m.id, hidden: m.hidden, upgrade: m.upgrade, isDefault: m.isDefault }));
 if (!r.data && !r.models) console.log(JSON.stringify(r).slice(0, 2000));
 child.stdin!.end();
+
