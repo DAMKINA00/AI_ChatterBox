@@ -1,27 +1,50 @@
-import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
-import type { AgentEvent, ChatterBoxApi, Session } from "../shared/types";
+import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from "electron";
+import type { ChatterBoxApi } from "../shared/types";
 
-const api: ChatterBoxApi & { addWorkspace(path: string): Promise<unknown> } = {
-  listWorkspaces: () => ipcRenderer.invoke("workspaces:list"),
-  pickWorkspace: () => ipcRenderer.invoke("workspaces:pick"),
-  addWorkspace: (path) => ipcRenderer.invoke("workspaces:add", path),
-  listSessions: (workspaceId) => ipcRenderer.invoke("sessions:list", workspaceId),
-  createSession: (workspaceId, agent) => ipcRenderer.invoke("sessions:create", workspaceId, agent),
-  loadEvents: (sessionId) => ipcRenderer.invoke("sessions:events", sessionId),
-  send: (sessionId, text) => ipcRenderer.invoke("sessions:send", sessionId, text),
-  stop: (sessionId) => ipcRenderer.invoke("sessions:stop", sessionId),
-  answerApproval: (sessionId, approvalId, decision) => ipcRenderer.invoke("sessions:approve", sessionId, approvalId, decision),
+function on<T extends unknown[]>(channel: string, cb: (...args: T) => void): () => void {
+  const h = (_e: IpcRendererEvent, ...args: unknown[]) => cb(...(args as T));
+  ipcRenderer.on(channel, h);
+  return () => {
+    ipcRenderer.removeListener(channel, h);
+  };
+}
+
+const api: ChatterBoxApi = {
+  listProjects: () => ipcRenderer.invoke("projects:list"),
+  createProject: (input) => ipcRenderer.invoke("projects:create", input),
+  updateProject: (id, patch) => ipcRenderer.invoke("projects:update", id, patch),
+  deleteProject: (id) => ipcRenderer.invoke("projects:delete", id),
+  pickFolder: () => ipcRenderer.invoke("projects:pickFolder"),
+
+  listChats: () => ipcRenderer.invoke("chats:list"),
+  createChat: (projectId) => ipcRenderer.invoke("chats:create", projectId),
+  updateChat: (id, patch) => ipcRenderer.invoke("chats:update", id, patch),
+  deleteChat: (id) => ipcRenderer.invoke("chats:delete", id),
+  markViewed: (id) => ipcRenderer.invoke("chats:viewed", id),
+  listConsults: (chatId) => ipcRenderer.invoke("chats:consults", chatId),
+  loadEvents: (chatId) => ipcRenderer.invoke("chats:events", chatId),
+  send: (chatId, text, attachmentIds) => ipcRenderer.invoke("chats:send", chatId, text, attachmentIds),
+  stop: (chatId) => ipcRenderer.invoke("chats:stop", chatId),
+  answerApproval: (chatId, approvalId, decision) => ipcRenderer.invoke("chats:approve", chatId, approvalId, decision),
+  answerAskUser: (chatId, askId, answer) => ipcRenderer.invoke("chats:answerAsk", chatId, askId, answer),
+
+  attachFromPaths: (chatId, paths) => ipcRenderer.invoke("att:paths", chatId, paths),
+  attachFromBytes: (chatId, name, mime, bytes) => ipcRenderer.invoke("att:bytes", chatId, name, mime, bytes),
+  pickAttachments: (chatId) => ipcRenderer.invoke("att:pick", chatId),
+  removeAttachment: (id) => ipcRenderer.invoke("att:remove", id),
+  pathForFile: (file) => webUtils.getPathForFile(file),
+
   cliInfo: () => ipcRenderer.invoke("cli:info"),
-  onEvent: (cb) => {
-    const h = (_e: IpcRendererEvent, sessionId: number, event: AgentEvent) => cb(sessionId, event);
-    ipcRenderer.on("session:event", h);
-    return () => ipcRenderer.removeListener("session:event", h);
-  },
-  onSessionUpdated: (cb) => {
-    const h = (_e: IpcRendererEvent, session: Session) => cb(session);
-    ipcRenderer.on("session:updated", h);
-    return () => ipcRenderer.removeListener("session:updated", h);
-  },
+  models: (agent) => ipcRenderer.invoke("models:list", agent),
+  getTheme: () => ipcRenderer.invoke("theme:get"),
+  setTheme: (theme) => ipcRenderer.invoke("theme:set", theme),
+  usage: () => ipcRenderer.invoke("usage:get"),
+  openPath: (p) => ipcRenderer.invoke("shell:openPath", p),
+
+  onEvent: (cb) => on("chat:event", cb),
+  onChatUpdated: (cb) => on("chat:updated", cb),
+  onConsultUpdated: (cb) => on("consult:updated", cb),
+  onUsage: (cb) => on("usage", cb),
 };
 
 contextBridge.exposeInMainWorld("chatterbox", api);

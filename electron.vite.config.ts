@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { defineConfig } from "electron-vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
   main: {
@@ -8,8 +9,8 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: resolve("src/main/index.ts"),
-          // Run by claude.exe as its permission-prompt MCP server (via Electron's binary as Node).
-          "approver-mcp": resolve("src/main/approver-mcp.ts"),
+          // Loaded by claude.exe / codex.exe as an MCP server (Electron's binary running as Node).
+          "bridge-mcp": resolve("src/main/bridge-mcp.ts"),
         },
       },
     },
@@ -23,6 +24,6 @@ export default defineConfig({
     },
   },
   renderer: {
-    plugins: [react()],
+    plugins: [react(), tailwindcss()],
   },
 });

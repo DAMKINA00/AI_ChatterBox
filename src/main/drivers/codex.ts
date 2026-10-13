@@ -1,9 +1,9 @@
 // Codex driver: one shared `codex app-server` process (JSON-RPC over stdio, one JSON object per line),
 // one CodexDriver per thread.
 import { spawn, type ChildProcess } from "node:child_process";
-import type { ApprovalDecision } from "../../shared/types";
+import type { FileDiff, ModelOption, UsageInfo } from "../../shared/types";
 import { readLines, shutdown } from "../proc";
-import type { AgentDriver, DriverCallbacks, DriverOptions } from "./types";
+import { fileNote, IMAGE_MIMES, type AgentDriver, type AgentInput, type DriverHost, type DriverOptions } from "./types";
 import type { RequestId, ServerNotification, ServerRequest, InitializeResponse, ClientRequest } from "../codex-schema";
 import type {
   ThreadItem,
@@ -13,8 +13,11 @@ import type {
   TurnStartParams,
   TurnStartResponse,
   TurnInterruptParams,
+  UserInput,
   CommandExecutionApprovalDecision,
   FileChangeApprovalDecision,
+  FileUpdateChange,
+  RateLimitSnapshot,
 } from "../codex-schema/v2";
 
 type Method = ClientRequest["method"];
@@ -29,6 +32,7 @@ export class CodexServer {
   /** Threads already started or resumed in the current process. */
   readonly loaded = new Set<string>();
   stderrTail = "";
+  onUsage?: (u: UsageInfo) => void;
 
   constructor(private exePath: string) {}
 
@@ -52,12 +56,11 @@ export class CodexServer {
     child.on("error", (e) => fail(`codex 실행 실패: ${e.message}`));
     child.on("exit", (code) => fail(`codex app-server 종료됨 (code ${code})`));
     this.ready = (async () => {
-      const r = await this.request<InitializeResponse>("initialize", {
-        clientInfo: { name: "ai_chatterbox", title: "AI_ChatterBox", version: "0.1.0" },
+      await this.request<InitializeResponse>("initialize", {
+        clientInfo: { name: "ai_chatterbox", title: "AI_ChatterBox", version: "0.2.0" },
         capabilities: { experimentalApi: false, requestAttestation: false },
       });
       this.write({ method: "initialized" });
-      console.log(`[codex] app-server ready: ${r.userAgent}`);
     })();
     return this.ready;
   }
@@ -65,7 +68,6 @@ export class CodexServer {
   attach(threadId: string, driver: CodexDriver) {
     this.threads.set(threadId, driver);
   }
-
   detach(threadId: string) {
     this.threads.delete(threadId);
   }
@@ -83,6 +85,18 @@ export class CodexServer {
 
   respond(id: RequestId, result: unknown) {
     this.write({ id, result });
+  }
+
+  async models(): Promise<ModelOption[]> {
+    await this.ensure();
+    const r = await this.request<any>("model/list", {});
+    return (r.data ?? []).map((m: any) => ({ id: m.id, label: m.displayName ?? m.id, isDefault: !!m.isDefault }));
+  }
+
+  async readUsage(): Promise<void> {
+    await this.ensure();
+    const r = await this.request<any>("account/rateLimits/read", {}).catch(() => null);
+    if (r?.rateLimits) this.onUsage?.(toUsage(r.rateLimits));
   }
 
   private onLine(line: string) {
@@ -111,6 +125,10 @@ export class CodexServer {
       return;
     }
     const n = msg as ServerNotification;
+    if (n.method === "account/rateLimits/updated") {
+      this.onUsage?.(toUsage(n.params.rateLimits));
+      return;
+    }
     const threadId = (n.params as any)?.threadId;
     if (threadId) this.threads.get(threadId)?.onNotification(n);
   }
@@ -123,34 +141,80 @@ export class CodexServer {
   }
 }
 
+function toUsage(r: RateLimitSnapshot): UsageInfo {
+  return {
+    codex: {
+      primary: r.primary ? { usedPercent: r.primary.usedPercent, resetsAt: r.primary.resetsAt } : undefined,
+      secondary: r.secondary ? { usedPercent: r.secondary.usedPercent, resetsAt: r.secondary.resetsAt } : undefined,
+    },
+  };
+}
+
+/** Strip Codex's Windows wrapper: "powershell.exe" -Command '…' → … */
+export function innerCommand(cmd: string): string {
+  const m = /-Command\s+'([\s\S]*)'\s*$/.exec(cmd);
+  return m ? m[1].replace(/''/g, "'") : cmd;
+}
+
+function toDiffs(changes: FileUpdateChange[]): FileDiff[] {
+  return changes.map((c) => ({ path: c.path, kind: c.kind.type, diff: c.diff }));
+}
+
+export interface CodexTurnResult {
+  text: string;
+  files: string[];
+  status: "completed" | "interrupted" | "failed";
+  error?: string;
+}
+
 export class CodexDriver implements AgentDriver {
   readonly agent = "codex" as const;
   private threadId: string | null;
   private turnId?: string;
-  private running = false;
+  private _running = false;
   private approvals = new Map<string, { requestId: RequestId; kind: "command" | "file" }>();
-  private fileItems = new Map<string, string>();
+  private fileItems = new Map<string, FileDiff[]>();
+  private turnText = "";
+  private turnFiles = new Set<string>();
+  private turnWaiters: ((r: CodexTurnResult) => void)[] = [];
 
   constructor(
     private opts: DriverOptions,
     private server: CodexServer,
-    private cb: DriverCallbacks,
+    private host: DriverHost,
   ) {
     this.threadId = opts.nativeId;
     if (this.threadId) server.attach(this.threadId, this);
   }
 
+  get running() {
+    return this._running;
+  }
+
   private async ensureThread(): Promise<string> {
     await this.server.ensure();
     if (!this.threadId) {
-      const params: ThreadStartParams = { cwd: this.opts.cwd, approvalPolicy: "on-request", sandbox: "workspace-write" };
+      const params: ThreadStartParams = {
+        cwd: this.opts.cwd,
+        ...this.policy(),
+        model: this.opts.model || null,
+        developerInstructions: this.opts.instructions ?? null,
+        config: (this.opts.codexConfig as ThreadStartParams["config"]) ?? null,
+      };
       const r = await this.server.request<ThreadStartResponse>("thread/start", params);
       this.threadId = r.thread.id;
       this.server.attach(this.threadId, this);
       this.server.loaded.add(this.threadId);
-      this.cb.onNativeId(this.threadId);
+      this.host.nativeId(this.threadId);
     } else if (!this.server.loaded.has(this.threadId)) {
-      const params: ThreadResumeParams = { threadId: this.threadId, excludeTurns: true };
+      const params: ThreadResumeParams = {
+        threadId: this.threadId,
+        excludeTurns: true,
+        ...this.policy(),
+        model: this.opts.model || null,
+        developerInstructions: this.opts.instructions ?? null,
+        config: (this.opts.codexConfig as ThreadResumeParams["config"]) ?? null,
+      };
       this.server.attach(this.threadId, this);
       await this.server.request("thread/resume", params);
       this.server.loaded.add(this.threadId);
@@ -158,25 +222,54 @@ export class CodexDriver implements AgentDriver {
     return this.threadId;
   }
 
-  async send(text: string): Promise<void> {
-    if (this.running) throw new Error("이전 응답이 아직 진행 중입니다.");
-    this.running = true;
+  /** Orchestrator: read-only sandbox and no escalation requests. Workers: workspace writes, ask for the rest. */
+  private policy(): Pick<ThreadStartParams, "approvalPolicy" | "sandbox"> {
+    return this.opts.readOnly
+      ? { approvalPolicy: "never", sandbox: "read-only" }
+      : { approvalPolicy: "on-request", sandbox: "workspace-write" };
+  }
+
+  /** Model for the next turn (turn/start applies it to this and later turns). */
+  setModel(model: string | undefined) {
+    this.opts.model = model;
+  }
+
+  async send(input: AgentInput): Promise<void> {
+    if (this._running) throw new Error("이전 응답이 아직 진행 중입니다.");
+    this._running = true;
+    this.turnText = "";
+    this.turnFiles.clear();
     try {
       const threadId = await this.ensureThread();
-      const params: TurnStartParams = { threadId, input: [{ type: "text", text, text_elements: [] }] };
+      const images = input.attachments.filter((a) => IMAGE_MIMES.has(a.mime));
+      const others = input.attachments.filter((a) => !images.includes(a));
+      const items: UserInput[] = images.map((a) => ({ type: "localImage", path: a.path }));
+      items.push({ type: "text", text: (input.text || "(첨부 파일을 확인해 주세요)") + fileNote(others), text_elements: [] });
+      const params: TurnStartParams = { threadId, input: items, model: this.opts.model || null };
       const r = await this.server.request<TurnStartResponse>("turn/start", params);
       this.turnId = r.turn.id;
     } catch (e) {
-      this.running = false;
+      this._running = false;
       const message = e instanceof Error ? e.message : String(e);
-      this.cb.onEvent({ type: "error", kind: "process", message: `${message} ${this.server.stderrTail.slice(-500)}`.trim() });
-      this.cb.onEvent({ type: "turn_end", ok: false, error: message });
+      this.host.emit({ type: "error", kind: "process", message: `${message} ${this.server.stderrTail.slice(-500)}`.trim() });
+      this.host.emit({ type: "turn_end", ok: false, error: message });
+      this.finishTurn({ text: "", files: [], status: "failed", error: message });
     }
   }
 
+  /** Resolves when the current (or next) turn completes, with its final text and changed files. */
+  waitTurn(): Promise<CodexTurnResult> {
+    return new Promise((resolve) => this.turnWaiters.push(resolve));
+  }
+
+  private finishTurn(r: CodexTurnResult) {
+    const waiters = this.turnWaiters;
+    this.turnWaiters = [];
+    for (const w of waiters) w(r);
+  }
+
   async stop(): Promise<void> {
-    if (!this.running || !this.threadId || !this.turnId) return;
-    this.denyAllPending();
+    if (!this._running || !this.threadId || !this.turnId) return;
     const params: TurnInterruptParams = { threadId: this.threadId, turnId: this.turnId };
     await this.server.request("turn/interrupt", params).catch(() => undefined);
   }
@@ -184,23 +277,39 @@ export class CodexDriver implements AgentDriver {
   onServerRequest(req: ServerRequest): boolean {
     switch (req.method) {
       case "item/commandExecution/requestApproval": {
-        const id = `codex:${req.id}`;
-        this.approvals.set(id, { requestId: req.id, kind: "command" });
         const p = req.params;
-        this.cb.onEvent({
-          type: "approval_request",
-          request: { id, title: "명령 실행", detail: p.command ?? JSON.stringify(p.commandActions), reason: p.reason ?? undefined },
-        });
+        const cmd = innerCommand(p.command ?? "");
+        void this.host
+          .approve({
+            title: "명령 실행",
+            detail: cmd || JSON.stringify(p.commandActions),
+            reason: p.reason ?? undefined,
+            key: `cmd:${cmd.trim().split(/\s+/)[0] ?? ""}`,
+            command: cmd,
+            paths: p.cwd ? [p.cwd] : [],
+          })
+          .then((v) => {
+            const decision: CommandExecutionApprovalDecision = v === "deny" ? "decline" : v === "allow_chat" ? "acceptForSession" : "accept";
+            this.server.respond(req.id, { decision });
+          });
         return true;
       }
       case "item/fileChange/requestApproval": {
-        const id = `codex:${req.id}`;
-        this.approvals.set(id, { requestId: req.id, kind: "file" });
         const p = req.params;
-        this.cb.onEvent({
-          type: "approval_request",
-          request: { id, title: "파일 변경", detail: this.fileItems.get(p.itemId) ?? p.grantRoot ?? "", reason: p.reason ?? undefined },
-        });
+        const diffs = this.fileItems.get(p.itemId) ?? [];
+        void this.host
+          .approve({
+            title: "파일 변경",
+            detail: diffs.map((d) => `${d.kind} ${d.path}`).join("\n") || p.grantRoot || "",
+            reason: p.reason ?? undefined,
+            key: "fileChange",
+            paths: [...diffs.map((d) => d.path), ...(p.grantRoot ? [p.grantRoot] : [])],
+            diffs,
+          })
+          .then((v) => {
+            const decision: FileChangeApprovalDecision = v === "deny" ? "decline" : v === "allow_chat" ? "acceptForSession" : "accept";
+            this.server.respond(req.id, { decision });
+          });
         return true;
       }
       default:
@@ -208,26 +317,10 @@ export class CodexDriver implements AgentDriver {
     }
   }
 
-  answerApproval(approvalId: string, decision: ApprovalDecision): void {
-    const a = this.approvals.get(approvalId);
-    if (!a) return;
-    this.approvals.delete(approvalId);
-    const result =
-      a.kind === "command"
-        ? { decision: (decision === "allow" ? "accept" : "decline") satisfies CommandExecutionApprovalDecision }
-        : { decision: (decision === "allow" ? "accept" : "decline") satisfies FileChangeApprovalDecision };
-    this.server.respond(a.requestId, result);
-    this.cb.onEvent({ type: "approval_resolved", id: approvalId, decision });
-  }
-
-  private denyAllPending() {
-    for (const id of [...this.approvals.keys()]) this.answerApproval(id, "deny");
-  }
-
   onNotification(n: ServerNotification) {
     switch (n.method) {
       case "item/agentMessage/delta":
-        this.cb.onEvent({ type: "text_delta", text: n.params.delta });
+        this.host.emit({ type: "text_delta", text: n.params.delta });
         break;
       case "item/started":
         this.onItem(n.params.item, false);
@@ -241,18 +334,19 @@ export class CodexDriver implements AgentDriver {
       case "turn/completed": {
         const t = n.params.turn;
         if (this.turnId && t.id !== this.turnId) break;
-        this.running = false;
+        this._running = false;
         this.turnId = undefined;
-        this.cb.onEvent({
-          type: "turn_end",
-          ok: t.status === "completed",
-          interrupted: t.status === "interrupted",
+        this.host.emit({ type: "turn_end", ok: t.status === "completed", interrupted: t.status === "interrupted", error: t.error?.message });
+        this.finishTurn({
+          text: this.turnText.trim(),
+          files: [...this.turnFiles],
+          status: t.status === "inProgress" ? "failed" : t.status,
           error: t.error?.message,
         });
         break;
       }
       case "error":
-        if (!n.params.willRetry) this.cb.onEvent({ type: "error", message: n.params.error.message });
+        if (!n.params.willRetry) this.host.emit({ type: "error", message: n.params.error.message });
         break;
     }
   }
@@ -260,12 +354,15 @@ export class CodexDriver implements AgentDriver {
   private onItem(item: ThreadItem, done: boolean) {
     switch (item.type) {
       case "agentMessage":
-        if (done && item.text) this.cb.onEvent({ type: "text", text: item.text });
+        if (done && item.text) {
+          this.turnText = item.text; // the last message of a turn is its answer
+          this.host.emit({ type: "text", text: item.text });
+        }
         break;
       case "commandExecution":
-        if (!done) this.cb.onEvent({ type: "tool_call", id: item.id, name: "명령", input: item.command });
+        if (!done) this.host.emit({ type: "tool_call", id: item.id, name: "명령", input: innerCommand(item.command) });
         else
-          this.cb.onEvent({
+          this.host.emit({
             type: "tool_result",
             id: item.id,
             ok: item.status === "completed" && (item.exitCode ?? 0) === 0,
@@ -273,16 +370,19 @@ export class CodexDriver implements AgentDriver {
           });
         break;
       case "fileChange": {
-        const summary = item.changes.map((c) => `${c.kind.type} ${c.path}`).join("\n");
-        this.fileItems.set(item.id, summary);
-        if (done) this.cb.onEvent({ type: "file_change", id: item.id, summary, ok: item.status === "completed" });
+        const diffs = toDiffs(item.changes);
+        this.fileItems.set(item.id, diffs);
+        if (done) {
+          if (item.status === "completed") for (const d of diffs) this.turnFiles.add(d.path);
+          this.host.emit({ type: "file_change", id: item.id, files: diffs, ok: item.status === "completed" });
+        }
         break;
       }
       case "mcpToolCall":
         if (!done)
-          this.cb.onEvent({ type: "tool_call", id: item.id, name: `${item.server}.${item.tool}`, input: JSON.stringify(item.arguments, null, 2) });
+          this.host.emit({ type: "tool_call", id: item.id, name: `${item.server}.${item.tool}`, input: JSON.stringify(item.arguments, null, 2) });
         else
-          this.cb.onEvent({
+          this.host.emit({
             type: "tool_result",
             id: item.id,
             ok: !item.error,
@@ -294,15 +394,15 @@ export class CodexDriver implements AgentDriver {
 
   onServerExit(why: string) {
     this.approvals.clear();
-    if (this.running) {
-      this.running = false;
-      this.cb.onEvent({ type: "error", kind: "process", message: why });
-      this.cb.onEvent({ type: "turn_end", ok: false, error: why });
+    if (this._running) {
+      this._running = false;
+      this.host.emit({ type: "error", kind: "process", message: why });
+      this.host.emit({ type: "turn_end", ok: false, error: why });
+      this.finishTurn({ text: this.turnText, files: [...this.turnFiles], status: "failed", error: why });
     }
   }
 
   async dispose(): Promise<void> {
-    this.denyAllPending();
     if (this.threadId) this.server.detach(this.threadId);
   }
 }
