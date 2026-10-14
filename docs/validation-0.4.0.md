@@ -19,6 +19,20 @@
 
 실제 Antigravity CLI 글쓰기 검사 **13/13**도 통과했습니다. 문장 다듬기·사서 대사, 앱 표정 도구, 같은 CLI 대화 재개, 쓰기 가능한 턴의 실행 전 거절, 토큰 사용량 증가와 중복 계산 방지를 확인했습니다. 증거는 `.scratch/cli-writing-results.json`입니다. CLI 마스터 배정 제한은 아래 자동 회귀 검사이며, 이번 실제 마스터 통합 검사는 웹 Argon에 대해 수행했습니다.
 
+### Windows 실제 설치 위치 확인 (배포 후 추가 검사)
+
+위 CLI 검사는 Codex의 실행 환경에서 수행했으므로, 일반 Windows 앱에서 동일한 설치 경로가 보이는지까지 증명하지는 못했습니다. 배포 앱에서 `cliInfo()`가 Gemini `path: null`을 반환했고, 사용자의 탐색기에서도 `AppData\Local\agy` 폴더가 없었습니다.
+
+파일 핸들의 최종 경로를 확인한 결과, 실제 바이너리는 `%LOCALAPPDATA%\Packages\OpenAI.Codex_2p2nqsd0c76g0\LocalCache\Local\agy\bin\agy.exe`에 있었습니다. Codex MSIX 환경의 AppData 가상화 때문에 일반 경로처럼 보였으며, 같은 환경에서 관리자 권한으로만 다시 검사해도 이 차이를 확인할 수 없었습니다. [Microsoft MSIX 파일 가상화 설명](https://learn.microsoft.com/en-us/windows/msix/desktop/desktop-to-uwp-behind-the-scenes).
+
+- 패키지 식별자가 없는 별도 Windows 프로세스에서 설치 폴더 부재를 재현했습니다.
+- 검증한 CLI 1.3.5 바이너리를 실제 사용자 `%LOCALAPPDATA%\agy\bin`에 설치하고 SHA-256 일치를 확인했습니다. 바이너리 해시: `4790560754318D0CED2358D13CBCE9181DFC51D1964C3D95C9776E8EAF5CD3C4`.
+- 해당 환경의 사용자 PATH를 확인·보완하고, 일반 Windows 환경에서 `agy.exe --version` 및 `agy.exe models`를 실행했습니다. Gemini 3.8 Flash high/medium/low 모델이 반환됐고 재로그인은 필요하지 않았습니다.
+- 사용자가 실행 중인 ChatterBox에서 **설치 경로 다시 확인**을 누른 뒤 경고가 사라졌음을 확인했습니다.
+- 실행 중인 ChatterBox와 작업자는 종료하지 않았습니다. 앱의 경로 검색 코드는 변경하지 않았으며 포터블 재빌드도 필요하지 않습니다.
+
+설치·로그인 검증 시에는 시작 메뉴에서 직접 연 PowerShell과 실제 앱 양쪽에서 확인해야 합니다. Codex 터미널의 `Test-Path` 또는 버전 출력만으로 일반 Windows 앱에서도 사용 가능하다고 판단하지 않습니다.
+
 ## 자동 검증
 
 | 검사 | 결과 |

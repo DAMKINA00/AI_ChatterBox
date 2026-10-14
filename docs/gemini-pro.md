@@ -10,7 +10,7 @@ Argon의 [공식 개발자 연동은 유료 Gemini API](https://blog.google/inno
 
 ## 설치와 로그인
 
-1. [공식 설치 안내](https://antigravity.google/docs/cli/install/)에서 Windows CLI를 설치합니다.
+1. Windows 시작 메뉴에서 직접 연 PowerShell에서 [공식 설치 안내](https://antigravity.google/docs/cli/install/)에 따라 CLI를 설치합니다.
 2. PowerShell에서 `& "$env:LOCALAPPDATA\agy\bin\agy.exe"`를 실행하고 Google AI Pro 계정으로 로그인합니다. 브라우저에 인증 코드가 나오면 CLI 터미널에 직접 입력합니다.
 3. `& "$env:LOCALAPPDATA\agy\bin\agy.exe" models`에 모델 목록이 나오면 준비가 끝납니다.
 4. ChatterBox 프로젝트 설정에서 Gemini 모델을 선택합니다. 기본값은 **Pro 자동 선택**입니다. 마스터에게 “제미나이에게 이 문서의 문장을 다듬게 해줘”처럼 요청할 수 있습니다.
@@ -23,6 +23,12 @@ agy --version
 ```
 
 0.3.8부터 상단 설치 경고의 **설치 경로 다시 확인**으로 앱을 종료하지 않고 다시 검사할 수 있습니다. 설치 후 앱으로 돌아오거나 모델의 **목록 다시 확인**을 눌러도 설치 경고가 함께 갱신됩니다. 실행 파일이 발견돼도 로그인·네트워크 문제가 있으면 모델 메뉴에 별도 오류로 표시합니다.
+
+### Codex에서는 실행되는데 탐색기·ChatterBox에서는 파일이 없는 경우
+
+Microsoft Store의 Codex 안에서 설치하면 [MSIX AppData 가상화](https://learn.microsoft.com/en-us/windows/msix/desktop/desktop-to-uwp-behind-the-scenes)로 실제 파일이 `%LOCALAPPDATA%\Packages\OpenAI.Codex_…\LocalCache\Local\agy`에 저장될 수 있습니다. 이때 Codex 안에서는 일반 `%LOCALAPPDATA%\agy` 경로가 존재하는 것처럼 보이며 관리자 권한 검사도 같은 환경에서는 성공할 수 있습니다.
+
+시작 메뉴에서 직접 연 PowerShell에서 설치를 진행하고 `agy --version`, `agy models`를 확인합니다. 탐색기의 실제 `%LOCALAPPDATA%\agy\bin\agy.exe`와 ChatterBox의 **설치 경로 다시 확인**까지 확인해야 설치가 완료된 것입니다. 실행 중인 ChatterBox 작업을 중지할 필요는 없습니다.
 
 ## 모델 목록과 남은 사용량 (0.3.6)
 
