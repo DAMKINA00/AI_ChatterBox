@@ -52,6 +52,7 @@ interface State {
   toggle(key: string, value?: boolean): void;
   select(sel: Selection | null): Promise<void>;
   loadModels(agent: AgentKind): Promise<void>;
+  refreshCli(): Promise<void>;
 
   createProject(input: { name: string; folder: string; settings: ProjectSettings }): Promise<Project | null>;
   updateProject(id: number, patch: Parameters<typeof api.updateProject>[1]): Promise<boolean>;
@@ -147,6 +148,7 @@ export const useStore = create<State>((set, get) => ({
     window.addEventListener("focus", () => {
       const sel = get().selection;
       if (sel && get().chats.find((c) => c.id === sel.chatId)?.unread) void api.markViewed(sel.chatId);
+      if (get().cli.some((c) => !c.path)) void get().refreshCli().catch(() => undefined);
     });
 
     // Reopen the last chat.
@@ -199,10 +201,15 @@ export const useStore = create<State>((set, get) => ({
     if (chat?.unread) void api.markViewed(sel.chatId);
   },
 
+  async refreshCli() {
+    set({ cli: await api.cliInfo() });
+  },
+
   async loadModels(agent) {
     if (get().models[agent]) return;
     set((s) => ({ modelErrors: { ...s.modelErrors, [agent]: undefined } }));
     try {
+      await get().refreshCli();
       const list = await api.models(agent);
       set((s) => ({ models: { ...s.models, [agent]: list }, modelErrors: { ...s.modelErrors, [agent]: undefined } }));
     } catch (e) {

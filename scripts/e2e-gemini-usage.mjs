@@ -28,8 +28,11 @@ try {
   writeFileSync(join(base, "actual-usage.json"), JSON.stringify(actual, null, 2));
 
   // First mount fails; opening the menu retries; explicit retry recovers after availability changes.
-  await app.evaluate(({ ipcMain }, list) => {
+  await app.evaluate(({ ipcMain }, { list, cli }) => {
     globalThis.__geminiQueryTest = { count: 0, available: false };
+    ipcMain.removeHandler("cli:info");
+    ipcMain.handle("cli:info", () => cli.map((c) => c.agent === "gemini" && !globalThis.__geminiQueryTest.available
+      ? { ...c, path: null, error: "격리 테스트: Gemini 설치 경로 없음" } : c));
     ipcMain.removeHandler("models:list");
     ipcMain.handle("models:list", (_e, agent) => {
       if (agent !== "gemini") return [];
@@ -37,7 +40,7 @@ try {
       if (!globalThis.__geminiQueryTest.available) throw new Error("격리 테스트: 일시적 CLI 탐색 실패");
       return list;
     });
-  }, models);
+  }, { list: models, cli });
   const chatId = await page.evaluate(async ({ settings, folder }) => {
     const p = await window.chatterbox.createProject({ name: "Gemini 연결 확인", folder, settings });
     return (await window.chatterbox.createChat(p.id)).id;
@@ -45,6 +48,10 @@ try {
   await page.reload();
   await page.locator(`[data-testid="chat-node"][data-chat-id="${chatId}"] [role="treeitem"]`).click();
   await page.waitForTimeout(300);
+  const warning = () => page.locator('[data-testid="cli-warning"]');
+  check("missing CLI has a direct installation retry button", await warning().getByRole("button", { name: "설치 경로 다시 확인" }).isVisible());
+  await warning().getByRole("button", { name: "설치 경로 다시 확인" }).click();
+  check("missing executable remains visible after retry", /Gemini 설치 경로 없음/.test(await warning().innerText()));
   const beforeOpen = await app.evaluate(() => globalThis.__geminiQueryTest.count);
   await page.getByRole("button", { name: "이 채팅의 Gemini 모델", exact: true }).click();
   await page.getByText("격리 테스트: 일시적 CLI 탐색 실패", { exact: false }).waitFor();
@@ -54,8 +61,26 @@ try {
   await page.getByRole("menuitem", { name: "목록 다시 확인" }).click();
   await page.getByRole("menuitem").filter({ hasText: models[0].label }).first().waitFor();
   check("retry recovers models without restart", await page.getByText("격리 테스트: 일시적 CLI 탐색 실패", { exact: false }).count() === 0);
+  check("model retry also clears stale global CLI warning", await warning().count() === 0);
   await page.screenshot({ path: join(base, "gemini-models.png") });
   await page.keyboard.press("Escape");
+
+  // The top-level retry also works before selecting a chat or querying models again.
+  await app.evaluate(() => { globalThis.__geminiQueryTest.available = false; });
+  await page.reload();
+  await warning().waitFor();
+  await app.evaluate(() => { globalThis.__geminiQueryTest.available = true; });
+  await warning().getByRole("button", { name: "설치 경로 다시 확인" }).click();
+  await warning().waitFor({ state: "detached" });
+  check("installation retry clears warning without restarting the app", await warning().count() === 0);
+
+  await app.evaluate(() => { globalThis.__geminiQueryTest.available = false; });
+  await page.reload();
+  await warning().waitFor();
+  await app.evaluate(() => { globalThis.__geminiQueryTest.available = true; });
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await warning().waitFor({ state: "detached" });
+  check("returning from installation rechecks missing CLI", await warning().count() === 0);
 
   const emit = (gemini) => app.evaluate(({ BrowserWindow }, u) => BrowserWindow.getAllWindows()[0].webContents.send("usage", u), { ...actual, gemini });
   await emit({ weekly: { usedPercent: 20 }, fiveHour: { usedPercent: 95 }, updatedAt: Date.now() });

@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
-import { CircleAlert, FolderPlus, Loader2, MessageSquarePlus, Workflow, X } from "lucide-react";
+import { CircleAlert, FolderPlus, Loader2, MessageSquarePlus, RotateCcw, Workflow, X } from "lucide-react";
 import { AGENT_LABEL } from "../../shared/types";
 import { useStore } from "./store";
 import { Sidebar } from "./components/Sidebar";
 import { ChatView } from "./components/ChatView";
 import { ProjectDialog } from "./components/ProjectDialog";
 import { Button, TooltipProvider } from "./components/ui";
-import { cn } from "./lib/utils";
+import { cn, errorMessage } from "./lib/utils";
 
 export function App() {
   const ready = useStore((s) => s.ready);
@@ -15,6 +15,9 @@ export function App() {
   const chats = useStore((s) => s.chats);
   const projects = useStore((s) => s.projects);
   const cli = useStore((s) => s.cli);
+  const refreshCli = useStore((s) => s.refreshCli);
+  const toast = useStore((s) => s.toast);
+  const [checkingCli, setCheckingCli] = useState(false);
   const [newProject, setNewProject] = useState(false);
 
   useEffect(() => {
@@ -38,13 +41,21 @@ export function App() {
         <Sidebar onNewProject={() => setNewProject(true)} />
         <main className="flex min-h-0 min-w-0 flex-col">
           {missing.length > 0 && (
-            <div className="flex items-start gap-2 border-b border-warning/40 bg-warning/10 px-4 py-2 text-[12.5px]">
+            <div data-testid="cli-warning" className="flex items-start gap-2 border-b border-warning/40 bg-warning/10 px-4 py-2 text-[12.5px]">
               <CircleAlert className="mt-0.5 size-4 shrink-0 text-warning" />
-              <div className="space-y-0.5">
+              <div className="min-w-0 flex-1 space-y-0.5">
                 {missing.map((m) => (
                   <div key={m.agent}>{m.error ?? `${AGENT_LABEL[m.agent]} CLI를 찾지 못했습니다.`}</div>
                 ))}
               </div>
+              <Button variant="outline" size="xs" disabled={checkingCli} onClick={async () => {
+                setCheckingCli(true);
+                try { await refreshCli(); }
+                catch (error) { toast(errorMessage(error)); }
+                finally { setCheckingCli(false); }
+              }}>
+                <RotateCcw className={cn(checkingCli && "animate-spin")} /> 설치 경로 다시 확인
+              </Button>
             </div>
           )}
           <div className="min-h-0 flex-1">
