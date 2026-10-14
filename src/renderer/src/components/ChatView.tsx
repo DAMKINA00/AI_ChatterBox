@@ -27,6 +27,7 @@ import { AgentAvatar } from "./AgentAvatar";
 import { AgentUsage } from "./AgentUsage";
 import { defaultEffortForModel, EffortPicker, effortLabel } from "./EffortPicker";
 import { ModelPicker, useModelLabel } from "./ModelPicker";
+import { formatElapsed, latestInstructionAt } from "../lib/time";
 import {
   Badge,
   Button,
@@ -46,6 +47,7 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
   const consults = useStore((s) => s.consults[chat.id]);
   const busy = chat.status === "working" || chat.status === "approval";
   const items = useMemo(() => buildItems(events ?? [], node, busy), [events, node, busy]);
+  const instructionAt = useMemo(() => latestInstructionAt(events ?? [], chat.createdAt), [events, chat.createdAt]);
   const [dragging, setDragging] = useState(false);
   const composer = useRef<ComposerHandle>(null);
   const plan = useMemo(() => planOf(events ?? []), [events]);
@@ -82,7 +84,7 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
       <TeamChips chat={chat} />
       {!node && <GoalBar chat={chat} />}
       {!node && plan && <PlanPanel chat={chat} plan={plan} onRevise={() => composer.current?.setText("/plan 수정: ")} />}
-      <Timeline items={items} chatId={chat.id} busy={busy} empty={!events?.length} loading={!events} />
+      <Timeline items={items} chatId={chat.id} busy={busy} instructionAt={instructionAt} empty={!events?.length} loading={!events} />
       {chat.status === "interrupted" && <InterruptedBanner chat={chat} />}
       {node && node !== "orch" ? (
         <div className="border-t px-6 py-2.5 text-center text-[12px] text-muted-foreground">
@@ -486,10 +488,18 @@ function InterruptedBanner({ chat }: { chat: Chat }) {
   );
 }
 
-function Timeline({ items, chatId, busy, empty, loading }: { items: ReturnType<typeof buildItems>; chatId: number; busy: boolean; empty: boolean; loading: boolean }) {
+function Timeline({ items, chatId, busy, instructionAt, empty, loading }: { items: ReturnType<typeof buildItems>; chatId: number; busy: boolean; instructionAt: number; empty: boolean; loading: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
   const stick = useRef(true);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!busy) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [busy, instructionAt]);
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -526,7 +536,7 @@ function Timeline({ items, chatId, busy, empty, loading }: { items: ReturnType<t
           )}
           {busy && (
             <div className="mt-4 flex items-center gap-2 text-[12px] text-muted-foreground" data-testid="working">
-              <Loader2 className="size-3.5 animate-spin" /> 작업 중…
+              <Loader2 className="size-3.5 animate-spin" /> 작업 중… · {formatElapsed(now - instructionAt)}
             </div>
           )}
         </div>

@@ -280,6 +280,10 @@ export class ChatManager {
       ? { id: 0, chatId, node, role, at: Date.now(), event }
       : this.store.addEvent(chatId, node, role, event);
     this.sink.event(e);
+    // Streaming can be frequent; persist activity at most every 15s until a full event arrives.
+    if (event.type !== "agent_usage" && event.type !== "expression"
+      && (event.type !== "text_delta" || e.at - (this.store.chat(chatId)?.lastActiveAt ?? 0) >= 15_000))
+      this.updateChat(chatId, { touch: true });
   }
 
   updateChat(chatId: number, patch: ChatPatch): Chat {
@@ -498,6 +502,7 @@ export class ChatManager {
       const ev = this.store.addEvent(chatId, "orch", null, { type: "user", text, attachments, queued: true, delivery });
       this.store.linkAttachments(attachmentIds, ev.id);
       this.sink.event(ev);
+      this.updateChat(chatId, { touch: true });
       await this.busySend(chat, { text, attachments }, delivery);
       return;
     }

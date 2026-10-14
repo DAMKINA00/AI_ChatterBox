@@ -204,6 +204,7 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     "- ask/ask_parallel의 각 배정에 reason(선택 이유)을 넣는다. 이미지 생성·편집은 requiresImage=true, kind=implement로 지피티에게 맡긴다. 배정 내용에는 목표, 제약, 산출물, 완료 기준을 포함한다.",
     "- 작업자는 이 대화를 보지 못한다. message에 목표, 관련 파일 경로, 제약, 완료 기준을 빠짐없이 적는다. 사용자가 첨부한 파일이 필요하면 attach로 경로를 넘긴다.",
     `- 작업 중 사용자의 즉시 추가 지시를 받으면 기존 작업자를 유지한다. CLI가 ask 응답 수신을 중단해도 작업자는 계속 실행될 수 있다. ${t("agents")}로 상태와 저장된 최근 결과를 확인하고, 이미 완료한 작업을 응답 재수신만을 위해 다시 배정하지 않는다.`,
+    "- 즉시 추가 질문·수정 요청에는 작업자의 완료를 기다리지 말고 먼저 사용자에게 한국어로 직접 답한다. 이미 아는 내용은 바로 설명하고 수정 요청은 이해한 내용과 반영 방법을 먼저 말한다. 기존 지시의 위임·교차 검증 요건은 그대로 유지하며, 추가 질문에 답하려고 기존 지시를 direct로 변경하지 않는다. 답변하기 전에 작업 배정이나 체크리스트 갱신으로 넘어가지 않는다.",
     `- 여러 단계 작업은 ${t("checklist")}로 단계와 담당(닉네임)을 등록하고, 단계를 시작·완료할 때마다 갱신한다.`,
     `- 채팅에 목표(/goal)가 있으면 그 목표를 향해 일하고, 한 단계를 마칠 때마다 ${t("update_goal")}로 진행을 보고한다. 다 이루면 status=complete.`,
     `- 꼭 필요한 결정만 ${t("ask_user")}로 묻는다.`,
@@ -243,6 +244,8 @@ interface Instruction {
   queued: { text: string; attachments: AttachmentRef[] }[];
   /** Extra instructions already handed over (repeated in later tool results). */
   pinned: string[];
+  /** A user follow-up needs a visible master reply before further team management. */
+  pendingImmediate?: boolean;
 }
 
 interface Running {
@@ -267,6 +270,8 @@ export class Orchestrator {
   private waits = new Map<number, WaitGraph>();
   /** One turn at a time per worker. */
   private workerQueue = new Map<string, Promise<unknown>>();
+  /** Only the master's tool wait is released; the consultation itself keeps running. */
+  private masterConsultWaiters = new Map<number, Set<() => void>>();
   /** Implement scopes currently held, per chat. */
   private scopeLocks = new Map<number, { consultId: number; scope: string[] }[]>();
   private scopeWaiters = new Map<number, (() => void)[]>();
@@ -333,6 +338,8 @@ export class Orchestrator {
   private async call(chatId: number, caller: Role, name: string, args: any): Promise<ToolResult> {
     if (!this.chats.store.chat(chatId)) return textResult("채팅이 삭제되었습니다.", true);
     const master = caller === "orch";
+    if (master && this.instructions.get(chatId)?.pendingImmediate && ["spawn", "ask", "ask_parallel", "release", "checklist", "update_goal", "ask_user"].includes(name))
+      return textResult("사용자의 즉시 추가 질문·수정 요청에 먼저 직접 답변하세요. 이미 아는 내용은 바로 설명하고, 수정 요청은 이해한 내용과 반영 방법을 사용자에게 먼저 말한 뒤 기존 작업을 계속하세요. 기존 작업자는 그대로 실행 중입니다.", true);
     try {
       switch (name) {
         case "route_request": {
@@ -340,6 +347,8 @@ export class Orchestrator {
           const inst = this.instructions.get(chatId);
           if (!inst || !["direct", "delegated"].includes(args.mode) || !String(args.reason ?? "").trim()) return textResult("mode와 reason을 지정하세요.", true);
           if (args.dualInvestigation !== undefined && typeof args.dualInvestigation !== "boolean") return textResult("dualInvestigation은 true 또는 false여야 합니다.", true);
+          if (inst.pendingImmediate && args.mode === "direct" && args.dualInvestigation !== true)
+            return textResult("이번 추가 질문은 마스터가 지금 직접 답변하세요. 기존 본 작업의 배정 방식·독립 조사·교차 리뷰 요건은 변경하지 않았습니다. 사용자에게 답한 뒤 기존 작업을 계속하세요.");
           const dualInvestigation = !!inst.dualInvestigation || args.dualInvestigation === true;
           if (dualInvestigation && args.mode !== "delegated") return textResult("중요 오류의 양쪽 조사는 delegated로 기록하세요.", true);
           if (inst.mode === "delegated" && args.mode === "direct") return textResult("위임할 본 작업을 직접 처리로 바꿀 수 없습니다. 가능한 작업자에게 맡기거나 미완료 사유를 보고하세요.", true);
@@ -353,17 +362,19 @@ export class Orchestrator {
           if (!isAgentExpression(args.expression)) return textResult("지원하지 않는 표정입니다.", true);
           this.chats.emit(chatId, this.chats.route(chatId, caller), caller, { type: "expression", expression: args.expression });
           return textResult("표정을 반영했습니다.");
-        case "ask":
-          return await this.askTool(chatId, caller, args);
+        case "ask": {
+          const task = this.askTool(chatId, caller, args);
+          return await (master ? this.waitForMasterConsult(chatId, task) : task);
+        }
         case "ask_parallel": {
           if (!master) break;
           const tasks: any[] = Array.isArray(args.tasks) ? args.tasks : [];
           if (!tasks.length) return textResult("tasks가 비었습니다.", true);
-          const results = await Promise.all(tasks.map((t) => this.askTool(chatId, caller, t).catch((error) => textResult(error instanceof Error ? error.message : String(error), true))));
-          return textResult(
+          const result = Promise.all(tasks.map((t) => this.askTool(chatId, caller, t).catch((error) => textResult(error instanceof Error ? error.message : String(error), true)))).then((results) => textResult(
             results.map((r, i) => `## ${i + 1}. ${String(tasks[i]?.to ?? "")}\n${r.content.map((c) => c.text).join("\n")}`).join("\n\n"),
             results.every((r) => r.isError),
-          );
+          ));
+          return await this.waitForMasterConsult(chatId, result);
         }
         case "agents":
           return textResult(this.agentsText(chatId, master));
@@ -388,6 +399,27 @@ export class Orchestrator {
     } catch (e) {
       return textResult(e instanceof Error ? e.message : String(e), true);
     }
+  }
+
+  private async waitForMasterConsult(chatId: number, result: Promise<ToolResult>): Promise<ToolResult> {
+    const waiters = this.masterConsultWaiters.get(chatId) ?? new Set<() => void>();
+    this.masterConsultWaiters.set(chatId, waiters);
+    let wake!: () => void;
+    const followup = new Promise<ToolResult>((resolve) => {
+      wake = () => resolve(textResult(this.stopped.has(chatId)
+        ? "사용자가 작업을 중지했습니다. 멈추세요."
+        : "사용자의 즉시 추가 요청을 처리하도록 협의 결과 대기만 해제했습니다. 기존 작업자는 중지하지 않았으며 결과는 저장됩니다. 먼저 사용자 질문에 직접 답하고, 수정 요청에는 반영 방법을 먼저 말하세요. 완료한 작업을 중복 배정하지 말고 이후 agents로 결과를 확인하세요." + this.takeQueued(chatId)));
+      waiters.add(wake);
+    });
+    try { return await Promise.race([result, followup]); }
+    finally {
+      waiters.delete(wake);
+      if (!waiters.size && this.masterConsultWaiters.get(chatId) === waiters) this.masterConsultWaiters.delete(chatId);
+    }
+  }
+
+  private wakeMasterConsults(chatId: number) {
+    for (const wake of this.masterConsultWaiters.get(chatId) ?? []) wake();
   }
 
   // ---------- team
@@ -684,6 +716,10 @@ export class Orchestrator {
   /** Collect each running consult's answer and changed files from the worker's events. */
   private observe(chatId: number, role: Role, event: AgentEvent) {
     if (role === "orch") {
+      if (event.type === "text" && event.text.trim()) {
+        const inst = this.instructions.get(chatId);
+        if (inst) inst.pendingImmediate = false;
+      }
       if (event.type === "tool_call" && isMutatingTool(event.name, event.input, !!event.diffs?.length)) {
         const active = this.masterActions.get(chatId) ?? new Set<string>();
         active.add(event.id);
@@ -919,21 +955,31 @@ export class Orchestrator {
     const inst = this.instructions.get(chat.id);
     if (!inst || this.stopped.has(chat.id)) throw new Error("중지되었거나 완료된 지시입니다. 새 지시로 보내 주세요.");
     const driver = this.chats.liveDriver(chat.id, "orch");
-    let accepted = false;
-    try { accepted = !!(await driver?.steer?.({ ...input, text: "[사용자 즉시 추가 지시 — 기존 작업을 유지하면서 우선 반영]\n" + input.text })); }
-    catch { /* A turn can finish between clicking send and the native receipt. Keep the message queued. */ }
-    if (accepted) {
-      const text = input.text + attachmentNote(input.attachments);
+    const text = input.text + attachmentNote(input.attachments);
+    const prompt = "[사용자 즉시 질문·수정 요청 — 작업 결과를 기다리지 말고 먼저 직접 답변]\n" + input.text + "\n\n질문에 먼저 한국어로 답하고, 수정 요청이면 이해한 내용과 반영 방법을 먼저 말하세요. 기존 작업자는 유지하며 본 작업의 위임·리뷰 요건도 유지합니다.";
+    const remember = () => {
       inst.text += "\n\n[사용자 추가 지시]\n" + text;
       inst.pinned.push(text);
-      this.chats.emit(chat.id, "orch", null, { type: "notice", text: "마스터에게 즉시 전달했습니다. 실행 중인 도구·승인은 안전한 처리 시점에 반영됩니다." });
-    } else if (this.stopped.has(chat.id)) {
+      inst.pendingImmediate = true;
+    };
+    let accepted = false;
+    try { accepted = !!(await driver?.steer?.({ ...input, text: prompt })); }
+    catch { /* A turn can finish between clicking send and the native receipt. Keep the message queued. */ }
+    if (this.stopped.has(chat.id)) {
       this.chats.emit(chat.id, "orch", null, { type: "notice", text: "작업이 중지되어 즉시 전달하지 않았습니다. 이 메시지는 대화에 남아 있습니다." });
+    } else if (accepted) {
+      remember();
+      this.wakeMasterConsults(chat.id);
+      this.chats.emit(chat.id, "orch", null, { type: "notice", text: "마스터에게 즉시 전달했습니다. 기존 작업을 유지하면서 질문·수정 요청에 먼저 답변합니다." });
     } else if (driver && !driver.running) {
       // The master can be idle while workers still run; keep the existing instruction and its limits.
       this.chats.updateChat(chat.id, { status: "working", touch: true });
-      inst.text += "\n\n[사용자 추가 지시]\n" + input.text;
-      await driver.send({ ...input, text: "[사용자 즉시 추가 지시 — 기존 작업자는 계속 실행 중일 수 있습니다]\n" + input.text, noWrites: this.planning.has(chat.id) || this.reviewing.has(chat.id) });
+      remember();
+      await driver.send({ ...input, text: prompt, noWrites: this.planning.has(chat.id) || this.reviewing.has(chat.id) });
+    } else if (driver && this.masterConsultWaiters.get(chat.id)?.size) {
+      remember();
+      this.wakeMasterConsults(chat.id);
+      this.chats.emit(chat.id, "orch", null, { type: "notice", text: "마스터의 협의 대기를 풀고 추가 요청을 전달했습니다. 기존 작업자는 계속 작업합니다." });
     } else {
       await this.queue(chat, input);
       this.chats.emit(chat.id, "orch", null, { type: "notice", text: "현재 CLI가 즉시 전달을 받지 못해 다음 단계 전달로 보관했습니다." });
@@ -1117,6 +1163,7 @@ export class Orchestrator {
   // ---------- stop
   async stop(chatId: number) {
     this.stopped.add(chatId);
+    this.wakeMasterConsults(chatId);
     for (const [id, a] of [...this.asks]) {
       if (a.chatId !== chatId) continue;
       this.asks.delete(id);
@@ -1133,6 +1180,7 @@ export class Orchestrator {
   }
 
   forget(chatId: number) {
+    this.wakeMasterConsults(chatId);
     this.judge.forget(chatId);
     for (const [id, reg] of [...this.bridgeKeys]) {
       if (!id.startsWith(`br-${chatId}-`)) continue;

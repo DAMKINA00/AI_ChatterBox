@@ -129,6 +129,12 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
   const [editProject, setEditProject] = useState<Project | undefined>();
   const [rename, setRename] = useState<{ kind: "chat" | "project"; id: number; title: string } | null>(null);
   const [confirm, setConfirm] = useState<{ title: string; body: string; run: () => Promise<void> } | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const q = search.trim().toLowerCase();
   // Message-content matches come from the main process (debounced).
@@ -193,6 +199,7 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
             chats={chats.filter((c) => c.projectId === p.id && (showArchived || !c.archived))}
             query={q}
             hits={contentHits}
+            now={now}
             onEdit={() => setEditProject(p)}
             onRename={(kind, id, title) => setRename({ kind, id, title })}
             onConfirm={setConfirm}
@@ -262,6 +269,7 @@ function ProjectNode({
   chats,
   query,
   hits,
+  now,
   onEdit,
   onRename,
   onConfirm,
@@ -270,6 +278,7 @@ function ProjectNode({
   chats: Chat[];
   query: string;
   hits: Set<number>;
+  now: number;
   onEdit: () => void;
   onRename: (kind: "chat" | "project", id: number, title: string) => void;
   onConfirm: (c: { title: string; body: string; run: () => Promise<void> }) => void;
@@ -338,7 +347,7 @@ function ProjectNode({
       {open && (
         <div className="ml-3 border-l pl-1.5">
           {shown.map((c) => (
-            <ChatNode key={c.id} chat={c} onRename={onRename} onConfirm={onConfirm} />
+            <ChatNode key={c.id} chat={c} now={now} onRename={onRename} onConfirm={onConfirm} />
           ))}
           {!query && (
             <button
@@ -356,10 +365,12 @@ function ProjectNode({
 
 function ChatNode({
   chat,
+  now,
   onRename,
   onConfirm,
 }: {
   chat: Chat;
+  now: number;
   onRename: (kind: "chat" | "project", id: number, title: string) => void;
   onConfirm: (c: { title: string; body: string; run: () => Promise<void> }) => void;
 }) {
@@ -433,7 +444,9 @@ function ChatNode({
           <StatusIcon status={chat.status} unread={chat.unread} />
           <span className={cn("min-w-0 flex-1 truncate", chat.unread && "font-semibold")}>{chat.title}</span>
           <span className="shrink-0 rounded border px-1 text-[9.5px] text-muted-foreground">전체 대화</span>
-          <span className="shrink-0 text-[11px] text-muted-foreground group-hover:hidden">{timeAgo(chat.lastActiveAt)}</span>
+          <span className="shrink-0 text-[11px] text-muted-foreground group-hover:hidden" title={new Date(chat.lastActiveAt).toLocaleString()}>
+            {timeAgo(chat.lastActiveAt, now)}
+          </span>
           <span className="hidden group-hover:block">
             <MoreMenu actions={actions} label={`${chat.title} 메뉴`} />
           </span>

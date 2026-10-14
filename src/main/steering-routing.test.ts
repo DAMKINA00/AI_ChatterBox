@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -90,4 +90,94 @@ test("manual stop cancels a pending result-synthesis continuation", async () => 
     assert.equal(f.store.events(f.chat.id).length, 0);
     assert.equal((f.inst as any).waitingForResults, false);
   } finally { await f.close(); }
+});
+
+test("immediate direct question does not downgrade delegated work or its independent investigation", async () => {
+  const f = fixture();
+  try {
+    (f.inst as any).dualInvestigation = true;
+    const args = { mode: "direct", reason: "이미 알고 있는 설정의 적용 범위 질문" };
+    assert.equal((await f.engine.call(f.chat.id, "orch", "route_request", args)).isError, true);
+    f.chats.liveDriver = () => ({ running: true, steer: async () => true } as any);
+    await f.chats.send(f.chat.id, "750k는 클로드에만 적용하지?", [], "now");
+    assert.equal((await f.engine.call(f.chat.id, "orch", "route_request", args)).isError, false);
+    assert.equal(f.inst.mode, "delegated");
+    assert.equal((f.inst as any).dualInvestigation, true);
+    const blocked = await f.engine.call(f.chat.id, "orch", "checklist", { steps: [] });
+    assert.equal(blocked.isError, true);
+    assert.match(blocked.content[0].text, /먼저 직접 답변/);
+    f.engine.observe(f.chat.id, "orch", { type: "text", text: "네, 현재 확인한 설정은 클로드 전용입니다." });
+    assert.equal((await f.engine.call(f.chat.id, "orch", "checklist", { steps: [{ title: "기존 작업 계속", status: "inProgress" }] })).isError, false);
+    assert.equal((await f.engine.call(f.chat.id, "orch", "route_request", args)).isError, true);
+  } finally { await f.close(); }
+});
+
+test("immediate input releases parallel master waits without completing or cancelling worker tasks", async () => {
+  const f = fixture();
+  const completions: (() => void)[] = [];
+  let finished = 0;
+  try {
+    f.engine.askTool = () => new Promise((resolve) => completions.push(() => {
+      finished++;
+      resolve({ content: [{ type: "text", text: "worker result" }], isError: false });
+    }));
+    f.chats.liveDriver = () => ({ running: true, steer: async () => true } as any);
+    const result = f.engine.call(f.chat.id, "orch", "ask_parallel", { tasks: [{ to: "one" }, { to: "two" }] });
+    await f.chats.send(f.chat.id, "기존 작업을 유지하고 이 질문에 답해줘", [], "now");
+    const reply = await result;
+    assert.match(reply.content[0].text, /대기만 해제/);
+    assert.match(reply.content[0].text, /이 질문에 답해줘/);
+    assert.equal(finished, 0);
+    assert.equal(f.engine.masterConsultWaiters.size, 0);
+    completions.forEach((complete) => complete());
+    await new Promise((r) => setImmediate(r));
+    assert.equal(finished, 2);
+  } finally { completions.forEach((complete) => complete()); await f.close(); }
+});
+
+test("older CLI can receive immediate input through its pending app consult result", async () => {
+  const f = fixture();
+  let complete!: () => void;
+  try {
+    f.engine.askTool = () => new Promise((resolve) => { complete = () => resolve({ content: [] }); });
+    f.chats.liveDriver = () => ({ running: true, steer: async () => false } as any);
+    const result = f.engine.call(f.chat.id, "orch", "ask", {});
+    await f.chats.send(f.chat.id, "제목을 바꿔줘", [], "now");
+    assert.match((await result).content[0].text, /제목을 바꿔줘/);
+    assert.equal(f.inst.queued.length, 0);
+    assert.equal((f.inst as any).pendingImmediate, true);
+  } finally { complete(); await f.close(); }
+});
+
+test("stop during accepted steering never releases a new reply task", async () => {
+  const f = fixture();
+  try {
+    f.chats.liveDriver = () => ({ running: true, steer: async () => { f.engine.stopped.add(f.chat.id); return true; } } as any);
+    await f.chats.send(f.chat.id, "race", [], "now");
+    assert.equal((f.inst as any).pendingImmediate, undefined);
+    assert.equal(f.inst.pinned.length, 0);
+  } finally { await f.close(); }
+});
+
+test("worker activity and queued user messages refresh persisted chat time; deltas are throttled", async () => {
+  let now = 100_000;
+  const clock = mock.method(Date, "now", () => now);
+  const f = fixture();
+  try {
+    now = 120_000;
+    f.chats.emit(f.chat.id, "w1", "w1", { type: "text_delta", text: "working" });
+    assert.equal(f.store.chat(f.chat.id)!.lastActiveAt, now);
+    now = 120_001;
+    f.chats.emit(f.chat.id, "w1", "w1", { type: "text_delta", text: "more" });
+    assert.equal(f.store.chat(f.chat.id)!.lastActiveAt, 120_000);
+    now = 121_000;
+    f.chats.emit(f.chat.id, "w1", "w1", { type: "text", text: "worker progress" });
+    assert.equal(f.store.chat(f.chat.id)!.lastActiveAt, now);
+    now = 130_000;
+    f.chats.emit(f.chat.id, "w1", "w1", { type: "expression", expression: "thinking" });
+    assert.equal(f.store.chat(f.chat.id)!.lastActiveAt, 121_000);
+    now = 140_000;
+    await f.chats.send(f.chat.id, "next step", [], "next");
+    assert.equal(f.store.chat(f.chat.id)!.lastActiveAt, now);
+  } finally { await f.close(); clock.mock.restore(); }
 });
