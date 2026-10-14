@@ -2,6 +2,28 @@
 import type { ProviderUsage } from "./usage";
 
 export type AgentKind = "claude" | "codex" | "gemini";
+export const GEMINI_WEB_MODEL = "gemini-web-argon";
+export const GEMINI_WRITING_INSTRUCTIONS = "제미나이는 웹·CLI 모두 글쓰기 전용이다. 문장 다듬기·캐릭터 대사·시나리오·문서 본문 작성·요약·번역을 맡는다. 코드 분석·구현·디버깅·테스트·기술 리뷰·교차검증은 맡지 않는다. 기술 문서는 마스터나 클로드·지피티가 확인해 제공한 사실을 유지하며 문장과 구성을 다듬는다. 불확실한 사실을 만들지 말고 필요한 확인을 마스터에게 보고한다. 결과는 텍스트로 반환하며 로컬 파일 반영은 클로드·지피티가 맡는다.";
+
+export interface GeminiWebUsage {
+  status: "unknown" | "available" | "limited" | "error";
+  detail: string;
+  checkedAt: number;
+  remaining?: number;
+  limit?: number;
+  resetText?: string;
+  current?: { usedPercent: number; resetText?: string };
+  weekly?: { usedPercent: number; resetText?: string };
+}
+
+export interface GeminiWebStatus {
+  accountId: "gemini-1";
+  state: "closed" | "login_required" | "ready" | "busy" | "error";
+  message: string;
+  model?: string;
+  checkedAt: number;
+  usage: GeminiWebUsage;
+}
 
 export interface TokenCounts {
   inputTokens: number;
@@ -130,10 +152,10 @@ export const APPROVAL_MODE_LABEL: Record<ApprovalMode, string> = {
 
 /** Defaults for new projects and settings absent in older project records. */
 export const DEFAULT_SETTINGS: ProjectSettings = {
-  claudeStrengths: "일반 업무의 기본 담당. 소스 분석·원인 조사·구현·테스트·문서 작성과 모션그래픽·애니메이션 제작을 우선 배정합니다.",
+  claudeStrengths: "기술 업무의 기본 담당. 소스 분석·원인 조사·구현·테스트·문서의 기술 검증과 파일 제작·모션그래픽·애니메이션 제작을 우선 배정합니다. 문서 본문과 대사 작성·문장 다듬기는 제미나이에게 맡깁니다.",
   claudeCautions: "이미지는 도구를 사용할 수 있는 지피티에게 맡깁니다. 중요한 버그·오류는 지피티와 각각 조사합니다. 사용 한도·작업량으로 지연되면 재배정합니다.",
   gptStrengths: "이미지 생성·편집, 중요한 버그·오류의 독립 조사 및 필요한 교차검증.",
-  gptCautions: "일반 분석·구현·테스트·문서와 모션그래픽은 클로드 우선입니다. 이미지 도구가 필요하거나 교차검증의 필요성이 크거나 클로드가 실행 불가·과부하일 때 배정합니다.",
+  gptCautions: "일반 분석·구현·테스트·문서 파일 제작과 모션그래픽은 클로드 우선입니다. 글쓰기는 제미나이에게 맡깁니다. 이미지 도구가 필요하거나 교차검증의 필요성이 크거나 클로드가 실행 불가·과부하일 때 배정합니다.",
   orchestratorModel: "claude:opus",
   claudeModel: "opus",
   codexModel: "gpt-6-astra",
@@ -142,8 +164,8 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   claudeEffort: "auto",
   codexEffort: "auto",
   geminiEffort: "auto",
-  geminiStrengths: "사용자 지정 제미나이 작업, 문서 요약·자료 비교와 추가 관점의 검토. 클로드가 바쁘거나 사용 한도에 도달했을 때 보조 담당.",
-  geminiCautions: "Google AI Pro 계정에서 실제 제공되는 Gemini 모델만 사용합니다. Ultra 전용 모델·API 결제로 전환하지 않습니다. 일반 업무는 클로드 우선, 이미지 생성은 지피티, 중요한 오류는 기존 클로드·지피티 양쪽 조사 규칙을 유지합니다.",
+  geminiStrengths: "웹·CLI 모두 글쓰기 전담. 문장 다듬기, 캐릭터 대사·시나리오, 문서 본문 작성·요약·번역을 우선 배정합니다.",
+  geminiCautions: "코드 분석·구현·디버깅·테스트·기술 리뷰·교차검증은 맡기지 않습니다. 검증된 사실과 캐릭터 말투를 유지하고 텍스트만 반환합니다. 실제 파일 반영은 클로드·지피티가 수행합니다. Google AI Pro 계정에서 제공되는 모델만 사용합니다.",
   reviewGate: true,
   maxConsults: 8,
   maxReviews: 3,
@@ -195,10 +217,10 @@ export interface Chat {
   lastActiveAt: number;
 }
 
-export type ConsultKind = "implement" | "review" | "opinion";
+export type ConsultKind = "implement" | "review" | "opinion" | "writing";
 export type ConsultStatus = "running" | "done" | "error" | "stopped" | "limited";
 
-export const CONSULT_KIND_LABEL: Record<ConsultKind, string> = { implement: "구현", review: "리뷰", opinion: "의견" };
+export const CONSULT_KIND_LABEL: Record<ConsultKind, string> = { implement: "구현", review: "리뷰", opinion: "의견", writing: "글쓰기" };
 
 export interface Consult {
   /** Requested by the master and actually applied, retained with this assignment. */
@@ -347,6 +369,7 @@ export interface UsageInfo {
   claude?: ProviderUsage;
   codex?: ProviderUsage;
   gemini?: ProviderUsage;
+  geminiWeb?: GeminiWebUsage;
 }
 
 export interface ChatterBoxApi {
@@ -400,6 +423,7 @@ export interface ChatterBoxApi {
   // misc
   cliInfo(): Promise<CliInfo[]>;
   models(agent: AgentKind): Promise<ModelOption[]>;
+  geminiWeb(action: "status" | "open" | "refresh"): Promise<GeminiWebStatus>;
   getTheme(): Promise<Theme>;
   setTheme(theme: Theme): Promise<void>;
   usage(): Promise<UsageInfo>;

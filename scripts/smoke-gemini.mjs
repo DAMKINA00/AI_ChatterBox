@@ -1,7 +1,7 @@
 // Real subscription-authenticated Antigravity, disposable workspace and app bridge only.
 import { build } from "esbuild";
 import { createRequire } from "node:module";
-import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 const root = resolve(import.meta.dirname, "..");
@@ -14,29 +14,28 @@ const { GeminiDriver, LocalBridge, bridgeServerConfig, textResult, findGemini } 
 const bridge = new LocalBridge();
 await bridge.start();
 const events = [], approvals = [], hooks = [], checks = [], diagnostics = [];
-let nativeId, expression = false, denied = false, driver;
+const turnInputs = [];
+let nativeId, expression = false, driver;
 const check = (name, ok) => { checks.push({ name, ok: !!ok }); console.log(ok ? "PASS" : "FAIL", name); };
 const reg = bridge.register({ tools: [{ name: "set_expression", description: "Set the worker facial expression.", inputSchema: { type: "object", properties: { expression: { type: "string" } }, required: ["expression"] } }], call: async () => { expression = true; return textResult("표정 적용 완료"); } });
-const opts = { cwd, exePath: findGemini(), model: process.env.CBX_GEMINI_MODEL || undefined, nativeId: null, instructions: "격리된 ChatterBox 검증 작업입니다. 본래 파일 경로만 다루고 네이티브 하위 에이전트를 만들지 마세요. 요청이 거부되면 우회하지 말고 보고하세요." };
+const opts = { cwd, exePath: findGemini(), model: process.env.CBX_GEMINI_MODEL || undefined, nativeId: null, instructions: "격리된 ChatterBox 글쓰기 검증 작업입니다. 문장 다듬기와 대사 작성만 수행하고 코드 분석·구현·디버깅·테스트·기술 리뷰는 맡지 마세요. 읽기 참고자료는 사용할 수 있지만 파일·명령 변경과 네이티브 하위 에이전트는 실행하지 마세요. 요청이 거부되면 우회하지 말고 보고하세요." };
 function create(id = null) {
   const d = new GeminiDriver({ ...opts, nativeId: id, tokenBaseline: id ? events.findLast((e) => e.type === "agent_usage")?.metrics.total : undefined }, { bridge, tmpDir: base, sessionKey: "test-worker", hookScript: join(root, "out/main/antigravity-hook.js"), mcpServers: () => ({ chatterbox_bridge: bridgeServerConfig(join(root, "out/main/bridge-mcp.js"), reg.url) }) }, {
     nativeId: (id) => { nativeId = id; },
     emit: (e) => { events.push(e); if (e.type !== "text_delta") console.log(e.type, e.name ?? e.message ?? e.ok ?? ""); },
     approve: async (input) => {
       approvals.push(input);
-      const forbidden = JSON.stringify(input).includes("denied.txt");
-      if (forbidden) denied = true;
-      // Only the named scratch file and read commands are approved in this smoke.
-      const allowed = !forbidden && (input.readOnly || input.diffs?.every((d) => resolve(d.path) === join(cwd, "allowed.txt")) || /^Get-Content\b/i.test(input.command ?? ""));
+      const allowed = !input.writes && !!input.readOnly;
       console.log("approval", input.title, allowed ? "allow" : "deny");
-      return { verdict: allowed ? "allow" : "deny", reason: allowed ? "isolated smoke" : "smoke intentionally denied; do not retry" };
+      return { verdict: allowed ? "allow" : "deny", reason: allowed ? "read-only reference material" : "writing smoke never approves file or command changes" };
     },
   });
   const hook = d.hook.bind(d);
   d.hook = async (phase, payload) => { hooks.push({ phase, tool: payload?.toolCall?.name }); console.log("hook", phase, payload?.toolCall?.name ?? ""); return hook(phase, payload); };
   return d;
 }
-async function turn(text, noWrites = false) {
+async function turn(text, noWrites = true) {
+  turnInputs.push(noWrites);
   const start = events.length;
   await driver.send({ text, noWrites, attachments: [] });
   driver.child?.stderr.on("data", (s) => { diagnostics.push(String(s)); });
@@ -53,19 +52,28 @@ try {
   driver = create();
   check("read-only hook handshake", (await turn("도구를 실행하지 말고 HOOK_READY라고만 답하세요.", true)).ok && hooks.some((h) => h.phase === "instructions"));
   if (!checks.at(-1).ok) throw new Error("Hook handshake failed; no file task will run");
-  check("file create/edit and bridge turn", (await turn(`기본 파일 도구로 ${join(cwd, "allowed.txt")}에 FIRST를 쓰고 SECOND로 수정하세요. 파일 도구로 읽어 확인한 후 chatterbox_bridge set_expression(happy)를 호출하고 완료라고 답하세요.`)).ok);
-  check("approved file is SECOND", existsSync(join(cwd, "allowed.txt")) && readFileSync(join(cwd, "allowed.txt"), "utf8").trim() === "SECOND");
-  check("app approved native edits", approvals.some((a) => a.writes));
+  const publicSentence = "별빛 도서관은 아침 9시에 연다. 월요일은 쉰다.";
+  const polishStart = events.length;
+  check("writing turn completes", (await turn(`다음 공개 문장을 자연스럽게 다듬어 주세요: ${publicSentence} 결과는 한국어 문장으로만 답하세요. 답변 전에 chatterbox_bridge set_expression(happy)를 호출하세요.`)).ok);
+  check("writing text returned", events.slice(polishStart).some((e) => e.type === "text" && /별빛|도서관/.test(e.text)));
   check("expression MCP called", expression);
-  const commandStart = approvals.length;
-  await turn(`run_command 도구로 Get-Content -LiteralPath '${join(cwd, "allowed.txt")}' 명령을 한 번 실행하고 내용을 답하세요. 파일 도구 대신 이 읽기 명령만 사용하세요.`);
-  check("native command goes through app approval", approvals.slice(commandStart).some((a) => /^Get-Content\b/i.test(a.command ?? "")));
-  await turn(`기본 파일 도구로 ${join(cwd, "denied.txt")}에 DENIED를 쓰는 요청을 딱 한 번 보내세요. 거부되면 재시도나 우회 없이 거부되었다고 답하세요.`);
-  check("rejected file never created", denied && !existsSync(join(cwd, "denied.txt")));
-  await driver.dispose(); driver = create(nativeId);
-  check("saved native session resumes", (await turn("방금 작업한 allowed.txt의 최종 내용이 무엇이었는지 한 단어로 답하세요. 도구는 필요 없습니다.", true)).ok);
+  const hookCount = hooks.length, approvalCount = approvals.length, eventCount = events.length;
+  let writableError = "";
+  try { await driver.send({ text: `파일을 수정하지 말고 ${join(cwd, "forbidden.txt")}에 내용을 쓰세요.`, noWrites: false, attachments: [] }); }
+  catch (error) { writableError = error instanceof Error ? error.message : String(error); }
+  const writableRejected = /글쓰기 전용/.test(writableError);
+  check("writable send is rejected before execution", writableRejected);
+  check("rejected writable send runs no hook or approval", hooks.length === hookCount && approvals.length === approvalCount && events.length === eventCount);
+  const savedNativeId = nativeId;
+  await driver.dispose(); driver = create(savedNativeId);
+  const resumeStart = events.length;
+  check("saved native session resumes with writing", (await turn(`앞서 다듬은 공개 문장 ${publicSentence}을 바탕으로, 방문객에게 건네는 사서의 대사를 한국어 한 문장으로 작성하세요. 파일이나 도구는 사용하지 마세요.`)).ok);
+  check("saved native session id is reused", !!savedNativeId && nativeId === savedNativeId);
+  check("resumed writing text returned", events.slice(resumeStart).some((e) => e.type === "text" && /사서|도서관/.test(e.text)));
+  check("writing turns use noWrites", turnInputs.every(Boolean));
   check("usage recorded", events.some((e) => e.type === "agent_usage" && e.metrics.outputTokens > 0));
   const metrics = events.filter((e) => e.type === "agent_usage").map((e) => e.metrics);
+  check("usage token total increases after resume", metrics.length >= 2 && metrics.at(-1).total.outputTokens > metrics[0].total.outputTokens);
   check("resumed token counters are not double-counted", metrics.reduce((sum, m) => sum + m.outputTokens, 0) === metrics.at(-1).total.outputTokens);
 } catch (e) { check(String(e), false); }
 finally {

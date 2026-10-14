@@ -41,6 +41,7 @@ const api: ChatterBoxApi = {
 
   cliInfo: () => ipcRenderer.invoke("cli:info"),
   models: (agent) => ipcRenderer.invoke("models:list", agent),
+  geminiWeb: (action) => ipcRenderer.invoke("gemini:web", action),
   getTheme: () => ipcRenderer.invoke("theme:get"),
   setTheme: (theme) => ipcRenderer.invoke("theme:set", theme),
   usage: () => ipcRenderer.invoke("usage:get"),

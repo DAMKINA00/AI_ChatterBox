@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { CircleAlert, FolderPlus, Loader2, MessageSquarePlus, RotateCcw, Workflow, X } from "lucide-react";
-import { AGENT_LABEL } from "../../shared/types";
+import { AGENT_LABEL, GEMINI_WEB_MODEL } from "../../shared/types";
 import { useStore } from "./store";
 import { Sidebar } from "./components/Sidebar";
 import { ChatView } from "./components/ChatView";
@@ -26,7 +26,8 @@ export function App() {
 
   const chat = selection ? chats.find((c) => c.id === selection.chatId) : undefined;
   const project = chat ? projects.find((p) => p.id === chat.projectId) : undefined;
-  const missing = cli.filter((c) => !c.path);
+  const webGemini = (chat?.geminiModelOverride ?? project?.settings.geminiModel) === GEMINI_WEB_MODEL;
+  const missing = cli.filter((c) => !c.path && !(c.agent === "gemini" && webGemini));
 
   if (!ready)
     return (

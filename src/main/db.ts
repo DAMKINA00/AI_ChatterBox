@@ -174,14 +174,16 @@ function projectSettings(json: string): ProjectSettings {
   const saved = JSON.parse(json);
   // Task duration is unlimited, including projects created with a saved time cap.
   delete saved.maxMinutes;
-  // Update untouched 0.3.2 defaults while preserving user-written preferences.
+  // Update earlier defaults while preserving user-written preferences.
   const previous = {
-    claudeStrengths: "소스 구조·동작 흐름 분석, 원인 조사. 구현·테스트·문서 작성은 맥락에 따라 배정.",
-    claudeCautions: "이미지 생성은 이미지 도구를 사용할 수 있는 지피티에게 맡깁니다. 성능 우열은 작업마다 다를 수 있습니다.",
-    gptStrengths: "이미지 생성·편집, 시각 자료 제작. 구현·테스트·문서 작성은 맥락에 따라 배정.",
-    gptCautions: "이미지 생성 도구의 실제 사용 가능 여부를 확인합니다. 소스 분석은 기본적으로 클로드를 우선 고려합니다.",
+    claudeStrengths: ["소스 구조·동작 흐름 분석, 원인 조사. 구현·테스트·문서 작성은 맥락에 따라 배정.", "일반 업무의 기본 담당. 소스 분석·원인 조사·구현·테스트·문서 작성과 모션그래픽·애니메이션 제작을 우선 배정합니다."],
+    claudeCautions: ["이미지 생성은 이미지 도구를 사용할 수 있는 지피티에게 맡깁니다. 성능 우열은 작업마다 다를 수 있습니다."],
+    gptStrengths: ["이미지 생성·편집, 시각 자료 제작. 구현·테스트·문서 작성은 맥락에 따라 배정."],
+    gptCautions: ["이미지 생성 도구의 실제 사용 가능 여부를 확인합니다. 소스 분석은 기본적으로 클로드를 우선 고려합니다.", "일반 분석·구현·테스트·문서와 모션그래픽은 클로드 우선입니다. 이미지 도구가 필요하거나 교차검증의 필요성이 크거나 클로드가 실행 불가·과부하일 때 배정합니다."],
+    geminiStrengths: ["사용자 지정 제미나이 작업, 문서 요약·자료 비교와 추가 관점의 검토. 클로드가 바쁘거나 사용 한도에 도달했을 때 보조 담당."],
+    geminiCautions: ["Google AI Pro 계정에서 실제 제공되는 Gemini 모델만 사용합니다. Ultra 전용 모델·API 결제로 전환하지 않습니다. 일반 업무는 클로드 우선, 이미지 생성은 지피티, 중요한 오류는 기존 클로드·지피티 양쪽 조사 규칙을 유지합니다."],
   };
-  for (const [key, value] of Object.entries(previous)) if (saved[key] === value) delete saved[key];
+  for (const [key, values] of Object.entries(previous)) if (values.includes(saved[key])) delete saved[key];
   return { ...DEFAULT_SETTINGS, ...saved };
 }
 

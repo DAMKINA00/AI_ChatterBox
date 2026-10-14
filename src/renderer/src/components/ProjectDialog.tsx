@@ -209,6 +209,7 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
               </div>
               <div className="grid content-start gap-2 rounded-md border p-2.5">
                 <div className="text-[13px] font-medium">제미나이 작업자</div>
+                <div className="text-[11.5px] leading-snug text-muted-foreground">웹·CLI 모두 문장 다듬기·캐릭터 대사·문서 본문 등 글쓰기 전용입니다. 로컬 파일 반영은 CLI Claude/GPT가 맡습니다.</div>
                 <label className="grid gap-1.5">
                   <span className="text-[11.5px] text-muted-foreground">잘 맡는 작업</span>
                   <textarea

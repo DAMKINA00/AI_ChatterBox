@@ -8,6 +8,7 @@ import { readLines, shutdown } from "../proc";
 import { isReadCommand } from "../execution-policy";
 import { fileNote, type AgentDriver, type AgentInput, type DriverHost, type DriverOptions } from "./types";
 import type { FileDiff, TokenCounts } from "../../shared/types";
+import { GEMINI_WRITING_INSTRUCTIONS } from "../../shared/types";
 import { GEMINI_READ_TOOLS, GEMINI_WRITE_TOOLS, geminiBridgeTool, geminiDiffs, geminiPaths, geminiTokens, listGeminiModels, tokenDelta, geminiEffortModel } from "./gemini-protocol";
 
 export interface GeminiEnv {
@@ -25,7 +26,7 @@ export class GeminiDriver implements AgentDriver {
   private nativeId: string | null;
   private _running = false;
   private stopping = false;
-  private noWrites = false;
+  private noWrites = true;
   private hookKey?: string;
   private startedAt = 0;
   private turnId = "";
@@ -50,7 +51,7 @@ export class GeminiDriver implements AgentDriver {
   async hook(phase: string, payload: any): Promise<Record<string, unknown>> {
     if (phase === "start" || phase === "instructions") {
       this.hooksReady = true;
-      return { injectSteps: [{ ephemeralMessage: `${this.opts.instructions ?? ""}\n실제 작업 폴더: ${this.opts.cwd}\n제어용 폴더(${this.sessionDir})는 수정하지 않는다. 네이티브 하위 작업자·브라우저·이미지 도구는 사용하지 않는다. 추가 인력은 마스터에게 결과로 요청한다.` }] };
+      return { injectSteps: [{ ephemeralMessage: `${this.opts.instructions ?? ""}\n${GEMINI_WRITING_INSTRUCTIONS}\n실제 작업 폴더: ${this.opts.cwd}\n제어용 폴더(${this.sessionDir})는 수정하지 않는다. 네이티브 하위 작업자·브라우저·이미지 도구는 사용하지 않는다. 추가 인력은 마스터에게 결과로 요청한다.` }] };
     }
     const tool = payload?.toolCall;
     const name = tool?.name;
@@ -175,6 +176,7 @@ export class GeminiDriver implements AgentDriver {
 
   async send(input: AgentInput) {
     if (this._running) throw new Error("제미나이 작업자가 이미 작업 중입니다.");
+    if (!input.noWrites) throw new Error("Gemini CLI는 글쓰기 전용입니다. 파일 수정은 Claude/GPT에 맡기세요.");
     this._running = true;
     this.stopping = false;
     const epoch = ++this.epoch;
@@ -188,7 +190,7 @@ export class GeminiDriver implements AgentDriver {
     if (epoch !== this.epoch || this.stopping) return;
     this.baseline = { ...this.total };
     this.startedAt = Date.now(); this.turnId = randomUUID(); this._running = true;
-    this.child!.stdin!.write(JSON.stringify({ event: "user", message: { content: `[AI_ChatterBox 작업 지시]\n${this.opts.instructions ?? ""}\n작업 폴더: ${this.opts.cwd}\n\n${input.text}${fileNote(input.attachments)}` } }) + "\n");
+    this.child!.stdin!.write(JSON.stringify({ event: "user", message: { content: `[AI_ChatterBox 작업 지시]\n${this.opts.instructions ?? ""}\n${GEMINI_WRITING_INSTRUCTIONS}\n작업 폴더: ${this.opts.cwd}\n\n${input.text}${fileNote(input.attachments)}` } }) + "\n");
   }
   async stop() {
     this.stopping = true;

@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { ChevronDown, Loader2, PencilLine, RotateCcw } from "lucide-react";
-import { AGENT_LABEL, type AgentKind } from "../../../shared/types";
+import { ChevronDown, Globe2, Loader2, PencilLine, RotateCcw } from "lucide-react";
+import { AGENT_LABEL, GEMINI_WEB_MODEL, type AgentKind } from "../../../shared/types";
 import { cn } from "../lib/utils";
 import { latestModels } from "../../../shared/models";
 import { useStore } from "../store";
+import { GeminiWebDialog } from "./GeminiWebDialog";
 import {
   Button,
   Dialog,
@@ -25,10 +26,13 @@ const MODEL_GROUP_LABEL: Record<AgentKind, string> = {
   gemini: "Gemini 모델 (Antigravity)",
 };
 
+const GEMINI_WEB_LABEL = "Gemini 웹 · Argon (계정 1)";
+
 /** "claude:opus" for the orchestrator (both CLIs), or a plain model id for a worker. */
 export function useModelLabel() {
   const models = useStore((s) => s.models);
-  return (agent: AgentKind, id: string) => models[agent]?.find((m) => m.id === id)?.label ?? (id || (agent === "gemini" ? "Pro 자동 선택" : "기본값"));
+  return (agent: AgentKind, id: string) =>
+    models[agent]?.find((m) => m.id === id)?.label ?? (agent === "gemini" && id === GEMINI_WEB_MODEL ? GEMINI_WEB_LABEL : id || (agent === "gemini" ? "Pro 자동 선택" : "기본값"));
 }
 
 interface Props {
@@ -52,22 +56,24 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
   const label = useModelLabel();
   const [custom, setCustom] = useState<AgentKind | null>(null);
   const [customText, setCustomText] = useState("");
+  const [geminiWebOpen, setGeminiWebOpen] = useState(false);
   const encoded = agents.length > 1;
-
-  useEffect(() => {
-    for (const a of agents) void loadModels(a);
-  }, [agents.join(","), loadModels]);
-
   const encodedAgent = agents.find((a) => value.startsWith(`${a}:`)) ?? agents[0];
   const current = encoded
     ? { agent: encodedAgent, id: value.slice(value.indexOf(":") + 1) }
     : { agent: agents[0], id: value };
+  const webSelected = current.agent === "gemini" && current.id === GEMINI_WEB_MODEL;
+
+  useEffect(() => {
+    for (const a of agents) if (!(webSelected && a === "gemini")) void loadModels(a);
+  }, [agents.join(","), loadModels, webSelected]);
+
   const make = (agent: AgentKind, id: string) => (encoded ? `${agent}:${id}` : id);
 
   return (
     <>
       <DropdownMenu onOpenChange={(open) => {
-        if (open) for (const a of agents) if (errors[a]) void loadModels(a);
+        if (open) for (const a of agents) if (!(webSelected && a === "gemini") && errors[a]) void loadModels(a);
       }}>
         <DropdownMenuTrigger asChild>
           <Button
@@ -99,16 +105,23 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
               {i > 0 && <DropdownMenuSeparator />}
               <DropdownMenuLabel>{MODEL_GROUP_LABEL[a]}</DropdownMenuLabel>
               {a === "gemini" && (
-                <DropdownMenuCheckItem checked={current.agent === a && current.id === ""} onSelect={() => onChange(make(a, ""))}>
-                  <span className="flex-1 truncate">Pro 자동 선택</span>
-                </DropdownMenuCheckItem>
+                <>
+                  <DropdownMenuItem onSelect={() => setGeminiWebOpen(true)} data-testid="gemini-web-connect">
+                    <Globe2 />
+                    웹 계정 1 연결…
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuCheckItem checked={current.agent === a && current.id === ""} onSelect={() => onChange(make(a, ""))}>
+                    <span className="flex-1 truncate">Pro 자동 선택</span>
+                  </DropdownMenuCheckItem>
+                </>
               )}
-              {!models[a] && !errors[a] && (
+              {!models[a] && !errors[a] && !(webSelected && a === "gemini") && (
                 <div className="flex items-center gap-2 px-2 py-1.5 text-[12px] text-muted-foreground">
                   <Loader2 className="size-3.5 animate-spin" /> 목록을 불러오는 중…
                 </div>
               )}
-              {errors[a] && <>
+              {errors[a] && !(webSelected && a === "gemini") && <>
                 <div className="px-2 py-1.5 text-[12px] text-destructive">{errors[a]}</div>
                 <DropdownMenuItem onSelect={(event) => { event.preventDefault(); void loadModels(a); }}>
                   <RotateCcw /> 목록 다시 확인
@@ -171,6 +184,11 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
           </form>
         </DialogContent>
       </Dialog>
+      <GeminiWebDialog
+        open={geminiWebOpen}
+        onOpenChange={setGeminiWebOpen}
+        onUseModel={() => onChange(make("gemini", GEMINI_WEB_MODEL))}
+      />
     </>
   );
 }

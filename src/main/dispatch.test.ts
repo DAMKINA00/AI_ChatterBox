@@ -164,6 +164,28 @@ test("untouched worker preferences adopt Claude-first defaults while custom pref
   }
 });
 
+test("old Gemini helper defaults migrate to prose-only while custom prose preferences remain", () => {
+  const root = mkdtempSync(join(tmpdir(), "aichatterbox-prose-"));
+  const file = join(root, "db.sqlite");
+  let store = new Store(file);
+  try {
+    const old = store.createProject("old", root, {
+      ...DEFAULT_SETTINGS,
+      claudeStrengths: "일반 업무의 기본 담당. 소스 분석·원인 조사·구현·테스트·문서 작성과 모션그래픽·애니메이션 제작을 우선 배정합니다.",
+      geminiStrengths: "사용자 지정 제미나이 작업, 문서 요약·자료 비교와 추가 관점의 검토. 클로드가 바쁘거나 사용 한도에 도달했을 때 보조 담당.",
+      geminiCautions: "Google AI Pro 계정에서 실제 제공되는 Gemini 모델만 사용합니다. Ultra 전용 모델·API 결제로 전환하지 않습니다. 일반 업무는 클로드 우선, 이미지 생성은 지피티, 중요한 오류는 기존 클로드·지피티 양쪽 조사 규칙을 유지합니다.",
+    });
+    const custom = store.createProject("custom", root, { ...DEFAULT_SETTINGS, geminiStrengths: "차분한 박사 말투의 대사", geminiCautions: "설정한 세계관을 유지" });
+    store.close(); store = new Store(file);
+    const migrated = store.project(old.id)!.settings;
+    assert.equal(migrated.claudeStrengths, DEFAULT_SETTINGS.claudeStrengths);
+    assert.equal(migrated.geminiStrengths, DEFAULT_SETTINGS.geminiStrengths);
+    assert.equal(migrated.geminiCautions, DEFAULT_SETTINGS.geminiCautions);
+    assert.equal(store.project(custom.id)!.settings.geminiStrengths, "차분한 박사 말투의 대사");
+    assert.equal(store.project(custom.id)!.settings.geminiCautions, "설정한 세계관을 유지");
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("released workers reuse their identity and session in number order without replacing history", () => {
   const root = mkdtempSync(join(tmpdir(), "aichatterbox-reuse-"));
   const file = join(root, "db.sqlite");

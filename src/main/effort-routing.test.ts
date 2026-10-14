@@ -32,10 +32,10 @@ test("master defaults to xhigh; parallel assignments keep separate effort and pe
   try {
     assert.equal((await f.chats.assignmentEffort(f.chat.id, "orch")).effort, "xhigh");
     const claude = f.store.createAgent(f.chat.id, "claude", "analyze");
-    const gemini = f.store.createAgent(f.chat.id, "gemini", "compare");
+    const gemini = f.store.createAgent(f.chat.id, "gemini", "write dialogue");
     const response = await f.engine.call(f.chat.id, "orch", "ask_parallel", { tasks: [
       { to: claude.nickname, kind: "opinion", message: "analyze", reason: "bounded analysis: medium", effort: "medium" },
-      { to: gemini.nickname, kind: "opinion", message: "compare", reason: "difficult comparison: xhigh", effort: "xhigh" },
+      { to: gemini.nickname, kind: "writing", message: "write dialogue", reason: "complex character voice: xhigh", effort: "xhigh" },
     ] });
     assert.ok(!response.isError);
     assert.deepEqual(f.sent.sort((a, b) => a.role.localeCompare(b.role)), [{ role: claude.key, effort: "medium" }, { role: gemini.key, effort: "high" }]);

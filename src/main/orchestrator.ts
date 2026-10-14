@@ -14,6 +14,7 @@ import { basename, isAbsolute, relative, resolve as resolvePath } from "node:pat
 import {
   chatOrchestrator,
   AGENT_EXPRESSIONS,
+  GEMINI_WRITING_INSTRUCTIONS,
   isAgentExpression,
   CONSULT_KIND_LABEL,
   MASTER_LABEL,
@@ -46,7 +47,7 @@ import { addWait, checkAsk, removeWait, type WaitGraph } from "./team";
 import { completionIssue, dualInvestigationIssue } from "./dispatch";
 import { WORKER_EFFORTS } from "./effort";
 
-const KINDS: ConsultKind[] = ["implement", "review", "opinion"];
+const KINDS: ConsultKind[] = ["implement", "review", "opinion", "writing"];
 const MAX_DEPTH = 3;
 const MAX_ASKS_CAP = 24;
 const MAX_GOAL_TURNS = 6;
@@ -68,7 +69,7 @@ const ASK_TOOL = (forMaster: boolean): ToolDef => ({
   name: "ask",
   description:
     "작업자에게 닉네임으로 일을 맡기거나 질문하고 결과를 기다립니다 (예: to=\"클로드 2호\"). 받는 쪽은 이 대화를 보지 못하므로 message에 목표, 관련 파일, 조건, 완료 기준을 모두 적으세요. " +
-    "kind: implement=구현·수정(받는 작업자가 파일을 고침, scope로 고칠 범위를 지정), review=리뷰(파일을 고치지 않고 문제점만 보고), opinion=의견·분석. " +
+    "kind: implement=구현·수정(받는 작업자가 파일을 고침, scope로 고칠 범위를 지정), review=기술 리뷰, opinion=의견·분석, writing=문장 다듬기·캐릭터 대사·문서 본문 등 글쓰기(파일을 고치지 않고 텍스트만 반환). 제미나이는 웹·CLI 모두 writing만 허용하며 코드 작업·기술 리뷰를 맡기지 않습니다. " +
     "scope(implement 전용): 고쳐도 되는 경로 glob 목록(작업 폴더 기준, 예: [\"src/ui/**\", \"README.md\"]). 범위가 겹치지 않는 구현은 동시에 진행되고, 범위 밖 쓰기는 거부됩니다. " +
     (forMaster ? "여러 작업자에게 동시에 맡기려면 ask를 여러 번 병렬로 호출하세요." : "마스터에게는 ask를 쓰지 말고 결과 보고에 질문을 포함하세요."),
   inputSchema: {
@@ -190,8 +191,10 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     `- 클로드 선호 작업: ${s.claudeStrengths}\n  주의점: ${s.claudeCautions}`,
     `- 지피티 선호 작업: ${s.gptStrengths}\n  주의점: ${s.gptCautions}`,
     `- 제미나이 선호 작업: ${s.geminiStrengths}\n  주의점: ${s.geminiCautions}` ,
-    "- 제미나이는 Pro 계정으로 제공되는 보조 작업자다. 사용자가 제미나이를 지정하면 우선 맡기고, 자료 비교·요약·추가 검토 또는 클로드 한도 초과 시 활용한다. 필요 없이 세 계열을 모두 호출하지 않는다. 중요한 오류의 클로드·지피티 독립 조사를 제미나이로 대체하지 않는다.",
-    "- 기본 배정은 클로드 중심이다. 일반 분석·구현·테스트·문서는 먼저 클로드에게 맡기고, 독립 작업이 많으면 클로드 작업자를 추가해 나눈다. 지피티는 이미지 도구가 필요한 작업, 중요한 양쪽 조사·다른 관점의 검증, 사용자의 지피티 지정, 또는 클로드의 한도·실행 불가·과부하에 따른 재배정에 우선 사용한다. 매번 두 계열을 균등하게 배정하지 않는다. 프로젝트의 사용자 지정 선호와 명시적인 사용자 지시는 존중하며 예외 배정 이유를 기록한다.",
+    `- ${GEMINI_WRITING_INSTRUCTIONS} 이 역할 제한은 이전 프로젝트 선호나 사용 한도에 따른 재배정에도 적용한다. 제미나이에 코드 일을 글쓰기라고 바꿔 맡기지 않는다.`,
+    "- 글쓰기 본 작업은 제미나이에게 kind=writing으로 배정한다. 요청에 독자·목적·분량·말투와 확인된 사실, 캐릭터 대사에는 성격·관계·상황·말투 예시를 전달한다. 기술 문서는 클로드·지피티가 사실을 확인 → 제미나이가 본문을 작성·다듬기 → 클로드·지피티가 기술 내용과 파일 반영을 확인한다. 제미나이가 비활성·한도·실패 상태면 이유를 기록하고 글쓰기를 클로드·지피티에 재배정할 수 있다. 간단한 답변은 마스터가 직접 한다.",
+    "- Gemini 웹 모델은 계정 1의 Argon 채팅이다. 계정당 작업자 하나만 사용한다. 로컬 파일·명령·MCP를 실행할 수 없으므로 message에 필요한 자료를 포함하거나 attach에 UTF-8 텍스트 파일을 명시한다. 웹에는 추론 단계 설정·토큰 수가 없으므로 effort는 배정 의도로만 기록된다.",
+    "- 기술 업무의 기본 배정은 클로드 중심이다. 일반 분석·구현·테스트·문서의 기술 검증과 파일 제작은 먼저 클로드에게 맡기고, 독립 작업이 많으면 클로드 작업자를 추가해 나눈다. 지피티는 이미지 도구가 필요한 작업, 중요한 양쪽 조사·다른 관점의 검증, 사용자의 지피티 지정, 또는 클로드의 한도·실행 불가·과부하에 따른 재배정에 우선 사용한다. 매번 두 계열을 균등하게 배정하지 않는다. 글쓰기 전용인 제미나이를 기술 작업의 대체자로 사용하지 않는다.",
     "- 위 기준은 기본 선호이며 절대적인 우열이 아니다. 필요한 도구 사용 가능 여부를 먼저 확인하고, 사용자가 지정한 담당·선호 기준·관련 맥락·작업량·사용 한도를 고려한다. 두 계열을 매번 모두 부르지 않는다. 실패하면 원인을 반영해 재배정하고 가능한 담당자가 없으면 미완료 사유를 알린다.",
     "- 시각 작업도 구분한다. 이미지 생성·편집은 이미지 도구가 있는 지피티에게, 모션그래픽·애니메이션의 코드·타임라인·연출 제작은 클로드에게 우선 배정한다. 모션그래픽에 새 이미지 소재가 필요하면 그 이미지 생성만 지피티에 맡기고 클로드가 결과를 통합한다.",
     `- 중요한 버그 수정·오류 분석이라고 판단하면 ${t("route_request")}(mode=delegated, dualInvestigation=true, reason=중요도 판단 근거)를 기록한다. 예: 데이터 손실·보안·설비 안전·서비스 중단에 영향이 크거나, 반복 장애의 원인이 불확실하고 잘못 고쳤을 때 피해가 큰 경우. 사용자에게 양쪽 조사를 명시적으로 요청받은 경우도 적용한다. 단순 문구·서식 수정이나 일반 질문에 모두 호출하지 않는다.`,
@@ -220,8 +223,11 @@ function workerInstructions(a: ChatAgent): string {
     `# 역할: AI_ChatterBox ${a.nickname} (${WORKER_KIND_LABEL[a.kind]} 작업자)`,
     `너는 마스터가 이끄는 팀의 작업자 "${a.nickname}"이다.${a.job ? ` 맡은 역할: ${a.job}` : ""}`,
     "- 너의 모델은 앱이 지정한다. 네이티브 spawn_agent/Agent/Task 또는 별도 CLI로 하위 작업자를 생성하지 않는다. 추가 인력이 필요하면 결과 보고에서 마스터에게 요청한다. 기존 팀과의 질문은 앱 ask만 사용한다.",
-    "- 구현 지시(implement): 지정된 범위(scope) 안의 파일만 고친다. 범위 밖 쓰기는 거부된다. 가능하면 빌드·테스트로 확인한다.",
-    "- 리뷰 지시(review)·의견 지시(opinion): 파일을 고치지 않는다. 리뷰는 버그, 빠진 처리, 개선점을 심각도와 함께 보고하고, 문제가 없으면 분명히 말한다.",
+    ...(a.kind === "gemini" ? [GEMINI_WRITING_INSTRUCTIONS, "- 글쓰기 이외 요청이면 수행하지 말고 마스터에게 재배정을 요청한다. 다른 작업자에게 코드 조사·리뷰를 다시 위임하지 않는다."] : [
+      "- 구현 지시(implement): 지정된 범위(scope) 안의 파일만 고친다. 범위 밖 쓰기는 거부된다. 가능하면 빌드·테스트로 확인한다.",
+      "- 리뷰 지시(review)·의견 지시(opinion): 파일을 고치지 않는다. 리뷰는 버그, 빠진 처리, 개선점을 심각도와 함께 보고하고, 문제가 없으면 분명히 말한다.",
+    ]),
+    "- 글쓰기 지시(writing): 문장·대사·문서 본문만 작성해 반환한다. 로컬 파일과 기술적 사실은 바꾸지 않는다. 독자·캐릭터의 말투·길이 조건을 지킨다.",
     "- 다른 작업자에게 확인할 것이 있으면 ask(to=닉네임)로 직접 묻는다. 팀 목록은 agents. 마스터에게는 ask를 쓰지 말고 결과 보고에 질문을 적는다.",
     "- 끝나면 한국어로 짧게 보고한다: 한 일, 바뀐 파일, 확인 방법과 결과, 남은 문제.",
     `- 대사 전에 set_expression 도구로 감정을 지정한다 (${AGENT_EXPRESSIONS.join(", ")}). Claude에서는 mcp__chatterbox_bridge__set_expression. 기술적 내용과 말투는 그대로 유지한다.`,
@@ -444,9 +450,10 @@ export class Orchestrator {
     const chat = this.chats.store.chat(chatId)!;
     const project = this.chats.store.project(chat.projectId)!;
     if (this.planning.has(chatId)) return textResult("지금은 계획 모드입니다. 작업자를 만들지 말고 계획만 세우세요.", true);
-    if (!this.chats.cliInfo().find((c) => c.agent === WORKER_AGENT[kind])?.path)
+    const web = kind === "gemini" && this.chats.usesGeminiWeb(chat);
+    if (!web && !this.chats.cliInfo().find((c) => c.agent === WORKER_AGENT[kind])?.path)
       return textResult(`${WORKER_KIND_LABEL[kind]} CLI가 설치되지 않았습니다. 사용 가능한 작업자를 선택하거나 미완료 사유를 보고하세요.`, true);
-    const max = kind === "claude" ? project.settings.maxClaudeWorkers : kind === "gpt" ? project.settings.maxGptWorkers : project.settings.maxGeminiWorkers;
+    const max = kind === "claude" ? project.settings.maxClaudeWorkers : kind === "gpt" ? project.settings.maxGptWorkers : web ? Math.min(1, project.settings.maxGeminiWorkers) : project.settings.maxGeminiWorkers;
     const active = this.agents(chatId).filter((a) => a.kind === kind && a.status === "active").length;
     if (active >= max)
       return textResult(`${WORKER_KIND_LABEL[kind]}는 동시에 ${max}명까지입니다. 기존 작업자에게 맡기거나 다 쓴 작업자를 release 하세요.`, true);
@@ -508,6 +515,8 @@ export class Orchestrator {
       return textResult(`그런 작업자가 없습니다: "${to}". 지금 팀: ${names.join(", ") || "(없음 — 마스터가 spawn으로 만듭니다)"}`, true);
     }
     if (target.status === "released") return textResult(`${target.nickname}은(는) 해제되었습니다.`, true);
+    if ((target.kind === "gemini" || this.agents(chatId).find((a) => a.key === caller)?.kind === "gemini") && kind !== "writing")
+      return textResult("제미나이는 웹·CLI 모두 글쓰기 전용입니다. 문장 다듬기·캐릭터 대사·문서 본문은 writing으로 요청하고, 코드 분석·구현·테스트·기술 리뷰는 클로드·지피티에게 직접 맡기세요.", true);
     if (args.requiresImage) {
       if (target.kind !== "gpt" || kind !== "implement") return textResult("이미지 생성은 지피티에게 implement로 맡기세요.", true);
       const caps = await this.chats.teamCapabilities(this.chats.store.chat(chatId)!);
@@ -680,7 +689,8 @@ export class Orchestrator {
             ? `[${target.nickname}: 사용자가 중지했습니다. 더 맡기지 말고 멈추세요.]`
             : `[${target.nickname}: 오류 — ${result.error ?? "실패"}]`;
       const files = result.files.length ? `\n\n변경된 파일:\n${result.files.map((f) => `- ${f}`).join("\n")}` : "\n\n변경된 파일: 없음";
-      return textResult(`${head} 협의 id=${consult.id} · 추론 ${reasoning.effort || "CLI 기본"}\n${summary}${files}${caller === "orch" ? this.takeQueued(chatId) : ""}`, status !== "done");
+      const effortLabel = target.kind === "gemini" && this.chats.usesGeminiWeb(chat) ? "웹 모델 설정" : reasoning.effort || "CLI 기본";
+      return textResult(`${head} 협의 id=${consult.id} · 추론 ${effortLabel}\n${summary}${files}${caller === "orch" ? this.takeQueued(chatId) : ""}`, status !== "done");
     } finally {
       removeWait(this.graph(chatId), caller, target.key);
       done();
@@ -1209,6 +1219,8 @@ function kindPrefix(kind: ConsultKind, from: string, scope: string[]): string {
       return `[${from}의 구현 요청${scope.length ? ` · 고칠 수 있는 범위: ${scope.join(", ")}` : ""}]\n`;
     case "review":
       return `[${from}의 리뷰 요청 — 파일을 고치지 말고 문제점만 보고하세요]\n`;
+    case "writing":
+      return `[${from}의 글쓰기 요청 — 문장·캐릭터 대사·문서 본문만 작성하고 파일을 고치거나 코드 분석·기술 리뷰를 하지 마세요]\n`;
     default:
       return `[${from}의 의견 요청 — 파일을 고치지 마세요]\n`;
   }

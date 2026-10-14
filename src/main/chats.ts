@@ -4,6 +4,7 @@
 import { mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import {
+  GEMINI_WEB_MODEL,
   chatOrchestrator,
   type AgentEvent,
   type AgentKind,
@@ -25,6 +26,8 @@ import { LocalBridge } from "./local-bridge";
 import { ApprovalService, type ApprovalInput, type JudgeAnswer } from "./approvals";
 import { findClaude, findCodex, findGemini } from "./locate";
 import { GeminiDriver } from "./drivers/gemini";
+import { GeminiWebDriver } from "./drivers/gemini-web";
+import { GeminiWebBrowser } from "./drivers/gemini-web-browser";
 import { listGeminiModels } from "./drivers/gemini-protocol";
 import { readGeminiUsage } from "./drivers/gemini-usage";
 import { ClaudeDriver, claudeUsageText, listClaudeModels } from "./drivers/claude";
@@ -68,6 +71,7 @@ export class ChatManager {
   readonly tmpDir: string;
   private usageState: UsageInfo = {};
   private geminiUsageRefresh?: Promise<void>;
+  private webBrowser?: GeminiWebBrowser;
   private attachments: AttachmentStore;
   /** Where a role's events currently go (its own node, or a consult it is serving). */
   private routes = new Map<number, Partial<Record<Role, NodeId>>>();
@@ -75,7 +79,7 @@ export class ChatManager {
   constructor(
     readonly store: Store,
     readonly sink: Sink,
-    dataDir: string,
+    readonly dataDir: string,
     readonly bridgeScript: string,
   ) {
     this.attachments = new AttachmentStore(join(dataDir, "attachments"), store);
@@ -145,10 +149,17 @@ export class ChatManager {
 
   geminiModels() { return listGeminiModels(this.geminiExe(), this.tmpDir); }
 
+  geminiWeb() {
+    return this.webBrowser ??= new GeminiWebBrowser(this.dataDir, (usage) => this.mergeUsage({ geminiWeb: usage }));
+  }
+  usesGeminiWeb(chat: Chat) {
+    return (chat.geminiModelOverride ?? this.store.project(chat.projectId)!.settings.geminiModel) === GEMINI_WEB_MODEL;
+  }
+
   async models(agent: AgentKind): Promise<ModelOption[]> {
     const cached = this.modelLists.get(agent);
     if (cached && cached.expires > Date.now()) return cached.promise;
-    const promise = agent === "codex" ? this.codex().models() : agent === "gemini" ? this.geminiModels()
+    const promise = agent === "codex" ? this.codex().models() : agent === "gemini" ? Promise.resolve().then(() => this.geminiModels()).catch(() => []).then((models) => [...models, { id: GEMINI_WEB_MODEL, label: "웹 · Gemini 4 Argon", reasoningEfforts: [] }])
       : listClaudeModels(this.claudeExe(), this.tmpDir).then((list) => list.map((m) => ({
         id: m.value, label: m.displayName, isDefault: m.value === "opus",
         reasoningEfforts: m.supportsEffort ? m.supportedEffortLevels ?? [] : [],
@@ -161,6 +172,10 @@ export class ChatManager {
   async assignmentEffort(chatId: number, role: Role, requested?: string): Promise<{ requestedEffort: string; effort: string }> {
     const chat = this.store.chat(chatId)!;
     const cfg = this.roleConfig(chat, this.store.project(chat.projectId)!, role);
+    if (cfg.agent === "gemini" && cfg.model === GEMINI_WEB_MODEL) {
+      workerEffort("auto", requested); // Validate the assignment, but do not pretend to control web thinking levels.
+      return { requestedEffort: requested ?? "", effort: "" };
+    }
     const choice = role === "orch" ? cfg.effort : workerEffort(cfg.effort, requested);
     if (!choice) return { requestedEffort: requested ?? "", effort: "" };
     const models = await this.models(cfg.agent);
@@ -173,6 +188,7 @@ export class ChatManager {
     const project = this.store.project(chat.projectId)!;
     const installed = this.cliInfo();
     const gptModel = chat.codexModelOverride ?? project.settings.codexModel;
+    const geminiWeb = this.usesGeminiWeb(chat);
     let imageGeneration: boolean | null = null;
     let codexAuthenticated: boolean | null = null;
     if (installed.find((c) => c.agent === "codex")?.path) {
@@ -210,7 +226,7 @@ export class ChatManager {
     return {
       claude: { installed: !!installed.find((c) => c.agent === "claude")?.path, model: chat.claudeModelOverride ?? project.settings.claudeModel, reasoningEfforts: effortLevels.claude, effortSetting: chat.claudeEffortOverride ?? project.settings.claudeEffort, imageGeneration: false, authentication: "실행 시 확인", usage: this.usageState.claude },
       gpt: { installed: !!installed.find((c) => c.agent === "codex")?.path, model: gptModel, reasoningEfforts: effortLevels.codex, effortSetting: chat.codexEffortOverride ?? project.settings.codexEffort, imageGeneration, authenticated: codexAuthenticated, usage: this.usageState.codex },
-      gemini: { installed: !!installed.find((c) => c.agent === "gemini")?.path, model: (chat.geminiModelOverride ?? project.settings.geminiModel) || "Pro 계정 제공 모델 자동 선택", reasoningEfforts: effortLevels.gemini, effortSetting: chat.geminiEffortOverride ?? project.settings.geminiEffort, imageGeneration: false, authentication: "Antigravity 로그인·모델 목록은 실행 시 확인", enabled: project.settings.maxGeminiWorkers > 0, usage: this.usageState.gemini },
+      gemini: { installed: geminiWeb || !!installed.find((c) => c.agent === "gemini")?.path, model: (chat.geminiModelOverride ?? project.settings.geminiModel) || "Pro 계정 제공 모델 자동 선택", reasoningEfforts: geminiWeb ? [] : effortLevels.gemini, effortSetting: geminiWeb ? "웹 모델 설정" : chat.geminiEffortOverride ?? project.settings.geminiEffort, imageGeneration: false, authentication: geminiWeb ? "웹 계정 1 로그인·Argon을 실행 시 확인" : "Antigravity 로그인·모델 목록은 실행 시 확인", enabled: project.settings.maxGeminiWorkers > 0, usage: geminiWeb ? this.usageState.geminiWeb : this.usageState.gemini, webOnly: geminiWeb, localTools: !geminiWeb, fileWrites: false, supportedKinds: ["writing"], role: "문장 다듬기·캐릭터 대사·문서 본문 작성 전용. 코드 작업·기술 리뷰 제외" },
     };
   }
 
@@ -234,6 +250,7 @@ export class ChatManager {
     }
     // Gemini /usage is a complete snapshot; errors must not retain a stale percentage.
     if (u.gemini) this.usageState = { ...this.usageState, gemini: u.gemini };
+    if (u.geminiWeb) this.usageState = { ...this.usageState, geminiWeb: u.geminiWeb };
     // Remember the last values so the sidebar isn't empty on the next launch.
     if (!this.disposing) this.store.setSetting("usage", JSON.stringify(this.usageState));
     this.sink.usage(this.usageState);
@@ -434,7 +451,11 @@ export class ChatManager {
         },
         host,
       );
+    } else if (cfg.agent === "gemini" && cfg.model === GEMINI_WEB_MODEL) {
+      driver = new GeminiWebDriver(driverOpts, this.geminiWeb(), host);
     } else if (cfg.agent === "gemini") {
+      // Web conversation paths must never be passed as CLI conversation identifiers.
+      if (driverOpts.nativeId?.startsWith("web:")) driverOpts.nativeId = null;
       driver = new GeminiDriver({ ...driverOpts, exePath: this.geminiExe() }, {
         bridge: this.bridge, hookScript: join(dirname(this.bridgeScript), "antigravity-hook.js"), tmpDir: this.tmpDir, sessionKey: `${chatId}-${role}`,
         mcpServers: () => this.toolsFor?.(this.store.chat(chatId)!, role, "gemini") ?? {},
@@ -576,6 +597,7 @@ export class ChatManager {
     this.live.clear();
     await Promise.all(all.map((l) => l?.driver.dispose().catch(() => undefined)));
     await this.codexServer?.dispose();
+    await this.webBrowser?.dispose();
     this.bridge.stop();
   }
 }

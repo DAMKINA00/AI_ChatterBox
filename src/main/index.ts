@@ -185,6 +185,12 @@ function registerIpc() {
   // misc
   ipcMain.handle("cli:info", () => chats.cliInfo());
   ipcMain.handle("models:list", (_e, agent: AgentKind) => chats.models(agent));
+  ipcMain.handle("gemini:web", (_e, action: string) => {
+    if (action === "open") return chats.geminiWeb().open();
+    if (action === "refresh") return chats.geminiWeb().refresh();
+    if (action === "status") return chats.geminiWeb().status();
+    throw new Error("지원하지 않는 웹 연결 요청입니다.");
+  });
   ipcMain.handle("theme:get", () => (store.getSetting("theme") as Theme) ?? "dark");
   ipcMain.handle("theme:set", (_e, theme: Theme) => {
     store.setSetting("theme", theme);
@@ -197,6 +203,7 @@ function registerIpc() {
       .catch(() => undefined);
     void chats.refreshClaudeUsage();
     void chats.refreshGeminiUsage();
+    if (chats.usage().geminiWeb || existsSync(join(chats.dataDir, "web-accounts", "gemini-1"))) void chats.geminiWeb().refreshUsage();
     return chats.usage();
   });
   ipcMain.handle("shell:openPath", async (_e, p: string) => {

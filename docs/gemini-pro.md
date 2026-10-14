@@ -1,19 +1,19 @@
 # Google AI Pro로 Gemini 작업자 사용
 
-ChatterBox의 Gemini는 Google 계정으로 로그인한 **Antigravity CLI**를 사용합니다. 별도 Gemini API 키를 요구하지 않습니다.
+ChatterBox의 Gemini CLI는 Google 계정으로 로그인한 **Antigravity CLI**를 사용합니다. 별도 Gemini API 키를 요구하지 않습니다. 0.4.0부터 웹·CLI Gemini 모두 **문장 다듬기·캐릭터 대사·문서 본문 등 글쓰기 전용**입니다. 코드 작업과 기술 리뷰는 클로드·지피티가 맡습니다.
 
 ## 웹과 CLI의 모델 차이
 
 2026-10-14 기준, Google AI Pro는 [Gemini 앱에서 Gemini 4 Argon](https://blog.google/innovation-and-ai/products/gemini-app/gemini-4-argon-availability/)을 사용할 수 있지만 [Antigravity의 Argon은 Ultra·Enterprise에 제공](https://antigravity.google/docs/models)됩니다. 웹에서 보이는 모델과 CLI 목록이 다른 것은 설치 실패를 뜻하지 않습니다. ChatterBox는 실제 CLI 계정에 제공되는 모델만 선택합니다.
 
-Argon의 [공식 개발자 연동은 유료 Gemini API](https://blog.google/innovation-and-ai/technology/developers-tools/build-with-gemini-4-argon/)로도 가능합니다. Pro 웹 채팅을 브라우저 조작으로 전달·수집하는 연동은 별도 구현이 필요하며, 현재 ChatterBox에는 포함하지 않습니다.
+Argon의 [공식 개발자 연동은 유료 Gemini API](https://blog.google/innovation-and-ai/technology/developers-tools/build-with-gemini-4-argon/)로도 가능합니다. 0.4.0에는 별도 계정 세션으로 Pro 웹 Argon을 연결하는 기능이 추가됐습니다. [웹 계정 연결 안내](gemini-web.md)를 참고하세요.
 
 ## 설치와 로그인
 
 1. [공식 설치 안내](https://antigravity.google/docs/cli/install/)에서 Windows CLI를 설치합니다.
 2. PowerShell에서 `& "$env:LOCALAPPDATA\agy\bin\agy.exe"`를 실행하고 Google AI Pro 계정으로 로그인합니다. 브라우저에 인증 코드가 나오면 CLI 터미널에 직접 입력합니다.
 3. `& "$env:LOCALAPPDATA\agy\bin\agy.exe" models`에 모델 목록이 나오면 준비가 끝납니다.
-4. ChatterBox 프로젝트 설정에서 Gemini 모델을 선택합니다. 기본값은 **Pro 자동 선택**입니다. 마스터에게 “제미나이에게 이 문서 비교를 맡겨줘”처럼 요청할 수 있습니다.
+4. ChatterBox 프로젝트 설정에서 Gemini 모델을 선택합니다. 기본값은 **Pro 자동 선택**입니다. 마스터에게 “제미나이에게 이 문서의 문장을 다듬게 해줘”처럼 요청할 수 있습니다.
 
 전체 경로로는 실행되는데 PowerShell에서 `agy`를 찾지 못하면 사용자 환경 변수 `Path`에 `%LOCALAPPDATA%\agy\bin`이 빠졌는지 확인하고 등록합니다. 이미 열린 터미널에는 이전 PATH가 남을 수 있으므로 새로 실행하거나, 현재 PowerShell에서 다음을 실행합니다.
 
@@ -42,13 +42,13 @@ CLI 1.3.5에서 실제 Pro 계정의 모델 3개와 두 한도를 확인했습�
 
 ## 승인과 작업 범위
 
-공식 [PreToolUse hook](https://antigravity.google/docs/hooks/)으로 파일·명령 요청을 ChatterBox 승인 처리에 전달합니다. 일반 구현은 지정한 범위 안에서 수행하며 리뷰·의견은 변경을 거부합니다. 승인 연결이 끊기면 hook은 거부를 반환합니다. 네이티브 하위 에이전트, 임의 MCP, 브라우저·이미지 생성 도구는 열지 않습니다. Windows 관리자 권한과 앱의 작업 승인은 별개입니다.
+글쓰기는 `writing`으로 배정하며 파일 변경 없이 텍스트를 반환합니다. 실제 파일 반영은 클로드·지피티가 맡습니다. 코드 분석·구현·테스트·기술 리뷰 요청은 앱이 거부하고, CLI도 쓰기 가능한 턴을 거부합니다. 공식 [PreToolUse hook](https://antigravity.google/docs/hooks/)으로 참고 자료 읽기 요청을 ChatterBox 승인 처리에 전달하며 파일·변경 명령은 차단합니다. 승인 연결이 끊기면 hook은 거부를 반환합니다. 네이티브 하위 에이전트, 임의 MCP, 브라우저·이미지 생성 도구는 열지 않습니다. Windows 관리자 권한과 앱의 작업 승인은 별개입니다.
 
-명령·파일 변경과 실시간 대사는 기존 협의 카드에 표시됩니다. 출력 토큰에는 생각 토큰을 포함하며 속도는 도구·승인 대기를 포함한 턴 평균입니다. 순수 모델 생성 속도나 Google 계정의 잔여 할당량이 아닙니다.
+참고 자료 읽기와 실시간 대사는 기존 협의 카드에 표시됩니다. 출력 토큰에는 생각 토큰을 포함하며 속도는 도구·승인 대기를 포함한 턴 평균입니다. 순수 모델 생성 속도나 Google 계정의 잔여 할당량이 아닙니다.
 
 ## 이번 버전의 범위
 
-- Gemini는 작업자이며 마스터 모델은 Claude/Codex입니다. 일반 업무는 Claude 우선, 이미지 생성은 GPT, 중요한 오류는 Claude와 GPT의 독립 조사 기준을 유지합니다.
+- Gemini는 글쓰기 작업자이며 마스터 모델은 Claude/Codex입니다. 기술 업무는 Claude 우선, 이미지 생성은 GPT, 중요한 오류는 Claude와 GPT의 독립 조사 기준을 유지합니다. 기술 문서의 사실은 이들이 먼저 확인한 뒤 Gemini에 전달합니다.
 - 아이콘은 별 모양 대신 제미나이 전용 치비 캐릭터 12종(중립 포함)으로 표시합니다.
 - CLI 제어 설정은 ChatterBox 임시 데이터 아래 `AI AGENT` 폴더에 생성하고 실제 작업 폴더를 별도로 전달합니다. 이것은 Antigravity 앱의 이름 있는 프로젝트 생성과는 다릅니다.
 - ChatterBox 기록 저장·작업자 해제·재호출은 지원합니다. CLI 1.3.4의 공식 [대화 관리](https://antigravity.google/docs/cli/conversations/)와 [명령 참조](https://antigravity.google/docs/cli/reference/)에서 보관·복원 기능을 확인하지 못했습니다. 내부 SQLite와 색인을 임의로 바꾸거나 원본 대화를 삭제하지 않으며, Claude/Codex와 같은 원본 목록 자동 보관은 지원하지 않습니다.

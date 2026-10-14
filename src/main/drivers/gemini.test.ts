@@ -36,23 +36,29 @@ test("Gemini usage subtracts cumulative session counters including thinking and 
   assert.deepEqual(geminiTokens({ output_tokens: -10, input_tokens: Infinity }), geminiTokens(null));
 });
 
-test("Gemini mutations require current app approval, and rejection is returned to CLI", async () => {
+test("Gemini prose worker rejects file mutations before approval", async () => {
   const f = fixture();
   const args = { TargetFile: "gemini-test-only.txt", CodeContent: "example" };
-  assert.equal((await f.call("write_to_file", args)).decision, "auto_approve");
-  assert.equal(f.approvals[0].writes, true);
-  assert.equal(f.approvals[0].diffs.length, 1);
-  f.verdict("deny");
   assert.equal((await f.call("write_to_file", args)).decision, "deny");
-  assert.equal(f.approvals.length, 2);
+  assert.equal(f.approvals.length, 0);
 });
 
-test("Gemini review rejects writes and compound shell but permits read command through app", async () => {
+test("Gemini writing rejects writes and compound shell but permits reading reference material through app", async () => {
   const f = fixture(); (f.driver as any).noWrites = true;
   assert.equal((await f.call("write_to_file", { TargetFile: "a", CodeContent: "b" })).decision, "deny");
   assert.equal((await f.call("run_command", { CommandLine: "Get-Content a; Set-Content a changed" })).decision, "deny");
   assert.equal((await f.call("run_command", { CommandLine: "git status" })).decision, "auto_approve");
   assert.equal(f.approvals.length, 1);
+});
+
+test("Gemini CLI refuses writable turns and injects the prose-only role even without caller instructions", async () => {
+  const f = fixture();
+  (f.driver as any)._running = false;
+  await assert.rejects(f.driver.send({ text: "change code", attachments: [], noWrites: false }), /글쓰기 전용/);
+  assert.equal(f.driver.running, false);
+  const instructions = await f.driver.hook("instructions", {});
+  assert.match(JSON.stringify(instructions), /웹·CLI 모두 글쓰기 전용/);
+  assert.match(JSON.stringify(instructions), /코드 분석·구현·디버깅·테스트·기술 리뷰·교차검증은 맡지 않는다/);
 });
 
 test("Gemini blocks native subagents, arbitrary MCP and tools after stop", async () => {

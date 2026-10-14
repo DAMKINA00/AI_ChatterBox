@@ -11,7 +11,7 @@ import type { AgentInput, DriverHost } from "./types";
 import type { TokenCounts } from "../../shared/types";
 
 const childProcess = createRequire(join(process.cwd(), "package.json"))("node:child_process") as typeof import("node:child_process");
-const input: AgentInput = { text: "test", attachments: [] };
+const input: AgentInput = { text: "test prose", attachments: [], noWrites: true };
 const modelOutput = "gemini-3.8-flash-medium Gemini 3.8 Flash (Medium)\n";
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -114,7 +114,9 @@ test("a late exit or output from a disposed child cannot finish its replacement 
     driver.onEvent({ event: "result", result: { status: "SUCCESS", usage: { output_tokens: 1 } } });
     assert.equal(driver.running, false);
 
-    const second = driver.send({ ...input, noWrites: true });
+    // Simulate an existing writable process from the older integration.
+    (driver as any).noWrites = false;
+    const second = driver.send(input);
     await second;
     assert.equal(f.children.length, 2);
     const oldChild = f.children[0];
@@ -193,7 +195,8 @@ test("stop during a mode transition prevents its replacement process", async (t)
     await first;
     await driver.hook("start", {});
     driver.onEvent({ event: "result", result: { status: "SUCCESS" } });
-    const changing = driver.send({ ...input, noWrites: true });
+    (driver as any).noWrites = false;
+    const changing = driver.send(input);
     const duplicate = assert.rejects(driver.send(input), /이미 작업 중/);
     await driver.stop();
     await changing;
