@@ -9,10 +9,13 @@ export function findGemini(override?: string): string | null {
   if (override && existsSync(override)) return override;
   const found = onPath("agy");
   if (found) return found;
-  const path = process.platform === "win32"
-    ? join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "agy", "bin", "agy.exe")
-    : join(homedir(), ".local", "bin", "agy");
-  return existsSync(path) ? path : null;
+  const paths = process.platform === "win32"
+    ? [process.env.LOCALAPPDATA, join(homedir(), "AppData", "Local")]
+      .filter((dir): dir is string => !!dir?.trim())
+      .map((dir) => join(dir, "agy", "bin", "agy.exe"))
+    : [join(homedir(), ".local", "bin", "agy")];
+  // An inherited LOCALAPPDATA may be stale; still check the current user's install.
+  return paths.find(existsSync) ?? null;
 }
 
 function onPath(name: string): string | undefined {

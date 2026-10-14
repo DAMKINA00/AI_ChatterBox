@@ -66,7 +66,9 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
 
   return (
     <>
-      <DropdownMenu>
+      <DropdownMenu onOpenChange={(open) => {
+        if (open) for (const a of agents) if (errors[a]) void loadModels(a);
+      }}>
         <DropdownMenuTrigger asChild>
           <Button
             variant="outline"
@@ -106,7 +108,12 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
                   <Loader2 className="size-3.5 animate-spin" /> 목록을 불러오는 중…
                 </div>
               )}
-              {errors[a] && <div className="px-2 py-1.5 text-[12px] text-destructive">{errors[a]}</div>}
+              {errors[a] && <>
+                <div className="px-2 py-1.5 text-[12px] text-destructive">{errors[a]}</div>
+                <DropdownMenuItem onSelect={(event) => { event.preventDefault(); void loadModels(a); }}>
+                  <RotateCcw /> 목록 다시 확인
+                </DropdownMenuItem>
+              </>}
               {models[a] &&
                 latestModels(a, models[a]!, current.agent === a ? [current.id] : []).map((m) => (
                   <DropdownMenuCheckItem

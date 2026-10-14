@@ -201,6 +201,7 @@ export const useStore = create<State>((set, get) => ({
 
   async loadModels(agent) {
     if (get().models[agent]) return;
+    set((s) => ({ modelErrors: { ...s.modelErrors, [agent]: undefined } }));
     try {
       const list = await api.models(agent);
       set((s) => ({ models: { ...s.models, [agent]: list }, modelErrors: { ...s.modelErrors, [agent]: undefined } }));

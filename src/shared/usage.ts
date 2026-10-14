@@ -11,6 +11,8 @@ export interface UsageWindow {
 export interface ProviderUsage {
   fiveHour?: UsageWindow;
   weekly?: UsageWindow;
+  updatedAt?: number;
+  error?: string;
 }
 
 export interface UsageDisplay {

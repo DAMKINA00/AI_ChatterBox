@@ -9,6 +9,14 @@ ChatterBox의 Gemini는 Google 계정으로 로그인한 **Antigravity CLI**를 
 3. `& "$env:LOCALAPPDATA\agy\bin\agy.exe" models`에 모델 목록이 나오면 준비가 끝납니다.
 4. ChatterBox 프로젝트 설정에서 Gemini 모델을 선택합니다. 기본값은 **Pro 자동 선택**입니다. 마스터에게 “제미나이에게 이 문서 비교를 맡겨줘”처럼 요청할 수 있습니다.
 
+## 모델 목록과 남은 사용량 (0.3.6)
+
+모델 조회가 일시적으로 실패하면 메뉴를 다시 열 때 재시도합니다. 메뉴 안의 **목록 다시 확인**으로도 재시도할 수 있습니다. Windows에서는 PATH와 LOCALAPPDATA뿐 아니라 현재 사용자 프로필의 기본 설치 폴더도 확인합니다. CLI 탐색 실패와 로그인·네트워크 조회 실패는 구분해서 표시합니다.
+
+왼쪽 아래에 **Claude · GPT · Gemini**의 남은 사용량을 표시합니다. Gemini는 Antigravity의 `agy -p /usage --output-format json`에서 **Gemini Models** 그룹의 주간·5시간 한도만 가져옵니다. 주간 잔여량을 기본으로 보여주고 5시간 잔여량이 10% 이하이면 해당 한도로 전환합니다. 마우스를 올리면 초기화 시간과 조회 시각을 볼 수 있습니다. 앱 시작과 5분마다 갱신하고 마지막 정상 조회는 재실행 후 복원합니다. 조회 실패 시 이전 비율을 현재 값으로 표시하지 않고 **조회 실패**로 표시합니다.
+
+CLI 1.3.5에서 실제 Pro 계정의 모델 3개와 두 한도를 확인했습니다. 이 조회는 CLI 자체 명령으로 모델 작업을 시작하지 않습니다(`num_turns: 0`, 사용 토큰 0). 명령 형식이 없는 구버전은 정보를 추정하지 않으며 CLI 업데이트가 필요합니다. [공식 headless 안내](https://antigravity.google/docs/cli/headless/), [모델 한도 안내](https://antigravity.google/docs/cli/commands/usage/).
+
 2026-10-14에 실제 Pro 계정과 CLI 1.3.4에서 확인한 모델은 Gemini 3.8 Flash High·Medium·Low입니다. Pro 자동 선택은 Flash Medium을 기준으로 모델 계열을 선택하며 계정이 제공하는 목록을 실행 전에 다시 검사합니다. 특정 모델을 지정했는데 사라졌다면 다른 계열로 바꾸지 않고 오류를 표시합니다. 제공 모델은 Google 정책과 계정에 따라 달라질 수 있습니다.
 
 ## 추론 수준과 작업 시간 (0.3.5)

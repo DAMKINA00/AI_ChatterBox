@@ -346,6 +346,7 @@ export type Theme = "dark" | "light";
 export interface UsageInfo {
   claude?: ProviderUsage;
   codex?: ProviderUsage;
+  gemini?: ProviderUsage;
 }
 
 export interface ChatterBoxApi {

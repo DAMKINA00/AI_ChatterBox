@@ -26,6 +26,7 @@ import { ApprovalService, type ApprovalInput, type JudgeAnswer } from "./approva
 import { findClaude, findCodex, findGemini } from "./locate";
 import { GeminiDriver } from "./drivers/gemini";
 import { listGeminiModels } from "./drivers/gemini-protocol";
+import { readGeminiUsage } from "./drivers/gemini-usage";
 import { ClaudeDriver, claudeUsageText, listClaudeModels } from "./drivers/claude";
 import { resolveEffort, workerEffort, WORKER_EFFORTS } from "./effort";
 import { parseClaudeUsageText } from "../shared/usage";
@@ -66,6 +67,7 @@ export class ChatManager {
   private modelLists = new Map<AgentKind, { expires: number; promise: Promise<ModelOption[]> }>();
   readonly tmpDir: string;
   private usageState: UsageInfo = {};
+  private geminiUsageRefresh?: Promise<void>;
   private attachments: AttachmentStore;
   /** Where a role's events currently go (its own node, or a consult it is serving). */
   private routes = new Map<number, Partial<Record<Role, NodeId>>>();
@@ -125,7 +127,7 @@ export class ChatManager {
         error: claude ? undefined : "claude.exe를 찾지 못했습니다. PowerShell에서 irm https://claude.ai/install.ps1 | iex 로 설치하고 로그인하세요.",
       },
       { agent: "codex", path: codex, error: codex ? undefined : "codex.exe를 찾지 못했습니다. Codex 앱 또는 Codex CLI를 설치하세요." },
-      { agent: "gemini", path: gemini, error: gemini ? undefined : "Antigravity CLI(agy)를 설치하고 Google AI Pro 계정으로 로그인하세요." },
+      { agent: "gemini", path: gemini, error: gemini ? undefined : "Antigravity CLI(agy.exe)를 찾지 못했습니다. 설치 경로를 확인한 뒤 ‘목록 다시 확인’을 눌러 주세요." },
     ];
   }
 
@@ -208,7 +210,7 @@ export class ChatManager {
     return {
       claude: { installed: !!installed.find((c) => c.agent === "claude")?.path, model: chat.claudeModelOverride ?? project.settings.claudeModel, reasoningEfforts: effortLevels.claude, effortSetting: chat.claudeEffortOverride ?? project.settings.claudeEffort, imageGeneration: false, authentication: "실행 시 확인", usage: this.usageState.claude },
       gpt: { installed: !!installed.find((c) => c.agent === "codex")?.path, model: gptModel, reasoningEfforts: effortLevels.codex, effortSetting: chat.codexEffortOverride ?? project.settings.codexEffort, imageGeneration, authenticated: codexAuthenticated, usage: this.usageState.codex },
-      gemini: { installed: !!installed.find((c) => c.agent === "gemini")?.path, model: (chat.geminiModelOverride ?? project.settings.geminiModel) || "Pro 계정 제공 모델 자동 선택", reasoningEfforts: effortLevels.gemini, effortSetting: chat.geminiEffortOverride ?? project.settings.geminiEffort, imageGeneration: false, authentication: "Antigravity 로그인·모델 목록은 실행 시 확인", enabled: project.settings.maxGeminiWorkers > 0 },
+      gemini: { installed: !!installed.find((c) => c.agent === "gemini")?.path, model: (chat.geminiModelOverride ?? project.settings.geminiModel) || "Pro 계정 제공 모델 자동 선택", reasoningEfforts: effortLevels.gemini, effortSetting: chat.geminiEffortOverride ?? project.settings.geminiEffort, imageGeneration: false, authentication: "Antigravity 로그인·모델 목록은 실행 시 확인", enabled: project.settings.maxGeminiWorkers > 0, usage: this.usageState.gemini },
     };
   }
 
@@ -230,6 +232,8 @@ export class ChatManager {
       const cur = this.usageState[k] ?? {};
       this.usageState = { ...this.usageState, [k]: { fiveHour: next.fiveHour ?? cur.fiveHour, weekly: next.weekly ?? cur.weekly } };
     }
+    // Gemini /usage is a complete snapshot; errors must not retain a stale percentage.
+    if (u.gemini) this.usageState = { ...this.usageState, gemini: u.gemini };
     // Remember the last values so the sidebar isn't empty on the next launch.
     if (!this.disposing) this.store.setSetting("usage", JSON.stringify(this.usageState));
     this.sink.usage(this.usageState);
@@ -245,6 +249,20 @@ export class ChatManager {
     const text = await claudeUsageText(exe, this.tmpDir).catch(() => null);
     const parsed = text ? parseClaudeUsageText(text) : null;
     if (parsed) this.mergeUsage({ claude: parsed });
+  }
+
+  refreshGeminiUsage(): Promise<void> {
+    if (this.geminiUsageRefresh) return this.geminiUsageRefresh;
+    const exe = findGemini(this.store.getSetting("geminiPath"));
+    if (!exe) {
+      this.mergeUsage({ gemini: { error: "Antigravity CLI를 찾지 못했습니다. 설치 경로를 확인해 주세요." } });
+      return Promise.resolve();
+    }
+    this.geminiUsageRefresh = readGeminiUsage(exe, this.tmpDir)
+      .then((usage) => { if (!this.disposing) this.mergeUsage({ gemini: { ...usage, updatedAt: Date.now() } }); })
+      .catch((error) => { if (!this.disposing) this.mergeUsage({ gemini: { error: error instanceof Error ? error.message : "Gemini 사용량 조회에 실패했습니다." } }); })
+      .finally(() => { this.geminiUsageRefresh = undefined; });
+    return this.geminiUsageRefresh;
   }
 
   /** Set by the orchestrator: what a worker may write right now (its implement scope). */

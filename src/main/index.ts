@@ -196,6 +196,7 @@ function registerIpc() {
       .readUsage()
       .catch(() => undefined);
     void chats.refreshClaudeUsage();
+    void chats.refreshGeminiUsage();
     return chats.usage();
   });
   ipcMain.handle("shell:openPath", async (_e, p: string) => {
