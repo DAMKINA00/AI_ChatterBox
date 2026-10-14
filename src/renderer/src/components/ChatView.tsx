@@ -683,7 +683,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
     else void runCommand(c.name, "");
   };
 
-  const send = async (delivery: "now" | "next" = "next") => {
+  const send = async (delivery: "now" | "next" = "now") => {
     const t = text.trim();
     // "/name arg" → command (attachments are not used by commands).
     const cmd = /^\/([a-z-]+)(?:\s+([\s\S]*))?$/i.exec(t);
@@ -757,7 +757,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
           ref={area}
           value={text}
           aria-label="메시지 입력"
-          placeholder={busy ? "추가 지시를 입력하세요. 즉시 전달하거나 다음 단계에 전달할 수 있습니다" : "지시를 입력하세요 (/ 로 명령)"}
+          placeholder={busy ? "추가 지시를 입력하세요. Enter 즉시 전달 · Alt+Enter 다음 단계 전달" : "지시를 입력하세요. Enter 즉시 전달 (/ 로 명령)"}
           className="block max-h-60 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[14px] leading-relaxed outline-none select-text placeholder:text-muted-foreground"
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => {
@@ -787,7 +787,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
             }
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
-              void send(busy && (e.ctrlKey || e.metaKey) ? "now" : "next");
+              void send(busy && e.altKey && !e.ctrlKey && !e.metaKey ? "next" : "now");
             }
           }}
         />
@@ -810,13 +810,14 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
             </Button>
           </Tooltip>
           <span className="ml-1 hidden text-[11.5px] text-muted-foreground xl:inline">
-            <Kbd>Enter</Kbd> 보내기 · <Kbd>Shift+Enter</Kbd> 줄바꿈 · <Kbd>Ctrl+V</Kbd> 이미지 붙여넣기
+            <Kbd>Enter</Kbd> 즉시 전달 · {busy && <><Kbd>Alt+Enter</Kbd> 다음 단계 · </>}
+            <Kbd>Shift+Enter</Kbd> 줄바꿈 · <Kbd>Ctrl+V</Kbd> 이미지 붙여넣기
           </span>
           <div className="flex-1" />
-          {busy && <Button size="sm" variant="outline" onClick={() => void send("now")} disabled={!canSend} aria-label="마스터에게 즉시 전달" title="Ctrl+Enter · 진행 중인 마스터에게 바로 전달" data-testid="send-now" className="rounded-full px-3.5">즉시 전달</Button>}
-          <Button size="sm" onClick={() => void send()} disabled={!canSend} aria-label="보내기" data-testid="send" className={cn("rounded-full px-3.5")}>
+          {busy && <Button size="sm" variant="outline" onClick={() => void send("next")} disabled={!canSend} aria-label="다음 단계로 전달" title="Alt+Enter" data-testid="send-next" className="rounded-full px-3.5">다음 단계 전달</Button>}
+          <Button size="sm" onClick={() => void send()} disabled={!canSend} aria-label={busy ? "마스터에게 즉시 전달" : "보내기"} title="Enter" data-testid="send" className={cn("rounded-full px-3.5")}>
             {sending ? <Loader2 className="animate-spin" /> : <SendHorizontal />}
-            {busy ? "다음 단계 전달" : "보내기"}
+            {busy ? "즉시 전달" : "보내기"}
           </Button>
         </div>
       </div>

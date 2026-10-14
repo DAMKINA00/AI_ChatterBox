@@ -13,7 +13,6 @@ import {
   ShieldAlert,
   ShieldCheck,
   Terminal,
-  User,
   Wrench,
   X,
 } from "lucide-react";
@@ -123,12 +122,10 @@ function ItemView({ item, chatId, nested }: { item: Item; chatId: number; nested
     case "user":
       return (
         <div className="group grid grid-cols-[36px_minmax(0,1fr)_auto] items-start gap-x-3 rounded-md px-2 py-1.5 transition-colors hover:bg-accent/30" data-testid="user-message">
-          <div className="flex size-9 items-center justify-center rounded-full border bg-card text-muted-foreground" aria-hidden="true">
-            <User className="size-4" />
-          </div>
+          <AgentAvatar kind="admin" size={36} alt="관리자 캐릭터" />
           <div className="min-w-0">
             <div className="mb-0.5 flex min-w-0 items-center gap-2">
-              <span className="text-[12px] font-semibold text-foreground">사용자</span>
+              <span className="text-[12px] font-semibold text-foreground">관리자</span>
               {item.queued && <span className="text-[11px] text-muted-foreground">{item.delivery === "now" ? "즉시 전달 요청" : "다음 단계 추가 지시"}</span>}
             </div>
             {item.attachments.length > 0 && (

@@ -106,15 +106,15 @@ try {
     BrowserWindow.getAllWindows()[0].webContents.send("chat:updated", { ...chat, status: "working" });
   }, chat);
   await page.getByRole("textbox", { name: "메시지 입력" }).fill("immediate click");
-  await page.locator('[data-testid="send-now"]').click();
-  await page.getByRole("textbox", { name: "메시지 입력" }).fill("next step");
   await page.locator('[data-testid="send"]').click();
+  await page.getByRole("textbox", { name: "메시지 입력" }).fill("next step");
+  await page.locator('[data-testid="send-next"]').click();
   await page.getByRole("textbox", { name: "메시지 입력" }).fill("immediate keyboard");
   await page.getByRole("textbox", { name: "메시지 입력" }).press("Control+Enter");
   const sends = await app.evaluate(() => globalThis.layoutSends);
   check("composer sends immediate, next-step and Ctrl+Enter modes", JSON.stringify(sends.map((s) => s.delivery)) === JSON.stringify(["now", "next", "now"]));
   await page.setViewportSize({ width: 900, height: 900 });
-  check("compact window keeps both send controls visible", await page.locator('[data-testid="send-now"]').isVisible() && await page.locator('[data-testid="send"]').isVisible());
+  check("compact window keeps both send controls visible", await page.locator('[data-testid="send-next"]').isVisible() && await page.locator('[data-testid="send"]').isVisible());
   check("compact window has no horizontal document overflow", await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
   await page.screenshot({ path: join(base, "discord-compact.png") });
   await app.close();

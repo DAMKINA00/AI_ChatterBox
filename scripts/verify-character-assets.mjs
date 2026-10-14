@@ -13,6 +13,7 @@ const previewPath = join(root, ".scratch", "character-gallery.png");
 const roles = ["orch", "claude", "gpt", "gemini"];
 const expressions = ["neutral", "thinking", "speaking", "happy", "confident", "surprised", "embarrassed", "worried", "sad", "angry", "tired", "waiting"];
 const entries = roles.flatMap((role) => expressions.map((expression) => ({ role, expression })));
+entries.push({ role: "admin", expression: "neutral" });
 const files = entries.map(({ role, expression }) => join(assetRoot, role, `${expression}.png`));
 
 function displayPath(file) {

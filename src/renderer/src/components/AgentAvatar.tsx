@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { isAgentExpression, type AgentExpression } from "../../../shared/types";
 import { cn } from "../lib/utils";
 
-export type AvatarKind = "orch" | "claude" | "gpt" | "gemini";
+export type AvatarKind = "orch" | "claude" | "gpt" | "gemini" | "admin";
 export type AvatarSize = 24 | 32 | 36;
 
 const SIZE_CLASS: Record<AvatarSize, string> = { 24: "size-6", 32: "size-8", 36: "size-9" };
@@ -26,7 +26,7 @@ export function AgentAvatar({
   alt: string;
   className?: string;
 }) {
-  const requested = isAgentExpression(expression) ? expression : "neutral";
+  const requested = kind !== "admin" && isAgentExpression(expression) ? expression : "neutral";
   const [current, setCurrent] = useState<AgentExpression>(requested);
   const [missing, setMissing] = useState(false);
 

@@ -21,14 +21,14 @@ function fixture() {
   return { store, chat, chats, engine, inst, async close() { await engine.judge.dispose(); await chats.dispose(); store.close(); rmSync(root, { recursive: true, force: true }); } };
 }
 
-test("immediate input steers the same master, preserves workers, and records delivery and time", async () => {
+test("default input immediately steers the same master, preserves workers, and records delivery and time", async () => {
   const f = fixture();
   try {
     const worker = f.store.createAgent(f.chat.id, "claude", "analysis");
     let sent = "";
     f.chats.liveDriver = () => ({ agent: "claude", running: true, steer: async (input) => { sent = input.text; return true; }, send: async () => { throw new Error("must not start a second master"); }, stop: async () => {}, dispose: async () => {} });
     const before = Date.now();
-    await f.chats.send(f.chat.id, "new constraint", [], "now");
+    await f.chats.send(f.chat.id, "new constraint", []);
     assert.match(sent, /new constraint/);
     assert.equal(f.inst.queued.length, 0);
     assert.match(f.inst.text, /new constraint/);
@@ -36,6 +36,19 @@ test("immediate input steers the same master, preserves workers, and records del
     const event = f.store.events(f.chat.id).find((e) => e.event.type === "user")!;
     assert.ok(event.at >= before);
     assert.equal(event.event.type === "user" && event.event.delivery, "now");
+  } finally { await f.close(); }
+});
+
+test("explicit next-step input queues without steering the running master", async () => {
+  const f = fixture();
+  try {
+    f.chats.liveDriver = () => { throw new Error("next-step input must not steer"); };
+    await f.chats.send(f.chat.id, "next constraint", [], "next");
+    assert.equal(f.inst.queued.length, 1);
+    assert.equal(f.inst.queued[0].text, "next constraint");
+    assert.equal((f.inst as any).pendingImmediate, undefined);
+    const event = f.store.events(f.chat.id).find((e) => e.event.type === "user")!;
+    assert.equal(event.event.type === "user" && event.event.delivery, "next");
   } finally { await f.close(); }
 });
 

@@ -492,7 +492,7 @@ export class ChatManager {
   /** Called instead of sendHandler while the chat is working (extra instructions). */
   busySend?: (chat: Chat, input: AgentInput, delivery: "now" | "next") => Promise<void>;
 
-  async send(chatId: number, text: string, attachmentIds: number[], delivery: "now" | "next" = "next") {
+  async send(chatId: number, text: string, attachmentIds: number[], delivery: "now" | "next" = "now") {
     if (!["now", "next"].includes(delivery)) throw new Error("지원하지 않는 전달 방식입니다.");
     const chat = this.store.chat(chatId);
     if (!chat) throw new Error("채팅이 없습니다.");

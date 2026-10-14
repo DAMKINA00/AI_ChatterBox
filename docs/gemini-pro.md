@@ -2,6 +2,12 @@
 
 ChatterBox의 Gemini는 Google 계정으로 로그인한 **Antigravity CLI**를 사용합니다. 별도 Gemini API 키를 요구하지 않습니다.
 
+## 웹과 CLI의 모델 차이
+
+2026-10-14 기준, Google AI Pro는 [Gemini 앱에서 Gemini 4 Argon](https://blog.google/innovation-and-ai/products/gemini-app/gemini-4-argon-availability/)을 사용할 수 있지만 [Antigravity의 Argon은 Ultra·Enterprise에 제공](https://antigravity.google/docs/models)됩니다. 웹에서 보이는 모델과 CLI 목록이 다른 것은 설치 실패를 뜻하지 않습니다. ChatterBox는 실제 CLI 계정에 제공되는 모델만 선택합니다.
+
+Argon의 [공식 개발자 연동은 유료 Gemini API](https://blog.google/innovation-and-ai/technology/developers-tools/build-with-gemini-4-argon/)로도 가능합니다. Pro 웹 채팅을 브라우저 조작으로 전달·수집하는 연동은 별도 구현이 필요하며, 현재 ChatterBox에는 포함하지 않습니다.
+
 ## 설치와 로그인
 
 1. [공식 설치 안내](https://antigravity.google/docs/cli/install/)에서 Windows CLI를 설치합니다.
