@@ -1,6 +1,6 @@
 import { BrowserWindow, session } from "electron";
 import { join } from "node:path";
-import type { GeminiWebStatus, GeminiWebUsage } from "../../shared/types";
+import type { GeminiWebAccountId, GeminiWebStatus, GeminiWebUsage } from "../../shared/types";
 import { SNAPSHOT_SCRIPT, USAGE_SCRIPT, GEMINI_ORIGIN, buttonScript, webUsage, webUsagePage, webConversationUrl, webConversationId, type WebSnapshot } from "./gemini-web-protocol";
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -14,8 +14,12 @@ export class GeminiWebBrowser {
   private usageReading?: Promise<GeminiWebUsage>;
   private verificationRequired = false;
   private lastUsageReadAt = 0;
-  private last: GeminiWebStatus = { accountId: "gemini-1", state: "closed", message: "웹 계정 1에 로그인하세요.", checkedAt: 0, usage: webUsage([]) };
-  constructor(private dataDir: string, private onUsage: (usage: GeminiWebUsage) => void) {}
+  private last: GeminiWebStatus = { accountId: "gemini-1", state: "closed", message: "로그인 상태를 확인하세요.", checkedAt: 0, usage: webUsage([]) };
+  constructor(private dataDir: string, private onUsage: (usage: GeminiWebUsage) => void, readonly accountId: GeminiWebAccountId = "gemini-1", usage?: GeminiWebUsage) {
+    this.last = { ...this.last, accountId, message: `웹 ${this.accountName}에 로그인하세요.`, usage: usage ?? this.last.usage };
+  }
+  private get accountName() { return `계정 ${this.accountId.slice(7)}`; }
+  get busy() { return !!this.owner; }
 
   status() { return this.last; }
   private setUsage(usage: GeminiWebUsage) {
@@ -25,7 +29,8 @@ export class GeminiWebBrowser {
   }
   observe(snapshot: WebSnapshot) {
     const notice = webUsage(snapshot.notices);
-    if (notice.status === "limited" && notice.detail !== this.last.usage.detail) this.setUsage(notice);
+    const low = notice.remaining !== undefined && notice.limit !== undefined && notice.remaining <= notice.limit * 0.1;
+    if ((notice.status === "limited" || low) && (notice.detail !== this.last.usage.detail || notice.status !== this.last.usage.status)) this.setUsage(notice);
     return notice;
   }
   private publish(state: GeminiWebStatus["state"], message: string, snapshot?: WebSnapshot) {
@@ -54,17 +59,17 @@ export class GeminiWebBrowser {
     return status;
   }
   private makeWindow(show: boolean) {
-    const ses = session.fromPath(join(this.dataDir, "web-accounts", "gemini-1"));
+    const ses = session.fromPath(join(this.dataDir, "web-accounts", this.accountId));
     ses.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     ses.setPermissionCheckHandler(() => false);
     const win = new BrowserWindow({ width: 1100, height: 850, show, autoHideMenuBar: true,
-      title: "ChatterBox · Gemini 웹 계정 1", webPreferences: { session: ses, sandbox: true, nodeIntegration: false, contextIsolation: true, backgroundThrottling: false } });
+      title: `ChatterBox · Gemini 웹 ${this.accountName}`, webPreferences: { session: ses, sandbox: true, nodeIntegration: false, contextIsolation: true, backgroundThrottling: false } });
     const allowed = (url: string) => { try { const u = new URL(url); return u.protocol === "https:" && (["gemini.google.com", "accounts.google.com", "myaccount.google.com"].includes(u.hostname) || (u.hostname === "www.google.com" && u.pathname.startsWith("/sorry/"))); } catch { return false; } };
     win.webContents.on("will-navigate", (event, url) => { if (!allowed(url)) event.preventDefault(); });
     win.webContents.on("will-redirect", (event, url) => {
       if (/^https:\/\/www\.google\.com\/sorry\//.test(url)) {
         this.verificationRequired = true;
-        this.publish("login_required", "Google 보안 확인이 필요합니다. 계정 1 브라우저를 열어 직접 확인해 주세요.");
+        this.publish("login_required", `Google 보안 확인이 필요합니다. ${this.accountName} 브라우저를 열어 직접 확인해 주세요.`);
       }
       if (!allowed(url)) event.preventDefault();
     });
@@ -93,16 +98,17 @@ export class GeminiWebBrowser {
   async refresh(readUsage = true): Promise<GeminiWebStatus> {
     try {
       const s = await this.snapshot();
-      if (this.verificationRequired && (!readUsage || !s || s.login)) return this.publish("login_required", "Google 보안 확인이 필요합니다. 계정 1 브라우저에서 직접 확인한 뒤 새로 확인을 눌러 주세요.");
+      if (this.verificationRequired && (!readUsage || !s || s.login)) return this.publish("login_required", `Google 보안 확인이 필요합니다. ${this.accountName} 브라우저에서 직접 확인한 뒤 새로 확인을 눌러 주세요.`);
       if (!this.win) {
-        this.publish("closed", "브라우저를 열어 웹 계정 1의 상태를 확인하세요.");
+        this.publish("closed", `브라우저를 열어 웹 ${this.accountName}의 상태를 확인하세요.`);
         if (readUsage) await this.refreshUsage(true);
         return this.last;
       }
       if (!s || s.login) return this.publish("login_required", "전용 브라우저에서 Google 계정 로그인을 완료하세요.");
       if (!s.composer) return this.publish("error", "Gemini 입력창을 확인하지 못했습니다. 브라우저의 안내를 확인하세요.");
       this.verificationRequired = false;
-      this.publish(this.owner ? "busy" : "ready", this.owner ? "웹 계정 1 작업 중" : /argon/i.test(s.model) ? "계정 1 · Argon 연결 준비 완료" : "로그인됨 · 작업 시작 전에 Argon을 확인합니다.", s);
+      const manual = !this.owner && (s.generating || !!s.draft.trim());
+      this.publish(this.owner || manual ? "busy" : "ready", this.owner ? `웹 ${this.accountName} 작업 중` : manual ? `${this.accountName} 브라우저에서 직접 작성 중입니다.` : /argon/i.test(s.model) ? `${this.accountName} · Argon 연결 준비 완료` : "로그인됨 · 작업 시작 전에 Argon을 확인합니다.", s);
       if (readUsage) await this.refreshUsage(true);
       return this.last;
     } catch { return this.publish("error", "웹 상태를 읽지 못했습니다. 브라우저에서 연결을 확인하세요."); }
@@ -125,9 +131,9 @@ export class GeminiWebBrowser {
       for (let n = 0; n < 30; n++) {
         if (this.disposed || win.isDestroyed()) throw new Error("사용량 연결이 종료되었습니다.");
         if (this.verificationRequired) return this.last.usage;
-        if (!win.webContents.getURL().startsWith(GEMINI_ORIGIN + "/")) return this.setUsage({ status: "unknown", detail: "웹 계정 1 로그인이 필요합니다.", checkedAt: Date.now() });
+        if (!win.webContents.getURL().startsWith(GEMINI_ORIGIN + "/")) return this.setUsage({ status: "unknown", detail: `웹 ${this.accountName} 로그인이 필요합니다.`, checkedAt: Date.now() });
         const s = await win.webContents.executeJavaScript(USAGE_SCRIPT);
-        if (s?.login) return this.setUsage({ status: "unknown", detail: "웹 계정 1 로그인이 필요합니다.", checkedAt: Date.now() });
+        if (s?.login) return this.setUsage({ status: "unknown", detail: `웹 ${this.accountName} 로그인이 필요합니다.`, checkedAt: Date.now() });
         if (s?.current || s?.weekly) return this.setUsage(webUsagePage(s.current, s.weekly));
         await delay(400);
       }
@@ -142,8 +148,8 @@ export class GeminiWebBrowser {
   }
   async claim(owner: string, signal?: AbortSignal) {
     signal?.throwIfAborted();
-    if (this.verificationRequired) throw new Error("Google 보안 확인이 필요합니다. 계정 1 브라우저를 열어 직접 확인한 뒤 새로 확인을 눌러 주세요.");
-    if (this.owner) throw new Error("Gemini 웹 계정 1이 다른 작업을 처리 중입니다. 완료 후 다시 배정하세요.");
+    if (this.verificationRequired) throw new Error(`Google 보안 확인이 필요합니다. ${this.accountName} 브라우저를 열어 직접 확인한 뒤 새로 확인을 눌러 주세요.`);
+    if (this.owner) throw new Error(`Gemini 웹 ${this.accountName}이 다른 작업을 처리 중입니다. 완료 후 다시 배정하세요.`);
     this.owner = owner;
     const abort = () => { if (this.owner === owner && this.win && !this.win.isDestroyed()) this.win.webContents.stop(); };
     signal?.addEventListener("abort", abort, { once: true });
@@ -158,10 +164,10 @@ export class GeminiWebBrowser {
   }
   async prepare(owner: string, nativeId: string | null, signal: AbortSignal) {
     this.check(owner, signal);
-    if (this.verificationRequired) throw new Error("Google 보안 확인이 필요합니다. 계정 1 브라우저에서 직접 확인해 주세요.");
+    if (this.verificationRequired) throw new Error(`Google 보안 확인이 필요합니다. ${this.accountName} 브라우저에서 직접 확인해 주세요.`);
     const existing = await this.snapshot();
     if (existing?.generating || existing?.draft.trim()) throw new Error("웹 채팅에 직접 작성 중인 내용이나 응답이 있습니다. 브라우저에서 마무리한 뒤 다시 요청하세요.");
-    const target = webConversationUrl(nativeId);
+    const target = webConversationUrl(nativeId, this.accountId);
     if (this.win!.webContents.getURL().split(/[?#]/)[0] !== target || !nativeId) {
       const contents = this.win!.webContents;
       const abort = () => { if (!contents.isDestroyed()) contents.stop(); };
@@ -171,7 +177,7 @@ export class GeminiWebBrowser {
     for (let n = 0; n < 40; n++) {
       this.check(owner, signal);
       const s = await this.snapshot();
-      if (s?.login) throw new Error("Gemini 웹 로그인이 필요합니다. 계정 1 브라우저를 열어 로그인하세요.");
+      if (s?.login) throw new Error(`Gemini 웹 로그인이 필요합니다. ${this.accountName} 브라우저를 열어 로그인하세요.`);
       // Gemini mounts the editor before the model selector; never mistake that loading state for a different model.
       if (s?.composer && s.model) {
         if (s.generating || s.draft.trim()) throw new Error("웹 채팅에 직접 작성 중인 내용이나 응답이 있습니다. 브라우저에서 마무리한 뒤 다시 요청하세요.");
@@ -189,6 +195,9 @@ export class GeminiWebBrowser {
         }
         const verified = await this.snapshot();
         if (!verified || !/argon/i.test(verified.model) || !verified.chatMode) throw new Error("Argon 채팅 모드를 확인하지 못했습니다. 다른 모델이나 작업 모드로 대신 실행하지 않습니다.");
+        this.publish("busy", `웹 ${this.accountName} 작업 중`, verified);
+        if (this.last.usage.status === "error") await this.refreshUsage(true);
+        this.check(owner, signal);
         return verified;
       }
       await delay(500);
@@ -209,7 +218,7 @@ export class GeminiWebBrowser {
     if (this.owner !== owner || !this.win || this.win.isDestroyed()) return;
     await this.win.webContents.executeJavaScript(buttonScript("응답 중지|답변 중지|생성 중지|stop response|stop generating")).catch(() => false);
   }
-  nativeId(snapshot: WebSnapshot) { return webConversationId(snapshot.url); }
+  nativeId(snapshot: WebSnapshot) { return webConversationId(snapshot.url, this.accountId); }
   async dispose() {
     this.disposed = true; this.owner = undefined;
     if (this.usageWindow && !this.usageWindow.isDestroyed()) this.usageWindow.destroy();

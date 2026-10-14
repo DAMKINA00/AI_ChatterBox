@@ -111,3 +111,11 @@ test("automatic usage reads are coalesced and throttled between short worker tur
   await GeminiWebBrowser.prototype.refreshUsage.call(browser, true);
   assert.equal(reads, 2);
 });
+
+test("visible low request counts update quota without reading assistant prose", () => {
+  const { browser, b } = fixture();
+  b.setUsage({ status: "available", detail: "old", checkedAt: Date.now(), weekly: { usedPercent: 5 } });
+  browser.observe(snapshot({ notices: ["Remaining: 1 of 100 requests"] }));
+  assert.equal(browser.status().usage.remaining, 1);
+  assert.equal(browser.status().usage.limit, 100);
+});

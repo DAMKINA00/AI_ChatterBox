@@ -1,15 +1,20 @@
-import type { GeminiWebUsage } from "../../shared/types";
+import type { GeminiWebAccountId, GeminiWebUsage } from "../../shared/types";
 
 export const GEMINI_ORIGIN = "https://gemini.google.com";
-export function webConversationUrl(id: string | null): string {
-  const match = /^web:gemini-1:(\/app\/[a-zA-Z0-9_-]+)$/.exec(id ?? "");
-  return GEMINI_ORIGIN + (match?.[1] ?? "/app");
+export function webAccountId(value: unknown): GeminiWebAccountId | null {
+  return typeof value === "string" && /^gemini-(?:[1-9]|10)$/.test(value) ? value as GeminiWebAccountId : null;
 }
-export function webConversationId(url: string): string | null {
+export function conversationAccount(id: string | null): GeminiWebAccountId | null {
+  return webAccountId(/^web:(gemini-(?:[1-9]|10)):\/app\/[a-zA-Z0-9_-]+$/.exec(id ?? "")?.[1]);
+}
+export function webConversationUrl(id: string | null, accountId: GeminiWebAccountId = "gemini-1"): string {
+  return GEMINI_ORIGIN + (conversationAccount(id) === accountId ? id!.split(":").slice(2).join(":") : "/app");
+}
+export function webConversationId(url: string, accountId: GeminiWebAccountId = "gemini-1"): string | null {
   try {
     const parsed = new URL(url);
     return parsed.origin === GEMINI_ORIGIN && /^\/app\/[a-zA-Z0-9_-]+$/.test(parsed.pathname)
-      ? `web:gemini-1:${parsed.pathname}` : null;
+      ? `web:${accountId}:${parsed.pathname}` : null;
   } catch { return null; }
 }
 

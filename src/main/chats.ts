@@ -26,8 +26,9 @@ import { LocalBridge } from "./local-bridge";
 import { ApprovalService, type ApprovalInput, type JudgeAnswer } from "./approvals";
 import { findClaude, findCodex, findGemini } from "./locate";
 import { GeminiDriver } from "./drivers/gemini";
-import { GeminiWebDriver } from "./drivers/gemini-web";
-import { GeminiWebBrowser } from "./drivers/gemini-web-browser";
+import { GeminiWebDriver, type WebContext } from "./drivers/gemini-web";
+import { GeminiWebAccounts } from "./drivers/gemini-web-accounts";
+import type { GeminiWebAccountId } from "../shared/types";
 import { listGeminiModels } from "./drivers/gemini-protocol";
 import { readGeminiUsage } from "./drivers/gemini-usage";
 import { ClaudeDriver, claudeUsageText, listClaudeModels } from "./drivers/claude";
@@ -71,7 +72,7 @@ export class ChatManager {
   readonly tmpDir: string;
   private usageState: UsageInfo = {};
   private geminiUsageRefresh?: Promise<void>;
-  private webBrowser?: GeminiWebBrowser;
+  private webAccounts?: GeminiWebAccounts;
   private attachments: AttachmentStore;
   /** Where a role's events currently go (its own node, or a consult it is serving). */
   private routes = new Map<number, Partial<Record<Role, NodeId>>>();
@@ -149,8 +150,11 @@ export class ChatManager {
 
   geminiModels() { return listGeminiModels(this.geminiExe(), this.tmpDir); }
 
-  geminiWeb() {
-    return this.webBrowser ??= new GeminiWebBrowser(this.dataDir, (usage) => this.mergeUsage({ geminiWeb: usage }));
+  geminiWebAccounts() {
+    return this.webAccounts ??= new GeminiWebAccounts(this.dataDir, this.store);
+  }
+  geminiWeb(accountId: GeminiWebAccountId = "gemini-1") {
+    return this.geminiWebAccounts().browser(accountId);
   }
   usesGeminiWeb(chat: Chat) {
     return (chat.geminiModelOverride ?? this.store.project(chat.projectId)!.settings.geminiModel) === GEMINI_WEB_MODEL;
@@ -452,7 +456,25 @@ export class ChatManager {
         host,
       );
     } else if (cfg.agent === "gemini" && cfg.model === GEMINI_WEB_MODEL) {
-      driver = new GeminiWebDriver(driverOpts, this.geminiWeb(), host);
+      const contextKey = `gemini-web-context:${chatId}:${role}`;
+      driver = new GeminiWebDriver(driverOpts, this.geminiWebAccounts(), host, {
+        load: (): WebContext => {
+          try {
+            const saved = JSON.parse(this.store.getSetting(contextKey) ?? "null");
+            if (saved && Array.isArray(saved.history)) return {
+              history: saved.history.filter((turn: any) => typeof turn?.request === "string" && typeof turn?.response === "string"),
+              pending: typeof saved.pending?.request === "string" && typeof saved.pending?.partial === "string" ? saved.pending : undefined,
+            };
+          } catch { /* Existing stored dialogue remains available below. */ }
+          const events = this.store.events(chatId);
+          return { history: this.store.listConsults(chatId).filter(c => c.toRole === role && c.status === "done").map(c => ({
+            request: c.request,
+            response: events.filter(e => e.role === role && e.node === `consult:${c.id}` && e.event.type === "text")
+              .map(e => e.event.type === "text" ? e.event.text : "").join("\n\n") || c.responseSummary || "",
+          })) };
+        },
+        save: context => this.store.setSetting(contextKey, JSON.stringify(context)),
+      });
     } else if (cfg.agent === "gemini") {
       // Web conversation paths must never be passed as CLI conversation identifiers.
       if (driverOpts.nativeId?.startsWith("web:")) driverOpts.nativeId = null;
@@ -597,7 +619,7 @@ export class ChatManager {
     this.live.clear();
     await Promise.all(all.map((l) => l?.driver.dispose().catch(() => undefined)));
     await this.codexServer?.dispose();
-    await this.webBrowser?.dispose();
+    await this.webAccounts?.dispose();
     this.bridge.stop();
   }
 }

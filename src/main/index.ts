@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, protocol, shell, nativeTheme, screen } from "electron";
 import { mkdirSync, readFileSync, existsSync, statSync, copyFileSync } from "node:fs";
 import { join, basename, resolve } from "node:path";
-import type { AgentKind, ApprovalDecision, ProjectSettings, Theme } from "../shared/types";
+import type { AgentKind, ApprovalDecision, ProjectSettings, Theme, GeminiWebAccountId } from "../shared/types";
 import { Store } from "./db";
 import { ChatManager } from "./chats";
 import { AttachmentStore } from "./attachments";
@@ -185,11 +185,19 @@ function registerIpc() {
   // misc
   ipcMain.handle("cli:info", () => chats.cliInfo());
   ipcMain.handle("models:list", (_e, agent: AgentKind) => chats.models(agent));
-  ipcMain.handle("gemini:web", (_e, action: string) => {
-    if (action === "open") return chats.geminiWeb().open();
-    if (action === "refresh") return chats.geminiWeb().refresh();
-    if (action === "status") return chats.geminiWeb().status();
+  ipcMain.handle("gemini:web", (_e, action: string, accountId: GeminiWebAccountId = "gemini-1") => {
+    const browser = chats.geminiWeb(accountId);
+    if (action === "open") return browser.open();
+    if (action === "refresh") return browser.refresh();
+    if (action === "status") return browser.status();
     throw new Error("지원하지 않는 웹 연결 요청입니다.");
+  });
+  ipcMain.handle("gemini:web-accounts", (_e, action: string, input?: { accountId?: GeminiWebAccountId; label?: string; enabled?: boolean }) => {
+    const accounts = chats.geminiWebAccounts();
+    if (action === "list") return accounts.list();
+    if (action === "add") return accounts.add();
+    if (action === "update" && input?.accountId) return accounts.update(input.accountId, input);
+    throw new Error("지원하지 않는 웹 계정 관리 요청입니다.");
   });
   ipcMain.handle("theme:get", () => (store.getSetting("theme") as Theme) ?? "dark");
   ipcMain.handle("theme:set", (_e, theme: Theme) => {
@@ -203,7 +211,6 @@ function registerIpc() {
       .catch(() => undefined);
     void chats.refreshClaudeUsage();
     void chats.refreshGeminiUsage();
-    if (chats.usage().geminiWeb || existsSync(join(chats.dataDir, "web-accounts", "gemini-1"))) void chats.geminiWeb().refreshUsage();
     return chats.usage();
   });
   ipcMain.handle("shell:openPath", async (_e, p: string) => {

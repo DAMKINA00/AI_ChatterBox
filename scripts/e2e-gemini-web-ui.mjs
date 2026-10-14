@@ -1,236 +1,114 @@
-// Isolated Gemini web account/worker UI verification. No browser login or model turn is started.
-// Run after the production build: node scripts/e2e-gemini-web-ui.mjs
-import { existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { makeChecks, launch, root } from "./e2e-lib.mjs";
-
+// Isolated multi-account management UI. No Google login, web navigation or model turn.
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { DEFAULTS, makeChecks, launch, root } from './e2e-lib.mjs';
 const { check, finish } = makeChecks();
-const base = join(root, ".scratch", "gemini-web-ui", String(Date.now()));
-const data = join(base, "data");
-const workspace = join(base, "workspace");
-const screenshots = join(base, "screenshots");
-mkdirSync(workspace, { recursive: true });
-mkdirSync(screenshots, { recursive: true });
-
-const settings = {
-  claudeStrengths: "",
-  claudeCautions: "",
-  gptStrengths: "",
-  gptCautions: "",
-  geminiStrengths: "문장 다듬기·캐릭터 대사·문서 본문",
-  geminiCautions: "웹·CLI 글쓰기 전용 · 로컬 파일 반영은 Claude/GPT",
-  orchestratorModel: "claude:opus",
-  claudeModel: "opus",
-  codexModel: "gpt-6-astra",
-  geminiModel: "",
-  orchestratorEffort: "xhigh",
-  claudeEffort: "auto",
-  codexEffort: "auto",
-  geminiEffort: "auto",
-  reviewGate: true,
-  maxConsults: 8,
-  maxReviews: 3,
-  maxClaudeWorkers: 1,
-  maxGptWorkers: 1,
-  maxGeminiWorkers: 1,
-  approvalMode: "orchestrator",
-  delegateHighRisk: false,
-};
-
-function usage(status, detail, extra = {}) {
-  return { status, detail, checkedAt: Date.now(), ...extra };
-}
-
-async function installMocks(app) {
-  await app.evaluate(({ ipcMain }) => {
-    const state = {
-      phase: "closed",
-      calls: [],
-      usage: { status: "unknown", detail: "웹 계정 1에 로그인하세요.", checkedAt: Date.now() },
-    };
-    const status = () => ({
-      accountId: "gemini-1",
-      state: state.phase,
-      message:
-        state.phase === "closed"
-          ? "웹 계정 1에 로그인하세요."
-          : state.phase === "login_required"
-            ? "전용 브라우저에서 Google 계정 로그인을 완료하세요."
-            : state.phase === "ready"
-              ? "계정 1 · Argon 연결 준비 완료"
-              : state.phase === "busy"
-                ? "웹 계정 1 작업 중"
-                : "웹 상태를 읽지 못했습니다.",
-      ...(state.phase === "ready" || state.phase === "busy" ? { model: "Gemini 4 Argon" } : {}),
-      checkedAt: Date.now(),
-      usage: state.usage,
-    });
-
-    globalThis.__geminiWebUiTest = state;
-    ipcMain.removeHandler("cli:info");
-    ipcMain.handle("cli:info", () => [
-      { agent: "claude", path: "C:\\mock\\claude.exe" },
-      { agent: "codex", path: "C:\\mock\\codex.exe" },
-      { agent: "gemini", path: "C:\\mock\\agy.exe" },
-    ]);
-    ipcMain.removeHandler("models:list");
-    ipcMain.handle("models:list", (_event, agent) => agent === "gemini" ? [
-      { id: "gemini-cli-test", label: "Gemini CLI 테스트 모델", reasoningEfforts: ["medium", "high", "xhigh"] },
-      { id: "gemini-web-argon", label: "Gemini 웹 · Argon (계정 1)" },
-    ] : []);
-    ipcMain.removeHandler("usage:get");
-    ipcMain.handle("usage:get", () => ({ geminiWeb: state.usage }));
-    ipcMain.removeHandler("gemini:web");
-    ipcMain.handle("gemini:web", (_event, action) => {
-      state.calls.push(action);
-      if (action === "open") state.phase = "login_required";
-      return status();
-    });
-  });
-  // Ensure the renderer starts after every model/usage-related handler is mocked.
-  await (await app.firstWindow()).reload();
-}
-
-async function mockState(app, patch) {
-  await app.evaluate((_electron, next) => Object.assign(globalThis.__geminiWebUiTest, next), patch);
-}
-
-async function calls(app) {
-  return app.evaluate(() => [...globalThis.__geminiWebUiTest.calls]);
-}
-
-async function pushUsage(app, nextUsage) {
-  await app.evaluate(({ BrowserWindow }, next) => {
-    globalThis.__geminiWebUiTest.usage = next;
-    BrowserWindow.getAllWindows()[0].webContents.send("usage", { geminiWeb: next });
-  }, nextUsage);
-}
-
-let app;
-let page;
+const base = join(root, '.scratch', 'gemini-web-accounts-ui', String(Date.now()));
+const data = join(base, 'data'), workspace = join(base, 'workspace'), screenshots = join(base, 'screenshots');
+mkdirSync(workspace, {recursive:true}); mkdirSync(screenshots, {recursive:true});
+let app, page;
 try {
-  ({ app, page } = await launch(data));
-  await installMocks(app);
-
-  const chatId = await page.evaluate(async ({ folder, projectSettings }) => {
-    const project = await window.chatterbox.createProject({ name: "Gemini 웹 UI 점검", folder, settings: projectSettings });
-    const chat = await window.chatterbox.createChat(project.id);
-    return chat.id;
-  }, { folder: workspace, projectSettings: settings });
-  await page.reload();
+  ({app, page} = await launch(data));
+  await app.evaluate(({ipcMain}) => {
+    const fresh = () => ({status:'unknown', detail:'로그인이 필요합니다.', checkedAt:Date.now()});
+    const account = n => ({accountId:`gemini-${n}`, label:`계정 ${n}`, enabled:true, state:'closed', message:'로그인을 확인하세요.', checkedAt:Date.now(), usage:fresh()});
+    const state = globalThis.__webAccountsUi = {accounts:[account(1)], calls:[]};
+    ipcMain.removeHandler('gemini:web-accounts');
+    ipcMain.handle('gemini:web-accounts', (_e, action, input) => {
+      state.calls.push({action, input});
+      if (action === 'add') {
+        if(state.accounts.length >= 10) throw new Error('계정은 최대 10개입니다.');
+        state.accounts.push(account(state.accounts.length + 1));
+      } else if(action === 'update') {
+        const a = state.accounts.find(a => a.accountId === input.accountId);
+        if(!a) throw new Error('등록되지 않은 계정');
+        if(a.state === 'busy' && input.enabled === false) throw new Error('작업 중인 계정');
+        Object.assign(a, input);
+      } else if(action !== 'list') throw new Error('지원하지 않는 요청');
+      return state.accounts;
+    });
+    ipcMain.removeHandler('gemini:web');
+    ipcMain.handle('gemini:web', (_e, action, id='gemini-1') => {
+      state.calls.push({action, id});
+      const a = state.accounts.find(a => a.accountId === id);
+      if(action === 'open') {
+        a.state='ready'; a.message='로그인됨'; a.model='Gemini 4 Argon';
+        a.usage={status:'available',detail:'현재 20% 사용 · 주간 5% 사용',checkedAt:Date.now(),current:{usedPercent:20,resetText:'오늘 저녁'},weekly:{usedPercent:5,resetText:'다음 주'}};
+        a.remainingPercent=80;
+      }
+      return a;
+    });
+    ipcMain.removeHandler('models:list');
+    ipcMain.handle('models:list', (_e, provider) => provider === 'gemini' ? [{id:'gemini-flash-test',label:'Gemini CLI 테스트'}, {id:'gemini-web-argon',label:'웹 · Gemini 4 Argon'}] : []);
+    ipcMain.removeHandler('cli:info'); ipcMain.handle('cli:info', () => [{agent:'claude',path:'C:\\mock\\claude.exe'},{agent:'codex',path:'C:\\mock\\codex.exe'},{agent:'gemini',path:'C:\\mock\\agy.exe'}]);
+    ipcMain.removeHandler('usage:get'); ipcMain.handle('usage:get', () => ({geminiWeb:{status:'limited',detail:'소진',checkedAt:Date.now(),current:{usedPercent:100},weekly:{usedPercent:100}}}));
+  });
+  const chatId = await page.evaluate(async ({workspace, defaults}) => {
+    const project = await window.chatterbox.createProject({name:'웹 계정 관리 검증', folder:workspace,settings:{...defaults,claudeStrengths:'',claudeCautions:'',gptStrengths:'',gptCautions:'',geminiStrengths:'글쓰기',geminiCautions:'글쓰기 전용',geminiModel:'',orchestratorEffort:'xhigh',claudeEffort:'auto',codexEffort:'auto',geminiEffort:'auto',maxClaudeWorkers:3,maxGptWorkers:3,maxGeminiWorkers:1,delegateHighRisk:false}});
+    return (await window.chatterbox.createChat(project.id)).id;
+  }, {workspace,defaults:DEFAULTS});
+  await page.reload(); await page.waitForSelector('[data-testid="sidebar"]');
   await page.locator(`[data-testid="chat-node"][data-chat-id="${chatId}"] [role="treeitem"]`).click();
-  await page.getByLabel("이 채팅의 Gemini 모델", { exact: true }).waitFor();
-
-  const picker = page.getByLabel("이 채팅의 Gemini 모델", { exact: true });
-  await picker.click();
-  check("Gemini CLI model remains in the web-enabled picker", await page.getByRole("menuitem", { name: /Gemini CLI 테스트 모델/ }).count() === 1);
-  check("Gemini web model id is offered", await page.getByRole("menuitem", { name: /gemini-web-argon/ }).count() === 1);
-  const connect = page.getByRole("menuitem", { name: "웹 계정 1 연결…", exact: true });
-  check("web account connection menu item is present", await connect.count() === 1);
-  const beforeDialog = await calls(app);
-  await connect.click();
-
-  const dialog = page.getByRole("dialog").filter({ hasText: "Gemini 웹 계정 1" });
-  await dialog.waitFor({ state: "visible" });
-  await page.getByTestId("gemini-web-status").getByText("브라우저 닫힘", { exact: true }).waitFor();
-  const afterStatus = await calls(app);
-  check("opening the connection dialog only checks status", afterStatus.length > beforeDialog.length && !afterStatus.includes("open"), JSON.stringify(afterStatus));
-  check("Argon use stays disabled before login", await page.getByTestId("gemini-web-use-argon").isDisabled());
-
-  await page.getByTestId("gemini-web-open").click();
-  await dialog.getByText("로그인 필요", { exact: true }).waitFor();
-  let webCalls = await calls(app);
-  check("browser opening is explicit and recorded once", webCalls.filter((action) => action === "open").length === 1, JSON.stringify(webCalls));
-
-  await mockState(app, {
-    phase: "ready",
-    usage: usage("available", "Argon 사용 가능", {
-      current: { usedPercent: 2, resetText: "오후 8:45" },
-      weekly: { usedPercent: 0, resetText: "10월 21일" },
-    }),
-  });
-  await page.getByTestId("gemini-web-refresh").click();
-  await dialog.getByText("사용 가능", { exact: true }).waitFor();
-  check("login recovery reports a ready web account", await page.getByTestId("gemini-web-status").getByText("사용 가능", { exact: true }).count() === 1);
-  check("Argon use enables after ready status", !(await page.getByTestId("gemini-web-use-argon").isDisabled()));
-  check("dialog shows both web quota windows", (await dialog.getByTestId("gemini-web-usage").innerText()).includes("현재 98% 남음") && (await dialog.getByTestId("gemini-web-usage").innerText()).includes("주간 100% 남음"));
-
-  await page.getByTestId("gemini-web-use-argon").click();
-  await page.waitForFunction(async () => (await window.chatterbox.listChats()).some((chat) => chat.geminiModelOverride === "gemini-web-argon"));
-  check("Argon action selects the web model id", (await page.evaluate(async (id) => (await window.chatterbox.listChats()).find((chat) => chat.id === id)?.geminiModelOverride, chatId)) === "gemini-web-argon");
-  const effort = page.getByLabel("이 채팅의 Gemini 추론 수준", { exact: true });
-  await effort.waitFor();
-  check("web effort picker is disabled", await effort.isDisabled());
-  check("web effort picker explains unavailable CLI levels", (await effort.getAttribute("title"))?.includes("medium") && (await effort.getAttribute("title"))?.includes("xhigh"));
-
-  const webBar = page.locator('[data-testid="usage-bar"][data-provider="gemini-web"]');
-  await pushUsage(app, usage("available", "웹 사용량 확인 완료", {
-    current: { usedPercent: 2, resetText: "오후 8:45" },
-    weekly: { usedPercent: 0, resetText: "10월 21일" },
-  }));
-  await page.waitForFunction(() => {
-    const row = document.querySelector('[data-provider="gemini-web"]');
-    return row?.textContent?.includes("주간") && row.textContent.includes("100%");
-  });
-  const numericText = await webBar.innerText();
-  check("numeric web usage shows weekly remaining and bar", numericText.includes("주간") && numericText.includes("100%"), numericText);
-  const numericTip = await webBar.getAttribute("title");
-  check("web usage tooltip includes both windows and reset details", numericTip?.includes("현재 2% 사용") && numericTip.includes("주간 0% 사용") && numericTip.includes("오후 8:45") && numericTip.includes("10월 21일") && numericTip.includes("조회"), numericTip);
-  check("CLI usage row keeps its provider name", await page.locator('[data-testid="usage-bar"]').filter({ hasText: "Gemini CLI" }).count() === 1);
-
-  await pushUsage(app, usage("unknown", "웹 사용량을 알 수 없습니다."));
-  await webBar.getByText("웹 사용량을 알 수 없습니다.", { exact: true }).waitFor();
-  check("unknown web usage shows detail without a fabricated percentage", !(await webBar.innerText()).includes("%"));
-
-  await pushUsage(app, usage("limited", "웹 사용량 제한", {
-    current: { usedPercent: 95, resetText: "내일" },
-    weekly: { usedPercent: 20, resetText: "10월 21일" },
-  }));
-  await page.waitForFunction(() => document.querySelector('[data-provider="gemini-web"]')?.textContent?.includes("현재") && document.querySelector('[data-provider="gemini-web"]')?.textContent?.includes("5%"));
-  check("limited web usage shows current remaining when low", (await webBar.innerText()).includes("현재") && (await webBar.innerText()).includes("5%") && (await webBar.getAttribute("title"))?.includes("웹 사용량 제한"));
-
-  await pushUsage(app, usage("available", "잘못된 수치는 무시됨", {
-    current: { usedPercent: -1, resetText: "무시" },
-    weekly: { usedPercent: 101, resetText: "무시" },
-  }));
-  await webBar.getByText("잘못된 수치는 무시됨", { exact: true }).waitFor();
-  check("out-of-range web percentages are ignored", !(await webBar.innerText()).includes("%"), await webBar.innerText());
-
-  await pushUsage(app, usage("error", "웹 사용량 조회 실패"));
-  await webBar.getByText("웹 사용량 조회 실패", { exact: true }).waitFor();
-  check("web usage errors show detail without stale percentages", !(await webBar.innerText()).includes("%"));
-
-  await pushUsage(app, usage("available", "웹 사용량 확인 완료", {
-    current: { usedPercent: 2, resetText: "오후 8:45" },
-    weekly: { usedPercent: 0, resetText: "10월 21일" },
-  }));
-  await webBar.getByRole("button", { name: "Gemini 웹 사용량 새로 확인" }).click();
-  await page.waitForFunction(() => document.querySelector('[data-provider="gemini-web"]')?.textContent?.includes("100%"));
-  webCalls = await calls(app);
-  check("web usage refresh uses the web refresh IPC", webCalls.filter((action) => action === "refresh").length >= 2, JSON.stringify(webCalls));
-  check("usage updates never open a browser implicitly", webCalls.filter((action) => action === "open").length === 1, JSON.stringify(webCalls));
-
-  await picker.click();
-  await page.getByRole("menuitem", { name: "웹 계정 1 연결…", exact: true }).click();
-  await dialog.waitFor({ state: "visible" });
-  await dialog.getByText("사용 가능", { exact: true }).waitFor();
-  await page.screenshot({ path: join(screenshots, "gemini-web-dark.png"), fullPage: true });
-  await page.keyboard.press("Escape");
-  await page.getByLabel("테마 전환", { exact: true }).click();
-  await page.waitForFunction(() => !document.documentElement.classList.contains("dark"));
-  await picker.click();
-  await page.getByRole("menuitem", { name: "웹 계정 1 연결…", exact: true }).click();
-  await dialog.waitFor({ state: "visible" });
-  await dialog.getByText("사용 가능", { exact: true }).waitFor();
-  await page.screenshot({ path: join(screenshots, "gemini-web-light.png"), fullPage: true });
-  await page.keyboard.press("Escape");
-  check("dark and light web UI screenshots are kept in scratch", existsSync(join(screenshots, "gemini-web-dark.png")) && existsSync(join(screenshots, "gemini-web-light.png")));
-} catch (error) {
-  console.error(error);
-  check("Gemini web UI verification completed", false, error instanceof Error ? error.stack ?? error.message : String(error));
-} finally {
-  await app?.close().catch(() => undefined);
-}
-
-console.log(`Scratch data and screenshots: ${base}`);
+  check('main sidebar has no separate Gemini web usage bar', await page.locator('[data-provider="gemini-web"]').count() === 0);
+  await page.getByTestId('gemini-web-manage').click();
+  let dialog = page.getByRole('dialog').filter({hasText:'Gemini 웹 계정 관리'});
+  await dialog.getByTestId('gemini-web-account').waitFor();
+  check('management starts with the existing account 1', await dialog.getByTestId('gemini-web-account').count() === 1);
+  const dialogText = await dialog.innerText();
+  check('management explains previous-account preference, idle fallback and waiting', ['10개', '이전 계정', '10% 이하', '쉬고 있는 계정', '대기', '주기적으로'].every(text => dialogText.includes(text)));
+  check('opening management never opens Google or starts a model', await app.evaluate(() => !globalThis.__webAccountsUi.calls.some(c=>c.action==='open')));
+  for(let n=2;n<=10;n++) {
+    await dialog.getByTestId('gemini-web-add-account').click();
+    await page.waitForFunction(n=>document.querySelectorAll('[data-testid="gemini-web-account"]').length===n,n);
+  }
+  check('ten separately identified accounts are rendered', await dialog.getByTestId('gemini-web-account').count()===10 && await dialog.locator('[data-account-id="gemini-10"]').count()===1);
+  check('account add is disabled at the limit', await dialog.getByTestId('gemini-web-add-account').isDisabled());
+  const overflow = await page.evaluate(async()=>{try{await window.chatterbox.geminiWebAccounts('add');return '';}catch(e){return String(e);}});
+  check('an eleventh account is rejected by the API', overflow.includes('10'));
+  const card = dialog.locator('[data-account-id="gemini-2"]');
+  await card.getByRole('textbox',{name:'계정 2 이름'}).fill('문서 편집 계정');
+  await card.getByRole('button',{name:'저장',exact:true}).click();
+  await page.waitForFunction(()=>globalThis.document.querySelector('[aria-label="계정 2 이름"]')?.value==='문서 편집 계정');
+  check('account label update reaches the intended account', await app.evaluate(()=>globalThis.__webAccountsUi.accounts.find(a=>a.accountId==='gemini-2').label==='문서 편집 계정'));
+  await card.getByRole('checkbox',{name:'계정 2 자동 배정'}).uncheck();
+  check('account exclusion reaches the intended account', await app.evaluate(()=>globalThis.__webAccountsUi.accounts.find(a=>a.accountId==='gemini-2').enabled===false));
+  await card.getByRole('button',{name:'로그인 / 브라우저',exact:true}).click();
+  await card.getByText('로그인됨',{exact:true}).waitFor();
+  check('login opens only the selected profile', await app.evaluate(()=>globalThis.__webAccountsUi.calls.filter(c=>c.action==='open').every(c=>c.id==='gemini-2')));
+  check('current and weekly quota are shown inside management', (await card.getByTestId('gemini-web-account-usage').innerText()).includes('80% 남음') && (await card.getByTestId('gemini-web-account-usage').innerText()).includes('95% 남음'));
+  check('quota tooltip preserves reset information', (await card.getByTestId('gemini-web-account-usage').getAttribute('title')).includes('오늘 저녁'));
+  await card.getByRole('button',{name:'사용량 확인',exact:true}).click();
+  check('refresh is scoped to the selected profile', await app.evaluate(()=>globalThis.__webAccountsUi.calls.filter(c=>c.action==='refresh').every(c=>c.id==='gemini-2')));
+  await app.evaluate(()=>{const a=globalThis.__webAccountsUi.accounts.find(a=>a.accountId==='gemini-3');a.state='busy';a.message='다른 글쓰기 작업 중';});
+  await page.waitForTimeout(3100);
+  check('busy account cannot be excluded from under a running job', await dialog.getByRole('checkbox',{name:'계정 3 자동 배정'}).isDisabled());
+  await app.evaluate(()=>{const a=globalThis.__webAccountsUi.accounts.find(a=>a.accountId==='gemini-4');a.usage={status:'error',detail:'로그인 확인 필요',checkedAt:Date.now(),current:{usedPercent:15}};a.remainingPercent=undefined;});
+  await page.waitForTimeout(3100);
+  const failedText=await dialog.locator('[data-account-id="gemini-4"] [data-testid="gemini-web-account-usage"]').innerText();
+  check('failed quota query is shown without stale numeric values', failedText.includes('로그인 확인 필요')&&!failedText.includes('% 남음'));
+  await page.screenshot({path:join(screenshots,'accounts-dark.png'),fullPage:true});
+  await dialog.getByText('닫기',{exact:true}).click();
+  await page.getByLabel('테마 전환').click();
+  await page.getByTestId('gemini-web-manage').click();
+  dialog=page.getByRole('dialog').filter({hasText:'Gemini 웹 계정 관리'});
+  await dialog.getByRole('textbox',{name:'계정 2 이름'}).waitFor();
+  check('labels and exclusions remain after closing and reopening management', await dialog.getByRole('textbox',{name:'계정 2 이름'}).inputValue()==='문서 편집 계정' && !(await dialog.getByRole('checkbox',{name:'계정 2 자동 배정'}).isChecked()));
+  await page.setViewportSize({width:760,height:900});
+  const layout=await dialog.evaluate(el=>({width:el.clientWidth,scrollWidth:el.scrollWidth}));
+  check('management fits a narrow window without horizontal overflow', layout.scrollWidth<=layout.width+1,JSON.stringify(layout));
+  await page.screenshot({path:join(screenshots,'accounts-light-narrow.png'),fullPage:true});
+  await dialog.getByRole('checkbox',{name:'계정 2 자동 배정'}).check();
+  await dialog.getByText('닫기',{exact:true}).click();
+  await page.getByLabel('이 채팅의 Gemini 모델').click();
+  await page.getByTestId('gemini-web-connect').click();
+  dialog=page.getByRole('dialog').filter({hasText:'Gemini 웹 계정 관리'});
+  await dialog.getByTestId('gemini-web-use-argon').waitFor();
+  check('the model picker opens the same account management page', await dialog.getByTestId('gemini-web-account').count()===10);
+  await dialog.getByTestId('gemini-web-use-argon').click();
+  await page.waitForFunction(async id=>(await window.chatterbox.listChats()).find(c=>c.id===id)?.geminiModelOverride==='gemini-web-argon',chatId);
+  check('automatic web allocation remains connected to the existing chat model', true);
+  check('web usage stays absent from the main sidebar after management', await page.locator('[data-provider="gemini-web"]').count()===0);
+  console.log('Scratch data and screenshots:',base);
+} catch(e) {console.error(e);check('web account management UI completed',false,e.stack??e.message);}
+finally {await app?.close().catch(()=>{});}
 finish();

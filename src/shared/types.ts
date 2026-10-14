@@ -3,6 +3,7 @@ import type { ProviderUsage } from "./usage";
 
 export type AgentKind = "claude" | "codex" | "gemini";
 export const GEMINI_WEB_MODEL = "gemini-web-argon";
+export type GeminiWebAccountId = `gemini-${1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10}`;
 export const GEMINI_WRITING_INSTRUCTIONS = "제미나이는 웹·CLI 모두 글쓰기 전용이다. 문장 다듬기·캐릭터 대사·시나리오·문서 본문 작성·요약·번역을 맡는다. 코드 분석·구현·디버깅·테스트·기술 리뷰·교차검증은 맡지 않는다. 기술 문서는 마스터나 클로드·지피티가 확인해 제공한 사실을 유지하며 문장과 구성을 다듬는다. 불확실한 사실을 만들지 말고 필요한 확인을 마스터에게 보고한다. 결과는 텍스트로 반환하며 로컬 파일 반영은 클로드·지피티가 맡는다.";
 
 export interface GeminiWebUsage {
@@ -17,12 +18,18 @@ export interface GeminiWebUsage {
 }
 
 export interface GeminiWebStatus {
-  accountId: "gemini-1";
+  accountId: GeminiWebAccountId;
   state: "closed" | "login_required" | "ready" | "busy" | "error";
   message: string;
   model?: string;
   checkedAt: number;
   usage: GeminiWebUsage;
+}
+
+export interface GeminiWebAccountStatus extends GeminiWebStatus {
+  label: string;
+  enabled: boolean;
+  remainingPercent?: number;
 }
 
 export interface TokenCounts {
@@ -423,7 +430,8 @@ export interface ChatterBoxApi {
   // misc
   cliInfo(): Promise<CliInfo[]>;
   models(agent: AgentKind): Promise<ModelOption[]>;
-  geminiWeb(action: "status" | "open" | "refresh"): Promise<GeminiWebStatus>;
+  geminiWeb(action: "status" | "open" | "refresh", accountId?: GeminiWebAccountId): Promise<GeminiWebStatus>;
+  geminiWebAccounts(action: "list" | "add" | "update", input?: { accountId?: GeminiWebAccountId; label?: string; enabled?: boolean }): Promise<GeminiWebAccountStatus[]>;
   getTheme(): Promise<Theme>;
   setTheme(theme: Theme): Promise<void>;
   usage(): Promise<UsageInfo>;

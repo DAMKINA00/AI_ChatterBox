@@ -108,7 +108,7 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
                 <>
                   <DropdownMenuItem onSelect={() => setGeminiWebOpen(true)} data-testid="gemini-web-connect">
                     <Globe2 />
-                    웹 계정 1 연결…
+                    웹 계정 관리…
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuCheckItem checked={current.agent === a && current.id === ""} onSelect={() => onChange(make(a, ""))}>
