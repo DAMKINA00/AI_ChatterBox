@@ -33,6 +33,15 @@
 
 설치·로그인 검증 시에는 시작 메뉴에서 직접 연 PowerShell과 실제 앱 양쪽에서 확인해야 합니다. Codex 터미널의 `Test-Path` 또는 버전 출력만으로 일반 Windows 앱에서도 사용 가능하다고 판단하지 않습니다.
 
+사용자 요청에 따라 같은 날 공식 기본 루트 `%LOCALAPPDATA%\agy\bin`에 CLI를 새로 내려받아 재설치했습니다. [공식 설치 스크립트](https://antigravity.google/cli/install.ps1)의 Windows 배포 manifest에서 1.3.5 파일을 받고 SHA-512를 검증한 뒤, MSIX 밖에서 설치 도구를 실행했습니다. 기존 Google 로그인은 유지했습니다.
+
+- 사용자 PATH에서 정식 설치 폴더를 중복 없이 등록하고 환경 변경을 통지했습니다. 일반 PowerShell에서 `agy`가 정식 경로의 실행 파일로 확인되고 `--version`은 1.3.5, `models`는 종료 코드 0을 반환했습니다.
+- ChatterBox의 `geminiPath` 설정과 실제 검색 결과가 모두 `C:\Users\damki\AppData\Local\agy\bin\agy.exe`인 것을 확인했습니다.
+- Codex 가상 폴더의 중복 실행 파일은 해시 확인·백업 후 제거했습니다. 이후 Codex에서 연 파일 핸들의 최종 경로도 정식 사용자 경로로 확인됐습니다. 로그인 정보와 진행 중인 작업은 유지했습니다.
+- 이미 열린 터미널의 환경 변수는 자동 교체되지 않습니다. 새 PowerShell에서 갱신된 PATH가 적용됩니다.
+
+재설치 증거: `.scratch/agy-default-reinstall/result.json`, `terminal-result.json`, `models.txt`, `cleanup.json`.
+
 ## 자동 검증
 
 | 검사 | 결과 |
