@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { FolderOpen } from "lucide-react";
-import { DEFAULT_SETTINGS, type Project, type ProjectSettings } from "../../../shared/types";
+import { DEFAULT_SETTINGS, parseOrchestrator, type AgentKind, type Project, type ProjectSettings } from "../../../shared/types";
 import { api, cn } from "../lib/utils";
 import { useStore } from "../store";
+import { defaultEffortForModel, EffortPicker } from "./EffortPicker";
 import { ModelPicker } from "./ModelPicker";
 import { Button, Dialog, DialogContent, DialogFooter, Input, Label, Switch } from "./ui";
 
@@ -17,6 +18,7 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
   const createProject = useStore((s) => s.createProject);
   const updateProject = useStore((s) => s.updateProject);
   const createChat = useStore((s) => s.createChat);
+  const models = useStore((s) => s.models);
   const [name, setName] = useState("");
   const [folder, setFolder] = useState("");
   const [settings, setSettings] = useState<ProjectSettings>(DEFAULT_SETTINGS);
@@ -30,6 +32,11 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
   }, [open]);
 
   const set = <K extends keyof ProjectSettings>(k: K, v: ProjectSettings[K]) => setSettings((s) => ({ ...s, [k]: v }));
+
+  const setModel = (modelKey: keyof ProjectSettings, effortKey: keyof ProjectSettings, agent: AgentKind, worker: boolean, value: string) => {
+    set(modelKey, value as ProjectSettings[typeof modelKey]);
+    set(effortKey, defaultEffortForModel(models, agent, worker ? value : parseOrchestrator(value).model, worker) as ProjectSettings[typeof effortKey]);
+  };
 
   const browse = async () => {
     const f = await api.pickFolder();
@@ -88,16 +95,63 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
           <div className="grid gap-3 rounded-lg border p-3.5">
             <div className="text-[12px] font-medium text-muted-foreground">모델</div>
             <ModelRow label="마스터" hint="지시를 받아 팀을 꾸리고 일을 나눕니다 (승인 설정에 따라 파일 수정·명령 실행)">
-              <ModelPicker agents={["claude", "codex"]} value={settings.orchestratorModel} onChange={(v) => set("orchestratorModel", v as ProjectSettings["orchestratorModel"])} ariaLabel="마스터 모델" />
+              <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                <ModelPicker
+                  agents={["claude", "codex"]}
+                  value={settings.orchestratorModel}
+                  onChange={(v) => setModel("orchestratorModel", "orchestratorEffort", parseOrchestrator(v).agent, false, v)}
+                  ariaLabel="마스터 모델"
+                  className="min-w-0"
+                />
+                {(() => {
+                  const orch = parseOrchestrator(settings.orchestratorModel);
+                  return (
+                    <EffortPicker
+                      agent={orch.agent}
+                      model={orch.model}
+                      value={settings.orchestratorEffort ?? "xhigh"}
+                      onChange={(v) => set("orchestratorEffort", v)}
+                      ariaLabel="마스터 추론 수준"
+                    />
+                  );
+                })()}
+              </div>
             </ModelRow>
             <ModelRow label="클로드 작업자" hint="클로드 N호 (Claude Code)">
-              <ModelPicker agents={["claude"]} value={settings.claudeModel} onChange={(v) => set("claudeModel", v)} ariaLabel="Claude 모델" />
+              <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                <ModelPicker
+                  agents={["claude"]}
+                  value={settings.claudeModel}
+                  onChange={(v) => setModel("claudeModel", "claudeEffort", "claude", true, v)}
+                  ariaLabel="Claude 모델"
+                  className="min-w-0"
+                />
+                <EffortPicker agent="claude" model={settings.claudeModel} worker value={settings.claudeEffort ?? "auto"} onChange={(v) => set("claudeEffort", v)} ariaLabel="Claude 작업자 추론 수준" />
+              </div>
             </ModelRow>
             <ModelRow label="지피티 작업자" hint="지피티 N호 (Codex)">
-              <ModelPicker agents={["codex"]} value={settings.codexModel} onChange={(v) => set("codexModel", v)} ariaLabel="GPT 모델" />
+              <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                <ModelPicker
+                  agents={["codex"]}
+                  value={settings.codexModel}
+                  onChange={(v) => setModel("codexModel", "codexEffort", "codex", true, v)}
+                  ariaLabel="GPT 모델"
+                  className="min-w-0"
+                />
+                <EffortPicker agent="codex" model={settings.codexModel} worker value={settings.codexEffort ?? "auto"} onChange={(v) => set("codexEffort", v)} ariaLabel="GPT 작업자 추론 수준" />
+              </div>
             </ModelRow>
             <ModelRow label="제미나이 작업자" hint="제미나이 N호 (Antigravity)">
-              <ModelPicker agents={["gemini"]} value={settings.geminiModel} onChange={(v) => set("geminiModel", v)} ariaLabel="Gemini 모델" />
+              <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                <ModelPicker
+                  agents={["gemini"]}
+                  value={settings.geminiModel}
+                  onChange={(v) => setModel("geminiModel", "geminiEffort", "gemini", true, v)}
+                  ariaLabel="Gemini 모델"
+                  className="min-w-0"
+                />
+                <EffortPicker agent="gemini" model={settings.geminiModel} worker value={settings.geminiEffort ?? "auto"} onChange={(v) => set("geminiEffort", v)} ariaLabel="Gemini 작업자 추론 수준" />
+              </div>
             </ModelRow>
           </div>
 
@@ -225,11 +279,11 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
               <NumberField label="동시 지피티 작업자" suffix="명" value={settings.maxGptWorkers} onChange={(v) => set("maxGptWorkers", v)} min={1} max={6} />
               <NumberField label="동시 제미나이 작업자 (0=사용 안 함)" suffix="명" value={settings.maxGeminiWorkers} onChange={(v) => set("maxGeminiWorkers", v)} min={0} max={6} />
             </div>
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-2 gap-3">
               <NumberField label="지시당 맡기기(기본)" suffix="회" value={settings.maxConsults} onChange={(v) => set("maxConsults", v)} min={1} max={30} />
               <NumberField label="리뷰 왕복" suffix="회" value={settings.maxReviews} onChange={(v) => set("maxReviews", v)} min={0} max={10} />
-              <NumberField label="지시당 시간" suffix="분" value={settings.maxMinutes} onChange={(v) => set("maxMinutes", v)} min={5} max={600} />
             </div>
+            <div className="text-[12px] text-muted-foreground">작업 시간은 무제한입니다. 필요하면 중지 버튼으로 멈출 수 있습니다.</div>
           </div>
 
           <DialogFooter>

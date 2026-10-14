@@ -27,7 +27,6 @@ import { CONSULT_KIND_LABEL, MASTER_LABEL, roleName, roleTone, type Chat, type C
 import { api, cn, timeAgo } from "../lib/utils";
 import { useStore } from "../store";
 import { ProjectDialog } from "./ProjectDialog";
-import { RoleDot } from "./Items";
 import { UsageBar } from "./Usage";
 import {
   Button,
@@ -442,7 +441,7 @@ function ChatNode({
       </ItemMenus>
       {expanded && (
         <div className="ml-4 border-l py-0.5 pl-1.5">
-          <NodeRow chatId={chat.id} node="orch" label={`${MASTER_LABEL} 대화`} icon={<RoleDot tone="orch" />} />
+          <NodeRow chatId={chat.id} node="orch" label={`${MASTER_LABEL} 대화`} icon={null} />
           {agents?.map((a) => (
             <NodeRow
               key={a.id}
@@ -453,9 +452,7 @@ function ChatNode({
               icon={
                 busyWorkers.has(a.key) ? (
                   <Loader2 className={cn("size-3 animate-spin", a.kind === "claude" ? "text-claude" : a.kind === "gpt" ? "text-gpt" : "text-gemini")} />
-                ) : (
-                  <RoleDot tone={a.kind} />
-                )
+                ) : null
               }
             />
           ))}

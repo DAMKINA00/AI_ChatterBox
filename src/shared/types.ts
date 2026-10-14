@@ -13,6 +13,8 @@ export interface AgentMetrics extends TokenCounts {
   turnId: string;
   elapsedMs: number;
   model?: string;
+  /** The option sent to the CLI; provider-side policy can further cap it. */
+  reasoningEffort?: string;
   approximate?: boolean;
   /** Native thread cumulative counters, used only as a resume baseline. */
   nativeId?: string;
@@ -99,14 +101,17 @@ export interface ProjectSettings {
   codexModel: string;
   /** Antigravity model slug. Empty selects an available Pro-compatible Gemini model. */
   geminiModel: string;
+  /** Empty = CLI default; auto = master chooses medium/high/xhigh for each worker assignment. */
+  orchestratorEffort: string;
+  claudeEffort: string;
+  codexEffort: string;
+  geminiEffort: string;
   /** Lead must get a Codex/Claude review before finishing code changes. */
   reviewGate: boolean;
   /** Max consults per user instruction. */
   maxConsults: number;
   /** Max review round-trips per user instruction. */
   maxReviews: number;
-  /** Minutes per user instruction before the lead is told to wrap up. */
-  maxMinutes: number;
   /** Max workers of each kind alive at once in a chat. */
   maxClaudeWorkers: number;
   maxGptWorkers: number;
@@ -123,7 +128,7 @@ export const APPROVAL_MODE_LABEL: Record<ApprovalMode, string> = {
   user: "매번 직접 승인",
 };
 
-/** Prefills the new-project form only. */
+/** Defaults for new projects and settings absent in older project records. */
 export const DEFAULT_SETTINGS: ProjectSettings = {
   claudeStrengths: "일반 업무의 기본 담당. 소스 분석·원인 조사·구현·테스트·문서 작성과 모션그래픽·애니메이션 제작을 우선 배정합니다.",
   claudeCautions: "이미지는 도구를 사용할 수 있는 지피티에게 맡깁니다. 중요한 버그·오류는 지피티와 각각 조사합니다. 사용 한도·작업량으로 지연되면 재배정합니다.",
@@ -133,15 +138,18 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   claudeModel: "opus",
   codexModel: "gpt-6-astra",
   geminiModel: "",
+  orchestratorEffort: "xhigh",
+  claudeEffort: "auto",
+  codexEffort: "auto",
+  geminiEffort: "auto",
   geminiStrengths: "사용자 지정 제미나이 작업, 문서 요약·자료 비교와 추가 관점의 검토. 클로드가 바쁘거나 사용 한도에 도달했을 때 보조 담당.",
   geminiCautions: "Google AI Pro 계정에서 실제 제공되는 Gemini 모델만 사용합니다. Ultra 전용 모델·API 결제로 전환하지 않습니다. 일반 업무는 클로드 우선, 이미지 생성은 지피티, 중요한 오류는 기존 클로드·지피티 양쪽 조사 규칙을 유지합니다.",
   reviewGate: true,
   maxConsults: 8,
   maxReviews: 3,
-  maxMinutes: 60,
   maxClaudeWorkers: 3,
   maxGptWorkers: 3,
-  maxGeminiWorkers: 2,
+  maxGeminiWorkers: 1,
   approvalMode: "orchestrator",
   delegateHighRisk: false,
 };
@@ -173,6 +181,10 @@ export interface Chat {
   claudeModelOverride: string | null;
   codexModelOverride: string | null;
   geminiModelOverride: string | null;
+  orchestratorEffortOverride: string | null;
+  claudeEffortOverride: string | null;
+  codexEffortOverride: string | null;
+  geminiEffortOverride: string | null;
   /** Per-chat approval mode; null = follow the project. */
   approvalModeOverride: ApprovalMode | null;
   goal: ChatGoal | null;
@@ -189,6 +201,9 @@ export type ConsultStatus = "running" | "done" | "error" | "stopped" | "limited"
 export const CONSULT_KIND_LABEL: Record<ConsultKind, string> = { implement: "구현", review: "리뷰", opinion: "의견" };
 
 export interface Consult {
+  /** Requested by the master and actually applied, retained with this assignment. */
+  requestedEffort?: string;
+  effort?: string;
   /** Failed assignment this retry/reassignment replaces. */
   supersedes?: number;
   /** User instruction event id; absent in records before 0.3.2. */
@@ -251,11 +266,12 @@ export type ApprovalDecision = "once" | "chat" | "deny";
 
 /** Normalized event stream. Every event also carries the agent that produced it (see TimelineEvent). */
 export type AgentEvent =
+  | { type: "artifacts"; paths: string[] }
   | { type: "agent_usage"; metrics: AgentMetrics }
   | { type: "dispatch"; instructionId: number; mode: "direct" | "delegated"; reason: string; dualInvestigation?: boolean }
   | { type: "image_generation"; id: string; status: "running" | "done" | "error"; prompt?: string; attachment?: AttachmentRef; error?: string }
   | { type: "expression"; expression: AgentExpression }
-  | { type: "user"; text: string; attachments: AttachmentRef[]; queued?: boolean }
+  | { type: "user"; text: string; attachments: AttachmentRef[]; queued?: boolean; delivery?: "now" | "next" }
   | { type: "text_delta"; text: string }
   | { type: "text"; text: string }
   | { type: "tool_call"; id: string; name: string; input: string; diffs?: FileDiff[] }
@@ -320,6 +336,8 @@ export interface ModelOption {
   hidden?: boolean;
   /** The CLI offers an upgrade (a newer model replaces it). */
   deprecated?: boolean;
+  reasoningEfforts?: string[];
+  defaultReasoningEffort?: string;
 }
 
 export type Theme = "dark" | "light";
@@ -349,6 +367,10 @@ export interface ChatterBoxApi {
       claudeModelOverride?: string | null;
       codexModelOverride?: string | null;
       geminiModelOverride?: string | null;
+      orchestratorEffortOverride?: string | null;
+      claudeEffortOverride?: string | null;
+      codexEffortOverride?: string | null;
+      geminiEffortOverride?: string | null;
       approvalModeOverride?: ApprovalMode | null;
     },
   ): Promise<Chat>;
@@ -359,7 +381,7 @@ export interface ChatterBoxApi {
   loadEvents(chatId: number): Promise<TimelineEvent[]>;
   /** Chat ids whose messages contain the text. */
   searchChats(q: string): Promise<number[]>;
-  send(chatId: number, text: string, attachmentIds: number[]): Promise<void>;
+  send(chatId: number, text: string, attachmentIds: number[], delivery?: "now" | "next"): Promise<void>;
   stop(chatId: number): Promise<void>;
   /** Continue a run the app quit or crashed in the middle of. */
   resume(chatId: number): Promise<void>;
@@ -381,6 +403,7 @@ export interface ChatterBoxApi {
   setTheme(theme: Theme): Promise<void>;
   usage(): Promise<UsageInfo>;
   openPath(path: string): Promise<void>;
+  previewImage(chatId: number, href: string): Promise<AttachmentRef | null>;
   linkAction(chatId: number, href: string, action: "open" | "reveal" | "save"): Promise<{ canceled?: boolean; path?: string }>;
   // push events
   onEvent(cb: (e: TimelineEvent) => void): () => void;

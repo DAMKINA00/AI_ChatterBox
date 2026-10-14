@@ -24,6 +24,8 @@ export interface AgentDriver {
   readonly running: boolean;
   /** Starts a turn. Resolves once the input is handed to the CLI, not when the turn ends. */
   send(input: AgentInput): Promise<void>;
+  /** Deliver user input into the active master turn; false means it could not be accepted. */
+  steer?(input: AgentInput): Promise<boolean>;
   /** Interrupts the running turn, if any. */
   stop(): Promise<void>;
   /** Ends the backing process (stdin EOF, then kill the tree). */
@@ -43,6 +45,8 @@ export interface DriverOptions {
   nativeId: string | null;
   exePath: string;
   model?: string;
+  /** Empty string follows CLI configuration; workers receive the master's resolved choice. */
+  effort?: string;
   /** Extra system instructions (Claude --append-system-prompt / Codex developerInstructions). */
   instructions?: string;
   /** Tool-less approval judge: no edits or shell escalation. */

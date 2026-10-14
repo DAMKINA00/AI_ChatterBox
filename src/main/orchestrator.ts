@@ -44,6 +44,7 @@ import { isMutatingTool, isReadCommand } from "./execution-policy";
 import type { ApprovalInput } from "./approvals";
 import { addWait, checkAsk, removeWait, type WaitGraph } from "./team";
 import { completionIssue, dualInvestigationIssue } from "./dispatch";
+import { WORKER_EFFORTS } from "./effort";
 
 const KINDS: ConsultKind[] = ["implement", "review", "opinion"];
 const MAX_DEPTH = 3;
@@ -77,12 +78,13 @@ const ASK_TOOL = (forMaster: boolean): ToolDef => ({
       message: { type: "string" },
       kind: { type: "string", enum: KINDS },
       reason: { type: "string", description: "이 작업자를 선택한 이유. 마스터 배정 시 필수." },
+      ...(forMaster ? { effort: { type: "string", enum: [...WORKER_EFFORTS], description: "추론 수준. 일반 작업 medium, 복잡한 분석·구현 high, 가장 어려운 추론·검증 xhigh. 모델 지원 범위를 확인하고 reason에 선택 근거를 적으세요." } } : {}),
       requiresImage: { type: "boolean", description: "실제 이미지 생성·편집 도구가 필요한 작업이면 true" },
       supersedes: { type: "integer", description: "이 배정으로 보완할 실패한 협의 id" },
       scope: { type: "array", items: { type: "string" } },
       ...(forMaster ? { attach: { type: "array", items: { type: "string" }, description: "함께 보낼 파일 절대경로 (사용자 첨부 이미지 등)" } } : {}),
     },
-    required: ["to", "message", "kind", ...(forMaster ? ["reason"] : [])],
+    required: ["to", "message", "kind", ...(forMaster ? ["reason", "effort"] : [])],
   },
 });
 const ASK_PARALLEL_TOOL: ToolDef = {
@@ -102,12 +104,13 @@ const ASK_PARALLEL_TOOL: ToolDef = {
             message: { type: "string" },
             kind: { type: "string", enum: KINDS },
             reason: { type: "string" },
+            effort: { type: "string", enum: [...WORKER_EFFORTS] },
             requiresImage: { type: "boolean" },
             supersedes: { type: "integer" },
             attach: { type: "array", items: { type: "string" } },
             scope: { type: "array", items: { type: "string" } },
           },
-          required: ["to", "message", "kind", "reason"],
+          required: ["to", "message", "kind", "reason", "effort"],
         },
       },
     },
@@ -132,7 +135,7 @@ const RELEASE_TOOL: ToolDef = {
 };
 const AGENTS_TOOL: ToolDef = {
   name: "agents",
-  description: "이 채팅의 팀 목록: 닉네임, 종류, 맡은 역할, 상태(대기/작업 중/해제).",
+  description: "이 채팅의 팀 목록: 닉네임, 종류, 맡은 역할, 상태(대기/작업 중/해제). 마스터에게는 현재 지시의 최근 협의 결과도 반환합니다. 즉시 추가 지시로 ask 응답을 놓쳤으면 재배정하기 전에 여기서 확인하세요.",
   inputSchema: { type: "object", properties: {} },
 };
 const CHECKLIST_TOOL: ToolDef = {
@@ -183,6 +186,7 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     "- 너는 배정·검토·취합 담당이다. 간단한 질문·짧은 설명·이미 주어진 정보만으로 답할 수 있는 확인은 direct로 기록한 뒤 작업자를 생성하거나 호출하지 않고 직접 답한다. 소스 분석·원인 조사·구현·이미지·문서 제작 등 본 작업은 반드시 앱 작업자에게 맡긴다. 결과에 누락·모순이 있으면 보완 요청하고 최종 답변을 취합한다. 사용자가 명시적으로 직접 수행을 요구한 예외에도 기존 승인·작업 범위 규칙을 지킨다.",
     `- 지시마다 먼저 ${t("route_request")}(mode=direct|delegated, reason=이유)를 호출한다. 반환되는 실제 사용 가능 도구·모델·사용량으로 후보를 확인한다. 도구 사용 불가/미확인은 가능하다고 가정하지 않는다.`,
     "- 모든 위임은 이 앱의 chatterbox_bridge spawn/ask/ask_parallel만 사용한다. CLI 내부 spawn_agent/Agent/Task/팀 도구나 별도 CLI 프로세스로 작업자를 만들지 않는다. 글로벌 스킬의 Luna 선호와 관계없이 앱 상단에서 선택한 클로드·지피티·제미나이 모델을 사용한다.",
+    "- 마스터 기본 추론은 xhigh다. 작업자의 추론은 마스터가 배정마다 effort=medium|high|xhigh로 선택한다. 일반·범위가 명확한 작업은 medium, 복잡한 분석·구현은 high, 가장 어려운 원인 추론·중요 검증은 xhigh를 쓴다. route_request의 reasoningEfforts에 나온 지원 수준 안에서 고르고 reason에 담당자와 추론 수준 선택 근거를 함께 적는다. Gemini Pro가 medium/high만 제공하면 그중 고른다. low/max를 지정하거나 CLI·환경 설정으로 우회하지 않는다. 사용자가 수동 지정한 추론은 우선 적용된다.",
     `- 클로드 선호 작업: ${s.claudeStrengths}\n  주의점: ${s.claudeCautions}`,
     `- 지피티 선호 작업: ${s.gptStrengths}\n  주의점: ${s.gptCautions}`,
     `- 제미나이 선호 작업: ${s.geminiStrengths}\n  주의점: ${s.geminiCautions}` ,
@@ -199,12 +203,14 @@ function masterInstructions(project: Project, agent: AgentKind): string {
       : "- 리뷰는 필요하다고 판단할 때만 맡긴다 (kind=review).",
     "- ask/ask_parallel의 각 배정에 reason(선택 이유)을 넣는다. 이미지 생성·편집은 requiresImage=true, kind=implement로 지피티에게 맡긴다. 배정 내용에는 목표, 제약, 산출물, 완료 기준을 포함한다.",
     "- 작업자는 이 대화를 보지 못한다. message에 목표, 관련 파일 경로, 제약, 완료 기준을 빠짐없이 적는다. 사용자가 첨부한 파일이 필요하면 attach로 경로를 넘긴다.",
+    `- 작업 중 사용자의 즉시 추가 지시를 받으면 기존 작업자를 유지한다. CLI가 ask 응답 수신을 중단해도 작업자는 계속 실행될 수 있다. ${t("agents")}로 상태와 저장된 최근 결과를 확인하고, 이미 완료한 작업을 응답 재수신만을 위해 다시 배정하지 않는다.`,
     `- 여러 단계 작업은 ${t("checklist")}로 단계와 담당(닉네임)을 등록하고, 단계를 시작·완료할 때마다 갱신한다.`,
     `- 채팅에 목표(/goal)가 있으면 그 목표를 향해 일하고, 한 단계를 마칠 때마다 ${t("update_goal")}로 진행을 보고한다. 다 이루면 status=complete.`,
     `- 꼭 필요한 결정만 ${t("ask_user")}로 묻는다.`,
     `- 사용자에게 대사를 쓰기 전에 ${t("set_expression")}(expression=감정)으로 표정을 지정한다. 감정: ${AGENT_EXPRESSIONS.join(", ")}. 기술적 내용과 말투를 억지로 바꾸지 않는다.`,
-    `- 한도: 지시 하나당 일 맡기기 횟수는 작업자 수에 따라 늘어난다(최대 ${MAX_ASKS_CAP}회), 리뷰 ${s.maxReviews}회, ${s.maxMinutes}분. 한도에 걸리면 그때까지의 결과로 보고한다.`,
+    `- 지시·협의의 작업 시간 제한은 없다. 사용자가 중지를 요청하면 즉시 멈춘다. 배정 횟수는 작업자 수에 따라 늘어나며 최대 ${MAX_ASKS_CAP}회, 리뷰는 ${s.maxReviews}회다. 횟수 한도에 걸리면 그때까지의 결과로 보고한다.`,
     "- 마지막에는 항상 한국어로 취합한다: 담당별 결과, 산출물 링크, 검증·리뷰 결과, 남은 문제. 돌아오지 않았거나 실패한 결과를 완료했다고 말하지 않는다. 생성 이미지 파일 경로도 최종 답변에 포함한다.",
+    "- 사용자에게 결과물을 제공할 때마다 반드시 해당 파일별로 클릭할 수 있는 Markdown 링크 [파일명](<절대경로>)를 함께 쓴다. 이미지도 같은 링크와 미리보기를 함께 제공한다. :codex-file-citation 같은 내부 앱 전용 표기나 링크 없는 완료 문장으로 대체하지 않는다. 수정한 기존 PDF·문서·ZIP도 빠뜨리지 않고 각각 연결한다.",
   ].join("\n");
 }
 
@@ -227,9 +233,9 @@ interface Instruction {
   mode?: "direct" | "delegated";
   dualInvestigation?: boolean;
   repaired?: boolean;
+  waitingForResults?: boolean;
   /** The user's instruction text (context for the approval judge). */
   text: string;
-  startedAt: number;
   asks: number;
   reviews: number;
   requests: Map<string, number>;
@@ -294,7 +300,7 @@ export class Orchestrator {
     chats.toolsFor = (chat, role) => ({ chatterbox_bridge: this.bridgeFor(chat.id, role) });
     chats.onDriverEvent = (chatId, role, event) => this.observe(chatId, role, event);
     chats.sendHandler = (chat, input) => this.instruct(chat, input);
-    chats.busySend = (chat, input) => this.queue(chat, input);
+    chats.busySend = (chat, input, delivery) => delivery === "now" ? this.deliverNow(chat, input) : this.queue(chat, input);
   }
 
   private agents(chatId: number) {
@@ -353,14 +359,14 @@ export class Orchestrator {
           if (!master) break;
           const tasks: any[] = Array.isArray(args.tasks) ? args.tasks : [];
           if (!tasks.length) return textResult("tasks가 비었습니다.", true);
-          const results = await Promise.all(tasks.map((t) => this.askTool(chatId, caller, t)));
+          const results = await Promise.all(tasks.map((t) => this.askTool(chatId, caller, t).catch((error) => textResult(error instanceof Error ? error.message : String(error), true))));
           return textResult(
             results.map((r, i) => `## ${i + 1}. ${String(tasks[i]?.to ?? "")}\n${r.content.map((c) => c.text).join("\n")}`).join("\n\n"),
             results.every((r) => r.isError),
           );
         }
         case "agents":
-          return textResult(this.agentsText(chatId));
+          return textResult(this.agentsText(chatId, master));
         case "spawn":
           if (!master) break;
           if (!["claude", "gpt", "gemini"].includes(args.kind)) return textResult("지원하지 않는 작업자 종류입니다.", true);
@@ -385,15 +391,19 @@ export class Orchestrator {
   }
 
   // ---------- team
-  private agentsText(chatId: number): string {
+  private agentsText(chatId: number, includeResults = false): string {
     const list = this.agents(chatId);
     if (!list.length) return "아직 작업자가 없습니다. spawn으로 만드세요.";
     const busy = this.running.get(chatId);
+    const instructionId = this.instructions.get(chatId)?.id;
+    const consults = includeResults && instructionId !== undefined ? this.chats.store.listConsults(chatId).filter((c) => c.instructionId === instructionId) : [];
     return list
       .map((a) => {
         const r = busy?.get(a.key);
         const state = a.status === "released" ? "해제됨" : r ? `작업 중 (${CONSULT_KIND_LABEL[r.kind]}${r.scope.length ? ` · ${r.scope.join(", ")}` : ""})` : "대기";
-        return `- ${a.nickname} (${WORKER_KIND_LABEL[a.kind]}) · ${a.job || "역할 미정"} · ${state}`;
+        const latest = consults.findLast((c) => c.toRole === a.key);
+        const result = latest ? `\n  최근 협의 id=${latest.id} · ${latest.status}${latest.responseSummary ? `\n${latest.responseSummary}` : ""}${latest.filesChanged.length ? `\n산출물:\n${latest.filesChanged.join("\n")}` : ""}` : "";
+        return `- ${a.nickname} (${WORKER_KIND_LABEL[a.kind]}) · ${a.job || "역할 미정"} · ${state}${result}`;
       })
       .join("\n");
   }
@@ -454,6 +464,7 @@ export class Orchestrator {
     const callerName = this.name(chatId, caller);
     const reason = String(args.reason ?? "").trim();
     if (caller === "orch" && !reason) return textResult("작업자를 선택한 이유(reason)를 적으세요.", true);
+    if (caller === "orch" && !(WORKER_EFFORTS as readonly unknown[]).includes(args.effort)) return textResult("effort는 medium, high, xhigh 중에서 선택하고 reason에 추론 수준 선택 이유를 적으세요.", true);
     if (kind === "implement" && (this.reviewing.has(chatId) || (caller !== "orch" && this.running.get(chatId)?.get(caller)?.kind !== "implement")))
       return textResult("리뷰·의견 요청에서는 다른 작업자에게 구현을 맡길 수 없습니다.", true);
 
@@ -491,7 +502,9 @@ export class Orchestrator {
       if (!Number.isSafeInteger(supersedes) || !previous || previous.chatId !== chatId || previous.instructionId !== inst?.id || ["running", "done"].includes(previous.status))
         return textResult("supersedes는 이번 지시에서 실패·중단된 협의 id여야 합니다.", true);
     }
-    return this.consult(chatId, caller, target, kind, message, scope, attach, reason, supersedes);
+    // Worker-to-worker questions inherit the level chosen by the master for the caller.
+    const inherited = caller === "orch" ? args.effort : this.chats.store.consult(this.running.get(chatId)?.get(caller)?.consultId ?? -1)?.effort || "medium";
+    return this.consult(chatId, caller, target, kind, message, scope, attach, reason, supersedes, inherited);
   }
 
   private limitCheck(chatId: number, project: Project, target: Role, kind: ConsultKind, message: string): string | null {
@@ -504,7 +517,6 @@ export class Orchestrator {
     const maxAsks = Math.min(MAX_ASKS_CAP, s.maxConsults + 4 * Math.max(0, workers - 2));
     if (inst.asks >= maxAsks) return `한도 도달: 이번 지시에서 ${maxAsks}번 맡겼습니다. 더 맡기지 말고 지금까지의 결과를 보고하세요.`;
     if (kind === "review" && inst.reviews >= s.maxReviews) return `한도 도달: 리뷰를 ${s.maxReviews}회 했습니다. 지금까지의 결과와 남은 지적 사항을 보고하세요.`;
-    if (Date.now() - inst.startedAt > s.maxMinutes * 60_000) return `한도 도달: 이번 지시에 ${s.maxMinutes}분이 지났습니다. 지금까지의 결과를 보고하세요.`;
     const h = createHash("sha1").update(`${target}|${kind}|${message.trim()}`).digest("hex");
     const n = (inst.requests.get(h) ?? 0) + 1;
     inst.requests.set(h, n);
@@ -531,7 +543,7 @@ export class Orchestrator {
     for (const f of w) f();
   }
 
-  private async consult(chatId: number, caller: Role, target: ChatAgent, kind: ConsultKind, message: string, scope: string[], attach: string[], reason: string, supersedes?: number): Promise<ToolResult> {
+  private async consult(chatId: number, caller: Role, target: ChatAgent, kind: ConsultKind, message: string, scope: string[], attach: string[], reason: string, supersedes?: number, requestedEffort?: string): Promise<ToolResult> {
     const chat = this.chats.store.chat(chatId)!;
     const project = this.chats.store.project(chat.projectId)!;
     const callerName = this.name(chatId, caller);
@@ -555,8 +567,10 @@ export class Orchestrator {
     this.workerQueue.set(queueKey, prev.then(() => mine));
     try {
       await prev; // the target finishes its current turn first
+      const reasoning = await this.chats.assignmentEffort(chatId, target.key, requestedEffort);
+      if (this.stopped.has(chatId)) return textResult("사용자가 작업을 중지했습니다.", true);
       const attachments = this.attachmentsFor(chatId, attach);
-      const consult = this.chats.store.createConsult(chatId, caller, target.key, kind, message, scope, inst?.id, reason, supersedes);
+      const consult = this.chats.store.createConsult(chatId, caller, target.key, kind, message, scope, inst?.id, reason, supersedes, reasoning);
       this.chats.sink.consult(consult);
       const node = `consult:${consult.id}` as NodeId;
       // The card goes where the caller is (master's timeline, or inside the calling worker's consult).
@@ -576,7 +590,6 @@ export class Orchestrator {
       this.chats.setRoute(chatId, target.key, node);
 
       const result = await new Promise<{ ok: boolean; interrupted?: boolean; error?: string; text: string; files: string[] }>((resolve) => {
-        let timer: ReturnType<typeof setTimeout> | undefined;
         let settled = false;
         const r: Running = {
           consultId: consult.id,
@@ -591,7 +604,6 @@ export class Orchestrator {
           resolve: (end) => {
             if (settled) return;
             settled = true;
-            if (timer) clearTimeout(timer);
             resolve({ ...end, text: r.text, files: [...r.files] });
           },
         };
@@ -600,13 +612,10 @@ export class Orchestrator {
         this.running.set(chatId, m);
         this.chats.agentsChanged(chatId);
         if (this.stopped.has(chatId)) return r.resolve({ ok: false, interrupted: true });
-        if (inst) {
-          const left = project.settings.maxMinutes * 60_000 - (Date.now() - inst.startedAt);
-          timer = setTimeout(() => void this.chats.liveDriver(chatId, target.key)?.stop(), Math.max(1000, left));
-        }
         void (async () => {
           try {
-            const driver = await this.chats.driver(chatId, target.key);
+            const driver = await this.chats.driver(chatId, target.key, reasoning.effort);
+            if (this.stopped.has(chatId) || settled) return r.resolve({ ok: false, interrupted: true });
             await driver.send({
               text: kindPrefix(kind, callerName, scope) + message,
               attachments,
@@ -621,9 +630,8 @@ export class Orchestrator {
       this.chats.setRoute(chatId, target.key, undefined);
       if (kind === "implement") this.releaseScope(chatId, consult.id);
       this.chats.agentsChanged(chatId);
-      const timedOut = inst ? Date.now() - inst.startedAt > project.settings.maxMinutes * 60_000 : false;
       const hasResult = !!result.text.trim() || result.files.length > 0;
-      const status = this.stopped.has(chatId) ? "stopped" : result.interrupted && timedOut ? "limited" : result.ok && hasResult ? "done" : result.interrupted ? "stopped" : "error";
+      const status = this.stopped.has(chatId) ? "stopped" : result.ok && hasResult ? "done" : result.interrupted ? "stopped" : "error";
       const summary = result.text.trim() || result.error || (result.files.length ? `산출물 ${result.files.length}개를 생성·수정했습니다.` : "작업자의 응답과 산출물이 없습니다.");
       const finished = this.chats.store.finishConsult(consult.id, status, summary, result.files);
       this.chats.sink.consult(finished);
@@ -638,11 +646,9 @@ export class Orchestrator {
           ? `[${target.nickname} · ${CONSULT_KIND_LABEL[kind]} 결과]`
           : status === "stopped"
             ? `[${target.nickname}: 사용자가 중지했습니다. 더 맡기지 말고 멈추세요.]`
-            : status === "limited"
-              ? `[${target.nickname}: 시간 한도에 걸려 중단했습니다. 지금까지의 결과로 보고하세요.]`
-              : `[${target.nickname}: 오류 — ${result.error ?? "실패"}]`;
+            : `[${target.nickname}: 오류 — ${result.error ?? "실패"}]`;
       const files = result.files.length ? `\n\n변경된 파일:\n${result.files.map((f) => `- ${f}`).join("\n")}` : "\n\n변경된 파일: 없음";
-      return textResult(`${head} 협의 id=${consult.id}\n${summary}${files}${caller === "orch" ? this.takeQueued(chatId) : ""}`, status !== "done");
+      return textResult(`${head} 협의 id=${consult.id} · 추론 ${reasoning.effort || "CLI 기본"}\n${summary}${files}${caller === "orch" ? this.takeQueued(chatId) : ""}`, status !== "done");
     } finally {
       removeWait(this.graph(chatId), caller, target.key);
       done();
@@ -689,6 +695,7 @@ export class Orchestrator {
       }
     }
     if (role === "orch" && event.type === "turn_end") {
+      if (event.ok && !event.interrupted) this.publishArtifacts(chatId);
       this.reviewing.delete(chatId);
       this.afterMasterTurn(chatId, event);
       // Extra instructions that arrived after the master's last ask become the next turn.
@@ -742,7 +749,7 @@ export class Orchestrator {
     const events = this.chats.store.events(chatId);
     const id = events.findLast((e) => e.event.type === "user")?.id ?? 0;
     const previous = restore ? events.findLast((e) => e.event.type === "dispatch" && e.event.instructionId === id)?.event : undefined;
-    return { id, mode: previous?.type === "dispatch" ? previous.mode : undefined, dualInvestigation: previous?.type === "dispatch" ? previous.dualInvestigation : undefined, text, startedAt: Date.now(), asks: 0, reviews: 0, requests: new Map(), queued: [], pinned: [] };
+    return { id, mode: previous?.type === "dispatch" ? previous.mode : undefined, dualInvestigation: previous?.type === "dispatch" ? previous.dualInvestigation : undefined, text, asks: 0, reviews: 0, requests: new Map(), queued: [], pinned: [] };
   }
 
   private investigationIssue(chatId: number): string | null {
@@ -750,11 +757,52 @@ export class Orchestrator {
     return inst?.dualInvestigation ? dualInvestigationIssue(inst.id, this.chats.store.listConsults(chatId), this.agents(chatId)) : null;
   }
 
+  /** Always retain clickable outputs the app observed, even when a model omits links in its prose. */
+  private publishArtifacts(chatId: number) {
+    const inst = this.instructions.get(chatId), chat = this.chats.store.chat(chatId);
+    const project = chat && this.chats.store.project(chat.projectId);
+    if (!inst || !project) return;
+    const paths = this.chats.store.listConsults(chatId).filter((c) => c.instructionId === inst.id && c.status === "done").flatMap((c) => c.filesChanged);
+    const already = new Set<string>();
+    for (const e of this.chats.store.events(chatId).filter((e) => e.id > inst.id)) {
+      if (e.event.type === "image_generation" && e.event.attachment) paths.push(e.event.attachment.path);
+      if (e.role === "orch" && e.event.type === "file_change" && e.event.ok) paths.push(...e.event.files.filter((f) => f.kind !== "delete").map((f) => f.movePath ?? f.path));
+      if (e.event.type === "artifacts") for (const p of e.event.paths) already.add(p.toLowerCase());
+    }
+    const outputs = [...new Map(paths.map((p) => { const full = resolvePath(project.folder, p); return [full.toLowerCase(), full]; })).values()].filter((p) => {
+      try { return !already.has(p.toLowerCase()) && existsSync(p) && statSync(p).isFile(); } catch { return false; }
+    });
+    if (outputs.length) this.chats.emit(chatId, "orch", "orch", { type: "artifacts", paths: outputs });
+  }
+
   private checkCompletion(chatId: number, end: Extract<AgentEvent, { type: "turn_end" }>): Extract<AgentEvent, { type: "turn_end" }> | null {
     const inst = this.instructions.get(chatId);
     if (!inst || !end.ok || end.interrupted || this.stopped.has(chatId) || this.planning.has(chatId)) return end;
     const chat = this.chats.store.chat(chatId);
     if (!chat) return end;
+    // Immediate input may detach the master's native ask call while app workers continue.
+    // Wait for those existing jobs and resume synthesis without spending the repair attempt.
+    if (this.chats.store.listConsults(chatId).some((c) => c.instructionId === inst.id && c.status === "running")) {
+      if (!inst.waitingForResults) {
+        inst.waitingForResults = true;
+        const pending = [...this.workerQueue].filter(([key]) => key.startsWith(`${chatId}:`)).map(([, promise]) => promise);
+        void Promise.allSettled(pending).then(async () => {
+          inst.waitingForResults = false;
+          if (this.stopped.has(chatId) || this.instructions.get(chatId) !== inst || !this.chats.store.chat(chatId)) return;
+          try {
+            const driver = await this.chats.driver(chatId, "orch");
+            if (driver.running || this.stopped.has(chatId) || this.instructions.get(chatId) !== inst) return;
+            this.chats.updateChat(chatId, { status: "working" });
+            await driver.send({ text: `[앱 작업자 결과 도착 — 기존 지시 계속]\n${this.agentsText(chatId, true)}\n기존 결과를 검토하고 사용자 추가 지시를 반영해 취합하세요. 응답 재수신만을 위한 재배정은 필요 없습니다.${this.takeQueued(chatId)}`, attachments: [], noWrites: this.reviewing.has(chatId) });
+          } catch (e) {
+            const error = String(e);
+            this.chats.emit(chatId, "orch", "orch", { type: "error", message: error });
+            this.chats.orchTurnEnded(chatId, { type: "turn_end", ok: false, error });
+          }
+        });
+      }
+      return null;
+    }
     const issue = this.investigationIssue(chatId) ?? completionIssue(inst.id, inst.mode, this.chats.store.listConsults(chatId), !!this.chats.store.project(chat.projectId)?.settings.reviewGate);
     if (!issue) return end;
     this.chats.emit(chatId, "orch", "orch", { type: "notice", text: `완료 확인: ${issue}` });
@@ -766,6 +814,7 @@ export class Orchestrator {
       void (async () => {
         try {
           const driver = await this.chats.driver(chatId, "orch");
+          if (this.stopped.has(chatId) || this.instructions.get(chatId) !== inst) return;
           await driver.send({ text: `[앱 완료 검사 — 보완 1회] ${issue}\n본 작업은 앱 작업자에게 배정해야 합니다. 실제 결과를 검토하고 취합하세요. 더 진행할 수 없으면 미완료 사유를 분명히 보고하세요.${this.takeQueued(chatId)}`, attachments: [], noWrites: this.reviewing.has(chatId) });
         } catch (e) {
           const message = String(e);
@@ -807,6 +856,7 @@ export class Orchestrator {
     if (prefix) input = { ...input, text: prefix + input.text };
     this.instructions.set(chat.id, this.newInstruction(chat.id, input.text));
     const driver = await this.chats.driver(chat.id, "orch");
+    if (this.stopped.has(chat.id)) return;
     await driver.send({ ...input, text: input.text + attachmentNote(input.attachments) + (this.planning.has(chat.id) ? "" : "\n\n[앱 협업 규칙] 먼저 route_request로 처리 방식을 기록하세요. 본 작업은 앱 spawn/ask로 배정하고 reason에 담당 선택 이유를 적으세요. CLI 내부 에이전트는 사용하지 마세요."), noWrites: this.planning.has(chat.id) || this.reviewing.has(chat.id) });
   }
 
@@ -841,7 +891,9 @@ export class Orchestrator {
     if (!this.agents(chatId).length && (chat.orchCodexThreadId || chat.orchClaudeSessionId))
       this.chats.emit(chatId, "orch", null, { type: "notice", text: "이전 버전의 CLI 내부 작업자 대화는 앱에 저장되지 않았을 수 있습니다. 새 배정부터 앱 작업자 기록으로 표시합니다." });
     try {
-      await (await this.chats.driver(chatId, "orch")).send({ text: this.handover(chat) + note, attachments: [], noWrites: this.planning.has(chatId) || this.reviewing.has(chatId) });
+      const driver = await this.chats.driver(chatId, "orch");
+      if (this.stopped.has(chatId)) return;
+      await driver.send({ text: this.handover(chat) + note, attachments: [], noWrites: this.planning.has(chatId) || this.reviewing.has(chatId) });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       this.planning.delete(chatId);
@@ -861,6 +913,31 @@ export class Orchestrator {
     if (!inst) throw new Error("작업이 진행 중입니다.");
     inst.queued.push(input);
     this.chats.emit(chat.id, "orch", null, { type: "notice", text: "추가 지시를 받았습니다. 다음 단계에서 마스터에게 전달합니다." });
+  }
+
+  private async deliverNow(chat: Chat, input: AgentInput) {
+    const inst = this.instructions.get(chat.id);
+    if (!inst || this.stopped.has(chat.id)) throw new Error("중지되었거나 완료된 지시입니다. 새 지시로 보내 주세요.");
+    const driver = this.chats.liveDriver(chat.id, "orch");
+    let accepted = false;
+    try { accepted = !!(await driver?.steer?.({ ...input, text: "[사용자 즉시 추가 지시 — 기존 작업을 유지하면서 우선 반영]\n" + input.text })); }
+    catch { /* A turn can finish between clicking send and the native receipt. Keep the message queued. */ }
+    if (accepted) {
+      const text = input.text + attachmentNote(input.attachments);
+      inst.text += "\n\n[사용자 추가 지시]\n" + text;
+      inst.pinned.push(text);
+      this.chats.emit(chat.id, "orch", null, { type: "notice", text: "마스터에게 즉시 전달했습니다. 실행 중인 도구·승인은 안전한 처리 시점에 반영됩니다." });
+    } else if (this.stopped.has(chat.id)) {
+      this.chats.emit(chat.id, "orch", null, { type: "notice", text: "작업이 중지되어 즉시 전달하지 않았습니다. 이 메시지는 대화에 남아 있습니다." });
+    } else if (driver && !driver.running) {
+      // The master can be idle while workers still run; keep the existing instruction and its limits.
+      this.chats.updateChat(chat.id, { status: "working", touch: true });
+      inst.text += "\n\n[사용자 추가 지시]\n" + input.text;
+      await driver.send({ ...input, text: "[사용자 즉시 추가 지시 — 기존 작업자는 계속 실행 중일 수 있습니다]\n" + input.text, noWrites: this.planning.has(chat.id) || this.reviewing.has(chat.id) });
+    } else {
+      await this.queue(chat, input);
+      this.chats.emit(chat.id, "orch", null, { type: "notice", text: "현재 CLI가 즉시 전달을 받지 못해 다음 단계 전달로 보관했습니다." });
+    }
   }
 
   /** Extra instructions ride along with the master's next tool result, and stay pinned to later ones. */

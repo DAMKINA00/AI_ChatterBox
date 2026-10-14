@@ -1,15 +1,15 @@
 import { app, BrowserWindow, dialog, ipcMain, protocol, shell, nativeTheme, screen } from "electron";
 import { mkdirSync, readFileSync, existsSync, statSync, copyFileSync } from "node:fs";
 import { join, basename, resolve } from "node:path";
-import type { AgentKind, ApprovalDecision, ModelOption, ProjectSettings, Theme } from "../shared/types";
+import type { AgentKind, ApprovalDecision, ProjectSettings, Theme } from "../shared/types";
 import { Store } from "./db";
 import { ChatManager } from "./chats";
 import { AttachmentStore } from "./attachments";
-import { listClaudeModels } from "./drivers/claude";
 import { Orchestrator } from "./orchestrator";
 import { AppTray } from "./tray";
 import { ensureOnlyInstance } from "./instance-guard";
 import { mayOpenDocument, resolveLink } from "./file-links";
+import { previewImage } from "./artifact-preview";
 
 // Data lives in %APPDATA%\AI_ChatterBox. Tests point AI_CHATTERBOX_DATA at scratch folders; the packaged
 // app only honours it with an explicit --test-data flag, so a stray variable can never hide real data.
@@ -37,7 +37,6 @@ let tray: AppTray | undefined;
 let store: Store;
 let chats: ChatManager;
 let attachments: AttachmentStore;
-const modelCache = new Map<AgentKind, ModelOption[]>();
 
 interface Bounds {
   x?: number;
@@ -161,7 +160,7 @@ function registerIpc() {
   ipcMain.handle("chats:agents", (_e, id: number) => store.listAgents(id));
   ipcMain.handle("chats:events", (_e, id: number) => store.events(id));
   ipcMain.handle("chats:search", (_e, q: string) => (q.trim() ? store.searchChats(q.trim()) : []));
-  ipcMain.handle("chats:send", (_e, id: number, text: string, attachmentIds: number[]) => chats.send(id, text, attachmentIds));
+  ipcMain.handle("chats:send", (_e, id: number, text: string, attachmentIds: number[], delivery?: "now" | "next") => chats.send(id, text, attachmentIds, delivery));
   ipcMain.handle("chats:stop", (_e, id: number) => orchestrator.stop(id));
   ipcMain.handle("chats:resume", (_e, id: number) => orchestrator.resume(id));
   ipcMain.handle("chats:command", (_e, id: number, name: string, arg: string) => orchestrator.command(id, name, arg));
@@ -172,6 +171,7 @@ function registerIpc() {
   ipcMain.handle("chats:answerAsk", (_e, id: number, askId: string, answer: string) => orchestrator.answerAsk(id, askId, answer));
 
   // attachments
+  ipcMain.handle("artifacts:previewImage", (_e, chatId: number, href: string) => previewImage(store, attachments, chatId, href));
   ipcMain.handle("att:paths", (_e, chatId: number, paths: string[]) => paths.map((p) => attachments.fromPath(chatId, p)));
   ipcMain.handle("att:bytes", (_e, chatId: number, name: string, mime: string, bytes: Uint8Array) =>
     attachments.fromBytes(chatId, name, mime, bytes),
@@ -184,21 +184,7 @@ function registerIpc() {
 
   // misc
   ipcMain.handle("cli:info", () => chats.cliInfo());
-  ipcMain.handle("models:list", async (_e, agent: AgentKind) => {
-    if (agent === "gemini") return chats.geminiModels();
-    const cached = modelCache.get(agent);
-    if (cached) return cached;
-    let list: ModelOption[];
-    if (agent === "codex") list = await chats.codex().models();
-    else
-      list = (await listClaudeModels(chats.claudeExe(), dataDir)).map((m) => ({
-        id: m.value,
-        label: m.displayName,
-        isDefault: m.value === "opus",
-      }));
-    modelCache.set(agent, list);
-    return list;
-  });
+  ipcMain.handle("models:list", (_e, agent: AgentKind) => chats.models(agent));
   ipcMain.handle("theme:get", () => (store.getSetting("theme") as Theme) ?? "dark");
   ipcMain.handle("theme:set", (_e, theme: Theme) => {
     store.setSetting("theme", theme);

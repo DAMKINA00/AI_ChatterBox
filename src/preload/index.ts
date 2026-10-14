@@ -25,7 +25,7 @@ const api: ChatterBoxApi = {
   listAgents: (chatId) => ipcRenderer.invoke("chats:agents", chatId),
   loadEvents: (chatId) => ipcRenderer.invoke("chats:events", chatId),
   searchChats: (q) => ipcRenderer.invoke("chats:search", q),
-  send: (chatId, text, attachmentIds) => ipcRenderer.invoke("chats:send", chatId, text, attachmentIds),
+  send: (chatId, text, attachmentIds, delivery) => ipcRenderer.invoke("chats:send", chatId, text, attachmentIds, delivery),
   stop: (chatId) => ipcRenderer.invoke("chats:stop", chatId),
   resume: (chatId) => ipcRenderer.invoke("chats:resume", chatId),
   command: (chatId, name, arg) => ipcRenderer.invoke("chats:command", chatId, name, arg),
@@ -45,6 +45,7 @@ const api: ChatterBoxApi = {
   setTheme: (theme) => ipcRenderer.invoke("theme:set", theme),
   usage: () => ipcRenderer.invoke("usage:get"),
   openPath: (p) => ipcRenderer.invoke("shell:openPath", p),
+  previewImage: (chatId, href) => ipcRenderer.invoke("artifacts:previewImage", chatId, href),
   linkAction: (chatId, href, action) => ipcRenderer.invoke("shell:link", chatId, href, action),
 
   onEvent: (cb) => on("chat:event", cb),

@@ -6,7 +6,8 @@ import { isAgentExpression, isWorkerKey } from "../../shared/types";
 import type { AgentExpression, PlanStep, AgentEvent, ApprovalDecision, ApprovalRequest, AttachmentRef, ConsultKind, ConsultStatus, FileDiff, NodeId, Role, TimelineEvent } from "../../shared/types";
 
 export type Item =
-  | { kind: "user"; key: string; text: string; attachments: AttachmentRef[]; at: number; queued?: boolean }
+  | { kind: "artifacts"; key: string; paths: string[] }
+  | { kind: "user"; key: string; text: string; attachments: AttachmentRef[]; at: number; queued?: boolean; delivery?: "now" | "next" }
   | { kind: "message"; key: string; role: Role; node: NodeId; text: string; streaming: boolean; expression: AgentExpression; at: number }
   | { kind: "tool"; key: string; role: Role; id: string; name: string; input: string; diffs?: FileDiff[]; result?: { ok: boolean; output: string } }
   | { kind: "files"; key: string; role: Role; files: FileDiff[]; ok: boolean }
@@ -234,7 +235,9 @@ export function apply(items: Item[], e: TimelineEvent, expression?: AgentExpress
     case "expression":
       return items;
     case "user":
-      return [...items, { kind: "user", key: key, text: ev.text, attachments: ev.attachments, at: e.at, queued: ev.queued }];
+      return [...items, { kind: "user", key: key, text: ev.text, attachments: ev.attachments, at: e.at, queued: ev.queued, delivery: ev.delivery }];
+    case "artifacts":
+      return [...items, { kind: "artifacts", key, paths: ev.paths }];
     case "text_delta": {
       const i = items.findLastIndex((x) => x.kind === "message" && x.streaming && x.role === role && x.node === node);
       if (i >= 0) {

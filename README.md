@@ -18,10 +18,23 @@
   - **고위험 위임:** 설정을 켜면 판단 세션이 사용자 지시 범위 안의 고위험 요청도 허용·거부할 수 있습니다. 설정 변경은 이전 승인 기억을 초기화합니다. `/plan`과 리뷰·의견의 수정 금지는 계속 적용됩니다.
   - **위험 우회 플래그 안 씀:** `--dangerously-skip-permissions`나 Codex yolo 모드는 쓰지 않습니다.
 - **첨부:** 📎 버튼, **Ctrl+V** 이미지 붙여넣기, 끌어다 놓기를 지원합니다. 이미지는 Claude와 Codex 모두 직접 봅니다.
-- **진행 중 조작:** 작업 중에도 추가 지시를 보낼 수 있고 (다음 단계에 오케스트레이터에게 전달), **중지**를 누르면 마스터와 작업자가 모두 멈춥니다.
+- **진행 중 조작:** 추가 지시를 마스터에게 즉시 전달(`Ctrl+Enter`)하거나 다음 단계에 전달할 수 있습니다. **중지**를 누르면 마스터와 작업자가 모두 멈춥니다.
 - **그 밖의 기능:** 마크다운과 코드 하이라이트, 도구 호출 카드, diff 보기, 다크/라이트 테마, 사용량 표시(Claude 5시간 / Codex 5시간·주간), 채팅과 메시지 검색, 창 크기 기억.
 - **작업자 가로줄 (0.3.1):** 상단 메뉴 아래에 생성된 작업자를 표시합니다. 활성 작업자가 앞에, 회색으로 표시한 해제 작업자는 뒤쪽 별도 구역에 있으며 모두 기록을 열 수 있습니다.
 - **캐릭터 (0.3.1):** 무광 눈동자와 같은 치비 화풍으로 맞춘 마스터·클쨩·짚쨩의 12종 표정을 표시합니다. `set_expression(expression)`은 호출한 역할의 다음 대사에 연결되고 과거 대사의 표정은 보존합니다. 실제 작업·승인·오류 상태는 별도 배지로 표시합니다. [표정 갤러리](docs/character-gallery.html)와 [제작 기준](docs/character-art.md)을 보관합니다.
+
+## 0.3.5 변경
+
+- **추론 설정:** 프로젝트 설정·채팅 상단·상태 창에서 역할별로 설정합니다. 마스터 기본값은 `xhigh`, 작업자는 `자동 배정`이며 마스터가 각 요청의 난이도에 따라 `medium`·`high`·`xhigh` 중에서 선택합니다. 사용자가 직접 고른 작업자 값이 있으면 우선 적용합니다. 선택 메뉴는 해당 CLI가 알려준 지원 수준만 표시합니다.
+- **적용 기록:** 협의 카드에 적용한 추론 수준을 표시하고 배정 이유와 함께 저장합니다. 선택한 수준을 모델이 지원하지 않으면 지원 범위 내에서 낮춰 적용하고 요청값도 보존합니다. Gemini Pro의 현재 모델에서는 `medium`·`high`를 사용합니다. 추론값은 CLI에 전달하는 설정이며 Claude 조직 정책 등 실제 서비스가 조정할 수 있으므로 내부 추론량의 실제 측정값으로 해석하지 않습니다.
+- **추가 지시:** 작업 중인 채팅은 **즉시 전달**과 기존 **다음 단계 전달**을 별도 버튼으로 제공합니다.
+- **대화 표시:** Discord형 대화처럼 왼쪽에 36px 캐릭터, 이름, 본문을 놓고 오른쪽에 저장 시각을 표시합니다. 역할 앞 장식 점은 제거했습니다.
+- **파일·이미지 표시:** 파일별 링크에서 열기·탐색기에서 보기·다운로드를 선택하고, 로컬 이미지 링크는 대화 안에서 미리 봅니다. Codex raw citation(`:codex-file-citation{...}`)도 같은 파일 링크로 변환합니다.
+- **Gemini 캐릭터:** Gemini도 같은 치비 화풍의 12종 표정 아이콘(중립 포함)을 사용합니다. [표정 갤러리](docs/character-gallery.html)와 [제작 기준](docs/gemini-character-art.md)에 기록했습니다.
+- **시간 제한 제거:** 지시 전체와 작업자 협의에 앱의 자동 종료 시간을 적용하지 않습니다. 기존 프로젝트의 시간 제한도 무시하고 필요할 때 **중지** 버튼으로 마스터와 작업자를 멈춥니다. 배정·리뷰 횟수 제한과 CLI 서비스의 네트워크·도구 제한은 별개입니다.
+- **기본 인원:** 새 프로젝트는 클로드 3명·지피티 3명·제미나이 1명입니다. 기존 프로젝트에서 저장한 인원은 유지합니다.
+- **Gemini 원본 보관:** 현재 Antigravity CLI에서 안전한 보관·복원 기능을 확인하지 못해 자동 보관은 추가하지 않았습니다. ChatterBox 기록·해제·재호출은 계속 지원합니다.
+- **검증 기록 초안:** [0.3.5 검증 기록](docs/validation-0.3.5.md)에 확인된 범위와 남은 검증 항목을 적었습니다.
 
 ## 0.3.4 변경
 
@@ -67,7 +80,7 @@
 
 ## 실행 파일
 
-`dist\AI_ChatterBox-0.3.4-portable.exe`를 더블클릭하면 됩니다. 설치는 필요 없습니다. 기존 작업이 끝난 뒤 앱을 종료하고 새 파일로 실행하세요.
+`dist\AI_ChatterBox-0.3.5-portable.exe`를 더블클릭하면 됩니다. 설치는 필요 없습니다. 기존 작업이 끝난 뒤 앱을 종료하고 새 파일로 실행하세요.
 
 - 실행할 때마다 임시 폴더에 압축을 풀기 때문에 처음 창이 뜰 때까지 10초쯤 걸립니다.
 - 실행기와 내부 앱 모두 Windows 관리자 권한을 요청합니다. UAC를 취소하면 실행되지 않습니다. CLI의 쓰기·명령 승인은 Windows 권한과 별도로 적용됩니다.
@@ -96,10 +109,15 @@ npm run dev
 | `npm run test:ui` | 격리 데이터로 설정창·작업자·재실행 UI 검사 (모델 호출 없음) |
 | `node scripts/e2e-delegation-ui.mjs` | 배정·이미지·사용량·파일 링크·설정 저장 UI 검사 (먼저 빌드, 모델 호출 없음) |
 | `node scripts/smoke-master-routing.mjs` | 실제 마스터의 직접 답변·분석·이미지·혼합·중요 오류 조사 배정과 취합 검사 (사용량 발생) |
+| `node scripts/e2e-effort-ui.mjs` | 추론 설정·저장·초기화·이전 기록·시간 제한 제거 UI 검사 (먼저 빌드, 모델 호출 없음) |
+| `node scripts/smoke-effort.mjs` | 실제 Claude/Codex 마스터의 xhigh와 세 계열 작업자 자동 추론 배정·응답·취합 검사 (사용량 발생) |
+| `node scripts/e2e-chat-layout.mjs` | Discord형 메시지·저장 시각·즉시/다음 단계 버튼·좁은 창 검사 |
+| `node scripts/e2e-artifact-preview.mjs` | 결과물 링크·인용 변환·이미지 미리보기·재실행 검사 |
+| `node scripts/smoke-steering.mjs` | 실제 Claude/Codex 마스터 즉시 전달과 기존 작업자 결과 취합 검사 (사용량 발생) |
 | `node scripts/smoke-cli-permissions.mjs` | 실제 Claude/Codex 마스터·작업자의 수정·명령·승인·표정 검사 (사용량 발생) |
 | `node scripts/smoke-cli-restrictions.mjs` | 실제 CLI의 계획·리뷰 제한, 별도 판단 세션의 고위험 위임 분기 검사 (사용량 발생) |
-| `node scripts/verify-character-assets.mjs` | 36개 PNG의 크기·투명도 검사와 표정 갤러리 캡처 |
-| `pwsh -File scripts/verify-admin-manifest.ps1 -Paths dist/AI_ChatterBox-0.3.4-portable.exe` | 배포 실행기의 requireAdministrator 매니페스트 검사 |
+| `node scripts/verify-character-assets.mjs` | 48개 PNG의 크기·투명도 검사와 표정 갤러리 캡처 |
+| `pwsh -File scripts/verify-admin-manifest.ps1 -Paths dist/AI_ChatterBox-0.3.5-portable.exe` | 배포 실행기의 requireAdministrator 매니페스트 검사 |
 | `node scripts/smoke-admin.mjs` | 격리 데이터로 UAC 실행·자식 CLI 관리자 토큰·관리자 조회 명령 검사 (직접 UAC 확인 필요, 사용량 발생) |
 | `npm run dist` | `dist\AI_ChatterBox-<버전>-portable.exe` 만들기 |
 | `npm run codex:schema` | 설치된 codex 버전으로 `src/main/codex-schema` 다시 만들기 |

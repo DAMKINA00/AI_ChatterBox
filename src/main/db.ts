@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS chats (
   codex_thread_id TEXT,
   claude_model_override TEXT,
   codex_model_override TEXT,
+  orchestrator_effort_override TEXT,
+  claude_effort_override TEXT,
+  codex_effort_override TEXT,
+  gemini_effort_override TEXT,
   status TEXT NOT NULL DEFAULT 'idle',
   unread INTEGER NOT NULL DEFAULT 0,
   archived INTEGER NOT NULL DEFAULT 0,
@@ -55,6 +59,8 @@ CREATE TABLE IF NOT EXISTS consults (
   to_role TEXT NOT NULL,
   kind TEXT NOT NULL,
   request TEXT NOT NULL,
+  requested_effort TEXT,
+  effort TEXT,
   response_summary TEXT,
   files_changed_json TEXT NOT NULL DEFAULT '[]',
   status TEXT NOT NULL,
@@ -151,6 +157,10 @@ export type ChatPatch = Partial<
     | "claudeModelOverride"
     | "codexModelOverride"
     | "geminiModelOverride"
+    | "orchestratorEffortOverride"
+    | "claudeEffortOverride"
+    | "codexEffortOverride"
+    | "geminiEffortOverride"
     | "approvalModeOverride"
     | "orchestratorModelOverride"
     | "goal"
@@ -162,6 +172,8 @@ export type ChatPatch = Partial<
 
 function projectSettings(json: string): ProjectSettings {
   const saved = JSON.parse(json);
+  // Task duration is unlimited, including projects created with a saved time cap.
+  delete saved.maxMinutes;
   // Update untouched 0.3.2 defaults while preserving user-written preferences.
   const previous = {
     claudeStrengths: "소스 구조·동작 흐름 분석, 원인 조사. 구현·테스트·문서 작성은 맥락에 따라 배정.",
@@ -192,6 +204,10 @@ const toChat = (r: Row): Chat => ({
   claudeModelOverride: r.claude_model_override,
   codexModelOverride: r.codex_model_override,
   geminiModelOverride: r.gemini_model_override ?? null,
+  orchestratorEffortOverride: r.orchestrator_effort_override ?? null,
+  claudeEffortOverride: r.claude_effort_override ?? null,
+  codexEffortOverride: r.codex_effort_override ?? null,
+  geminiEffortOverride: r.gemini_effort_override ?? null,
   approvalModeOverride: r.approval_mode_override ?? null,
   orchestratorModelOverride: r.orchestrator_model_override ?? null,
   goal: r.goal_json ? JSON.parse(r.goal_json) : null,
@@ -202,6 +218,8 @@ const toChat = (r: Row): Chat => ({
   lastActiveAt: r.last_active_at,
 });
 const toConsult = (r: Row): Consult => ({
+  requestedEffort: r.requested_effort ?? undefined,
+  effort: r.effort ?? undefined,
   supersedes: r.supersedes ?? undefined,
   instructionId: r.instruction_id ?? undefined,
   reason: r.reason ?? undefined,
@@ -356,10 +374,16 @@ export class Store {
     add("chats", "orchestrator_model_override", "orchestrator_model_override TEXT");
     add("chats", "goal_json", "goal_json TEXT");
     add("chats", "gemini_model_override", "gemini_model_override TEXT");
+    add("chats", "orchestrator_effort_override", "orchestrator_effort_override TEXT");
+    add("chats", "claude_effort_override", "claude_effort_override TEXT");
+    add("chats", "codex_effort_override", "codex_effort_override TEXT");
+    add("chats", "gemini_effort_override", "gemini_effort_override TEXT");
     add("consults", "scope_json", "scope_json TEXT");
     add("consults", "instruction_id", "instruction_id INTEGER");
     add("consults", "reason", "reason TEXT");
     add("consults", "supersedes", "supersedes INTEGER");
+    add("consults", "requested_effort", "requested_effort TEXT");
+    add("consults", "effort", "effort TEXT");
     add("approvals", "decided_by", "decided_by TEXT NOT NULL DEFAULT 'user'");
     add("approvals", "reason", "reason TEXT");
   }
@@ -480,7 +504,7 @@ export class Store {
     this.db
       .prepare(
         `UPDATE chats SET title = ?, orch_claude_session_id = ?, orch_codex_thread_id = ?, claude_session_id = ?, codex_thread_id = ?,
-         claude_model_override = ?, codex_model_override = ?, gemini_model_override = ?, approval_mode_override = ?, orchestrator_model_override = ?, goal_json = ?, status = ?, unread = ?, archived = ?, last_active_at = ? WHERE id = ?`,
+         claude_model_override = ?, codex_model_override = ?, gemini_model_override = ?, orchestrator_effort_override = ?, claude_effort_override = ?, codex_effort_override = ?, gemini_effort_override = ?, approval_mode_override = ?, orchestrator_model_override = ?, goal_json = ?, status = ?, unread = ?, archived = ?, last_active_at = ? WHERE id = ?`,
       )
       .run(
         pick("title"),
@@ -491,6 +515,10 @@ export class Store {
         pick("claudeModelOverride"),
         pick("codexModelOverride"),
         pick("geminiModelOverride"),
+        pick("orchestratorEffortOverride"),
+        pick("claudeEffortOverride"),
+        pick("codexEffortOverride"),
+        pick("geminiEffortOverride"),
         pick("approvalModeOverride"),
         pick("orchestratorModelOverride"),
         (() => {
@@ -517,11 +545,36 @@ export class Store {
     const r = this.db.prepare("SELECT * FROM consults WHERE id = ?").get(id);
     return r ? toConsult(r) : undefined;
   }
-  createConsult(chatId: number, from: Role, to: Role, kind: ConsultKind, request: string, scope: string[] = [], instructionId?: number, reason?: string, supersedes?: number): Consult {
+  createConsult(
+    chatId: number,
+    from: Role,
+    to: Role,
+    kind: ConsultKind,
+    request: string,
+    scope: string[] = [],
+    instructionId?: number,
+    reason?: string,
+    supersedes?: number,
+    reasoning?: { requestedEffort?: string; effort?: string },
+  ): Consult {
     const seq = ((this.db.prepare("SELECT MAX(seq) m FROM consults WHERE chat_id = ?").get(chatId) as Row).m ?? 0) + 1;
     const r = this.db
-      .prepare("INSERT INTO consults (chat_id, seq, from_role, to_role, kind, request, status, started_at, scope_json, instruction_id, reason, supersedes) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)")
-      .run(chatId, seq, from, to, kind, request, Date.now(), JSON.stringify(scope), instructionId ?? null, reason ?? null, supersedes ?? null);
+      .prepare("INSERT INTO consults (chat_id, seq, from_role, to_role, kind, request, requested_effort, effort, status, started_at, scope_json, instruction_id, reason, supersedes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)")
+      .run(
+        chatId,
+        seq,
+        from,
+        to,
+        kind,
+        request,
+        reasoning?.requestedEffort ?? null,
+        reasoning?.effort ?? null,
+        Date.now(),
+        JSON.stringify(scope),
+        instructionId ?? null,
+        reason ?? null,
+        supersedes ?? null,
+      );
     return this.consult(Number(r.lastInsertRowid))!;
   }
   finishConsult(id: number, status: ConsultStatus, summary: string, files: string[]): Consult {

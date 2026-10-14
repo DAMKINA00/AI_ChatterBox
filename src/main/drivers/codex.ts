@@ -67,7 +67,7 @@ export class CodexServer {
     child.on("exit", (code) => fail(`codex app-server 종료됨 (code ${code})`));
     this.ready = (async () => {
       await this.request<InitializeResponse>("initialize", {
-        clientInfo: { name: "ai_chatterbox", title: "AI_ChatterBox", version: "0.3.3" },
+        clientInfo: { name: "ai_chatterbox", title: "AI_ChatterBox", version: "0.3.5" },
         capabilities: { experimentalApi: true, requestAttestation: false },
       });
       this.write({ method: "initialized" });
@@ -106,6 +106,8 @@ export class CodexServer {
       isDefault: !!m.isDefault,
       hidden: !!m.hidden,
       deprecated: !!m.upgrade,
+      reasoningEfforts: (m.supportedReasoningEfforts ?? []).map((e: any) => e.reasoningEffort).filter((e: unknown) => typeof e === "string"),
+      defaultReasoningEffort: m.defaultReasoningEffort,
     }));
   }
 
@@ -206,6 +208,7 @@ export class CodexDriver implements AgentDriver {
   private tokenTotal?: TokenCounts;
   private tokenBase?: TokenCounts;
   private metrics?: AgentMetrics;
+  private turnEffort?: string;
   private noWrites = false;
   private imageFailure?: string;
   readonly agent = "codex" as const;
@@ -327,6 +330,8 @@ export class CodexDriver implements AgentDriver {
     this.opts.model = model;
   }
 
+  setEffort(effort: string) { this.opts.effort = effort; }
+
   async send(input: AgentInput): Promise<void> {
     if (this._running) throw new Error("이전 응답이 아직 진행 중입니다.");
     this._running = true;
@@ -343,6 +348,17 @@ export class CodexDriver implements AgentDriver {
     }
     try {
       const threadId = await this.ensureThread();
+      // A prior turn's effort persists on resumed threads. Explicitly reset it when the user chooses CLI default.
+      let effort = this.opts.effort || undefined;
+      if (this.opts.effort === "") {
+        const config = await this.server.request<any>("config/read", { cwd: this.opts.cwd, includeLayers: false });
+        const models = await this.server.models();
+        const selected = this.opts.model || config.config?.model;
+        const model = models.find((m) => m.id === selected) ?? models.find((m) => m.isDefault);
+        const configured = config.config?.model_reasoning_effort;
+        effort = model?.reasoningEfforts?.includes(configured) ? configured : model?.defaultReasoningEffort;
+        if (!effort) throw new Error("Codex 기본 추론 수준을 확인하지 못했습니다. 추론 수준을 직접 선택하세요.");
+      }
       const images = input.attachments.filter((a) => IMAGE_MIMES.has(a.mime));
       const others = input.attachments.filter((a) => !images.includes(a));
       const items: UserInput[] = images.map((a) => ({ type: "localImage", path: a.path }));
@@ -351,11 +367,19 @@ export class CodexDriver implements AgentDriver {
         threadId,
         input: items,
         model: this.opts.model || null,
+        effort,
         // The OS token may be elevated; sandbox writes still require our approval on every role.
         approvalPolicy: this.opts.readOnly || input.noWrites ? "never" : "on-request",
         approvalsReviewer: "user",
         sandboxPolicy: { type: "readOnly", networkAccess: false },
       };
+      this.turnEffort = effort;
+      if (this.stopRequested) {
+        this._running = false;
+        this.host.emit({ type: "turn_end", ok: false, interrupted: true });
+        this.finishTurn({ text: "", files: [], status: "interrupted" });
+        return;
+      }
       const r = await this.server.request<TurnStartResponse>("turn/start", params);
       this.turnKnown(r.turn.id);
     } catch (e) {
@@ -375,6 +399,15 @@ export class CodexDriver implements AgentDriver {
     return new Promise((resolve) => this.turnWaiters.push(resolve));
   }
 
+  async steer(input: AgentInput): Promise<boolean> {
+    if (!this._running || !this.threadId || !this.turnId || this.stopRequested) return false;
+    const images = input.attachments.filter((a) => IMAGE_MIMES.has(a.mime));
+    const items: UserInput[] = images.map((a) => ({ type: "localImage", path: a.path }));
+    items.push({ type: "text", text: input.text + fileNote(input.attachments.filter((a) => !images.includes(a))), text_elements: [] });
+    await this.server.request("turn/steer", { threadId: this.threadId, expectedTurnId: this.turnId, input: items });
+    return true;
+  }
+
   private finishTurn(r: CodexTurnResult) {
     const waiters = this.turnWaiters;
     this.turnWaiters = [];
@@ -383,9 +416,9 @@ export class CodexDriver implements AgentDriver {
 
   async stop(): Promise<void> {
     if (!this._running) return;
+    this.stopRequested = true;
     // Stop pressed before turn/start answered: interrupt as soon as the turn id is known.
     if (!this.threadId || !this.turnId) {
-      this.stopRequested = true;
       return;
     }
     const params: TurnInterruptParams = { threadId: this.threadId, turnId: this.turnId };
@@ -397,7 +430,6 @@ export class CodexDriver implements AgentDriver {
   private turnKnown(id: string) {
     this.turnId = id;
     if (this.stopRequested) {
-      this.stopRequested = false;
       void this.stop();
     }
   }
@@ -463,7 +495,7 @@ export class CodexDriver implements AgentDriver {
         if (!this.tokenBase || reset) this.tokenBase = Object.fromEntries(fields.map((k) => [k, Math.max(0, total[k] - last[k])])) as unknown as TokenCounts;
         this.tokenTotal = { ...total };
         const counts = Object.fromEntries(fields.map((k) => [k, Math.max(0, total[k] - this.tokenBase![k])])) as unknown as TokenCounts;
-        this.metrics = { ...counts, turnId: n.params.turnId, elapsedMs: Date.now() - this.startedAt, model: this.opts.model, approximate, total, nativeId: this.threadId ?? undefined };
+        this.metrics = { ...counts, turnId: n.params.turnId, elapsedMs: Date.now() - this.startedAt, model: this.opts.model, reasoningEffort: this.turnEffort, approximate, total, nativeId: this.threadId ?? undefined };
         this.host.emit({ type: "agent_usage", metrics: this.metrics });
         break;
       }

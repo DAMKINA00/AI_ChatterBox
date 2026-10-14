@@ -61,6 +61,38 @@ test("native Claude delegation is excluded from normal driver tool sets", () => 
   for (const tool of ["Agent", "Task", "TeamCreate", "SendMessage"]) assert.ok(NATIVE_AGENT_TOOLS.includes(tool));
 });
 
+test("Codex applies each effort and resets a resumed turn to current CLI defaults", async () => {
+  const f = codex();
+  const server = (f.driver as any).server;
+  const request = server.request;
+  server.models = async () => [{ id: "test", isDefault: true, reasoningEfforts: ["medium", "high", "xhigh"], defaultReasoningEffort: "medium" }];
+  server.request = (method: string, params: any) => method === "config/read" ? Promise.resolve({ config: { model: "test", model_reasoning_effort: "high" } }) : request(method, params);
+  for (const [setting, expected] of [["xhigh", "xhigh"], ["medium", "medium"], ["", "high"]]) {
+    f.driver.setEffort(setting);
+    await f.driver.send({ text: "verify effort", attachments: [] });
+    assert.equal(f.calls.at(-1)!.params.effort, expected);
+    f.driver.onNotification({ method: "turn/completed", params: { threadId: "thread", turn: { id: "turn", status: "completed" } } } as any);
+  }
+});
+
+test("Codex stop during default effort lookup prevents turn dispatch", async () => {
+  const f = codex();
+  let resolve!: (value: unknown) => void;
+  const server = (f.driver as any).server;
+  const request = server.request;
+  server.models = async () => [{ id: "test", isDefault: true, defaultReasoningEffort: "medium" }];
+  server.request = (method: string, params: any) => method === "config/read" ? new Promise((r) => { resolve = r; }) : request(method, params);
+  f.driver.setEffort("");
+  const sending = f.driver.send({ text: "stop before send", attachments: [] });
+  await new Promise((r) => setImmediate(r));
+  await f.driver.stop();
+  resolve({ config: {} });
+  await sending;
+  assert.equal(f.calls.some((c) => c.method === "turn/start"), false);
+  assert.equal(f.driver.running, false);
+  assert.equal(f.events.at(-1).interrupted, true);
+});
+
 test("image failure prevents a successful worker turn; readonly turns disable native image generation", async () => {
   const f = codex();
   await f.driver.send({ text: "readonly", attachments: [], noWrites: true });

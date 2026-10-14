@@ -37,17 +37,21 @@ export interface JudgeContext {
 
 export class ApprovalJudge {
   private sessions = new Map<number, Session>();
+  private generation = 0;
 
   constructor(
     private chats: ChatManager,
     private context: (chatId: number, role?: Role) => JudgeContext,
   ) {}
 
-  private session(chatId: number): Session {
+  private async session(chatId: number): Promise<Session> {
+    const generation = this.generation;
     const chat = this.chats.store.chat(chatId)!;
     const project = this.chats.store.project(chat.projectId)!;
     const { agent, model } = chatOrchestrator(chat, project);
-    const key = `${agent}:${model}:${project.folder}:${project.settings.delegateHighRisk}`;
+    const { effort } = await this.chats.assignmentEffort(chatId, "orch");
+    if (generation !== this.generation) throw new Error("승인 판단 초기화가 취소되었습니다.");
+    const key = `${agent}:${model}:${effort}:${project.folder}:${project.settings.delegateHighRisk}`;
     const cur = this.sessions.get(chatId);
     if (cur && cur.key === key) return cur;
     if (cur) void cur.driver.dispose();
@@ -67,7 +71,7 @@ export class ApprovalJudge {
       approve: async () => ({ verdict: "deny" as const, reason: "판단 세션은 도구를 쓰지 않습니다." }),
       usage: (u: UsageInfo) => this.chats.mergeUsage(u),
     };
-    const opts = { cwd: project.folder, nativeId: null, exePath: "", model: model || undefined, instructions: JUDGE_INSTRUCTIONS, readOnly: true, ephemeral: true };
+    const opts = { cwd: project.folder, nativeId: null, exePath: "", model: model || undefined, effort, instructions: JUDGE_INSTRUCTIONS, readOnly: true, ephemeral: true };
     s.driver =
       agent === "claude"
         ? new ClaudeDriver(
@@ -87,8 +91,8 @@ export class ApprovalJudge {
     return s;
   }
 
-  decide(chatId: number, request: ApprovalRequest, input: ApprovalInput): Promise<JudgeAnswer | null> {
-    const s = this.session(chatId);
+  async decide(chatId: number, request: ApprovalRequest, input: ApprovalInput): Promise<JudgeAnswer | null> {
+    const s = await this.session(chatId);
     // One question at a time per chat.
     const run = s.queue.then(() => this.sessions.get(chatId) === s ? this.ask(chatId, s, request, input) : null);
     s.queue = run.catch(() => undefined);
@@ -148,12 +152,14 @@ export class ApprovalJudge {
   }
 
   forget(chatId: number) {
+    this.generation++;
     const s = this.sessions.get(chatId);
     this.sessions.delete(chatId);
     void s?.driver.dispose();
   }
 
   async dispose() {
+    this.generation++;
     const all = [...this.sessions.values()];
     this.sessions.clear();
     await Promise.all(all.map((s) => s.driver.dispose().catch(() => undefined)));

@@ -54,6 +54,8 @@ export class ClaudeDriver implements AgentDriver {
   private noWrites = false;
   private bridgeKey?: string;
   private toolInputs = new Map<string, { name: string; input: any }>();
+  private canSteer = false;
+  private pendingSteers = new Set<string>();
 
   constructor(
     private opts: DriverOptions,
@@ -108,6 +110,7 @@ export class ClaudeDriver implements AgentDriver {
       "--settings", JSON.stringify({ permissions: { ask: [...WRITE_TOOLS, ...SHELL_TOOLS] } }),
     ];
     if (this.opts.model) args.push("--model", this.opts.model);
+    if (this.opts.effort) args.push("--effort", this.opts.effort);
     if (this.opts.workerSession) args.push("--name", this.opts.workerSession.name);
     if (this.opts.instructions) args.push("--append-system-prompt", this.opts.instructions);
     const disallowed = [...NATIVE_AGENT_TOOLS, ...(this.env.disallowedTools ?? []), ...(this.noWrites ? [...WRITE_TOOLS] : [])];
@@ -123,7 +126,7 @@ export class ClaudeDriver implements AgentDriver {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       // Approvals and consults can take a long time; don't let MCP calls time out.
-      env: { ...process.env, MCP_TOOL_TIMEOUT: String(24 * 3600 * 1000) },
+      env: { ...process.env, MCP_TOOL_TIMEOUT: String(24 * 3600 * 1000), ...(this.opts.effort ? { CLAUDE_CODE_EFFORT_LEVEL: this.opts.effort } : {}) },
     });
     child.stderr!.setEncoding("utf8");
     let stderr = "";
@@ -156,6 +159,10 @@ export class ClaudeDriver implements AgentDriver {
     }
     switch (ev.type) {
       case "system":
+        if (ev.subtype === "init") {
+          const v = String(ev.claude_code_version ?? "").match(/^(\d+)\.(\d+)\.(\d+)/);
+          this.canSteer = !!v && (Number(v[1]) > 2 || (Number(v[1]) === 2 && (Number(v[2]) > 1 || Number(v[2]) === 1 && Number(v[3]) >= 286)));
+        }
         if (ev.subtype === "init" && ev.session_id && ev.session_id !== this.nativeId) {
           this.nativeId = ev.session_id;
           this.host.nativeId(ev.session_id);
@@ -217,15 +224,20 @@ export class ClaudeDriver implements AgentDriver {
         break;
       }
       case "result": {
+        for (const id of ev.user_message_uuids ?? [ev.user_message_uuid]) this.pendingSteers.delete(id);
         if (ev.usage) {
           const u = ev.usage;
           const number = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0;
           const cached = number(u.cache_read_input_tokens), written = number(u.cache_creation_input_tokens);
           this.host.emit({ type: "agent_usage", metrics: {
             turnId: this.metricsTurnId, inputTokens: number(u.input_tokens) + cached + written, outputTokens: number(u.output_tokens),
-            cachedInputTokens: cached, cacheWriteInputTokens: written, elapsedMs: Date.now() - this.startedAt, model: this.opts.model,
+            cachedInputTokens: cached, cacheWriteInputTokens: written, elapsedMs: Date.now() - this.startedAt, model: this.opts.model, reasoningEffort: this.opts.effort || undefined,
           } });
         }
+        // A priority=now input can interrupt the current answer before starting its continuation.
+        // Do not report the entire app instruction complete while such an input is still pending.
+        if (this.pendingSteers.size && !this.stopping) return;
+        this.pendingSteers.clear();
         this._running = false;
         const interrupted = this.stopping;
         this.stopping = false;
@@ -270,6 +282,10 @@ export class ClaudeDriver implements AgentDriver {
     }
     if (!this.child) this.child = this.start();
     this._running = true;
+    this.writeInput(input);
+  }
+
+  private writeInput(input: AgentInput, immediateId?: string) {
     const images = input.attachments.filter((a) => IMAGE_MIMES.has(a.mime) && a.size <= MAX_IMAGE_BYTES);
     const others = input.attachments.filter((a) => !images.includes(a));
     const content: unknown[] = images.map((a) => ({
@@ -277,14 +293,25 @@ export class ClaudeDriver implements AgentDriver {
       source: { type: "base64", media_type: a.mime, data: readFileSync(a.path).toString("base64") },
     }));
     content.push({ type: "text", text: (input.text || "(첨부 파일을 확인해 주세요)") + fileNote(others) });
-    const msg = { type: "user", message: { role: "user", content }, parent_tool_use_id: null };
-    this.child.stdin!.write(JSON.stringify(msg) + "\n", "utf8");
+    const msg = { type: "user", message: { role: "user", content }, parent_tool_use_id: null,
+      ...(immediateId ? { uuid: immediateId, priority: "now", origin: { kind: "human" }, client_composed: true } : {}) };
+    if (!this.child?.stdin?.writable) throw new Error("Claude 입력 연결이 닫혔습니다.");
+    this.child.stdin.write(JSON.stringify(msg) + "\n", "utf8");
+  }
+
+  async steer(input: AgentInput): Promise<boolean> {
+    if (!this._running || !this.child?.stdin?.writable || this.stopping || !this.canSteer) return false;
+    const id = randomUUID();
+    this.pendingSteers.add(id);
+    try { this.writeInput(input, id); }
+    catch (error) { this.pendingSteers.delete(id); throw error; }
+    return true;
   }
 
   async stop(): Promise<void> {
     if (!this._running || !this.child) return;
     this.stopping = true;
-    const req = { type: "control_request", request_id: randomUUID(), request: { subtype: "interrupt" } };
+    const req = { type: "control_request", request_id: randomUUID(), request: { subtype: "interrupt", cancel_queued: true } };
     this.child.stdin!.write(JSON.stringify(req) + "\n", "utf8");
     // If the CLI ignores the interrupt, end the process; the next send resumes the session.
     const child = this.child;
@@ -297,6 +324,8 @@ export class ClaudeDriver implements AgentDriver {
     const child = this.child;
     this.child = undefined;
     this._running = false;
+    this.pendingSteers.clear();
+    this.canSteer = false;
     if (child) await shutdown(child);
     if (this.bridgeKey) this.env.bridge.unregister(this.bridgeKey);
   }
@@ -346,7 +375,7 @@ export async function claudeUsageText(exePath: string, cwd: string): Promise<str
 }
 
 /** Model list from the CLI itself (stream-json control_request "initialize" → response.models). */
-export async function listClaudeModels(exePath: string, cwd: string): Promise<{ value: string; displayName: string; description?: string }[]> {
+export async function listClaudeModels(exePath: string, cwd: string): Promise<{ value: string; displayName: string; description?: string; supportsEffort?: boolean; supportedEffortLevels?: string[] }[]> {
   const child = spawn(exePath, ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"], {
     cwd,
     stdio: ["pipe", "pipe", "ignore"],

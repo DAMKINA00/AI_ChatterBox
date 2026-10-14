@@ -16,7 +16,22 @@ export function parseGeminiModels(text: string): ModelOption[] {
   // Prefer the newest Flash Medium model for predictable Pro usage; retain Pro choices in the picker.
   const flash = models.filter((m) => /-flash-medium$/.test(m.id)).sort((a, b) => b.id.localeCompare(a.id, undefined, { numeric: true }))[0];
   if (flash ?? models[0]) (flash ?? models[0]).isDefault = true;
+  for (const model of models) {
+    const suffix = /-(low|medium|high|xhigh|max)$/.exec(model.id);
+    if (!suffix) continue;
+    const family = model.id.slice(0, -suffix[0].length);
+    model.reasoningEfforts = ["low", "medium", "high", "xhigh", "max"].filter((level) => models.some((m) => m.id === `${family}-${level}`));
+    model.defaultReasoningEffort = suffix[1];
+  }
   return models;
+}
+
+export function geminiEffortModel(model: ModelOption, effort: string | undefined, models: ModelOption[]): ModelOption {
+  if (!effort) return model;
+  const family = model.id.replace(/-(low|medium|high|xhigh|max)$/, "");
+  const selected = models.find((m) => m.id === `${family}-${effort}`);
+  if (!selected) throw new Error(`현재 Gemini 계정에서 ${effort} 모델을 사용할 수 없습니다.`);
+  return selected;
 }
 
 const modelLists = new Map<string, { expires: number; promise: Promise<ModelOption[]> }>();

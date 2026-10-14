@@ -22,9 +22,10 @@ import { useStore } from "../store";
 import { buildItems, latestExpression, planOf } from "../timeline";
 import { GoalBar, PlanPanel } from "./PlanGoal";
 import { SLASH_COMMANDS, StatusDialog, type SlashCommand } from "./Commands";
-import { AttachmentChip, ItemList, RoleDot } from "./Items";
+import { AttachmentChip, ItemList } from "./Items";
 import { AgentAvatar } from "./AgentAvatar";
 import { AgentUsage } from "./AgentUsage";
+import { defaultEffortForModel, EffortPicker, effortLabel } from "./EffortPicker";
 import { ModelPicker, useModelLabel } from "./ModelPicker";
 import {
   Badge,
@@ -106,9 +107,18 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
 
 function ChatHeader({ chat, project, nodeLabel, busy, masterExpression }: { chat: Chat; project: Project; nodeLabel: string | null; busy: boolean; masterExpression: AgentExpression }) {
   const updateChat = useStore((s) => s.updateChat);
+  const models = useStore((s) => s.models);
   const toast = useStore((s) => s.toast);
   const label = useModelLabel();
-  const orch = parseOrchestrator(project.settings.orchestratorModel);
+  const orch = parseOrchestrator(chat.orchestratorModelOverride ?? project.settings.orchestratorModel);
+  const projectOrch = parseOrchestrator(project.settings.orchestratorModel);
+  const orchEffort = chat.orchestratorEffortOverride ?? project.settings.orchestratorEffort ?? "xhigh";
+  const claudeModel = chat.claudeModelOverride ?? project.settings.claudeModel;
+  const codexModel = chat.codexModelOverride ?? project.settings.codexModel;
+  const geminiModel = chat.geminiModelOverride ?? project.settings.geminiModel;
+  const claudeEffort = chat.claudeEffortOverride ?? project.settings.claudeEffort ?? "auto";
+  const codexEffort = chat.codexEffortOverride ?? project.settings.codexEffort ?? "auto";
+  const geminiEffort = chat.geminiEffortOverride ?? project.settings.geminiEffort ?? "auto";
   const [stopping, setStopping] = useState(false);
   useEffect(() => {
     if (!busy) setStopping(false);
@@ -130,9 +140,8 @@ function ChatHeader({ chat, project, nodeLabel, busy, masterExpression }: { chat
           </div>
         </div>
       </div>
-      <div className="flex items-center gap-1.5" data-testid="orch-badge">
+      <div className="flex min-w-0 items-center gap-1.5" data-testid="orch-badge">
         <AgentAvatar kind="orch" expression={masterExpression} size={24} alt="마스터 캐릭터" />
-        <RoleDot tone="orch" />
         <span className="text-[12px] text-muted-foreground">마스터</span>
         <ModelPicker
           compact
@@ -140,54 +149,104 @@ function ChatHeader({ chat, project, nodeLabel, busy, masterExpression }: { chat
           ariaLabel="이 채팅의 마스터 모델"
           value={chat.orchestratorModelOverride ?? project.settings.orchestratorModel}
           inherited={chat.orchestratorModelOverride === null}
-          onChange={(v) => void updateChat(chat.id, { orchestratorModelOverride: v as Project["settings"]["orchestratorModel"] })}
+          onChange={(v) => {
+            const next = parseOrchestrator(v);
+            void updateChat(chat.id, {
+              orchestratorModelOverride: v as Project["settings"]["orchestratorModel"],
+              orchestratorEffortOverride: defaultEffortForModel(models, next.agent, next.model, false),
+            });
+          }}
           onReset={() => void updateChat(chat.id, { orchestratorModelOverride: null })}
-          resetLabel={`프로젝트 값 사용 (${orch.agent === "claude" ? "Claude" : "GPT"} · ${label(orch.agent, orch.model)})`}
+          resetLabel={`프로젝트 값 사용 (${projectOrch.agent === "claude" ? "Claude" : "GPT"} · ${label(projectOrch.agent, projectOrch.model)})`}
+        />
+        <EffortPicker
+          compact
+          agent={orch.agent}
+          model={orch.model}
+          value={orchEffort}
+          inherited={chat.orchestratorEffortOverride === null}
+          onChange={(v) => void updateChat(chat.id, { orchestratorEffortOverride: v })}
+          onReset={() => void updateChat(chat.id, { orchestratorEffortOverride: null })}
+          resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.orchestratorEffort ?? "xhigh")})`}
+          ariaLabel="이 채팅의 마스터 추론 수준"
         />
       </div>
-      <div className="flex items-center gap-1.5">
+      <div className="flex min-w-0 items-center gap-1.5">
         <AgentAvatar kind="claude" size={24} alt="클로드 캐릭터" />
-        <RoleDot tone="claude" />
         <span className="text-[12px] text-muted-foreground">클로드</span>
         <ModelPicker
           compact
           agents={["claude"]}
           ariaLabel="이 채팅의 Claude 모델"
-          value={chat.claudeModelOverride ?? project.settings.claudeModel}
+          value={claudeModel}
           inherited={chat.claudeModelOverride === null}
-          onChange={(v) => void updateChat(chat.id, { claudeModelOverride: v })}
+          onChange={(v) => void updateChat(chat.id, { claudeModelOverride: v, claudeEffortOverride: defaultEffortForModel(models, "claude", v, true) })}
           onReset={() => void updateChat(chat.id, { claudeModelOverride: null })}
           resetLabel={`프로젝트 값 사용 (${label("claude", project.settings.claudeModel)})`}
         />
+        <EffortPicker
+          compact
+          agent="claude"
+          model={claudeModel}
+          worker
+          value={claudeEffort}
+          inherited={chat.claudeEffortOverride === null}
+          onChange={(v) => void updateChat(chat.id, { claudeEffortOverride: v })}
+          onReset={() => void updateChat(chat.id, { claudeEffortOverride: null })}
+          resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.claudeEffort ?? "auto")})`}
+          ariaLabel="이 채팅의 Claude 추론 수준"
+        />
       </div>
-      <div className="flex items-center gap-1.5">
+      <div className="flex min-w-0 items-center gap-1.5">
         <AgentAvatar kind="gpt" size={24} alt="지피티 캐릭터" />
-        <RoleDot tone="gpt" />
         <span className="text-[12px] text-muted-foreground">지피티</span>
         <ModelPicker
           compact
           agents={["codex"]}
           ariaLabel="이 채팅의 GPT 모델"
-          value={chat.codexModelOverride ?? project.settings.codexModel}
+          value={codexModel}
           inherited={chat.codexModelOverride === null}
-          onChange={(v) => void updateChat(chat.id, { codexModelOverride: v })}
+          onChange={(v) => void updateChat(chat.id, { codexModelOverride: v, codexEffortOverride: defaultEffortForModel(models, "codex", v, true) })}
           onReset={() => void updateChat(chat.id, { codexModelOverride: null })}
           resetLabel={`프로젝트 값 사용 (${label("codex", project.settings.codexModel)})`}
         />
+        <EffortPicker
+          compact
+          agent="codex"
+          model={codexModel}
+          worker
+          value={codexEffort}
+          inherited={chat.codexEffortOverride === null}
+          onChange={(v) => void updateChat(chat.id, { codexEffortOverride: v })}
+          onReset={() => void updateChat(chat.id, { codexEffortOverride: null })}
+          resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.codexEffort ?? "auto")})`}
+          ariaLabel="이 채팅의 GPT 추론 수준"
+        />
       </div>
-      <div className="flex items-center gap-1.5">
+      <div className="flex min-w-0 items-center gap-1.5">
         <AgentAvatar kind="gemini" size={24} alt="제미나이 캐릭터" />
-        <RoleDot tone="gemini" />
         <span className="text-[12px] text-muted-foreground">제미나이</span>
         <ModelPicker
           compact
           agents={["gemini"]}
           ariaLabel="이 채팅의 Gemini 모델"
-          value={chat.geminiModelOverride ?? project.settings.geminiModel}
+          value={geminiModel}
           inherited={chat.geminiModelOverride === null}
-          onChange={(v) => void updateChat(chat.id, { geminiModelOverride: v })}
+          onChange={(v) => void updateChat(chat.id, { geminiModelOverride: v, geminiEffortOverride: defaultEffortForModel(models, "gemini", v, true) })}
           onReset={() => void updateChat(chat.id, { geminiModelOverride: null })}
           resetLabel={`프로젝트 값 사용 (${label("gemini", project.settings.geminiModel)})`}
+        />
+        <EffortPicker
+          compact
+          agent="gemini"
+          model={geminiModel}
+          worker
+          value={geminiEffort}
+          inherited={chat.geminiEffortOverride === null}
+          onChange={(v) => void updateChat(chat.id, { geminiEffortOverride: v })}
+          onReset={() => void updateChat(chat.id, { geminiEffortOverride: null })}
+          resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.geminiEffort ?? "auto")})`}
+          ariaLabel="이 채팅의 Gemini 추론 수준"
         />
       </div>
       <ApprovalModePicker chat={chat} project={project} />
@@ -348,7 +407,6 @@ function WorkerChip({
       onClick={onSelect}
     >
       <AgentAvatar kind={agent.kind} expression={expression} size={32} alt={`${agent.nickname} 캐릭터`} className={released ? "grayscale" : undefined} />
-      <RoleDot tone={agent.kind} />
       <span>{agent.nickname}</span>
       <Badge className={cn("h-5 px-1.5 text-[10px] font-normal", status === "working" && "border-primary/30 text-primary", status === "approval" && "border-warning/40 text-warning", status === "error" && "border-destructive/40 text-destructive")}>
         {status === "working" && <Loader2 className="size-3 animate-spin" />}
@@ -615,7 +673,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
     else void runCommand(c.name, "");
   };
 
-  const send = async () => {
+  const send = async (delivery: "now" | "next" = "next") => {
     const t = text.trim();
     // "/name arg" → command (attachments are not used by commands).
     const cmd = /^\/([a-z-]+)(?:\s+([\s\S]*))?$/i.exec(t);
@@ -627,6 +685,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
         chat.id,
         t,
         attachments.map((a) => a.id),
+        delivery,
       );
       setText("");
       setAttachments([]);
@@ -688,7 +747,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
           ref={area}
           value={text}
           aria-label="메시지 입력"
-          placeholder={busy ? "추가 지시를 보내면 다음 단계에 마스터에게 전달됩니다" : "지시를 입력하세요 (/ 로 명령)"}
+          placeholder={busy ? "추가 지시를 입력하세요. 즉시 전달하거나 다음 단계에 전달할 수 있습니다" : "지시를 입력하세요 (/ 로 명령)"}
           className="block max-h-60 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[14px] leading-relaxed outline-none select-text placeholder:text-muted-foreground"
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => {
@@ -718,11 +777,11 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
             }
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
-              void send();
+              void send(busy && (e.ctrlKey || e.metaKey) ? "now" : "next");
             }
           }}
         />
-        <div className="flex items-center gap-1 px-2 pb-2">
+        <div className="flex flex-wrap items-center gap-1 px-2 pb-2">
           <Tooltip content="파일 첨부">
             <Button
               variant="ghost"
@@ -740,13 +799,14 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
               <Paperclip />
             </Button>
           </Tooltip>
-          <span className="ml-1 hidden text-[11.5px] text-muted-foreground sm:inline">
+          <span className="ml-1 hidden text-[11.5px] text-muted-foreground xl:inline">
             <Kbd>Enter</Kbd> 보내기 · <Kbd>Shift+Enter</Kbd> 줄바꿈 · <Kbd>Ctrl+V</Kbd> 이미지 붙여넣기
           </span>
           <div className="flex-1" />
+          {busy && <Button size="sm" variant="outline" onClick={() => void send("now")} disabled={!canSend} aria-label="마스터에게 즉시 전달" title="Ctrl+Enter · 진행 중인 마스터에게 바로 전달" data-testid="send-now" className="rounded-full px-3.5">즉시 전달</Button>}
           <Button size="sm" onClick={() => void send()} disabled={!canSend} aria-label="보내기" data-testid="send" className={cn("rounded-full px-3.5")}>
             {sending ? <Loader2 className="animate-spin" /> : <SendHorizontal />}
-            {busy ? "추가 지시" : "보내기"}
+            {busy ? "다음 단계 전달" : "보내기"}
           </Button>
         </div>
       </div>

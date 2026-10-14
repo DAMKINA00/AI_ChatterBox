@@ -8,7 +8,7 @@ import { readLines, shutdown } from "../proc";
 import { isReadCommand } from "../execution-policy";
 import { fileNote, type AgentDriver, type AgentInput, type DriverHost, type DriverOptions } from "./types";
 import type { FileDiff, TokenCounts } from "../../shared/types";
-import { GEMINI_READ_TOOLS, GEMINI_WRITE_TOOLS, geminiBridgeTool, geminiDiffs, geminiPaths, geminiTokens, listGeminiModels, tokenDelta } from "./gemini-protocol";
+import { GEMINI_READ_TOOLS, GEMINI_WRITE_TOOLS, geminiBridgeTool, geminiDiffs, geminiPaths, geminiTokens, listGeminiModels, tokenDelta, geminiEffortModel } from "./gemini-protocol";
 
 export interface GeminiEnv {
   bridge: LocalBridge;
@@ -94,7 +94,7 @@ export class GeminiDriver implements AgentDriver {
     if (epoch !== this.epoch || this.stopping) throw new Error("Antigravity 실행이 중지되었습니다.");
     const model = this.opts.model ? models.find((m) => m.id === this.opts.model) : models.find((m) => m.isDefault) ?? models[0];
     if (!model) throw new Error("선택한 Gemini 모델은 현재 Pro 모델 목록에 없습니다. 모델 메뉴에서 다시 선택하세요.");
-    this.model = model.id;
+    this.model = geminiEffortModel(model, this.opts.effort, models).id;
     if (!existsSync(this.env.hookScript)) throw new Error("Antigravity 승인 연결 파일을 찾지 못했습니다. 앱을 다시 설치해 주세요.");
     const reg = this.env.bridge.register({ tools: [], call: async (name, args) => textResult(JSON.stringify(await this.hook(name, args))) });
     this.hookKey = reg.key;
@@ -159,7 +159,7 @@ export class GeminiDriver implements AgentDriver {
     } else if (event.event === "result") {
       const result = event.result ?? {};
       this.total = geminiTokens(result.usage);
-      this.host.emit({ type: "agent_usage", metrics: { ...tokenDelta(this.total, this.baseline), turnId: this.turnId, elapsedMs: Date.now() - this.startedAt, model: this.model, nativeId: this.nativeId ?? undefined, total: this.total } });
+      this.host.emit({ type: "agent_usage", metrics: { ...tokenDelta(this.total, this.baseline), turnId: this.turnId, elapsedMs: Date.now() - this.startedAt, model: this.model, ...(this.opts.effort ? { reasoningEffort: this.opts.effort } : {}), nativeId: this.nativeId ?? undefined, total: this.total } });
       if (typeof result.response === "string" && result.response && ![...this.texts.values()].includes(result.response)) this.host.emit({ type: "text", text: result.response });
       const ok = result.status === "SUCCESS" && this.hooksReady;
       this.finish(ok, ok ? undefined : result.error || (!this.hooksReady ? "Antigravity 승인 연결이 활성화되지 않았습니다." : "Antigravity 작업이 완료되지 않았습니다."), ["CANCELED", "INTERRUPTED"].includes(result.status));

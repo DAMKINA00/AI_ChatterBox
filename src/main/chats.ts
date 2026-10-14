@@ -18,6 +18,7 @@ import {
   type Role,
   type TimelineEvent,
   type UsageInfo,
+  type ModelOption,
 } from "../shared/types";
 import type { ChatPatch, Store } from "./db";
 import { LocalBridge } from "./local-bridge";
@@ -25,7 +26,8 @@ import { ApprovalService, type ApprovalInput, type JudgeAnswer } from "./approva
 import { findClaude, findCodex, findGemini } from "./locate";
 import { GeminiDriver } from "./drivers/gemini";
 import { listGeminiModels } from "./drivers/gemini-protocol";
-import { ClaudeDriver, claudeUsageText } from "./drivers/claude";
+import { ClaudeDriver, claudeUsageText, listClaudeModels } from "./drivers/claude";
+import { resolveEffort, workerEffort, WORKER_EFFORTS } from "./effort";
 import { parseClaudeUsageText } from "../shared/usage";
 import { CodexDriver, CodexServer } from "./drivers/codex";
 import { AttachmentStore } from "./attachments";
@@ -46,12 +48,14 @@ interface Live {
   driver: AgentDriver;
   agent: AgentKind;
   model: string;
+  effort: string;
   instructions?: string;
 }
 
 export interface RoleConfig {
   agent: AgentKind;
   model: string;
+  effort: string;
 }
 
 export class ChatManager {
@@ -59,6 +63,7 @@ export class ChatManager {
   readonly approvals: ApprovalService;
   private live = new Map<number, Partial<Record<Role, Live>>>();
   private codexServer?: CodexServer;
+  private modelLists = new Map<AgentKind, { expires: number; promise: Promise<ModelOption[]> }>();
   readonly tmpDir: string;
   private usageState: UsageInfo = {};
   private attachments: AttachmentStore;
@@ -138,6 +143,30 @@ export class ChatManager {
 
   geminiModels() { return listGeminiModels(this.geminiExe(), this.tmpDir); }
 
+  async models(agent: AgentKind): Promise<ModelOption[]> {
+    const cached = this.modelLists.get(agent);
+    if (cached && cached.expires > Date.now()) return cached.promise;
+    const promise = agent === "codex" ? this.codex().models() : agent === "gemini" ? this.geminiModels()
+      : listClaudeModels(this.claudeExe(), this.tmpDir).then((list) => list.map((m) => ({
+        id: m.value, label: m.displayName, isDefault: m.value === "opus",
+        reasoningEfforts: m.supportsEffort ? m.supportedEffortLevels ?? [] : [],
+      })));
+    this.modelLists.set(agent, { expires: Date.now() + 60_000, promise });
+    try { return await promise; }
+    catch (error) { if (this.modelLists.get(agent)?.promise === promise) this.modelLists.delete(agent); throw error; }
+  }
+
+  async assignmentEffort(chatId: number, role: Role, requested?: string): Promise<{ requestedEffort: string; effort: string }> {
+    const chat = this.store.chat(chatId)!;
+    const cfg = this.roleConfig(chat, this.store.project(chat.projectId)!, role);
+    const choice = role === "orch" ? cfg.effort : workerEffort(cfg.effort, requested);
+    if (!choice) return { requestedEffort: requested ?? "", effort: "" };
+    const models = await this.models(cfg.agent);
+    const model = cfg.model ? models.find((m) => m.id === cfg.model) : models.find((m) => m.isDefault);
+    if (!model) throw new Error("선택한 모델의 추론 수준을 확인하지 못했습니다. 모델을 다시 선택하세요.");
+    return { requestedEffort: requested ?? choice, effort: resolveEffort(choice, model) };
+  }
+
   async teamCapabilities(chat: Chat) {
     const project = this.store.project(chat.projectId)!;
     const installed = this.cliInfo();
@@ -167,10 +196,19 @@ export class ChatManager {
       } catch { /* Unknown is not a confirmed capability. */ }
       finally { if (timer) clearTimeout(timer); }
     }
+    const effortLevels: Partial<Record<AgentKind, string[]>> = {};
+    await Promise.all(installed.filter((c) => c.path).map(async ({ agent }) => {
+      try {
+        const models = await this.models(agent);
+        const id = agent === "claude" ? chat.claudeModelOverride ?? project.settings.claudeModel : agent === "codex" ? gptModel : chat.geminiModelOverride ?? project.settings.geminiModel;
+        const model = id ? models.find((m) => m.id === id) : models.find((m) => m.isDefault);
+        effortLevels[agent] = WORKER_EFFORTS.filter((level) => model?.reasoningEfforts?.includes(level));
+      } catch { /* Unknown levels remain unavailable, never invent support. */ }
+    }));
     return {
-      claude: { installed: !!installed.find((c) => c.agent === "claude")?.path, model: chat.claudeModelOverride ?? project.settings.claudeModel, imageGeneration: false, authentication: "실행 시 확인", usage: this.usageState.claude },
-      gpt: { installed: !!installed.find((c) => c.agent === "codex")?.path, model: gptModel, imageGeneration, authenticated: codexAuthenticated, usage: this.usageState.codex },
-      gemini: { installed: !!installed.find((c) => c.agent === "gemini")?.path, model: (chat.geminiModelOverride ?? project.settings.geminiModel) || "Pro 계정 제공 모델 자동 선택", imageGeneration: false, authentication: "Antigravity 로그인·모델 목록은 실행 시 확인", enabled: project.settings.maxGeminiWorkers > 0 },
+      claude: { installed: !!installed.find((c) => c.agent === "claude")?.path, model: chat.claudeModelOverride ?? project.settings.claudeModel, reasoningEfforts: effortLevels.claude, effortSetting: chat.claudeEffortOverride ?? project.settings.claudeEffort, imageGeneration: false, authentication: "실행 시 확인", usage: this.usageState.claude },
+      gpt: { installed: !!installed.find((c) => c.agent === "codex")?.path, model: gptModel, reasoningEfforts: effortLevels.codex, effortSetting: chat.codexEffortOverride ?? project.settings.codexEffort, imageGeneration, authenticated: codexAuthenticated, usage: this.usageState.codex },
+      gemini: { installed: !!installed.find((c) => c.agent === "gemini")?.path, model: (chat.geminiModelOverride ?? project.settings.geminiModel) || "Pro 계정 제공 모델 자동 선택", reasoningEfforts: effortLevels.gemini, effortSetting: chat.geminiEffortOverride ?? project.settings.geminiEffort, imageGeneration: false, authentication: "Antigravity 로그인·모델 목록은 실행 시 확인", enabled: project.settings.maxGeminiWorkers > 0 },
     };
   }
 
@@ -230,7 +268,7 @@ export class ChatManager {
     // While quitting, keep the stored status ("working" → "interrupted" on next launch).
     if (this.disposing) return this.store.chat(chatId)!;
     const chat = this.store.updateChat(chatId, patch);
-    if (patch.approvalModeOverride !== undefined || patch.orchestratorModelOverride !== undefined)
+    if (patch.approvalModeOverride !== undefined || patch.orchestratorModelOverride !== undefined || patch.orchestratorEffortOverride !== undefined)
       this.approvals.invalidate(chatId);
     this.sink.chat(chat);
     return chat;
@@ -250,11 +288,11 @@ export class ChatManager {
   // ---------- roles and drivers
   /** Agent + model a role uses right now (orchestrator follows the project; workers may be overridden per chat). */
   roleConfig(chat: Chat, project: Project, role: Role): RoleConfig {
-    if (role === "orch") return chatOrchestrator(chat, project);
+    if (role === "orch") return { ...chatOrchestrator(chat, project), effort: chat.orchestratorEffortOverride ?? project.settings.orchestratorEffort };
     const worker = this.store.agentByKey(chat.id, role);
-    if (worker?.kind === "gpt") return { agent: "codex", model: chat.codexModelOverride ?? project.settings.codexModel };
-    if (worker?.kind === "gemini") return { agent: "gemini", model: chat.geminiModelOverride ?? project.settings.geminiModel };
-    return { agent: "claude", model: chat.claudeModelOverride ?? project.settings.claudeModel };
+    if (worker?.kind === "gpt") return { agent: "codex", model: chat.codexModelOverride ?? project.settings.codexModel, effort: chat.codexEffortOverride ?? project.settings.codexEffort };
+    if (worker?.kind === "gemini") return { agent: "gemini", model: chat.geminiModelOverride ?? project.settings.geminiModel, effort: chat.geminiEffortOverride ?? project.settings.geminiEffort };
+    return { agent: "claude", model: chat.claudeModelOverride ?? project.settings.claudeModel, effort: chat.claudeEffortOverride ?? project.settings.claudeEffort };
   }
 
   private nativeIdOf(chat: Chat, role: Role, agent: AgentKind): string | null {
@@ -299,21 +337,24 @@ export class ChatManager {
    * Driver for a role, created on demand. If the role's CLI or model changed since the driver was
    * made (project/chat settings), the old one is replaced; the CLI session is resumed, so context stays.
    */
-  async driver(chatId: number, role: Role): Promise<AgentDriver> {
+  async driver(chatId: number, role: Role, assignmentEffort?: string): Promise<AgentDriver> {
     const chat = this.store.chat(chatId)!;
     const project = this.store.project(chat.projectId)!;
     const cfg = this.roleConfig(chat, project, role);
+    const effort = assignmentEffort ?? (await this.assignmentEffort(chatId, role)).effort;
     const instructions = this.instructionsFor?.(chat, project, role, cfg.agent);
     const slot = this.live.get(chatId) ?? {};
     this.live.set(chatId, slot);
     const cur = slot[role];
     if (cur && !cur.driver.running) {
-      if (cur.agent !== cfg.agent || cur.instructions !== instructions || (cur.agent !== "codex" && cur.model !== cfg.model)) {
+      if (cur.agent !== cfg.agent || cur.instructions !== instructions || (cur.agent !== "codex" && (cur.model !== cfg.model || cur.effort !== effort))) {
         await cur.driver.dispose();
         delete slot[role];
-      } else if (cur.agent === "codex" && cur.model !== cfg.model) {
+      } else if (cur.agent === "codex" && (cur.model !== cfg.model || cur.effort !== effort)) {
         (cur.driver as CodexDriver).setModel(cfg.model || undefined);
+        (cur.driver as CodexDriver).setEffort(effort);
         cur.model = cfg.model;
+        cur.effort = effort;
       }
     }
     if (slot[role]) return slot[role]!.driver;
@@ -345,6 +386,7 @@ export class ChatManager {
       nativeId: this.nativeIdOf(chat, role, cfg.agent),
       exePath: "",
       model: cfg.model || undefined,
+      effort,
       instructions,
       readOnly: false,
       allowImages: role !== "orch",
@@ -383,7 +425,7 @@ export class ChatManager {
         host,
       );
     }
-    slot[role] = { driver, agent: cfg.agent, model: cfg.model, instructions };
+    slot[role] = { driver, agent: cfg.agent, model: cfg.model, effort, instructions };
     return driver;
   }
 
@@ -426,18 +468,19 @@ export class ChatManager {
   };
 
   /** Called instead of sendHandler while the chat is working (extra instructions). */
-  busySend?: (chat: Chat, input: AgentInput) => Promise<void>;
+  busySend?: (chat: Chat, input: AgentInput, delivery: "now" | "next") => Promise<void>;
 
-  async send(chatId: number, text: string, attachmentIds: number[]) {
+  async send(chatId: number, text: string, attachmentIds: number[], delivery: "now" | "next" = "next") {
+    if (!["now", "next"].includes(delivery)) throw new Error("지원하지 않는 전달 방식입니다.");
     const chat = this.store.chat(chatId);
     if (!chat) throw new Error("채팅이 없습니다.");
     const attachments = this.store.attachmentsFor(attachmentIds);
     if (chat.status === "working" || chat.status === "approval" || this.isBusy(chatId)) {
       if (!this.busySend) throw new Error("작업이 진행 중입니다. 끝나거나 중지한 뒤 보내 주세요.");
-      const ev = this.store.addEvent(chatId, "orch", null, { type: "user", text, attachments, queued: true });
+      const ev = this.store.addEvent(chatId, "orch", null, { type: "user", text, attachments, queued: true, delivery });
       this.store.linkAttachments(attachmentIds, ev.id);
       this.sink.event(ev);
-      await this.busySend(chat, { text, attachments });
+      await this.busySend(chat, { text, attachments }, delivery);
       return;
     }
     await this.startTurn(chatId, text, attachmentIds, () => this.sendHandler(chat, { text, attachments }));

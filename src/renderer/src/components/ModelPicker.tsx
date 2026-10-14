@@ -72,7 +72,7 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
             variant="outline"
             size={compact ? "xs" : "default"}
             aria-label={ariaLabel}
-            className={cn("justify-between font-normal", !compact && "w-full", className)}
+            className={cn("min-w-0 justify-between font-normal", compact && "max-w-40", !compact && "w-full", className)}
           >
             <span className="flex min-w-0 items-center gap-1.5 truncate">
               {encoded && <span className="text-muted-foreground">{AGENT_LABEL[current.agent]} ·</span>}

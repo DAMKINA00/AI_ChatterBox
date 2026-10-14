@@ -13,26 +13,25 @@ import {
   ShieldAlert,
   ShieldCheck,
   Terminal,
+  User,
   Wrench,
   X,
 } from "lucide-react";
+import { artifactFileLabel } from "../../../shared/artifact-markdown";
 import { CONSULT_KIND_LABEL, MASTER_LABEL, roleName, roleTone, type AgentExpression, type AttachmentRef, type Role } from "../../../shared/types";
 import { api, cn, errorMessage, formatBytes } from "../lib/utils";
 import { useStore } from "../store";
 import type { Item } from "../timeline";
 import { Markdown, CopyButton } from "./Markdown";
 import { FileLink } from "./FileLink";
+import { ArtifactPreview } from "./ArtifactPreview";
 import { DiffList, Stats } from "./DiffView";
 import { AgentAvatar, type AvatarSize } from "./AgentAvatar";
+import { effortLabel } from "./EffortPicker";
 import { Badge, Button, Input } from "./ui";
 
 export type Tone = "orch" | "claude" | "gpt" | "gemini";
 const TONE_TEXT: Record<Tone, string> = { orch: "text-orch", claude: "text-claude", gpt: "text-gpt", gemini: "text-gemini" };
-const TONE_BG: Record<Tone, string> = { orch: "bg-orch", claude: "bg-claude", gpt: "bg-gpt", gemini: "bg-gemini" };
-
-export function RoleDot({ tone, className }: { tone: Tone; className?: string }) {
-  return <span className={cn("inline-block size-2 shrink-0 rounded-full", TONE_BG[tone], className)} />;
-}
 
 /** Name + color of a role in a chat: 마스터, 클로드 2호, 지피티 1호 … */
 export function useRole(chatId: number, role: Role | null | undefined) {
@@ -40,12 +39,29 @@ export function useRole(chatId: number, role: Role | null | undefined) {
   return { name: roleName(role, agents), tone: roleTone(role, agents) as Tone };
 }
 
-export function RoleName({ chatId, role, size = 24, expression }: { chatId: number; role: Role; size?: AvatarSize; expression?: AgentExpression | string | null }) {
+function formatItemTime(at: number) {
+  const date = new Date(at);
+  return {
+    label: `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`,
+    title: date.toLocaleString(),
+    dateTime: date.toISOString(),
+  };
+}
+
+function ItemTime({ at }: { at: number }) {
+  const time = formatItemTime(at);
+  return (
+    <time className="shrink-0 pt-1 text-[11px] tabular-nums text-muted-foreground" dateTime={time.dateTime} title={time.title} data-testid="item-time">
+      {time.label}
+    </time>
+  );
+}
+
+export function RoleName({ chatId, role, size = 24, expression, avatar = true }: { chatId: number; role: Role; size?: AvatarSize; expression?: AgentExpression | string | null; avatar?: boolean }) {
   const { name, tone } = useRole(chatId, role);
   return (
     <span className={cn("inline-flex items-center gap-1.5 text-[12px] font-semibold whitespace-nowrap", TONE_TEXT[tone])} data-testid="role-name">
-      <AgentAvatar kind={tone} expression={expression} size={size} alt={`${name} 캐릭터`} />
-      <RoleDot tone={tone} />
+      {avatar && <AgentAvatar kind={tone} expression={expression} size={size} alt={`${name} 캐릭터`} />}
       {name}
     </span>
   );
@@ -89,9 +105,11 @@ export function AttachmentChip({ a, onRemove }: { a: AttachmentRef; onRemove?: (
   );
 }
 
+type ArtifactItem = Extract<Item, { kind: "artifacts" }>;
+
 export function ItemList({ items, chatId, nested = false }: { items: Item[]; chatId: number; nested?: boolean }) {
   return (
-    <div className={cn("flex flex-col", nested ? "gap-2.5" : "gap-4")}>
+    <div className={cn("flex flex-col", nested ? "gap-0.5" : "gap-1")}>
       {items.map((it) => (
         <ItemView key={it.key} item={it} chatId={chatId} nested={nested} />
       ))}
@@ -100,36 +118,46 @@ export function ItemList({ items, chatId, nested = false }: { items: Item[]; cha
 }
 
 function ItemView({ item, chatId, nested }: { item: Item; chatId: number; nested: boolean }) {
+  const agents = useStore((s) => s.agents[chatId]);
   switch (item.kind) {
     case "user":
       return (
-        <div className="flex flex-col items-end gap-1.5" data-testid="user-message">
-          {item.attachments.length > 0 && (
-            <div className="flex flex-wrap justify-end gap-1.5">
-              {item.attachments.map((a) => (
-                <AttachmentChip key={a.id} a={a} />
-              ))}
+        <div className="group grid grid-cols-[36px_minmax(0,1fr)_auto] items-start gap-x-3 rounded-md px-2 py-1.5 transition-colors hover:bg-accent/30" data-testid="user-message">
+          <div className="flex size-9 items-center justify-center rounded-full border bg-card text-muted-foreground" aria-hidden="true">
+            <User className="size-4" />
+          </div>
+          <div className="min-w-0">
+            <div className="mb-0.5 flex min-w-0 items-center gap-2">
+              <span className="text-[12px] font-semibold text-foreground">사용자</span>
+              {item.queued && <span className="text-[11px] text-muted-foreground">{item.delivery === "now" ? "즉시 전달 요청" : "다음 단계 추가 지시"}</span>}
             </div>
-          )}
-          {item.queued && <span className="text-[11px] text-muted-foreground">작업 중 추가 지시</span>}
-          {item.text && (
-            <div className="max-w-[78%] rounded-2xl rounded-br-md bg-user-bubble px-3.5 py-2 whitespace-pre-wrap text-white select-text">
-              {item.text}
-            </div>
-          )}
+            {item.attachments.length > 0 && (
+              <div className="mb-1.5 flex flex-wrap gap-1.5">
+                {item.attachments.map((a) => (
+                  <AttachmentChip key={a.id} a={a} />
+                ))}
+              </div>
+            )}
+            {item.text && <div className="whitespace-pre-wrap text-[13px] text-foreground select-text">{item.text}</div>}
+          </div>
+          <ItemTime at={item.at} />
         </div>
       );
     case "message":
       return (
-        <div className="flex flex-col gap-1" data-testid="agent-message" data-role={item.role} data-expression={item.expression}>
-          <RoleName chatId={chatId} role={item.role} size={36} expression={item.expression} />
-          <div className={cn("group relative", nested ? "" : "pl-3.5")}>
-            <Markdown text={item.text} />
-            {item.streaming && <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse-dot rounded-sm bg-primary align-text-bottom" />}
-            {!item.streaming && (
-              <CopyButton text={item.text} className="absolute -top-6 right-0 opacity-0 group-hover:opacity-100" label="메시지 복사" />
-            )}
+        <div className="group grid grid-cols-[36px_minmax(0,1fr)_auto] items-start gap-x-3 rounded-md px-2 py-1.5 transition-colors hover:bg-accent/30" data-testid="agent-message" data-role={item.role} data-expression={item.expression}>
+          <AgentAvatar kind={roleTone(item.role, agents) as Tone} expression={item.expression} size={36} alt={`${roleName(item.role, agents)} 캐릭터`} />
+          <div className="min-w-0">
+            <RoleName chatId={chatId} role={item.role} expression={item.expression} avatar={false} />
+            <div className="group relative mt-0.5">
+              <Markdown text={item.text} />
+              {item.streaming && <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse-dot rounded-sm bg-primary align-text-bottom" />}
+              {!item.streaming && (
+                <CopyButton text={item.text} className="absolute -top-6 right-0 opacity-0 group-hover:opacity-100" label="메시지 복사" />
+              )}
+            </div>
           </div>
+          <ItemTime at={item.at} />
         </div>
       );
     case "tool":
@@ -154,9 +182,27 @@ function ItemView({ item, chatId, nested }: { item: Item; chatId: number; nested
       return <ImageCard item={item} chatId={chatId} />;
     case "ask":
       return <AskCard item={item} chatId={chatId} />;
+    case "artifacts":
+      return <ArtifactCard item={item} nested={nested} />;
     case "notice":
       return <Notice tone={item.tone}>{item.text}</Notice>;
   }
+}
+
+function ArtifactCard({ item, nested }: { item: ArtifactItem; nested: boolean }) {
+  return (
+    <div className={cn("rounded-md border bg-card px-3 py-2", !nested && "ml-3.5")} data-testid="artifacts">
+      <div className="mb-1.5 flex items-center gap-2 text-[12px] font-medium text-muted-foreground">
+        <FileText className="size-3.5" />
+        결과물
+      </div>
+      <div className="flex flex-wrap gap-x-3 gap-y-1 text-[12px]">
+        {item.paths.map((path, index) => (
+          <ArtifactPreview key={`${path}-${index}`} href={path} label={artifactFileLabel(path)} />
+        ))}
+      </div>
+    </div>
+  );
 }
 
 export function Notice({ tone, children }: { tone: "error" | "auth" | "info"; children: ReactNode }) {
@@ -291,8 +337,7 @@ function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval"
         </div>
       )}
       {r.judgeReason && (
-        <div className="flex items-start gap-1.5 rounded-md bg-orch/10 px-2.5 py-1.5 text-[12.5px] select-text" data-testid="judge-reason">
-          <RoleDot tone="orch" className="mt-1.5" />
+        <div className="rounded-md bg-orch/10 px-2.5 py-1.5 text-[12.5px] select-text" data-testid="judge-reason">
           {r.judgeReason}
         </div>
       )}
@@ -373,7 +418,10 @@ const STATUS_LABEL = { running: "진행 중", done: "완료", error: "오류", s
 function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }>; chatId: number }) {
   const [expanded, setExpanded] = useState(false);
   const select = useStore((s) => s.select);
+  const consult = useStore((s) => s.consults[chatId]?.find((c) => c.id === item.consultId));
   const requestBrief = item.request.split("\n").find((line) => line.trim())?.trim() ?? "(요청 내용 없음)";
+  const actualEffort = consult?.effort;
+  const effortTitle = `CLI에 전달한 설정입니다. 서비스 정책에 따라 조정될 수 있습니다.${consult?.requestedEffort && consult.requestedEffort !== actualEffort ? ` 마스터 요청: ${consult.requestedEffort}` : ""}`;
   return (
     <div className="overflow-hidden rounded-xl border bg-card" data-testid="consult-card" data-status={item.status}>
       <div className="flex items-center gap-2 px-3 py-2">
@@ -390,6 +438,11 @@ function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }
           <ArrowRight className="size-3.5 text-muted-foreground" />
           <RoleName chatId={chatId} role={item.to} size={24} />
           <Badge>{CONSULT_KIND_LABEL[item.consultKind]}</Badge>
+          {actualEffort !== undefined && (
+            <Badge data-testid="consult-effort" data-effort={actualEffort} aria-label={`CLI 추론 설정 ${effortLabel(actualEffort)}`} title={effortTitle}>
+              추론 {effortLabel(actualEffort)}
+            </Badge>
+          )}
           {item.scope && item.scope.length > 0 && (
             <span className="shrink-0 font-mono text-[11px] text-muted-foreground" title={item.scope.join(", ")}>
               {item.scope.join(", ").slice(0, 40)}

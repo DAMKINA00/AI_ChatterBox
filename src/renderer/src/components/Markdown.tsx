@@ -5,7 +5,8 @@ import rehypeHighlight from "rehype-highlight";
 import { Check, Copy } from "lucide-react";
 import { cn } from "../lib/utils";
 import { safeLinkHref } from "../../../shared/links";
-import { FileLink } from "./FileLink";
+import { normalizeArtifactMarkdown } from "../../../shared/artifact-markdown";
+import { ArtifactPreview } from "./ArtifactPreview";
 
 function textOf(node: ReactNode): string {
   if (typeof node === "string" || typeof node === "number") return String(node);
@@ -62,7 +63,8 @@ export const Markdown = memo(function Markdown({ text, className }: { text: stri
         rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
         components={{
           pre: Pre,
-          a: ({ href, children }) => <FileLink href={href ?? ""}>{children}</FileLink>,
+          a: ({ href, children }) => <ArtifactPreview href={href ?? ""} label={children} />,
+          img: ({ src, alt }) => <ArtifactPreview href={src ?? ""} label={alt || src || "이미지"} image />,
           table: ({ children }) => (
             <div className="overflow-x-auto">
               <table>{children}</table>
@@ -70,7 +72,7 @@ export const Markdown = memo(function Markdown({ text, className }: { text: stri
           ),
         }}
       >
-        {text}
+        {normalizeArtifactMarkdown(text)}
       </ReactMarkdown>
     </div>
   );

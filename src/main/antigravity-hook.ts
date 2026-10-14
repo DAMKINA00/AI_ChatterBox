@@ -29,7 +29,7 @@ process.stdin.on("end", () => {
       res.on("error", () => finish(fallback("응답 연결")));
     });
     req.on("error", () => finish(fallback("요청 연결")));
-    req.setTimeout(23 * 3600 * 1000, () => { req.destroy(); finish(fallback("대기 시간")); });
+    req.setTimeout(0);
     req.end(data);
   } catch { send(fallback("입력 형식")); }
 });
