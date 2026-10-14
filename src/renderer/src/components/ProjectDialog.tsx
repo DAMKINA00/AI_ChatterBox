@@ -61,8 +61,8 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         title={project ? "프로젝트 설정" : "새 프로젝트"}
-        description={project ? "모델 변경은 다음 지시부터 적용됩니다." : "작업할 폴더와 세 역할의 모델을 고르세요."}
-        className="w-[600px]"
+        description={project ? "모델 변경은 다음 지시부터 적용됩니다." : "작업할 폴더와 네 역할의 모델을 고르세요."}
+        className="w-[min(1000px,calc(100vw-40px))]"
       >
         <form
           className="grid gap-5"
@@ -96,6 +96,9 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
             <ModelRow label="지피티 작업자" hint="지피티 N호 (Codex)">
               <ModelPicker agents={["codex"]} value={settings.codexModel} onChange={(v) => set("codexModel", v)} ariaLabel="GPT 모델" />
             </ModelRow>
+            <ModelRow label="제미나이 작업자" hint="제미나이 N호 (Antigravity)">
+              <ModelPicker agents={["gemini"]} value={settings.geminiModel} onChange={(v) => set("geminiModel", v)} ariaLabel="Gemini 모델" />
+            </ModelRow>
           </div>
 
           <div className="grid gap-3 rounded-lg border p-3.5">
@@ -103,27 +106,27 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
               <div className="text-[12px] font-medium text-muted-foreground">작업자 배정 참고</div>
               <div className="text-[11.5px] text-muted-foreground">마스터가 작업을 나눌 때 각 작업자의 강점과 주의점을 참고합니다.</div>
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
               <div className="grid content-start gap-2 rounded-md border p-2.5">
                 <div className="text-[13px] font-medium">클로드 작업자</div>
                 <label className="grid gap-1.5">
                   <span className="text-[11.5px] text-muted-foreground">잘 맡는 작업</span>
                   <textarea
-                    rows={3}
+                    rows={4}
                     value={settings.claudeStrengths}
                     onChange={(e) => set("claudeStrengths", e.target.value)}
                     aria-label="클로드가 잘 맡는 작업"
-                    className="min-h-20 w-full resize-y rounded-md border border-input bg-transparent px-2.5 py-2 text-[12px] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+                    className="min-h-24 w-full resize-none rounded-md border border-input bg-transparent px-2.5 py-2 text-[12px] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
                   />
                 </label>
                 <label className="grid gap-1.5">
                   <span className="text-[11.5px] text-muted-foreground">주의할 점</span>
                   <textarea
-                    rows={3}
+                    rows={4}
                     value={settings.claudeCautions}
                     onChange={(e) => set("claudeCautions", e.target.value)}
                     aria-label="클로드 작업자 주의점"
-                    className="min-h-20 w-full resize-y rounded-md border border-input bg-transparent px-2.5 py-2 text-[12px] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+                    className="min-h-24 w-full resize-none rounded-md border border-input bg-transparent px-2.5 py-2 text-[12px] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
                   />
                 </label>
               </div>
@@ -132,21 +135,44 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
                 <label className="grid gap-1.5">
                   <span className="text-[11.5px] text-muted-foreground">잘 맡는 작업</span>
                   <textarea
-                    rows={3}
+                    rows={4}
                     value={settings.gptStrengths}
                     onChange={(e) => set("gptStrengths", e.target.value)}
                     aria-label="지피티가 잘 맡는 작업"
-                    className="min-h-20 w-full resize-y rounded-md border border-input bg-transparent px-2.5 py-2 text-[12px] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+                    className="min-h-24 w-full resize-none rounded-md border border-input bg-transparent px-2.5 py-2 text-[12px] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
                   />
                 </label>
                 <label className="grid gap-1.5">
                   <span className="text-[11.5px] text-muted-foreground">주의할 점</span>
                   <textarea
-                    rows={3}
+                    rows={4}
                     value={settings.gptCautions}
                     onChange={(e) => set("gptCautions", e.target.value)}
                     aria-label="지피티 작업자 주의점"
-                    className="min-h-20 w-full resize-y rounded-md border border-input bg-transparent px-2.5 py-2 text-[12px] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+                    className="min-h-24 w-full resize-none rounded-md border border-input bg-transparent px-2.5 py-2 text-[12px] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+                  />
+                </label>
+              </div>
+              <div className="grid content-start gap-2 rounded-md border p-2.5">
+                <div className="text-[13px] font-medium">제미나이 작업자</div>
+                <label className="grid gap-1.5">
+                  <span className="text-[11.5px] text-muted-foreground">잘 맡는 작업</span>
+                  <textarea
+                    rows={4}
+                    value={settings.geminiStrengths}
+                    onChange={(e) => set("geminiStrengths", e.target.value)}
+                    aria-label="제미나이가 잘 맡는 작업"
+                    className="min-h-24 w-full resize-none rounded-md border border-input bg-transparent px-2.5 py-2 text-[12px] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+                  />
+                </label>
+                <label className="grid gap-1.5">
+                  <span className="text-[11.5px] text-muted-foreground">주의할 점</span>
+                  <textarea
+                    rows={4}
+                    value={settings.geminiCautions}
+                    onChange={(e) => set("geminiCautions", e.target.value)}
+                    aria-label="제미나이 작업자 주의점"
+                    className="min-h-24 w-full resize-none rounded-md border border-input bg-transparent px-2.5 py-2 text-[12px] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
                   />
                 </label>
               </div>
@@ -194,9 +220,10 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
               </div>
               <Switch checked={settings.reviewGate} onChange={(v) => set("reviewGate", v)} label="교차 리뷰" />
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-3 gap-3">
               <NumberField label="동시 클로드 작업자" suffix="명" value={settings.maxClaudeWorkers} onChange={(v) => set("maxClaudeWorkers", v)} min={1} max={6} />
               <NumberField label="동시 지피티 작업자" suffix="명" value={settings.maxGptWorkers} onChange={(v) => set("maxGptWorkers", v)} min={1} max={6} />
+              <NumberField label="동시 제미나이 작업자 (0=사용 안 함)" suffix="명" value={settings.maxGeminiWorkers} onChange={(v) => set("maxGeminiWorkers", v)} min={0} max={6} />
             </div>
             <div className="grid grid-cols-3 gap-3">
               <NumberField label="지시당 맡기기(기본)" suffix="회" value={settings.maxConsults} onChange={(v) => set("maxConsults", v)} min={1} max={30} />

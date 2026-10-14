@@ -3,6 +3,8 @@
 import { DatabaseSync } from "node:sqlite";
 import {
   DEFAULT_SETTINGS,
+  WORKER_KIND_LABEL,
+  type WorkerKind,
   type AgentEvent,
   type AttachmentRef,
   type ChatAgent,
@@ -92,7 +94,7 @@ CREATE TABLE IF NOT EXISTS approvals (
 CREATE TABLE IF NOT EXISTS agents (
   id INTEGER PRIMARY KEY,
   chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
-  kind TEXT NOT NULL CHECK (kind IN ('claude','gpt')),
+  kind TEXT NOT NULL CHECK (kind IN ('claude','gpt','gemini')),
   number INTEGER NOT NULL,
   nickname TEXT NOT NULL,
   job TEXT NOT NULL DEFAULT '',
@@ -148,6 +150,7 @@ export type ChatPatch = Partial<
     | "codexThreadId"
     | "claudeModelOverride"
     | "codexModelOverride"
+    | "geminiModelOverride"
     | "approvalModeOverride"
     | "orchestratorModelOverride"
     | "goal"
@@ -188,6 +191,7 @@ const toChat = (r: Row): Chat => ({
   codexThreadId: r.codex_thread_id,
   claudeModelOverride: r.claude_model_override,
   codexModelOverride: r.codex_model_override,
+  geminiModelOverride: r.gemini_model_override ?? null,
   approvalModeOverride: r.approval_mode_override ?? null,
   orchestratorModelOverride: r.orchestrator_model_override ?? null,
   goal: r.goal_json ? JSON.parse(r.goal_json) : null,
@@ -237,6 +241,7 @@ export class Store {
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
     this.db.exec(SCHEMA);
     this.addColumns();
+    this.migrateGeminiAgents();
     // The app was quit or crashed mid-run: those chats can be resumed ("이어서 진행").
     this.db.exec("UPDATE chats SET status = 'interrupted' WHERE status IN ('working','approval')");
     this.db.exec("UPDATE consults SET status = 'stopped', ended_at = COALESCE(ended_at, started_at) WHERE status = 'running'");
@@ -290,6 +295,24 @@ export class Store {
   }
 
   // ---- agents (pooled workers)
+  private migrateGeminiAgents() {
+    const schema = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='agents'").get() as Row;
+    if (schema.sql.includes("'gemini'")) return;
+    // SQLite cannot extend a CHECK constraint. Preserve every identity and session atomically.
+    this.db.exec("BEGIN");
+    try {
+      this.db.exec(`CREATE TABLE agents_next (
+        id INTEGER PRIMARY KEY, chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('claude','gpt','gemini')), number INTEGER NOT NULL,
+        nickname TEXT NOT NULL, job TEXT NOT NULL DEFAULT '', session_id TEXT,
+        status TEXT NOT NULL DEFAULT 'active', created_at INTEGER NOT NULL);
+        INSERT INTO agents_next SELECT * FROM agents;
+        DROP TABLE agents;
+        ALTER TABLE agents_next RENAME TO agents;
+        CREATE INDEX agents_chat ON agents(chat_id, id); COMMIT;`);
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
   listAgents(chatId: number): ChatAgent[] {
     return this.db.prepare("SELECT * FROM agents WHERE chat_id = ? ORDER BY id").all(chatId).map(toAgent);
   }
@@ -302,7 +325,7 @@ export class Store {
     const a = m ? this.agent(Number(m[1])) : undefined;
     return a && a.chatId === chatId ? a : undefined;
   }
-  createAgent(chatId: number, kind: "claude" | "gpt", job: string): ChatAgent {
+  createAgent(chatId: number, kind: WorkerKind, job: string): ChatAgent {
     // Reactivate the same identity/session so previous conversations keep their owner.
     const reusable = this.db.prepare("SELECT id FROM agents WHERE chat_id = ? AND kind = ? AND status = 'released' ORDER BY number, id LIMIT 1").get(chatId, kind) as Row | undefined;
     if (reusable) {
@@ -312,7 +335,7 @@ export class Store {
     const n = ((this.db.prepare("SELECT MAX(number) m FROM agents WHERE chat_id = ? AND kind = ?").get(chatId, kind) as Row).m ?? 0) + 1;
     const r = this.db
       .prepare("INSERT INTO agents (chat_id, kind, number, nickname, job, status, created_at) VALUES (?, ?, ?, ?, ?, 'active', ?)")
-      .run(chatId, kind, n, `${kind === "claude" ? "클로드" : "지피티"} ${n}호`, job, Date.now());
+      .run(chatId, kind, n, `${WORKER_KIND_LABEL[kind]} ${n}호`, job, Date.now());
     return this.agent(Number(r.lastInsertRowid))!;
   }
   updateAgent(id: number, patch: { sessionId?: string; status?: "active" | "released"; job?: string }) {
@@ -332,6 +355,7 @@ export class Store {
     add("chats", "approval_mode_override", "approval_mode_override TEXT");
     add("chats", "orchestrator_model_override", "orchestrator_model_override TEXT");
     add("chats", "goal_json", "goal_json TEXT");
+    add("chats", "gemini_model_override", "gemini_model_override TEXT");
     add("consults", "scope_json", "scope_json TEXT");
     add("consults", "instruction_id", "instruction_id INTEGER");
     add("consults", "reason", "reason TEXT");
@@ -456,7 +480,7 @@ export class Store {
     this.db
       .prepare(
         `UPDATE chats SET title = ?, orch_claude_session_id = ?, orch_codex_thread_id = ?, claude_session_id = ?, codex_thread_id = ?,
-         claude_model_override = ?, codex_model_override = ?, approval_mode_override = ?, orchestrator_model_override = ?, goal_json = ?, status = ?, unread = ?, archived = ?, last_active_at = ? WHERE id = ?`,
+         claude_model_override = ?, codex_model_override = ?, gemini_model_override = ?, approval_mode_override = ?, orchestrator_model_override = ?, goal_json = ?, status = ?, unread = ?, archived = ?, last_active_at = ? WHERE id = ?`,
       )
       .run(
         pick("title"),
@@ -466,6 +490,7 @@ export class Store {
         pick("codexThreadId"),
         pick("claudeModelOverride"),
         pick("codexModelOverride"),
+        pick("geminiModelOverride"),
         pick("approvalModeOverride"),
         pick("orchestratorModelOverride"),
         (() => {

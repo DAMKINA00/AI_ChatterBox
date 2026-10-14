@@ -26,9 +26,9 @@ import { DiffList, Stats } from "./DiffView";
 import { AgentAvatar, type AvatarSize } from "./AgentAvatar";
 import { Badge, Button, Input } from "./ui";
 
-export type Tone = "orch" | "claude" | "gpt";
-const TONE_TEXT: Record<Tone, string> = { orch: "text-orch", claude: "text-claude", gpt: "text-gpt" };
-const TONE_BG: Record<Tone, string> = { orch: "bg-orch", claude: "bg-claude", gpt: "bg-gpt" };
+export type Tone = "orch" | "claude" | "gpt" | "gemini";
+const TONE_TEXT: Record<Tone, string> = { orch: "text-orch", claude: "text-claude", gpt: "text-gpt", gemini: "text-gemini" };
+const TONE_BG: Record<Tone, string> = { orch: "bg-orch", claude: "bg-claude", gpt: "bg-gpt", gemini: "bg-gemini" };
 
 export function RoleDot({ tone, className }: { tone: Tone; className?: string }) {
   return <span className={cn("inline-block size-2 shrink-0 rounded-full", TONE_BG[tone], className)} />;

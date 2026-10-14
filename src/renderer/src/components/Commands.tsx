@@ -76,6 +76,17 @@ export function StatusDialog({ open, onOpenChange, chat, project }: { open: bool
               onReset={() => void updateChat(chat.id, { codexModelOverride: null })}
             />,
           )}
+          {row(
+            <span className="flex items-center gap-1.5"><RoleDot tone="gemini" />제미나이 작업자</span>,
+            <ModelPicker
+              agents={["gemini"]}
+              ariaLabel="상태: Gemini 모델"
+              value={chat.geminiModelOverride ?? project.settings.geminiModel}
+              inherited={chat.geminiModelOverride === null}
+              onChange={(v) => void updateChat(chat.id, { geminiModelOverride: v })}
+              onReset={() => void updateChat(chat.id, { geminiModelOverride: null })}
+            />,
+          )}
           <div className="mt-1 text-[12px] font-medium text-muted-foreground">대화</div>
           {row(MASTER_LABEL, <div className="grid">{id(chat.orchClaudeSessionId)}{chat.orchCodexThreadId && id(chat.orchCodexThreadId)}</div>)}
           {(agents ?? []).map((a) => row(a.nickname + (a.status === "released" ? " (해제)" : ""), id(a.sessionId)))}

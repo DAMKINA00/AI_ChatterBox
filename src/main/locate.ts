@@ -5,6 +5,16 @@ import { homedir } from "node:os";
 
 const exe = (name: string) => (process.platform === "win32" ? `${name}.exe` : name);
 
+export function findGemini(override?: string): string | null {
+  if (override && existsSync(override)) return override;
+  const found = onPath("agy");
+  if (found) return found;
+  const path = process.platform === "win32"
+    ? join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "agy", "bin", "agy.exe")
+    : join(homedir(), ".local", "bin", "agy");
+  return existsSync(path) ? path : null;
+}
+
 function onPath(name: string): string | undefined {
   for (const dir of (process.env.PATH ?? "").split(delimiter)) {
     if (!dir.trim()) continue;

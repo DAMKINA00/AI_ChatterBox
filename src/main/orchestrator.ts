@@ -18,6 +18,7 @@ import {
   CONSULT_KIND_LABEL,
   MASTER_LABEL,
   WORKER_KIND_LABEL,
+  WORKER_AGENT,
   isWorkerKey,
   roleName,
   type AgentEvent,
@@ -117,10 +118,10 @@ const ASK_PARALLEL_TOOL: ToolDef = {
 const SPAWN_TOOL: ToolDef = {
   name: "spawn",
   description:
-    "해제된 같은 계열의 작업자를 낮은 번호부터 다시 활성화하며, 없을 때 새로 만듭니다. kind=claude → 클로드 N호(Claude Code), kind=gpt → 지피티 N호(Codex). 이전 번호·대화 기록을 유지합니다. job에 맡길 역할을 한 줄로 적으세요. 동시에 필요한 수만 확보하세요.",
+    "해제된 같은 계열의 작업자를 낮은 번호부터 다시 활성화하며, 없을 때 새로 만듭니다. kind=claude → 클로드 N호(Claude Code), kind=gpt → 지피티 N호(Codex), kind=gemini → 제미나이 N호(Antigravity/Google AI Pro). 이전 번호·대화 기록을 유지합니다. job에 맡길 역할을 한 줄로 적으세요. 동시에 필요한 수만 확보하세요.",
   inputSchema: {
     type: "object",
-    properties: { kind: { type: "string", enum: ["claude", "gpt"] }, job: { type: "string" } },
+    properties: { kind: { type: "string", enum: ["claude", "gpt", "gemini"] }, job: { type: "string" } },
     required: ["kind", "job"],
   },
 };
@@ -181,15 +182,17 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     `너는 사용자의 지시를 받아 팀을 꾸리고 일을 나눠 맡기는 마스터다. 작업 폴더: ${project.folder}`,
     "- 너는 배정·검토·취합 담당이다. 간단한 질문·짧은 설명·이미 주어진 정보만으로 답할 수 있는 확인은 direct로 기록한 뒤 작업자를 생성하거나 호출하지 않고 직접 답한다. 소스 분석·원인 조사·구현·이미지·문서 제작 등 본 작업은 반드시 앱 작업자에게 맡긴다. 결과에 누락·모순이 있으면 보완 요청하고 최종 답변을 취합한다. 사용자가 명시적으로 직접 수행을 요구한 예외에도 기존 승인·작업 범위 규칙을 지킨다.",
     `- 지시마다 먼저 ${t("route_request")}(mode=direct|delegated, reason=이유)를 호출한다. 반환되는 실제 사용 가능 도구·모델·사용량으로 후보를 확인한다. 도구 사용 불가/미확인은 가능하다고 가정하지 않는다.`,
-    "- 모든 위임은 이 앱의 chatterbox_bridge spawn/ask/ask_parallel만 사용한다. CLI 내부 spawn_agent/Agent/Task/팀 도구나 별도 CLI 프로세스로 작업자를 만들지 않는다. 글로벌 스킬의 Luna 선호와 관계없이 앱 상단에서 선택한 클로드·지피티 모델을 사용한다.",
+    "- 모든 위임은 이 앱의 chatterbox_bridge spawn/ask/ask_parallel만 사용한다. CLI 내부 spawn_agent/Agent/Task/팀 도구나 별도 CLI 프로세스로 작업자를 만들지 않는다. 글로벌 스킬의 Luna 선호와 관계없이 앱 상단에서 선택한 클로드·지피티·제미나이 모델을 사용한다.",
     `- 클로드 선호 작업: ${s.claudeStrengths}\n  주의점: ${s.claudeCautions}`,
     `- 지피티 선호 작업: ${s.gptStrengths}\n  주의점: ${s.gptCautions}`,
+    `- 제미나이 선호 작업: ${s.geminiStrengths}\n  주의점: ${s.geminiCautions}` ,
+    "- 제미나이는 Pro 계정으로 제공되는 보조 작업자다. 사용자가 제미나이를 지정하면 우선 맡기고, 자료 비교·요약·추가 검토 또는 클로드 한도 초과 시 활용한다. 필요 없이 세 계열을 모두 호출하지 않는다. 중요한 오류의 클로드·지피티 독립 조사를 제미나이로 대체하지 않는다.",
     "- 기본 배정은 클로드 중심이다. 일반 분석·구현·테스트·문서는 먼저 클로드에게 맡기고, 독립 작업이 많으면 클로드 작업자를 추가해 나눈다. 지피티는 이미지 도구가 필요한 작업, 중요한 양쪽 조사·다른 관점의 검증, 사용자의 지피티 지정, 또는 클로드의 한도·실행 불가·과부하에 따른 재배정에 우선 사용한다. 매번 두 계열을 균등하게 배정하지 않는다. 프로젝트의 사용자 지정 선호와 명시적인 사용자 지시는 존중하며 예외 배정 이유를 기록한다.",
     "- 위 기준은 기본 선호이며 절대적인 우열이 아니다. 필요한 도구 사용 가능 여부를 먼저 확인하고, 사용자가 지정한 담당·선호 기준·관련 맥락·작업량·사용 한도를 고려한다. 두 계열을 매번 모두 부르지 않는다. 실패하면 원인을 반영해 재배정하고 가능한 담당자가 없으면 미완료 사유를 알린다.",
     "- 시각 작업도 구분한다. 이미지 생성·편집은 이미지 도구가 있는 지피티에게, 모션그래픽·애니메이션의 코드·타임라인·연출 제작은 클로드에게 우선 배정한다. 모션그래픽에 새 이미지 소재가 필요하면 그 이미지 생성만 지피티에 맡기고 클로드가 결과를 통합한다.",
     `- 중요한 버그 수정·오류 분석이라고 판단하면 ${t("route_request")}(mode=delegated, dualInvestigation=true, reason=중요도 판단 근거)를 기록한다. 예: 데이터 손실·보안·설비 안전·서비스 중단에 영향이 크거나, 반복 장애의 원인이 불확실하고 잘못 고쳤을 때 피해가 큰 경우. 사용자에게 양쪽 조사를 명시적으로 요청받은 경우도 적용한다. 단순 문구·서식 수정이나 일반 질문에 모두 호출하지 않는다.`,
     `- 양쪽 조사: 클로드와 지피티에게 동일한 문제·증상·소스·로그·완료 기준을 주고 ${t("ask_parallel")}(각 kind=opinion)로 독립 조사시킨다. 다른 쪽 결론을 먼저 전달하거나 파일 수정을 맡기지 않는다. 각각 원인 후보·근거(파일/로그)·재현 방법·수정안·불확실성을 보고하게 한다. 두 결과가 오면 공통점과 차이를 대조하고, 충돌은 추가 증거로 확인해 마스터가 최종 원인·수정 방향을 취합한다. 이후 구현은 정한 담당자에게 맡기고 교차 리뷰 규칙을 유지한다. 한쪽을 실행할 수 없으면 양쪽 조사를 완료했다고 하지 말고 제한과 확인된 결과를 보고한다.`,
-    `- 팀: ${t("spawn")}(kind=claude|gpt)로 작업자를 만든다 → 클로드 N호 / 지피티 N호. 작업자 수는 일의 양에 맞춘다: 작은 일은 한 명, 큰 일은 범위를 나눠 여러 명(동시에 클로드 최대 ${s.maxClaudeWorkers}명, 지피티 최대 ${s.maxGptWorkers}명). 다 쓴 작업자는 ${t("release")}로 해제한다. ${t("agents")}로 팀을 확인한다.`,
+    `- 팀: ${t("spawn")}(kind=claude|gpt|gemini)로 작업자를 만든다 → 클로드 N호 / 지피티 N호 / 제미나이 N호. 작업자 수는 일의 양에 맞춘다: 작은 일은 한 명, 큰 일은 범위를 나눠 여러 명(동시에 클로드 최대 ${s.maxClaudeWorkers}명, 지피티 최대 ${s.maxGptWorkers}명, 제미나이 최대 ${s.maxGeminiWorkers}명). 다 쓴 작업자는 ${t("release")}로 해제한다. ${t("agents")}로 팀을 확인한다.`,
     `- 일 맡기기: ${t("ask")}(to=닉네임, kind, message, scope). 서로 독립적인 일은 반드시 ${t("ask_parallel")}(tasks=[…])로 한 번에 맡겨 동시에 진행한다(하나씩 기다리지 말 것). 구현(implement)은 고칠 범위(scope)를 겹치지 않게 나눈다. 리뷰·의견은 언제든 동시에 가능하다.`,
     s.reviewGate
       ? "- 너 자신 또는 작업자가 코드를 바꾸면 끝내기 전에, 그 코드를 만들지 않은 작업자에게 리뷰를 맡긴다 (kind=review). 일반 변경의 리뷰는 다른 클로드 작업자도 가능하다. 중요한 오류·보안·안전 등 다른 계열 관점이 꼭 필요한 경우 지피티로 교차검증한다. 네가 직접 바꾼 파일도 빠짐없이 넘긴다. 지적이 나오면 고치고 다시 리뷰받는다."
@@ -207,7 +210,7 @@ function masterInstructions(project: Project, agent: AgentKind): string {
 
 function workerInstructions(a: ChatAgent): string {
   return [
-    `# 역할: AI_ChatterBox ${a.nickname} (${a.kind === "claude" ? "Claude" : "GPT"} 작업자)`,
+    `# 역할: AI_ChatterBox ${a.nickname} (${WORKER_KIND_LABEL[a.kind]} 작업자)`,
     `너는 마스터가 이끄는 팀의 작업자 "${a.nickname}"이다.${a.job ? ` 맡은 역할: ${a.job}` : ""}`,
     "- 너의 모델은 앱이 지정한다. 네이티브 spawn_agent/Agent/Task 또는 별도 CLI로 하위 작업자를 생성하지 않는다. 추가 인력이 필요하면 결과 보고에서 마스터에게 요청한다. 기존 팀과의 질문은 앱 ask만 사용한다.",
     "- 구현 지시(implement): 지정된 범위(scope) 안의 파일만 고친다. 범위 밖 쓰기는 거부된다. 가능하면 빌드·테스트로 확인한다.",
@@ -360,7 +363,8 @@ export class Orchestrator {
           return textResult(this.agentsText(chatId));
         case "spawn":
           if (!master) break;
-          return this.spawn(chatId, args.kind === "gpt" ? "gpt" : "claude", String(args.job ?? ""));
+          if (!["claude", "gpt", "gemini"].includes(args.kind)) return textResult("지원하지 않는 작업자 종류입니다.", true);
+          return this.spawn(chatId, args.kind, String(args.job ?? ""));
         case "release":
           if (!master) break;
           return await this.release(chatId, String(args.nickname ?? ""));
@@ -389,7 +393,7 @@ export class Orchestrator {
       .map((a) => {
         const r = busy?.get(a.key);
         const state = a.status === "released" ? "해제됨" : r ? `작업 중 (${CONSULT_KIND_LABEL[r.kind]}${r.scope.length ? ` · ${r.scope.join(", ")}` : ""})` : "대기";
-        return `- ${a.nickname} (${a.kind === "claude" ? "Claude" : "GPT"}) · ${a.job || "역할 미정"} · ${state}`;
+        return `- ${a.nickname} (${WORKER_KIND_LABEL[a.kind]}) · ${a.job || "역할 미정"} · ${state}`;
       })
       .join("\n");
   }
@@ -398,9 +402,9 @@ export class Orchestrator {
     const chat = this.chats.store.chat(chatId)!;
     const project = this.chats.store.project(chat.projectId)!;
     if (this.planning.has(chatId)) return textResult("지금은 계획 모드입니다. 작업자를 만들지 말고 계획만 세우세요.", true);
-    if (!this.chats.cliInfo().find((c) => c.agent === (kind === "gpt" ? "codex" : "claude"))?.path)
+    if (!this.chats.cliInfo().find((c) => c.agent === WORKER_AGENT[kind])?.path)
       return textResult(`${WORKER_KIND_LABEL[kind]} CLI가 설치되지 않았습니다. 사용 가능한 작업자를 선택하거나 미완료 사유를 보고하세요.`, true);
-    const max = kind === "claude" ? project.settings.maxClaudeWorkers : project.settings.maxGptWorkers;
+    const max = kind === "claude" ? project.settings.maxClaudeWorkers : kind === "gpt" ? project.settings.maxGptWorkers : project.settings.maxGeminiWorkers;
     const active = this.agents(chatId).filter((a) => a.kind === kind && a.status === "active").length;
     if (active >= max)
       return textResult(`${WORKER_KIND_LABEL[kind]}는 동시에 ${max}명까지입니다. 기존 작업자에게 맡기거나 다 쓴 작업자를 release 하세요.`, true);

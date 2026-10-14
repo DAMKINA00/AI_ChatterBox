@@ -145,7 +145,7 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
   return (
     <aside className="flex h-full min-h-0 flex-col border-r bg-sidebar" data-testid="sidebar">
       <div className="flex items-center gap-2 px-3 pt-3 pb-2">
-        <div className="flex size-7 items-center justify-center rounded-lg bg-gradient-to-br from-claude to-gpt text-white shadow-sm">
+        <div className="flex size-7 items-center justify-center rounded-lg bg-gradient-to-br from-claude via-gemini to-gpt text-white shadow-sm">
           <Workflow className="size-4" />
         </div>
         <div className="flex-1 text-[14px] font-semibold tracking-tight">AI_ChatterBox</div>
@@ -450,7 +450,13 @@ function ChatNode({
               node={a.key}
               label={a.nickname}
               dim={a.status === "released"}
-              icon={busyWorkers.has(a.key) ? <Loader2 className={cn("size-3 animate-spin", a.kind === "claude" ? "text-claude" : "text-gpt")} /> : <RoleDot tone={a.kind} />}
+              icon={
+                busyWorkers.has(a.key) ? (
+                  <Loader2 className={cn("size-3 animate-spin", a.kind === "claude" ? "text-claude" : a.kind === "gpt" ? "text-gpt" : "text-gemini")} />
+                ) : (
+                  <RoleDot tone={a.kind} />
+                )
+              }
             />
           ))}
           {sidebarConsults.map((consult) => (

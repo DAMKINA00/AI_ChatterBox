@@ -175,6 +175,21 @@ function ChatHeader({ chat, project, nodeLabel, busy, masterExpression }: { chat
           resetLabel={`프로젝트 값 사용 (${label("codex", project.settings.codexModel)})`}
         />
       </div>
+      <div className="flex items-center gap-1.5">
+        <AgentAvatar kind="gemini" size={24} alt="제미나이 캐릭터" />
+        <RoleDot tone="gemini" />
+        <span className="text-[12px] text-muted-foreground">제미나이</span>
+        <ModelPicker
+          compact
+          agents={["gemini"]}
+          ariaLabel="이 채팅의 Gemini 모델"
+          value={chat.geminiModelOverride ?? project.settings.geminiModel}
+          inherited={chat.geminiModelOverride === null}
+          onChange={(v) => void updateChat(chat.id, { geminiModelOverride: v })}
+          onReset={() => void updateChat(chat.id, { geminiModelOverride: null })}
+          resetLabel={`프로젝트 값 사용 (${label("gemini", project.settings.geminiModel)})`}
+        />
+      </div>
       <ApprovalModePicker chat={chat} project={project} />
       {busy && (
         <Button
@@ -479,12 +494,12 @@ function Timeline({ items, chatId, busy, empty, loading }: { items: ReturnType<t
 function EmptyChat() {
   return (
     <div className="flex flex-col items-center gap-3 py-20 text-center">
-      <div className="flex size-12 items-center justify-center rounded-2xl bg-gradient-to-br from-claude to-gpt text-white shadow">
+      <div className="flex size-12 items-center justify-center rounded-2xl bg-gradient-to-br from-claude via-gemini to-gpt text-white shadow">
         <Workflow className="size-6" />
       </div>
       <div className="text-[15px] font-semibold">무엇을 할까요?</div>
       <div className="max-w-md text-[13px] leading-relaxed text-muted-foreground">
-        지시를 보내면 마스터가 계획을 세우고, 일의 양에 맞춰 클로드·지피티 작업자를 꾸려 구현과 리뷰를 나눠 맡깁니다. 이미지는 붙여넣기(Ctrl+V)나 끌어다 놓기로 첨부할 수 있어요.
+        지시를 보내면 마스터가 계획을 세우고, 일의 양에 맞춰 클로드·지피티·제미나이 작업자를 꾸려 구현과 리뷰를 나눠 맡깁니다. 이미지는 붙여넣기(Ctrl+V)나 끌어다 놓기로 첨부할 수 있어요.
       </div>
     </div>
   );

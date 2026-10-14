@@ -1,7 +1,7 @@
 // Types shared by main, preload and renderer.
 import type { ProviderUsage } from "./usage";
 
-export type AgentKind = "claude" | "codex";
+export type AgentKind = "claude" | "codex" | "gemini";
 
 export interface TokenCounts {
   inputTokens: number;
@@ -25,7 +25,7 @@ export function isAgentExpression(value: unknown): value is AgentExpression {
   return typeof value === "string" && (AGENT_EXPRESSIONS as readonly string[]).includes(value);
 }
 
-export const AGENT_LABEL: Record<AgentKind, string> = { claude: "Claude", codex: "Codex" };
+export const AGENT_LABEL: Record<AgentKind, string> = { claude: "Claude", codex: "Codex", gemini: "Gemini" };
 
 /**
  * Who said / did something in a chat: "orch" = the master (마스터), or "w<agent id>" = a worker
@@ -35,9 +35,9 @@ export type Role = "orch" | `w${number}`;
 
 export const MASTER_LABEL = "마스터";
 
-export type WorkerKind = "claude" | "gpt";
-export const WORKER_KIND_LABEL: Record<WorkerKind, string> = { claude: "클로드", gpt: "지피티" };
-export const WORKER_AGENT: Record<WorkerKind, AgentKind> = { claude: "claude", gpt: "codex" };
+export type WorkerKind = "claude" | "gpt" | "gemini";
+export const WORKER_KIND_LABEL: Record<WorkerKind, string> = { claude: "클로드", gpt: "지피티", gemini: "제미나이" };
+export const WORKER_AGENT: Record<WorkerKind, AgentKind> = { claude: "claude", gpt: "codex", gemini: "gemini" };
 
 export interface ChatAgent {
   id: number;
@@ -72,7 +72,7 @@ export function roleTone(role: Role | null | undefined, agents: ChatAgent[] | un
 }
 
 /** Orchestrator model, encoded as "<agent>:<model id>", e.g. "claude:opus" or "codex:gpt-6-astra". */
-export type OrchestratorModel = `${AgentKind}:${string}`;
+export type OrchestratorModel = `${"claude" | "codex"}:${string}`;
 
 /** The orchestrator model a chat uses (its own override, else the project's). */
 export function chatOrchestrator(chat: { orchestratorModelOverride: string | null }, project: { settings: { orchestratorModel: string } }) {
@@ -90,11 +90,15 @@ export interface ProjectSettings {
   claudeCautions: string;
   gptStrengths: string;
   gptCautions: string;
+  geminiStrengths: string;
+  geminiCautions: string;
   orchestratorModel: OrchestratorModel;
   /** Claude worker --model value (alias or id). */
   claudeModel: string;
   /** GPT worker model id (Codex model/list). */
   codexModel: string;
+  /** Antigravity model slug. Empty selects an available Pro-compatible Gemini model. */
+  geminiModel: string;
   /** Lead must get a Codex/Claude review before finishing code changes. */
   reviewGate: boolean;
   /** Max consults per user instruction. */
@@ -106,6 +110,7 @@ export interface ProjectSettings {
   /** Max workers of each kind alive at once in a chat. */
   maxClaudeWorkers: number;
   maxGptWorkers: number;
+  maxGeminiWorkers: number;
   /** Who answers workers' approval requests. */
   approvalMode: ApprovalMode;
   /** Let the orchestrator also allow high-risk requests (otherwise they go to the user). */
@@ -127,12 +132,16 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   orchestratorModel: "claude:opus",
   claudeModel: "opus",
   codexModel: "gpt-6-astra",
+  geminiModel: "",
+  geminiStrengths: "사용자 지정 제미나이 작업, 문서 요약·자료 비교와 추가 관점의 검토. 클로드가 바쁘거나 사용 한도에 도달했을 때 보조 담당.",
+  geminiCautions: "Google AI Pro 계정에서 실제 제공되는 Gemini 모델만 사용합니다. Ultra 전용 모델·API 결제로 전환하지 않습니다. 일반 업무는 클로드 우선, 이미지 생성은 지피티, 중요한 오류는 기존 클로드·지피티 양쪽 조사 규칙을 유지합니다.",
   reviewGate: true,
   maxConsults: 8,
   maxReviews: 3,
   maxMinutes: 60,
   maxClaudeWorkers: 3,
   maxGptWorkers: 3,
+  maxGeminiWorkers: 2,
   approvalMode: "orchestrator",
   delegateHighRisk: false,
 };
@@ -163,6 +172,7 @@ export interface Chat {
   orchestratorModelOverride: OrchestratorModel | null;
   claudeModelOverride: string | null;
   codexModelOverride: string | null;
+  geminiModelOverride: string | null;
   /** Per-chat approval mode; null = follow the project. */
   approvalModeOverride: ApprovalMode | null;
   goal: ChatGoal | null;
@@ -338,6 +348,7 @@ export interface ChatterBoxApi {
       orchestratorModelOverride?: OrchestratorModel | null;
       claudeModelOverride?: string | null;
       codexModelOverride?: string | null;
+      geminiModelOverride?: string | null;
       approvalModeOverride?: ApprovalMode | null;
     },
   ): Promise<Chat>;

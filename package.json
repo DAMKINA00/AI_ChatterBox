@@ -1,9 +1,9 @@
 {
   "name": "ai-chatterbox",
   "productName": "AI_ChatterBox",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "private": true,
-  "description": "Desktop chat front-end for Claude Code and Codex",
+  "description": "Desktop agent team for Claude Code, Codex and Antigravity Gemini",
   "main": "out/main/index.js",
   "type": "module",
   "scripts": {
@@ -35,7 +35,8 @@
       }
     ],
     "asarUnpack": [
-      "out/main/bridge-mcp.js"
+      "out/main/bridge-mcp.js",
+      "out/main/antigravity-hook.js"
     ],
     "win": {
       "requestedExecutionLevel": "requireAdministrator",

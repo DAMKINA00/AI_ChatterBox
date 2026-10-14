@@ -95,6 +95,12 @@ async function setSwitch(locator, value) {
   if ((await locator.getAttribute("aria-checked")) !== String(value)) await locator.click();
 }
 
+async function fillProjectName(dialog, value) {
+  const input = dialog.locator("#proj-name");
+  await input.scrollIntoViewIfNeeded();
+  await input.fill(value);
+}
+
 function persistedProject() {
   const db = new DatabaseSync(dbFile, { readOnly: true });
   try {
@@ -154,6 +160,45 @@ try {
 
   // Settings dialog: repeated switch toggles must not submit or close it.
   let dialog = await openSettings(page, "UI 상태 점검");
+  const settingsLayout = await dialog.evaluate((dialogNode) => {
+    const workerGrid = [...dialogNode.querySelectorAll("div")].find((el) => el.children.length === 3 && el.querySelector('textarea[aria-label="제미나이 작업자 주의점"]'));
+    const textareas = [...dialogNode.querySelectorAll("textarea")];
+    const dialogRect = dialogNode.getBoundingClientRect();
+    const gridRect = workerGrid?.getBoundingClientRect();
+    return {
+      viewportWidth: window.innerWidth,
+      dialogWidth: dialogRect.width,
+      dialogClientWidth: dialogNode.clientWidth,
+      dialogScrollWidth: dialogNode.scrollWidth,
+      workerGridColumns: workerGrid ? getComputedStyle(workerGrid).gridTemplateColumns : null,
+      workerGridClientWidth: workerGrid?.clientWidth ?? null,
+      workerGridScrollWidth: workerGrid?.scrollWidth ?? null,
+      workerGridRenderedWidth: gridRect?.width ?? null,
+      textareaResize: textareas.map((textarea) => getComputedStyle(textarea).resize),
+    };
+  });
+  console.log(`SETTINGS_LAYOUT  ${JSON.stringify(settingsLayout)}`);
+  const expectedDialogWidth = Math.min(1000, settingsLayout.viewportWidth - 40);
+  check(
+    "settings dialog uses the available width without horizontal worker-card overflow",
+    settingsLayout.dialogWidth >= expectedDialogWidth - 2 && settingsLayout.dialogScrollWidth <= settingsLayout.dialogClientWidth + 1 && settingsLayout.workerGridScrollWidth <= (settingsLayout.workerGridClientWidth ?? 0) + 1,
+    JSON.stringify(settingsLayout),
+  );
+  check("settings textareas disable the native resize handle", settingsLayout.textareaResize.length === 6 && settingsLayout.textareaResize.every((resize) => resize === "none"), JSON.stringify(settingsLayout.textareaResize));
+  await page.screenshot({ path: join(screenshots, "settings-dark.png") });
+  await dialog.getByRole("button", { name: "취소" }).click();
+  await page.waitForSelector('[role="dialog"]', { state: "detached" });
+  const themeToggle = page.getByLabel("테마 전환");
+  await themeToggle.click();
+  await page.waitForFunction(() => !document.documentElement.classList.contains("dark"));
+  dialog = await openSettings(page, "UI 상태 점검");
+  await page.screenshot({ path: join(screenshots, "settings-light.png") });
+  await dialog.getByRole("button", { name: "취소" }).click();
+  await page.waitForSelector('[role="dialog"]', { state: "detached" });
+  await themeToggle.click();
+  await page.waitForFunction(() => document.documentElement.classList.contains("dark"));
+  check("dark and light settings screenshots were written", existsSync(join(screenshots, "settings-dark.png")) && existsSync(join(screenshots, "settings-light.png")));
+  dialog = await openSettings(page, "UI 상태 점검");
   const highRisk = dialog.getByRole("switch", { name: "고위험 요청도 맡기기" });
   const reviewGate = dialog.getByRole("switch", { name: "교차 리뷰" });
   const originalName = await dialog.locator("#proj-name").inputValue();
@@ -165,7 +210,23 @@ try {
     await reviewGate.click();
     check(`repeated switch toggle ${i + 1} keeps settings dialog open`, await dialog.isVisible());
   }
-  await dialog.locator("#proj-name").fill("취소하면 사라질 입력");
+  const settingsViewport = await dialog.locator("#proj-name").evaluate((input) => {
+    const dialogNode = input.closest('[role="dialog"]');
+    const inputRect = input.getBoundingClientRect();
+    const dialogRect = dialogNode?.getBoundingClientRect();
+    const style = dialogNode ? getComputedStyle(dialogNode) : undefined;
+    return {
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      input: { top: inputRect.top, bottom: inputRect.bottom, left: inputRect.left, right: inputRect.right, width: inputRect.width, height: inputRect.height },
+      dialog: dialogRect ? { top: dialogRect.top, bottom: dialogRect.bottom, left: dialogRect.left, right: dialogRect.right, clientHeight: dialogNode.clientHeight, scrollHeight: dialogNode.scrollHeight, scrollTop: dialogNode.scrollTop } : null,
+      overflowY: style?.overflowY ?? null,
+      inputInViewport: inputRect.top >= 0 && inputRect.bottom <= window.innerHeight && inputRect.left >= 0 && inputRect.right <= window.innerWidth,
+      inputInDialogViewport: !!dialogRect && inputRect.top >= dialogRect.top && inputRect.bottom <= dialogRect.bottom,
+    };
+  });
+  console.log(`SETTINGS_VIEWPORT  ${JSON.stringify(settingsViewport)}`);
+  await page.screenshot({ path: join(screenshots, "settings-after-toggles.png") });
+  await fillProjectName(dialog, "취소하면 사라질 입력");
   await dialog.getByRole("button", { name: "취소" }).click();
   await page.waitForSelector('[role="dialog"]', { state: "detached" });
   const afterCancel = persistedProject();
@@ -173,7 +234,7 @@ try {
 
   // Save both switch values and the project name, then verify the persisted record.
   dialog = await openSettings(page, "UI 상태 점검");
-  await dialog.locator("#proj-name").fill("UI 저장 완료");
+  await fillProjectName(dialog, "UI 저장 완료");
   await setSwitch(dialog.getByRole("switch", { name: "고위험 요청도 맡기기" }), true);
   await setSwitch(dialog.getByRole("switch", { name: "교차 리뷰" }), false);
   await dialog.getByRole("button", { name: "저장" }).click();
@@ -184,7 +245,7 @@ try {
   // A bad folder must keep the dialog and all edited inputs open after the error.
   dialog = await openSettings(page, "UI 저장 완료");
   const invalidName = "실패해도 입력 유지";
-  await dialog.locator("#proj-name").fill(invalidName);
+  await fillProjectName(dialog, invalidName);
   await dialog.locator("#proj-folder").fill(missingFolder);
   await dialog.getByRole("button", { name: "저장" }).click();
   await page.waitForFunction(() => {

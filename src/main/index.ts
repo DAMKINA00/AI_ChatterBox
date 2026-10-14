@@ -185,6 +185,7 @@ function registerIpc() {
   // misc
   ipcMain.handle("cli:info", () => chats.cliInfo());
   ipcMain.handle("models:list", async (_e, agent: AgentKind) => {
+    if (agent === "gemini") return chats.geminiModels();
     const cached = modelCache.get(agent);
     if (cached) return cached;
     let list: ModelOption[];

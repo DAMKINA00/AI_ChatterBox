@@ -2,7 +2,7 @@
 // persists normalized events, tracks chat status, and forwards everything to the renderer.
 // The Orchestrator (orchestrator.ts) plugs in through the hooks at the bottom.
 import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import {
   chatOrchestrator,
   type AgentEvent,
@@ -22,7 +22,9 @@ import {
 import type { ChatPatch, Store } from "./db";
 import { LocalBridge } from "./local-bridge";
 import { ApprovalService, type ApprovalInput, type JudgeAnswer } from "./approvals";
-import { findClaude, findCodex } from "./locate";
+import { findClaude, findCodex, findGemini } from "./locate";
+import { GeminiDriver } from "./drivers/gemini";
+import { listGeminiModels } from "./drivers/gemini-protocol";
 import { ClaudeDriver, claudeUsageText } from "./drivers/claude";
 import { parseClaudeUsageText } from "../shared/usage";
 import { CodexDriver, CodexServer } from "./drivers/codex";
@@ -110,6 +112,7 @@ export class ChatManager {
   cliInfo(): CliInfo[] {
     const claude = findClaude(this.store.getSetting("claudePath"));
     const codex = findCodex(this.store.getSetting("codexPath"));
+    const gemini = findGemini(this.store.getSetting("geminiPath"));
     return [
       {
         agent: "claude",
@@ -117,6 +120,7 @@ export class ChatManager {
         error: claude ? undefined : "claude.exe를 찾지 못했습니다. PowerShell에서 irm https://claude.ai/install.ps1 | iex 로 설치하고 로그인하세요.",
       },
       { agent: "codex", path: codex, error: codex ? undefined : "codex.exe를 찾지 못했습니다. Codex 앱 또는 Codex CLI를 설치하세요." },
+      { agent: "gemini", path: gemini, error: gemini ? undefined : "Antigravity CLI(agy)를 설치하고 Google AI Pro 계정으로 로그인하세요." },
     ];
   }
 
@@ -125,6 +129,14 @@ export class ChatManager {
     if (!exe) throw new Error(this.cliInfo()[0].error);
     return exe;
   }
+
+  geminiExe(): string {
+    const exe = findGemini(this.store.getSetting("geminiPath"));
+    if (!exe) throw new Error(this.cliInfo().find((c) => c.agent === "gemini")!.error);
+    return exe;
+  }
+
+  geminiModels() { return listGeminiModels(this.geminiExe(), this.tmpDir); }
 
   async teamCapabilities(chat: Chat) {
     const project = this.store.project(chat.projectId)!;
@@ -158,6 +170,7 @@ export class ChatManager {
     return {
       claude: { installed: !!installed.find((c) => c.agent === "claude")?.path, model: chat.claudeModelOverride ?? project.settings.claudeModel, imageGeneration: false, authentication: "실행 시 확인", usage: this.usageState.claude },
       gpt: { installed: !!installed.find((c) => c.agent === "codex")?.path, model: gptModel, imageGeneration, authenticated: codexAuthenticated, usage: this.usageState.codex },
+      gemini: { installed: !!installed.find((c) => c.agent === "gemini")?.path, model: (chat.geminiModelOverride ?? project.settings.geminiModel) || "Pro 계정 제공 모델 자동 선택", imageGeneration: false, authentication: "Antigravity 로그인·모델 목록은 실행 시 확인", enabled: project.settings.maxGeminiWorkers > 0 },
     };
   }
 
@@ -240,6 +253,7 @@ export class ChatManager {
     if (role === "orch") return chatOrchestrator(chat, project);
     const worker = this.store.agentByKey(chat.id, role);
     if (worker?.kind === "gpt") return { agent: "codex", model: chat.codexModelOverride ?? project.settings.codexModel };
+    if (worker?.kind === "gemini") return { agent: "gemini", model: chat.geminiModelOverride ?? project.settings.geminiModel };
     return { agent: "claude", model: chat.claudeModelOverride ?? project.settings.claudeModel };
   }
 
@@ -294,7 +308,7 @@ export class ChatManager {
     this.live.set(chatId, slot);
     const cur = slot[role];
     if (cur && !cur.driver.running) {
-      if (cur.agent !== cfg.agent || cur.instructions !== instructions || (cur.agent === "claude" && cur.model !== cfg.model)) {
+      if (cur.agent !== cfg.agent || cur.instructions !== instructions || (cur.agent !== "codex" && cur.model !== cfg.model)) {
         await cur.driver.dispose();
         delete slot[role];
       } else if (cur.agent === "codex" && cur.model !== cfg.model) {
@@ -356,6 +370,11 @@ export class ChatManager {
         },
         host,
       );
+    } else if (cfg.agent === "gemini") {
+      driver = new GeminiDriver({ ...driverOpts, exePath: this.geminiExe() }, {
+        bridge: this.bridge, hookScript: join(dirname(this.bridgeScript), "antigravity-hook.js"), tmpDir: this.tmpDir, sessionKey: `${chatId}-${role}`,
+        mcpServers: () => this.toolsFor?.(this.store.chat(chatId)!, role, "gemini") ?? {},
+      }, host);
     } else {
       const servers = this.toolsFor?.(chat, role, "codex");
       driver = new CodexDriver(

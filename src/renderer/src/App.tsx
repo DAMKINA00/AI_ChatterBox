@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { CircleAlert, FolderPlus, Loader2, MessageSquarePlus, Workflow, X } from "lucide-react";
+import { AGENT_LABEL } from "../../shared/types";
 import { useStore } from "./store";
 import { Sidebar } from "./components/Sidebar";
 import { ChatView } from "./components/ChatView";
@@ -41,7 +42,7 @@ export function App() {
               <CircleAlert className="mt-0.5 size-4 shrink-0 text-warning" />
               <div className="space-y-0.5">
                 {missing.map((m) => (
-                  <div key={m.agent}>{m.error}</div>
+                  <div key={m.agent}>{m.error ?? `${AGENT_LABEL[m.agent]} CLI를 찾지 못했습니다.`}</div>
                 ))}
               </div>
             </div>
@@ -66,13 +67,13 @@ function Welcome({ hasProjects, onNewProject }: { hasProjects: boolean; onNewPro
   const createChat = useStore((s) => s.createChat);
   return (
     <div className="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
-      <div className="flex size-14 items-center justify-center rounded-2xl bg-gradient-to-br from-claude to-gpt text-white shadow-lg">
+      <div className="flex size-14 items-center justify-center rounded-2xl bg-gradient-to-br from-claude via-gemini to-gpt text-white shadow-lg">
         <Workflow className="size-7" />
       </div>
       <div className="space-y-1.5">
-        <div className="text-lg font-semibold">Claude와 GPT가 함께 일하는 채팅</div>
+        <div className="text-lg font-semibold">Claude·GPT·Gemini가 함께 일하는 채팅</div>
         <div className="max-w-md text-[13px] leading-relaxed text-muted-foreground">
-          프로젝트(작업 폴더)를 만들고 채팅에 지시하면, 마스터가 일의 양에 맞춰 클로드·지피티 작업자를 꾸리고 구현과 리뷰를 나눠 맡긴 뒤 결과를 정리해 보고합니다.
+          프로젝트(작업 폴더)를 만들고 채팅에 지시하면, 마스터가 일의 양에 맞춰 클로드·지피티·제미나이 작업자를 꾸리고 구현과 리뷰를 나눠 맡긴 뒤 결과를 정리해 보고합니다.
         </div>
       </div>
       <div className="flex gap-2">

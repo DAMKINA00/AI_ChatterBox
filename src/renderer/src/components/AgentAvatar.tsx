@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
+import { Sparkles } from "lucide-react";
 import { isAgentExpression, type AgentExpression } from "../../../shared/types";
 import { cn } from "../lib/utils";
 
-export type AvatarKind = "orch" | "claude" | "gpt";
+export type AvatarKind = "orch" | "claude" | "gpt" | "gemini";
 export type AvatarSize = 24 | 32 | 36;
 
 const SIZE_CLASS: Record<AvatarSize, string> = { 24: "size-6", 32: "size-8", 36: "size-9" };
@@ -36,7 +37,21 @@ export function AgentAvatar({
   }, [kind, requested]);
 
   const classes = cn("shrink-0 rounded-full object-cover", SIZE_CLASS[size], className);
-  if (missing) return <span className={classes} role="img" aria-label={alt} data-testid="agent-avatar" data-expression="neutral" />;
+  if (kind === "gemini") {
+    return (
+      <span
+        className={cn(classes, "inline-flex items-center justify-center bg-gradient-to-br from-sky-500/20 via-violet-500/20 to-indigo-500/30")}
+        role="img"
+        aria-label={alt}
+        data-testid="agent-avatar"
+        data-kind={kind}
+        data-expression={current}
+      >
+        <Sparkles className="size-[60%] text-violet-600 dark:text-sky-300" strokeWidth={2.25} aria-hidden="true" />
+      </span>
+    );
+  }
+  if (missing) return <span className={classes} role="img" aria-label={alt} data-testid="agent-avatar" data-kind={kind} data-expression="neutral" />;
   return (
     <img
       src={source(kind, current)}

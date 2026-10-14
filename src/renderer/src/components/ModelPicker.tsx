@@ -19,10 +19,16 @@ import {
   Input,
 } from "./ui";
 
+const MODEL_GROUP_LABEL: Record<AgentKind, string> = {
+  claude: "Claude 모델 (Claude Code)",
+  codex: "GPT 모델 (Codex)",
+  gemini: "Gemini 모델 (Antigravity)",
+};
+
 /** "claude:opus" for the orchestrator (both CLIs), or a plain model id for a worker. */
 export function useModelLabel() {
   const models = useStore((s) => s.models);
-  return (agent: AgentKind, id: string) => models[agent]?.find((m) => m.id === id)?.label ?? (id || "기본값");
+  return (agent: AgentKind, id: string) => models[agent]?.find((m) => m.id === id)?.label ?? (id || (agent === "gemini" ? "Pro 자동 선택" : "기본값"));
 }
 
 interface Props {
@@ -52,8 +58,9 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
     for (const a of agents) void loadModels(a);
   }, [agents.join(","), loadModels]);
 
+  const encodedAgent = agents.find((a) => value.startsWith(`${a}:`)) ?? agents[0];
   const current = encoded
-    ? { agent: (value.startsWith("codex:") ? "codex" : "claude") as AgentKind, id: value.slice(value.indexOf(":") + 1) }
+    ? { agent: encodedAgent, id: value.slice(value.indexOf(":") + 1) }
     : { agent: agents[0], id: value };
   const make = (agent: AgentKind, id: string) => (encoded ? `${agent}:${id}` : id);
 
@@ -88,7 +95,12 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
           {agents.map((a, i) => (
             <div key={a}>
               {i > 0 && <DropdownMenuSeparator />}
-              <DropdownMenuLabel>{a === "claude" ? "Claude 모델 (Claude Code)" : "GPT 모델 (Codex)"}</DropdownMenuLabel>
+              <DropdownMenuLabel>{MODEL_GROUP_LABEL[a]}</DropdownMenuLabel>
+              {a === "gemini" && (
+                <DropdownMenuCheckItem checked={current.agent === a && current.id === ""} onSelect={() => onChange(make(a, ""))}>
+                  <span className="flex-1 truncate">Pro 자동 선택</span>
+                </DropdownMenuCheckItem>
+              )}
               {!models[a] && !errors[a] && (
                 <div className="flex items-center gap-2 px-2 py-1.5 text-[12px] text-muted-foreground">
                   <Loader2 className="size-3.5 animate-spin" /> 목록을 불러오는 중…
@@ -123,7 +135,13 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
       <Dialog open={custom !== null} onOpenChange={(o) => !o && setCustom(null)}>
         <DialogContent
           title={`${custom ? AGENT_LABEL[custom] : ""} 모델 직접 입력`}
-          description={custom === "codex" ? "Codex가 받는 모델 id (예: gpt-6-astra)" : "Claude Code --model 값 (별칭 또는 전체 id)"}
+          description={
+            custom === "codex"
+              ? "Codex가 받는 모델 id (예: gpt-6-astra)"
+              : custom === "gemini"
+                ? "Antigravity가 받는 Gemini 모델 id"
+                : "Claude Code --model 값 (별칭 또는 전체 id)"
+          }
           className="w-[420px]"
         >
           <form
