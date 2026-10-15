@@ -67,7 +67,7 @@ function createWindow() {
     ...b,
     minWidth: 900,
     minHeight: 560,
-    title: testData ? "AI_ChatterBox [자동 테스트 데이터]" : "AI_ChatterBox",
+    title: `AI ChatterBox v${app.getVersion()}${testData ? " [자동 테스트 데이터]" : ""}`,
     skipTaskbar: hideTestWindow,
     backgroundColor: theme === "dark" ? "#0b0d12" : "#ffffff",
     autoHideMenuBar: true,
@@ -79,6 +79,7 @@ function createWindow() {
       sandbox: true,
     },
   });
+  win.on("page-title-updated", (event) => event.preventDefault());
   if ("maximized" in b && b.maximized) win.maximize();
   win.once("ready-to-show", () => win?.show());
   const persist = () => {

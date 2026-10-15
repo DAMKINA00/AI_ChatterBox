@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { version } from "../../../../package.json";
 import {
   Archive,
   ArchiveRestore,
@@ -132,6 +133,7 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
+    document.title = `AI ChatterBox v${version}`;
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
     return () => window.clearInterval(timer);
   }, []);
@@ -153,7 +155,7 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
         <div className="flex size-7 items-center justify-center rounded-lg bg-gradient-to-br from-claude via-gemini to-gpt text-white shadow-sm">
           <Workflow className="size-4" />
         </div>
-        <div className="flex-1 text-[14px] font-semibold tracking-tight">AI_ChatterBox</div>
+        <div className="flex-1 whitespace-nowrap text-[14px] font-semibold tracking-tight">AI ChatterBox <span className="text-[12px] font-normal text-muted-foreground">v{version}</span></div>
         <Tooltip content={theme === "dark" ? "라이트 테마" : "다크 테마"}>
           <Button variant="ghost" size="icon-sm" aria-label="테마 전환" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
             {theme === "dark" ? <Sun /> : <Moon />}
