@@ -5,7 +5,8 @@
 //     Hard-floor actions (outside the folder, recursive deletes, git push, secrets, system changes,
 //     uploads) are never auto-allowed unless the project delegates high-risk requests too;
 //     the judge may still deny them.
-//  4. otherwise (or when the judge asks / fails): the inline approval card for the user.
+//  4. delegated high-risk mode allows an uncertain/failed judgment within runtime restrictions;
+//     explicit denials stand. Otherwise show the inline approval card for the user.
 import { randomUUID } from "node:crypto";
 import { isAbsolute, relative, resolve } from "node:path";
 import { inScope as matchesScope } from "./scope";
@@ -216,7 +217,15 @@ export class ApprovalService {
         ? answer.decision === "allow"
           ? `마스터는 허용하려 했지만 고위험 작업(${c.reason})이라 직접 확인이 필요합니다. 판단: ${answer.reason}`
           : `마스터 의견: ${answer.reason}`
-        : "마스터가 판단하지 못해 직접 확인이 필요합니다.";
+        : delegateHighRisk ? "승인 판단을 사용할 수 없습니다." : "마스터가 판단하지 못해 직접 확인이 필요합니다.";
+    }
+
+    if (mode === "orchestrator" && delegateHighRisk) {
+      const id = `ap:${randomUUID()}`;
+      const reason = `고위험 자동 승인 설정에 따라 허용했습니다. ${judgeReason ?? "별도 승인 판단을 사용할 수 없습니다."}`;
+      log("allow", "once", "orchestrator-delegated", reason);
+      this.host.emit(chatId, input.node, input.role, { type: "approval_auto", request: { ...base, id }, decision: "allow", reason });
+      return { verdict: "allow" };
     }
 
     // 5. Ask the user.

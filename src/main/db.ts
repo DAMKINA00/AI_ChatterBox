@@ -3,6 +3,8 @@
 import { DatabaseSync } from "node:sqlite";
 import {
   DEFAULT_SETTINGS,
+  MAX_CONSULTS,
+  MAX_REVIEWS,
   WORKER_KIND_LABEL,
   type WorkerKind,
   type AgentEvent,
@@ -184,7 +186,11 @@ function projectSettings(json: string): ProjectSettings {
     geminiCautions: ["Google AI Pro 계정에서 실제 제공되는 Gemini 모델만 사용합니다. Ultra 전용 모델·API 결제로 전환하지 않습니다. 일반 업무는 클로드 우선, 이미지 생성은 지피티, 중요한 오류는 기존 클로드·지피티 양쪽 조사 규칙을 유지합니다."],
   };
   for (const [key, values] of Object.entries(previous)) if (values.includes(saved[key])) delete saved[key];
-  return { ...DEFAULT_SETTINGS, ...saved };
+  const settings = { ...DEFAULT_SETTINGS, ...saved };
+  const bounded = (value: number, min: number, max: number, fallback: number) => Number.isFinite(value) ? Math.min(max, Math.max(min, Math.floor(value))) : fallback;
+  settings.maxConsults = bounded(settings.maxConsults, 1, MAX_CONSULTS, DEFAULT_SETTINGS.maxConsults);
+  settings.maxReviews = bounded(settings.maxReviews, 0, MAX_REVIEWS, DEFAULT_SETTINGS.maxReviews);
+  return settings;
 }
 
 const toProject = (r: Row): Project => ({
@@ -267,6 +273,18 @@ export class Store {
     this.db.exec("UPDATE consults SET status = 'stopped', ended_at = COALESCE(ended_at, started_at) WHERE status = 'running'");
     this.migrateV1();
     this.migrateAgents();
+    this.migrateAllocationLimits();
+  }
+
+  private migrateAllocationLimits() {
+    if (this.getSetting("migratedAllocationLimits")) return;
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare("UPDATE projects SET settings_json = json_set(settings_json, '$.maxConsults', ?, '$.maxReviews', ?) WHERE json_extract(settings_json, '$.maxConsults') = 8 AND json_extract(settings_json, '$.maxReviews') = 3")
+        .run(DEFAULT_SETTINGS.maxConsults, DEFAULT_SETTINGS.maxReviews);
+      this.setSetting("migratedAllocationLimits", "1");
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
   /**

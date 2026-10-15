@@ -105,13 +105,86 @@ export function AttachmentChip({ a, onRemove }: { a: AttachmentRef; onRemove?: (
 }
 
 type ArtifactItem = Extract<Item, { kind: "artifacts" }>;
+type ToolItem = Extract<Item, { kind: "tool" }>;
+type ItemEntry =
+  | { kind: "item"; item: Item }
+  | { kind: "tool-group"; items: ToolItem[] };
+
+function groupItems(items: Item[]): ItemEntry[] {
+  const entries: ItemEntry[] = [];
+  for (let index = 0; index < items.length; ) {
+    const item = items[index];
+    if (item.kind !== "tool") {
+      entries.push({ kind: "item", item });
+      index += 1;
+      continue;
+    }
+    const tools: ToolItem[] = [item];
+    while (index + tools.length < items.length) {
+      const next = items[index + tools.length];
+      if (next.kind !== "tool" || next.role !== item.role) break;
+      tools.push(next);
+    }
+    entries.push(tools.length >= 2 ? { kind: "tool-group", items: tools } : { kind: "item", item });
+    index += tools.length;
+  }
+  return entries;
+}
 
 export function ItemList({ items, chatId, nested = false }: { items: Item[]; chatId: number; nested?: boolean }) {
+  const entries = groupItems(items);
   return (
     <div className={cn("flex flex-col", nested ? "gap-0.5" : "gap-1")}>
-      {items.map((it) => (
-        <ItemView key={it.key} item={it} chatId={chatId} nested={nested} />
-      ))}
+      {entries.map((entry) =>
+        entry.kind === "tool-group" ? (
+          <ToolGroup key={entry.items[0].key} items={entry.items} nested={nested} />
+        ) : (
+          <ItemView key={entry.item.key} item={entry.item} chatId={chatId} nested={nested} />
+        )
+      )}
+    </div>
+  );
+}
+
+function ToolGroup({ items, nested }: { items: ToolItem[]; nested: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  const runningCount = items.filter((item) => !item.result).length;
+  const errorCount = items.filter((item) => item.result && !item.result.ok).length;
+  return (
+    <div className={cn("overflow-hidden rounded-lg border bg-card", !nested && "ml-3.5")} data-testid="task-list-group" data-role={items[0].role}>
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-accent/60"
+        data-testid="task-list-toggle"
+        aria-expanded={expanded}
+        aria-label={`작업 목록 ${items.length}개`}
+        onClick={() => setExpanded(!expanded)}
+      >
+        <ChevronRight className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", expanded && "rotate-90")} />
+        <Terminal className="size-3.5 shrink-0 text-muted-foreground" />
+        <span className="shrink-0 text-[12.5px] font-medium">작업 목록</span>
+        <span className="text-[12px] text-muted-foreground">({items.length})</span>
+        <span className="min-w-0 flex-1" />
+        {runningCount > 0 && (
+          <span className="flex shrink-0 items-center gap-1 text-[12px] text-primary">
+            <Loader2 className="size-3.5 animate-spin" />
+            {runningCount}개 진행 중
+          </span>
+        )}
+        {errorCount > 0 && (
+          <span className="flex shrink-0 items-center gap-1 text-[12px] text-destructive">
+            <X className="size-3.5" />
+            {errorCount}개 오류
+          </span>
+        )}
+      </button>
+      {expanded && (
+        <div className="space-y-1.5 border-t p-2">
+          {items.map((item) => (
+            <ToolCard key={item.key} item={item} nested />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

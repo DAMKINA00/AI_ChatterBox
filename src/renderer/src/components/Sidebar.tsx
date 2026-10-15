@@ -325,12 +325,15 @@ function ProjectNode({
       <ItemMenus actions={actions}>
         <div
           className={cn("group flex h-8 cursor-default items-center gap-1 rounded-md pr-1 pl-1 hover:bg-accent/70", project.archived && "opacity-60")}
-          onClick={() => toggle(`p${project.id}`, !open)}
           title={project.folder}
         >
-          <ChevronRight className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", open && "rotate-90")} />
-          {open ? <FolderOpen className="size-4 shrink-0 text-muted-foreground" /> : <FolderClosed className="size-4 shrink-0 text-muted-foreground" />}
-          <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{project.name}</span>
+          <button type="button" className="flex min-w-0 flex-1 items-center gap-1 text-left" aria-label={`${project.name} 폴더`} aria-expanded={open}
+            onClick={(e) => { if (e.detail === 0) toggle(`p${project.id}`, !open); }}
+            onDoubleClick={() => toggle(`p${project.id}`, !open)}>
+            <ChevronRight className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", open && "rotate-90")} />
+            {open ? <FolderOpen className="size-4 shrink-0 text-muted-foreground" /> : <FolderClosed className="size-4 shrink-0 text-muted-foreground" />}
+            <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{project.name}</span>
+          </button>
           <MoreMenu actions={actions} label={`${project.name} 메뉴`} />
           <Tooltip content="새 채팅">
             <button
@@ -446,11 +449,13 @@ function ChatNode({
           <StatusIcon status={chat.status} unread={chat.unread} />
           <span className={cn("min-w-0 flex-1 truncate", chat.unread && "font-semibold")}>{chat.title}</span>
           <span className="shrink-0 rounded border px-1 text-[9.5px] text-muted-foreground">전체 대화</span>
-          <span className="shrink-0 text-[11px] text-muted-foreground group-hover:hidden" title={new Date(chat.lastActiveAt).toLocaleString()}>
-            {timeAgo(chat.lastActiveAt, now)}
-          </span>
-          <span className="hidden group-hover:block">
-            <MoreMenu actions={actions} label={`${chat.title} 메뉴`} />
+          <span className="relative shrink-0">
+            <span className="text-[11px] text-muted-foreground group-hover:opacity-0 group-focus-within:opacity-0 group-has-[[data-state=open]]:opacity-0" title={new Date(chat.lastActiveAt).toLocaleString()}>
+              {timeAgo(chat.lastActiveAt, now)}
+            </span>
+            <span className="absolute top-1/2 right-0 -translate-y-1/2">
+              <MoreMenu actions={actions} label={`${chat.title} 메뉴`} />
+            </span>
           </span>
         </div>
       </ItemMenus>

@@ -83,6 +83,68 @@ test("direct approval and judge failure preserve user fallback", async () => {
     assert.equal((await p).verdict, "allow");
   }
 });
+
+test("high-risk delegation auto allows uncertain or unavailable judgments for master and workers", async () => {
+  for (const role of ["orch", "w1"] as const) {
+    for (const result of ["uncertain", "offline", "empty"] as const) {
+      const f = fixture();
+      f.setHigh(true);
+      f.setJudge(async () => {
+        if (result === "offline") throw new Error("offline");
+        return result === "empty" ? null : { decision: "ask_user", reason: "명령 후반이 생략됨" };
+      });
+      const action = { ...write, role, node: role, writes: false, paths: [], command: "git push", detail: "git push" };
+      assert.equal((await f.service.request(1, folder, action)).verdict, "allow");
+      assert.equal(f.service.pendingCount(1), 0);
+      assert.equal(f.events.some(e => e.type === "approval_request"), false);
+      assert.ok(f.events.some(e => e.type === "approval_auto" && e.decision === "allow" && e.reason.includes("고위험 자동 승인")));
+    }
+  }
+});
+
+test("uncertain judgment still asks the user when high-risk delegation is off", async () => {
+  const f = fixture();
+  f.setJudge(async () => ({ decision: "ask_user", reason: "생략된 명령" }));
+  const pending = f.service.request(1, folder, write);
+  await tick();
+  const event = f.events.find(e => e.type === "approval_request");
+  assert.ok(event?.type === "approval_request");
+  f.service.answer(1, event.request.id, "once");
+  assert.equal((await pending).verdict, "allow");
+});
+
+test("high-risk delegation preserves explicit denial, runtime restrictions and direct approval", async () => {
+  const f = fixture();
+  f.setHigh(true);
+  f.setJudge(async () => ({ decision: "deny", reason: "요청과 무관한 작업" }));
+  assert.equal((await f.service.request(1, folder, write)).verdict, "deny");
+  f.setJudge(async () => ({ decision: "ask_user", reason: "불확실" }));
+  f.setScope(["other/**"]);
+  assert.equal((await f.service.request(1, folder, write)).verdict, "deny");
+  f.setScope(null); f.setGuard("plan mode");
+  assert.equal((await f.service.request(1, folder, write)).verdict, "deny");
+  f.setGuard(null); f.setMode("user");
+  const pending = f.service.request(1, folder, write);
+  await tick();
+  const event = f.events.findLast(e => e.type === "approval_request");
+  assert.ok(event?.type === "approval_request");
+  f.service.answer(1, event.request.id, "deny");
+  assert.equal((await pending).verdict, "deny");
+});
+
+test("high-risk uncertain fallback rechecks stop, settings and scope changes", async () => {
+  for (const change of ["stop", "scope"] as const) {
+    const f = fixture();
+    f.setHigh(true);
+    f.setJudge(async () => {
+      if (change === "stop") f.service.invalidate(1);
+      else f.setScope(["other/**"]);
+      return { decision: "ask_user", reason: "불확실" };
+    });
+    assert.equal((await f.service.request(1, folder, write)).verdict, "deny");
+    assert.equal(f.service.pendingCount(1), 0);
+  }
+});
 test("restriction is rechecked after async judgment and before human answer", async () => {
   const f = fixture();
   f.setJudge(async () => { f.setGuard("another implementation started"); return { decision: "allow", reason: "yes" }; });

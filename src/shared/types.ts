@@ -157,6 +157,8 @@ export const APPROVAL_MODE_LABEL: Record<ApprovalMode, string> = {
   user: "매번 직접 승인",
 };
 
+export const MAX_CONSULTS = 999;
+export const MAX_REVIEWS = 99;
 /** Defaults for new projects and settings absent in older project records. */
 export const DEFAULT_SETTINGS: ProjectSettings = {
   claudeStrengths: "기술 업무의 기본 담당. 소스 분석·원인 조사·구현·테스트·문서의 기술 검증과 파일 제작·모션그래픽·애니메이션 제작을 우선 배정합니다. 문서 본문과 대사 작성·문장 다듬기는 제미나이에게 맡깁니다.",
@@ -174,8 +176,8 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   geminiStrengths: "웹·CLI 모두 글쓰기 전담. 문장 다듬기, 캐릭터 대사·시나리오, 문서 본문 작성·요약·번역을 우선 배정합니다.",
   geminiCautions: "코드 분석·구현·디버깅·테스트·기술 리뷰·교차검증은 맡기지 않습니다. 검증된 사실과 캐릭터 말투를 유지하고 텍스트만 반환합니다. 실제 파일 반영은 클로드·지피티가 수행합니다. Google AI Pro 계정에서 제공되는 모델만 사용합니다.",
   reviewGate: true,
-  maxConsults: 8,
-  maxReviews: 3,
+  maxConsults: 100,
+  maxReviews: 20,
   maxClaudeWorkers: 3,
   maxGptWorkers: 3,
   maxGeminiWorkers: 1,

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { FolderOpen } from "lucide-react";
-import { DEFAULT_SETTINGS, parseOrchestrator, type AgentKind, type Project, type ProjectSettings } from "../../../shared/types";
+import { DEFAULT_SETTINGS, MAX_CONSULTS, MAX_REVIEWS, parseOrchestrator, type AgentKind, type Project, type ProjectSettings } from "../../../shared/types";
 import { api, cn } from "../lib/utils";
 import { useStore } from "../store";
 import { defaultEffortForModel, EffortPicker } from "./EffortPicker";
@@ -259,7 +259,7 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
               <div className="flex items-center justify-between gap-4">
                 <div>
                   <div className="text-[13px] font-medium">고위험 요청도 마스터에 맡기기</div>
-                  <div className="text-[12px] text-muted-foreground">작업 폴더 밖 쓰기, 재귀 삭제, git push, 비밀 파일, 시스템 변경, 업로드. 끄면 이런 요청은 직접 확인합니다</div>
+                  <div className="text-[12px] text-muted-foreground">작업 폴더 밖 쓰기, 재귀 삭제, git push, 비밀 파일, 시스템 변경, 업로드. 켜면 판단이 불확실하거나 실패해도 자동 허용합니다. 명시적 거부와 작업 범위·계획 모드 제한은 유지합니다.</div>
                 </div>
                 <Switch checked={settings.delegateHighRisk} onChange={(v) => set("delegateHighRisk", v)} label="고위험 요청도 맡기기" />
               </div>
@@ -281,8 +281,8 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
               <NumberField label="동시 제미나이 작업자 (0=사용 안 함)" suffix="명" value={settings.maxGeminiWorkers} onChange={(v) => set("maxGeminiWorkers", v)} min={0} max={6} />
             </div>
             <div className="grid grid-cols-2 gap-3">
-              <NumberField label="지시당 맡기기(기본)" suffix="회" value={settings.maxConsults} onChange={(v) => set("maxConsults", v)} min={1} max={30} />
-              <NumberField label="리뷰 왕복" suffix="회" value={settings.maxReviews} onChange={(v) => set("maxReviews", v)} min={0} max={10} />
+              <NumberField label="지시당 배정 한도" suffix="회" value={settings.maxConsults} onChange={(v) => set("maxConsults", v)} min={1} max={MAX_CONSULTS} />
+              <NumberField label="리뷰 왕복" suffix="회" value={settings.maxReviews} onChange={(v) => set("maxReviews", v)} min={0} max={MAX_REVIEWS} />
             </div>
             <div className="text-[12px] text-muted-foreground">작업 시간은 무제한입니다. 필요하면 중지 버튼으로 멈출 수 있습니다.</div>
           </div>

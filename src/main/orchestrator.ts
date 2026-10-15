@@ -49,7 +49,6 @@ import { WORKER_EFFORTS } from "./effort";
 
 const KINDS: ConsultKind[] = ["implement", "review", "opinion", "writing"];
 const MAX_DEPTH = 3;
-const MAX_ASKS_CAP = 24;
 const MAX_GOAL_TURNS = 6;
 const DISCUSSION_INPUT = {
   type: "object", description: "관련 쟁점을 작업자끼리 직접 토의할 그룹. to는 진행자, peers는 의견을 주고받을 다른 작업자 닉네임입니다. opinion 또는 writing 전용이며 진행자는 각 참여자의 실제 응답을 취합해야 합니다.",
@@ -221,7 +220,7 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     `- 채팅에 목표(/goal)가 있으면 그 목표를 향해 일하고, 한 단계를 마칠 때마다 ${t("update_goal")}로 진행을 보고한다. 다 이루면 status=complete.`,
     `- 꼭 필요한 결정만 ${t("ask_user")}로 묻는다.`,
     `- 사용자에게 대사를 쓰기 전에 ${t("set_expression")}(expression=감정)으로 표정을 지정한다. 감정: ${AGENT_EXPRESSIONS.join(", ")}. 기술적 내용과 말투를 억지로 바꾸지 않는다.`,
-    `- 지시·협의의 작업 시간 제한은 없다. 사용자가 중지를 요청하면 즉시 멈춘다. 배정 횟수는 작업자 수에 따라 늘어나며 최대 ${MAX_ASKS_CAP}회, 리뷰는 ${s.maxReviews}회다. 횟수 한도에 걸리면 그때까지의 결과로 보고한다.`,
+    `- 지시·협의의 작업 시간 제한은 없다. 사용자가 중지를 요청하면 즉시 멈춘다. 지시당 배정 한도는 ${s.maxConsults}회, 그중 리뷰는 ${s.maxReviews}회다. 횟수 한도에 걸리면 그때까지의 결과로 보고한다.`,
     "- 마지막에는 항상 한국어로 취합한다: 담당별 결과, 산출물 링크, 검증·리뷰 결과, 남은 문제. 돌아오지 않았거나 실패한 결과를 완료했다고 말하지 않는다. 생성 이미지 파일 경로도 최종 답변에 포함한다.",
     "- 사용자에게 결과물을 제공할 때마다 반드시 해당 파일별로 클릭할 수 있는 Markdown 링크 [파일명](<절대경로>)를 함께 쓴다. 이미지도 같은 링크와 미리보기를 함께 제공한다. :codex-file-citation 같은 내부 앱 전용 표기나 링크 없는 완료 문장으로 대체하지 않는다. 수정한 기존 PDF·문서·ZIP도 빠뜨리지 않고 각각 연결한다.",
   ].join("\n");
@@ -595,8 +594,7 @@ export class Orchestrator {
     const s = project.settings;
     if (this.stopped.has(chatId)) return "사용자가 작업을 중지했습니다. 더 이상 맡기지 말고 멈추세요.";
     if (this.planning.has(chatId)) return "지금은 계획 모드입니다. 작업자에게 맡기지 말고 계획(체크리스트)만 세워 보고하세요.";
-    const workers = this.agents(chatId).filter((a) => a.status === "active").length;
-    const maxAsks = Math.min(MAX_ASKS_CAP, s.maxConsults + 4 * Math.max(0, workers - 2));
+    const maxAsks = s.maxConsults;
     if (inst.asks >= maxAsks) return `한도 도달: 이번 지시에서 ${maxAsks}번 맡겼습니다. 더 맡기지 말고 지금까지의 결과를 보고하세요.`;
     if (kind === "review" && inst.reviews >= s.maxReviews) return `한도 도달: 리뷰를 ${s.maxReviews}회 했습니다. 지금까지의 결과와 남은 지적 사항을 보고하세요.`;
     const h = createHash("sha1").update(`${target}|${kind}|${message.trim()}`).digest("hex");
