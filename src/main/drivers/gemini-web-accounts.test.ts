@@ -172,6 +172,97 @@ test("disposing the account pool cancels waiting allocations", async () => {
   await f.pool.dispose(); await rejected;
 });
 
+test("new ready accounts wake a waiting request even while the previous account's quota lookup is stalled", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = fixture(), first = f.state("gemini-1");
+  first.usage = usage(100);
+  const controller = new AbortController();
+  let chosen: GeminiWebBrowser | undefined, releaseRead!: (u: GeminiWebUsage) => void;
+  const task = f.pool.acquire("waiting-job", controller.signal, "gemini-1").then(b => { chosen = b; }, () => {});
+  try {
+    await flush();
+    first.read = () => new Promise(resolve => { releaseRead = resolve; });
+    t.mock.timers.tick(WEB_RECHECK_MS); await flush();
+    assert.ok(releaseRead, "the previous account has a pending lookup");
+    for (let n = 2; n <= 4; n++) {
+      f.pool.add();
+      f.state(`gemini-${n}` as GeminiWebAccountId).usage = usage(n * 10);
+    }
+    await Promise.all([2, 3, 4].map(n => f.state(`gemini-${n}` as GeminiWebAccountId).browser.refreshUsage()));
+    await flush();
+    assert.equal(chosen?.accountId, "gemini-2", "fresh available accounts must be selected without waiting for account 1");
+    assert.equal(first.owner, undefined);
+    assert.equal(f.state("gemini-2").owner, "waiting-job");
+  } finally {
+    controller.abort();
+    releaseRead?.(usage(100));
+    await task; await f.pool.dispose();
+  }
+});
+
+test("a simultaneous account change releases a lease returned by the abandoned allocation pass", async () => {
+  const f = fixture(), first = f.state("gemini-1");
+  const original = (f.pool as any).pick.bind(f.pool);
+  let race = true;
+  (f.pool as any).pick = (owner: string, signal: AbortSignal, preferred: GeminiWebAccountId | null, refresh: boolean) => {
+    if (!race) return original(owner, signal, preferred, refresh);
+    race = false;
+    return new Promise(resolve => setImmediate(() => {
+      first.owner = owner;
+      f.pool.add();
+      resolve(first.browser);
+    }));
+  };
+  try {
+    const chosen = await f.pool.acquire("racing-job", new AbortController().signal);
+    const owned = f.pool.list().filter(a => f.state(a.accountId).owner === "racing-job");
+    assert.deepEqual(owned.map(a => a.accountId), [chosen.accountId]);
+    chosen.release("racing-job");
+    assert.ok(f.pool.list().every(a => !f.state(a.accountId).owner));
+  } finally { await f.pool.dispose(); }
+});
+
+test("a newly usable account resumes the same waiting driver request with its saved context and partial draft", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = fixture(), first = f.state("gemini-1");
+  first.usage = usage(100);
+  let stored: WebContext = { history: [{ request: "독자와 인물을 유지하세요.", response: "확인된 설정" }], pending: { request: input.text, partial: "이어 쓸 초안" } };
+  const r = run(f.pool, { load: () => stored, save: c => { stored = structuredClone(c); } }, "web:gemini-1:/app/previous-story");
+  await r.driver.send(input); await flush();
+  assert.ok(r.events.some(e => e.type === "notice" && e.text.includes("배정 대기")));
+  assert.equal(r.events.some(e => e.type === "turn_end"), false);
+  f.pool.add();
+  const second = f.state("gemini-2");
+  second.usage = usage(1);
+  await second.browser.refreshUsage(); await flush();
+  for (let n = 0; n < 4; n++) await pulse(t);
+  await r.task();
+  assert.equal(first.prompts.length, 0);
+  assert.equal(second.prompts.length, 1);
+  assert.match(second.prompts[0], /확인된 설정/);
+  assert.match(second.prompts[0], /이어 쓸 초안/);
+  assert.match(second.prompts[0], /사서의 목소리/);
+  assert.equal(stored.pending, undefined);
+  assert.equal(r.events.filter(e => e.type === "turn_end").length, 1);
+  assert.equal(r.events.findLast(e => e.type === "turn_end")?.ok, true);
+  await f.pool.dispose();
+});
+
+test("accounts added after the user stops a waiting request cannot restart that request", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = fixture(); f.state("gemini-1").usage = usage(100);
+  const r = run(f.pool);
+  await r.driver.send(input); await flush();
+  await r.driver.stop();
+  f.pool.add();
+  await f.state("gemini-2").browser.refreshUsage();
+  t.mock.timers.tick(WEB_RECHECK_MS); await flush();
+  assert.ok(f.pool.list().every(a => !f.state(a.accountId).owner && f.state(a.accountId).prompts.length === 0));
+  assert.equal(r.events.filter(e => e.type === "turn_end").length, 1);
+  assert.equal(r.events.findLast(e => e.type === "turn_end")?.interrupted, true);
+  await f.pool.dispose();
+});
+
 test("manual drafts are skipped without interruption when another account can work", async () => {
   const f = fixture(); f.pool.add();
   const first = f.state("gemini-1"), second = f.state("gemini-2");
