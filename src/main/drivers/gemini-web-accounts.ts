@@ -1,4 +1,4 @@
-import type { GeminiWebAccountId, GeminiWebAccountStatus, GeminiWebUsage } from "../../shared/types";
+import type { GeminiWebAccountId, GeminiWebAccountStatus, GeminiWebUsage, GeminiWebStatus } from "../../shared/types";
 import { GeminiWebBrowser } from "./gemini-web-browser";
 import { webAccountId } from "./gemini-web-protocol";
 
@@ -26,7 +26,8 @@ export class GeminiWebAccounts {
   private disposed = false;
   private closing = new AbortController();
   constructor(private dataDir: string, private settings: Settings,
-    private makeBrowser = (id: GeminiWebAccountId, changed: (usage: GeminiWebUsage) => void, usage?: GeminiWebUsage) => new GeminiWebBrowser(dataDir, changed, id, usage)) {
+    private makeBrowser = (id: GeminiWebAccountId, changed: (usage: GeminiWebUsage) => void, usage?: GeminiWebUsage) => new GeminiWebBrowser(dataDir, changed, id, usage, status => this.onLogin(status)),
+    private onLogin: (status: GeminiWebStatus) => void = () => {}) {
     let saved: unknown;
     try { saved = JSON.parse(settings.getSetting(SETTING) ?? "null"); } catch { /* Keep the original account when metadata is damaged. */ }
     const seen = new Set<string>();

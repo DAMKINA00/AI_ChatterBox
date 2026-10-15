@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { GeminiWebBrowser } from "./gemini-web-browser";
+import { GeminiWebAccounts } from "./gemini-web-accounts";
 import type { WebSnapshot } from "./gemini-web-protocol";
 
 const snapshot = (patch: Partial<WebSnapshot> = {}): WebSnapshot => ({ url: "https://gemini.google.com/app", login: false,
@@ -118,4 +119,158 @@ test("visible low request counts update quota without reading assistant prose", 
   browser.observe(snapshot({ notices: ["Remaining: 1 of 100 requests"] }));
   assert.equal(browser.status().usage.remaining, 1);
   assert.equal(browser.status().usage.limit, 100);
+});
+
+function loginFixture(t: TestContext) {
+  const confirmed: any[] = [];
+  const usageWrites: any[] = [];
+  const browser = new GeminiWebBrowser("unused", usage => usageWrites.push(usage), "gemini-1", undefined, status => confirmed.push(status));
+  const b = browser as any;
+  let hidden = 0, flushed = 0, destroyed = false;
+  const win = { isDestroyed: () => destroyed, show() {}, focus() {}, hide() { hidden++; },
+    destroy() { destroyed = true; }, webContents: { stop() {}, session: { flushStorageData() { flushed++; } } } };
+  b.win = win;
+  browser.open = async () => browser.status();
+  browser.refresh = async () => browser.status();
+  browser.refreshUsage = async () => browser.status().usage;
+  t.after(() => b.cancelLoginWatch());
+  return { browser, b, win, confirmed, usageWrites, counts: () => ({ hidden, flushed }) };
+}
+
+test("waiting for Google login does not persist identical unknown quota every second", async t => {
+  const { browser, b, usageWrites } = loginFixture(t);
+  browser.snapshot = async () => snapshot({ login: true });
+  await browser.login();
+  const watch = b.loginWatch;
+  clearTimeout(watch.timer);
+  for (let n = 0; n < 3; n++) { await b.checkLogin(watch); clearTimeout(watch.timer); }
+  assert.equal(usageWrites.length, 1);
+  assert.equal(browser.status().state, "login_required");
+});
+
+test("explicit login waits for authenticated composer, closes once and publishes confirmation", async t => {
+  const { browser, b, confirmed, counts } = loginFixture(t);
+  browser.snapshot = async () => snapshot({ login: true });
+  const pending = await browser.login();
+  assert.equal(pending.state, "login_required");
+  assert.match(pending.message, /자동으로 닫습니다/);
+  const watch = b.loginWatch;
+  assert.ok(watch.timer);
+  assert.equal(confirmed.length, 0);
+  browser.snapshot = async () => snapshot();
+  await b.checkLogin(watch);
+  await b.checkLogin(watch);
+  assert.equal(browser.status().state, "ready");
+  assert.match(browser.status().message, /로그인 완료/);
+  assert.deepEqual(counts(), { hidden: 1, flushed: 1 });
+  assert.equal(confirmed.length, 1);
+  assert.equal(b.loginWatch, undefined);
+});
+
+test("login monitoring never treats an OAuth page, loading editor or visible sign-in button as success", async t => {
+  const { browser, b, confirmed, counts } = loginFixture(t);
+  browser.snapshot = async () => null;
+  await browser.login();
+  const watch = b.loginWatch;
+  clearTimeout(watch.timer);
+  for (const incomplete of [snapshot({ composer: false }), snapshot({ model: "" }), snapshot({ login: true })]) {
+    browser.snapshot = async () => incomplete;
+    await b.checkLogin(watch);
+    // Run a deterministic observation instead of leaving a second scheduled tick behind.
+    clearTimeout(watch.timer);
+  }
+  assert.equal(confirmed.length, 0);
+  assert.equal(browser.status().state, "login_required");
+  assert.equal(counts().hidden, 0);
+});
+
+test("successful sign-in preserves a manually typed draft or generating response", async t => {
+  for (const patch of [{ draft: "unfinished dialogue" }, { generating: true }]) {
+    const { browser, b, confirmed, counts } = loginFixture(t);
+    browser.snapshot = async () => snapshot(patch);
+    await browser.login();
+    assert.equal(browser.status().state, "busy");
+    assert.equal(counts().hidden, 0);
+    assert.match(confirmed[0].message, /브라우저를 유지/);
+    assert.equal(b.loginWatch, undefined);
+  }
+});
+
+test("manual browser opening cancels auto-close and login cannot close a worker-owned browser", async t => {
+  const { browser, b, confirmed, counts } = loginFixture(t);
+  browser.snapshot = async () => snapshot({ login: true });
+  await browser.login();
+  const oldWatch = b.loginWatch;
+  await GeminiWebBrowser.prototype.open.call(browser, true);
+  browser.snapshot = async () => snapshot();
+  await b.checkLogin(oldWatch);
+  assert.equal(b.loginWatch, undefined);
+  assert.equal(confirmed.length, 0);
+  b.owner = "active-worker";
+  await browser.login();
+  assert.equal(b.owner, "active-worker");
+  assert.equal(b.loginWatch, undefined);
+  assert.equal(counts().hidden, 0);
+});
+
+test("late login observation cannot report success after shutdown", async t => {
+  const { browser, b, win, confirmed, counts } = loginFixture(t);
+  let finish!: (s: WebSnapshot) => void;
+  browser.snapshot = () => new Promise(resolve => { finish = resolve; });
+  const pending = browser.login();
+  await new Promise(resolve => setImmediate(resolve));
+  await browser.dispose();
+  finish(snapshot());
+  await pending;
+  assert.equal(win.isDestroyed(), true);
+  assert.equal(b.loginWatch, undefined);
+  assert.equal(confirmed.length, 0);
+  assert.equal(counts().hidden, 0);
+});
+
+test("closing during login opening never starts a watcher for a missing window", async t => {
+  const { browser, b, confirmed } = loginFixture(t);
+  browser.open = async () => { b.win = undefined; return browser.status(); };
+  await browser.login();
+  assert.equal(b.loginWatch, undefined);
+  assert.equal(confirmed.length, 0);
+});
+
+test("explicit visible login recovers Google verification only after a confirmed signed-in page", async t => {
+  const { browser, b, confirmed } = loginFixture(t);
+  b.verificationRequired = true;
+  browser.snapshot = async () => null;
+  await browser.login();
+  const watch = b.loginWatch;
+  assert.equal(b.verificationRequired, true);
+  browser.snapshot = async () => snapshot();
+  await b.checkLogin(watch);
+  assert.equal(b.verificationRequired, false);
+  assert.equal(confirmed.length, 1);
+});
+
+test("account pool login callbacks and windows stay isolated for two simultaneous sign-ins", async t => {
+  const confirmed: any[] = [], values = new Map<string, string>();
+  const pool = new GeminiWebAccounts("unused", { getSetting: key => values.get(key), setSetting: (key, value) => { values.set(key, value); } }, undefined, status => confirmed.push(status));
+  pool.add();
+  t.after(() => pool.dispose());
+  const first = pool.browser("gemini-1"), second = pool.browser("gemini-2");
+  let firstHidden = 0, secondHidden = 0;
+  for (const [browser, hide] of [[first, () => firstHidden++], [second, () => secondHidden++]] as const) {
+    const b = browser as any;
+    b.win = { isDestroyed: () => false, hide, destroy() {}, webContents: { stop() {}, session: { flushStorageData() {} } } };
+    browser.open = async () => browser.status();
+    browser.refreshUsage = async () => browser.status().usage;
+  }
+  first.snapshot = async () => snapshot();
+  second.snapshot = async () => snapshot({ login: true });
+  await Promise.all([first.login(), second.login()]);
+  assert.deepEqual(confirmed.map(status => status.accountId), ["gemini-1"]);
+  assert.equal(firstHidden, 1);
+  assert.equal(secondHidden, 0);
+  assert.equal(pool.list()[1].state, "login_required");
+  second.snapshot = async () => snapshot();
+  await (second as any).checkLogin((second as any).loginWatch);
+  assert.deepEqual(confirmed.map(status => status.accountId), ["gemini-1", "gemini-2"]);
+  assert.equal(secondHidden, 1);
 });

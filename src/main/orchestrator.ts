@@ -51,6 +51,11 @@ const KINDS: ConsultKind[] = ["implement", "review", "opinion", "writing"];
 const MAX_DEPTH = 3;
 const MAX_ASKS_CAP = 24;
 const MAX_GOAL_TURNS = 6;
+const DISCUSSION_INPUT = {
+  type: "object", description: "관련 쟁점을 작업자끼리 직접 토의할 그룹. to는 진행자, peers는 의견을 주고받을 다른 작업자 닉네임입니다. opinion 또는 writing 전용이며 진행자는 각 참여자의 실제 응답을 취합해야 합니다.",
+  properties: { topic: { type: "string" }, peers: { type: "array", items: { type: "string" }, minItems: 1, uniqueItems: true } },
+  required: ["topic", "peers"], additionalProperties: false,
+};
 
 const ROUTE_TOOL: ToolDef = {
   name: "route_request",
@@ -71,7 +76,7 @@ const ASK_TOOL = (forMaster: boolean): ToolDef => ({
     "작업자에게 닉네임으로 일을 맡기거나 질문하고 결과를 기다립니다 (예: to=\"클로드 2호\"). 받는 쪽은 이 대화를 보지 못하므로 message에 목표, 관련 파일, 조건, 완료 기준을 모두 적으세요. " +
     "kind: implement=구현·수정(받는 작업자가 파일을 고침, scope로 고칠 범위를 지정), review=기술 리뷰, opinion=의견·분석, writing=문장 다듬기·캐릭터 대사·문서 본문 등 글쓰기(파일을 고치지 않고 텍스트만 반환). 제미나이는 웹·CLI 모두 writing만 허용하며 코드 작업·기술 리뷰를 맡기지 않습니다. " +
     "scope(implement 전용): 고쳐도 되는 경로 glob 목록(작업 폴더 기준, 예: [\"src/ui/**\", \"README.md\"]). 범위가 겹치지 않는 구현은 동시에 진행되고, 범위 밖 쓰기는 거부됩니다. " +
-    (forMaster ? "여러 작업자에게 동시에 맡기려면 ask를 여러 번 병렬로 호출하세요." : "마스터에게는 ask를 쓰지 말고 결과 보고에 질문을 포함하세요."),
+    (forMaster ? "관련 쟁점을 묶어 토의하려면 discussion={topic, peers}를 지정해 클로드/지피티 진행자에게 맡기세요. 진행자가 참여자에게 직접 ask로 묻고 결과를 취합합니다. 독립적인 일은 ask_parallel을 사용하세요." : "토의 진행자로 지정되면 참여 작업자에게 직접 ask하고 합의·이견·근거를 취합하세요. 마스터에게는 ask를 쓰지 말고 결과 보고에 질문을 포함하세요."),
   inputSchema: {
     type: "object",
     properties: {
@@ -80,6 +85,7 @@ const ASK_TOOL = (forMaster: boolean): ToolDef => ({
       kind: { type: "string", enum: KINDS },
       reason: { type: "string", description: "이 작업자를 선택한 이유. 마스터 배정 시 필수." },
       ...(forMaster ? { effort: { type: "string", enum: [...WORKER_EFFORTS], description: "추론 수준. 일반 작업 medium, 복잡한 분석·구현 high, 가장 어려운 추론·검증 xhigh. 모델 지원 범위를 확인하고 reason에 선택 근거를 적으세요." } } : {}),
+      ...(forMaster ? { discussion: DISCUSSION_INPUT } : {}),
       requiresImage: { type: "boolean", description: "실제 이미지 생성·편집 도구가 필요한 작업이면 true" },
       supersedes: { type: "integer", description: "이 배정으로 보완할 실패한 협의 id" },
       scope: { type: "array", items: { type: "string" } },
@@ -110,6 +116,7 @@ const ASK_PARALLEL_TOOL: ToolDef = {
             supersedes: { type: "integer" },
             attach: { type: "array", items: { type: "string" } },
             scope: { type: "array", items: { type: "string" } },
+            discussion: DISCUSSION_INPUT,
           },
           required: ["to", "message", "kind", "reason", "effort"],
         },
@@ -193,7 +200,7 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     `- 제미나이 선호 작업: ${s.geminiStrengths}\n  주의점: ${s.geminiCautions}` ,
     `- ${GEMINI_WRITING_INSTRUCTIONS} 이 역할 제한은 이전 프로젝트 선호나 사용 한도에 따른 재배정에도 적용한다. 제미나이에 코드 일을 글쓰기라고 바꿔 맡기지 않는다.`,
     "- 글쓰기 본 작업은 제미나이에게 kind=writing으로 배정한다. 요청에 독자·목적·분량·말투와 확인된 사실, 캐릭터 대사에는 성격·관계·상황·말투 예시를 전달한다. 기술 문서는 클로드·지피티가 사실을 확인 → 제미나이가 본문을 작성·다듬기 → 클로드·지피티가 기술 내용과 파일 반영을 확인한다. 제미나이가 비활성·한도·실패 상태면 이유를 기록하고 글쓰기를 클로드·지피티에 재배정할 수 있다. 간단한 답변은 마스터가 직접 한다.",
-    "- Gemini 웹 모델은 계정 1의 Argon 채팅이다. 계정당 작업자 하나만 사용한다. 로컬 파일·명령·MCP를 실행할 수 없으므로 message에 필요한 자료를 포함하거나 attach에 UTF-8 텍스트 파일을 명시한다. 웹에는 추론 단계 설정·토큰 수가 없으므로 effort는 배정 의도로만 기록된다.",
+    "- Gemini 웹 모델은 등록된 별도 계정의 Argon 채팅이다. 계정마다 한 작업만 실행하며 앱이 잔여량·작업량에 따라 계정을 배정하고 맥락을 인계한다. 로컬 파일·명령·MCP를 실행할 수 없으므로 message에 필요한 자료를 포함하거나 attach에 UTF-8 텍스트 파일을 명시한다. 웹에는 추론 단계 설정·토큰 수가 없으므로 effort는 배정 의도로만 기록된다.",
     "- 기술 업무의 기본 배정은 클로드 중심이다. 일반 분석·구현·테스트·문서의 기술 검증과 파일 제작은 먼저 클로드에게 맡기고, 독립 작업이 많으면 클로드 작업자를 추가해 나눈다. 지피티는 이미지 도구가 필요한 작업, 중요한 양쪽 조사·다른 관점의 검증, 사용자의 지피티 지정, 또는 클로드의 한도·실행 불가·과부하에 따른 재배정에 우선 사용한다. 매번 두 계열을 균등하게 배정하지 않는다. 글쓰기 전용인 제미나이를 기술 작업의 대체자로 사용하지 않는다.",
     "- 위 기준은 기본 선호이며 절대적인 우열이 아니다. 필요한 도구 사용 가능 여부를 먼저 확인하고, 사용자가 지정한 담당·선호 기준·관련 맥락·작업량·사용 한도를 고려한다. 두 계열을 매번 모두 부르지 않는다. 실패하면 원인을 반영해 재배정하고 가능한 담당자가 없으면 미완료 사유를 알린다.",
     "- 시각 작업도 구분한다. 이미지 생성·편집은 이미지 도구가 있는 지피티에게, 모션그래픽·애니메이션의 코드·타임라인·연출 제작은 클로드에게 우선 배정한다. 모션그래픽에 새 이미지 소재가 필요하면 그 이미지 생성만 지피티에 맡기고 클로드가 결과를 통합한다.",
@@ -201,6 +208,8 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     `- 양쪽 조사: 클로드와 지피티에게 동일한 문제·증상·소스·로그·완료 기준을 주고 ${t("ask_parallel")}(각 kind=opinion)로 독립 조사시킨다. 다른 쪽 결론을 먼저 전달하거나 파일 수정을 맡기지 않는다. 각각 원인 후보·근거(파일/로그)·재현 방법·수정안·불확실성을 보고하게 한다. 두 결과가 오면 공통점과 차이를 대조하고, 충돌은 추가 증거로 확인해 마스터가 최종 원인·수정 방향을 취합한다. 이후 구현은 정한 담당자에게 맡기고 교차 리뷰 규칙을 유지한다. 한쪽을 실행할 수 없으면 양쪽 조사를 완료했다고 하지 말고 제한과 확인된 결과를 보고한다.`,
     `- 팀: ${t("spawn")}(kind=claude|gpt|gemini)로 작업자를 만든다 → 클로드 N호 / 지피티 N호 / 제미나이 N호. 작업자 수는 일의 양에 맞춘다: 작은 일은 한 명, 큰 일은 범위를 나눠 여러 명(동시에 클로드 최대 ${s.maxClaudeWorkers}명, 지피티 최대 ${s.maxGptWorkers}명, 제미나이 최대 ${s.maxGeminiWorkers}명). 다 쓴 작업자는 ${t("release")}로 해제한다. ${t("agents")}로 팀을 확인한다.`,
     `- 일 맡기기: ${t("ask")}(to=닉네임, kind, message, scope). 서로 독립적인 일은 반드시 ${t("ask_parallel")}(tasks=[…])로 한 번에 맡겨 동시에 진행한다(하나씩 기다리지 말 것). 구현(implement)은 고칠 범위(scope)를 겹치지 않게 나눈다. 리뷰·의견은 언제든 동시에 가능하다.`,
+    `- 관련 쟁점·서로 맞물린 설계·문장과 연출 등 직접 논의가 필요한 항목은 주제별 토의 그룹으로 묶는다. ${t("ask")}(to=클로드/지피티 진행자, kind=opinion|writing, discussion={topic:주제, peers:[참여 닉네임]}, message=목표·공통 자료·쟁점·완료 기준, reason, effort)로 맡긴다. 진행자가 참여자에게 직접 ask로 초안과 근거를 주고받아 합의·이견·남은 확인을 정리하고, 너는 그룹별 결과와 필요한 최종 결정만 취합한다. 사소한 확인까지 매번 중계하지 않는다.`,
+    "- 토의는 파일을 고치지 않는다. 기술 그룹은 클로드·지피티로 구성하고, 제미나이는 글쓰기 그룹에만 참여한다. 참여자는 토의 시점에 대기 상태로 두고 다른 병렬 작업·토의 그룹에 중복 배정하지 않는다. 중요한 오류는 먼저 양쪽 독립 조사 결과를 확보한 뒤 토의 그룹에서 대조한다. 토의 결과를 교차 리뷰로 대신하지 않는다. 실제 참여 응답이 없으면 토의 완료로 보고하지 말고 보완하거나 미완료 사유를 알린다.",
     s.reviewGate
       ? "- 너 자신 또는 작업자가 코드를 바꾸면 끝내기 전에, 그 코드를 만들지 않은 작업자에게 리뷰를 맡긴다 (kind=review). 일반 변경의 리뷰는 다른 클로드 작업자도 가능하다. 중요한 오류·보안·안전 등 다른 계열 관점이 꼭 필요한 경우 지피티로 교차검증한다. 네가 직접 바꾼 파일도 빠짐없이 넘긴다. 지적이 나오면 고치고 다시 리뷰받는다."
       : "- 리뷰는 필요하다고 판단할 때만 맡긴다 (kind=review).",
@@ -229,6 +238,7 @@ function workerInstructions(a: ChatAgent): string {
     ]),
     "- 글쓰기 지시(writing): 문장·대사·문서 본문만 작성해 반환한다. 로컬 파일과 기술적 사실은 바꾸지 않는다. 독자·캐릭터의 말투·길이 조건을 지킨다.",
     "- 다른 작업자에게 확인할 것이 있으면 ask(to=닉네임)로 직접 묻는다. 팀 목록은 agents. 마스터에게는 ask를 쓰지 말고 결과 보고에 질문을 적는다.",
+    "- 토의 그룹의 진행자로 지정되면 공통 주제와 너의 초안·근거·질문을 각 참여자에게 앱 ask로 직접 보내고, 실제 의견을 받아 대조·보완한 뒤 합의, 이견, 근거, 남은 결정을 한 번에 보고한다. 참여자로 질문을 받으면 쟁점에 답하고 반론·확인 질문을 이번 응답에 담는다. 너의 답을 기다리는 진행자에게 다시 ask하여 순환 대기를 만들지 않는다. 그룹 밖 쟁점이나 사용자 결정만 마스터에게 최종 보고한다.",
     "- 끝나면 한국어로 짧게 보고한다: 한 일, 바뀐 파일, 확인 방법과 결과, 남은 문제.",
     `- 대사 전에 set_expression 도구로 감정을 지정한다 (${AGENT_EXPRESSIONS.join(", ")}). Claude에서는 mcp__chatterbox_bridge__set_expression. 기술적 내용과 말투는 그대로 유지한다.`,
   ].join("\n");
@@ -254,6 +264,7 @@ interface Instruction {
   pendingImmediate?: boolean;
 }
 
+interface Discussion { topic: string; peers: ChatAgent[] }
 interface Running {
   consultId: number;
   caller: Role;
@@ -264,6 +275,8 @@ interface Running {
   text: string;
   files: Set<string>;
   pendingFiles: Map<string, string[]>;
+  discussion?: Discussion;
+  discussionReplies?: Set<Role>;
   resolve: (r: { ok: boolean; interrupted?: boolean; error?: string }) => void;
 }
 
@@ -497,7 +510,7 @@ export class Orchestrator {
   private async askTool(chatId: number, caller: Role, args: any): Promise<ToolResult> {
     const to = String(args.to ?? "").trim();
     const kind: ConsultKind = KINDS.includes(args.kind) ? args.kind : "implement";
-    const message = String(args.message ?? "");
+    let message = String(args.message ?? "");
     const scope: string[] = kind === "implement" && Array.isArray(args.scope) ? args.scope.map(String).filter(Boolean) : [];
     const attach: string[] = Array.isArray(args.attach) ? args.attach.map(String) : [];
     const callerName = this.name(chatId, caller);
@@ -515,6 +528,32 @@ export class Orchestrator {
       return textResult(`그런 작업자가 없습니다: "${to}". 지금 팀: ${names.join(", ") || "(없음 — 마스터가 spawn으로 만듭니다)"}`, true);
     }
     if (target.status === "released") return textResult(`${target.nickname}은(는) 해제되었습니다.`, true);
+    let discussion: Discussion | undefined;
+    if (args.discussion !== undefined) {
+      if (caller !== "orch") return textResult("토의 그룹 구성은 마스터가 지정합니다.", true);
+      if (!["opinion", "writing"].includes(kind) || target.kind === "gemini")
+        return textResult("토의 진행자는 클로드·지피티이며 opinion 또는 writing으로 파일 변경 없이 맡기세요.", true);
+      const raw = args.discussion;
+      if (!raw || typeof raw !== "object" || typeof raw.topic !== "string" || !raw.topic.trim() || !Array.isArray(raw.peers) || !raw.peers.length || raw.peers.some((p: unknown) => typeof p !== "string" || !p.trim()))
+        return textResult("토의 주제(topic)와 참여자(peers)를 지정하세요.", true);
+      const names: string[] = raw.peers.map((p: string) => p.trim());
+      if (new Set(names).size !== names.length || names.includes(target.nickname)) return textResult("토의 참여자는 진행자와 다른 닉네임을 중복 없이 지정하세요.", true);
+      const peers = names.map(name => this.agents(chatId).find(a => a.nickname === name && a.status === "active"));
+      if (peers.some(p => !p)) return textResult("토의 참여자는 현재 활성 작업자여야 합니다.", true);
+      const available = peers as ChatAgent[];
+      if (available.some(p => this.running.get(chatId)?.has(p.key))) return textResult("토의 참여자가 작업 중입니다. 완료 후 대기 상태에서 그룹으로 묶으세요.", true);
+      if (kind !== "writing" && available.some(p => p.kind === "gemini")) return textResult("제미나이는 글쓰기 토의(writing)에만 참여할 수 있습니다.", true);
+      const issue = this.investigationIssue(chatId);
+      if (issue) return textResult(`독립 조사 결과를 확보한 뒤 토의하세요. ${issue}`, true);
+      discussion = { topic: raw.topic.trim(), peers: available };
+      message = `[토의 그룹: ${discussion.topic}]\n진행자: ${target.nickname}\n참여자: ${names.join(", ")}\n각 참여자에게 앱 ask(kind=${kind})로 너의 초안·근거·질문을 직접 보내고 실제 답을 받아 대조하라. 필요하면 후속 질문으로 보완하고 합의·이견·근거·남은 결정을 취합하라. 참여 응답 없이 토의 완료라고 하지 마라. 파일을 고치지 마라.\n\n${message}`;
+    }
+    const parent = this.running.get(chatId)?.get(caller);
+    if (parent?.discussion) {
+      if (kind !== parent.kind || !parent.discussion.peers.some(p => p.key === target.key))
+        return textResult("마스터가 지정한 토의 참여자에게 같은 opinion/writing 종류로만 직접 질문하세요. 파일 변경이나 그룹 확장은 마스터에게 보고하세요.", true);
+      message = `[토의 주제: ${parent.discussion.topic}]\n${callerName}이(가) 토의를 진행하며 너의 의견을 기다린다. 이번 응답에 반론·근거·확인 질문을 담고 진행자에게 다시 ask하지 마라.\n\n${message}`;
+    }
     if ((target.kind === "gemini" || this.agents(chatId).find((a) => a.key === caller)?.kind === "gemini") && kind !== "writing")
       return textResult("제미나이는 웹·CLI 모두 글쓰기 전용입니다. 문장 다듬기·캐릭터 대사·문서 본문은 writing으로 요청하고, 코드 분석·구현·테스트·기술 리뷰는 클로드·지피티에게 직접 맡기세요.", true);
     if (args.requiresImage) {
@@ -545,7 +584,9 @@ export class Orchestrator {
     }
     // Worker-to-worker questions inherit the level chosen by the master for the caller.
     const inherited = caller === "orch" ? args.effort : this.chats.store.consult(this.running.get(chatId)?.get(caller)?.consultId ?? -1)?.effort || "medium";
-    return this.consult(chatId, caller, target, kind, message, scope, attach, reason, supersedes, inherited);
+    const response = await this.consult(chatId, caller, target, kind, message, scope, attach, reason || (parent?.discussion ? `토의 ${parent.discussion.topic} · ${callerName} → ${target.nickname}` : ""), supersedes, inherited, discussion);
+    if (parent?.discussion && !response.isError) parent.discussionReplies!.add(target.key);
+    return response;
   }
 
   private limitCheck(chatId: number, project: Project, target: Role, kind: ConsultKind, message: string): string | null {
@@ -584,7 +625,7 @@ export class Orchestrator {
     for (const f of w) f();
   }
 
-  private async consult(chatId: number, caller: Role, target: ChatAgent, kind: ConsultKind, message: string, scope: string[], attach: string[], reason: string, supersedes?: number, requestedEffort?: string): Promise<ToolResult> {
+  private async consult(chatId: number, caller: Role, target: ChatAgent, kind: ConsultKind, message: string, scope: string[], attach: string[], reason: string, supersedes?: number, requestedEffort?: string, discussion?: Discussion): Promise<ToolResult> {
     const chat = this.chats.store.chat(chatId)!;
     const project = this.chats.store.project(chat.projectId)!;
     const callerName = this.name(chatId, caller);
@@ -642,10 +683,14 @@ export class Orchestrator {
           text: "",
           files: new Set(),
           pendingFiles: new Map(),
+          discussion,
+          discussionReplies: discussion ? new Set() : undefined,
           resolve: (end) => {
             if (settled) return;
             settled = true;
-            resolve({ ...end, text: r.text, files: [...r.files] });
+            const missing = discussion?.peers.filter(p => !r.discussionReplies!.has(p.key));
+            const issue = end.ok && missing?.length ? `토의 미완료: ${missing.map(p => p.nickname).join(", ")}의 실제 참여 응답이 없습니다. 보완하거나 미완료 사유를 보고하세요.` : "";
+            resolve({ ...end, ...(issue ? { ok: false, error: issue } : {}), text: issue ? `${issue}\n${r.text}` : r.text, files: [...r.files] });
           },
         };
         const m = this.running.get(chatId) ?? new Map<Role, Running>();

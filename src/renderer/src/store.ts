@@ -143,6 +143,7 @@ export const useStore = create<State>((set, get) => ({
       }),
     );
     api.onUsage((usage) => set({ usage }));
+    api.onGeminiWebLogin((status) => get().toast(`Gemini 웹 계정 ${status.accountId.slice(7)} · ${status.message}`, "info"));
     api.onAgentsUpdated((chatId, list) => set((s) => ({ agents: { ...s.agents, [chatId]: list } })));
     api.onSelectChat((chatId) => void get().select({ chatId }));
     window.addEventListener("focus", () => {

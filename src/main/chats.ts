@@ -20,6 +20,7 @@ import {
   type TimelineEvent,
   type UsageInfo,
   type ModelOption,
+  type GeminiWebStatus,
 } from "../shared/types";
 import type { ChatPatch, Store } from "./db";
 import { LocalBridge } from "./local-bridge";
@@ -44,6 +45,7 @@ export interface Sink {
   chat(chat: Chat): void;
   consult(c: Consult): void;
   usage(u: UsageInfo): void;
+  webLogin?(status: GeminiWebStatus): void;
 }
 
 /** Live-only events (not persisted). */
@@ -151,7 +153,7 @@ export class ChatManager {
   geminiModels() { return listGeminiModels(this.geminiExe(), this.tmpDir); }
 
   geminiWebAccounts() {
-    return this.webAccounts ??= new GeminiWebAccounts(this.dataDir, this.store);
+    return this.webAccounts ??= new GeminiWebAccounts(this.dataDir, this.store, undefined, status => this.sink.webLogin?.(status));
   }
   geminiWeb(accountId: GeminiWebAccountId = "gemini-1") {
     return this.geminiWebAccounts().browser(accountId);

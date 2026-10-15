@@ -55,6 +55,7 @@ const api: ChatterBoxApi = {
   onConsultUpdated: (cb) => on("consult:updated", cb),
   onAgentsUpdated: (cb) => on("agents:updated", cb),
   onUsage: (cb) => on("usage", cb),
+  onGeminiWebLogin: (cb) => on("gemini:web-login", cb),
   onSelectChat: (cb) => on("select-chat", cb),
 };
 

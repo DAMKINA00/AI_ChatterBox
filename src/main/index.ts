@@ -187,6 +187,7 @@ function registerIpc() {
   ipcMain.handle("models:list", (_e, agent: AgentKind) => chats.models(agent));
   ipcMain.handle("gemini:web", (_e, action: string, accountId: GeminiWebAccountId = "gemini-1") => {
     const browser = chats.geminiWeb(accountId);
+    if (action === "login") return browser.login();
     if (action === "open") return browser.open();
     if (action === "refresh") return browser.refresh();
     if (action === "status") return browser.status();
@@ -277,6 +278,7 @@ app.whenReady().then(async () => {
       },
       consult: (c) => send("consult:updated", c),
       usage: (u) => send("usage", u),
+      webLogin: (status) => send("gemini:web-login", status),
     },
     dataDir,
     // claude.exe/codex.exe run this script with our exe as Node; packaged, it is unpacked next to app.asar.

@@ -430,7 +430,7 @@ export interface ChatterBoxApi {
   // misc
   cliInfo(): Promise<CliInfo[]>;
   models(agent: AgentKind): Promise<ModelOption[]>;
-  geminiWeb(action: "status" | "open" | "refresh", accountId?: GeminiWebAccountId): Promise<GeminiWebStatus>;
+  geminiWeb(action: "status" | "open" | "login" | "refresh", accountId?: GeminiWebAccountId): Promise<GeminiWebStatus>;
   geminiWebAccounts(action: "list" | "add" | "update", input?: { accountId?: GeminiWebAccountId; label?: string; enabled?: boolean }): Promise<GeminiWebAccountStatus[]>;
   getTheme(): Promise<Theme>;
   setTheme(theme: Theme): Promise<void>;
@@ -444,6 +444,7 @@ export interface ChatterBoxApi {
   onConsultUpdated(cb: (consult: Consult) => void): () => void;
   onAgentsUpdated(cb: (chatId: number, agents: ChatAgent[]) => void): () => void;
   onUsage(cb: (u: UsageInfo) => void): () => void;
+  onGeminiWebLogin(cb: (status: GeminiWebStatus) => void): () => void;
   /** Main asks to show a chat (tray notification clicked). */
   onSelectChat(cb: (chatId: number) => void): () => void;
 }

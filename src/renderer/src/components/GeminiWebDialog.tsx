@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { CircleAlert, ExternalLink, Loader2, Plus, RefreshCw, Sparkles } from "lucide-react";
 import type { GeminiWebAccountId, GeminiWebAccountStatus, GeminiWebStatus, GeminiWebUsage } from "../../../shared/types";
 import { api, errorMessage } from "../lib/utils";
@@ -101,17 +101,24 @@ interface Props {
   onUseModel?: () => void;
 }
 
-function AccountCard({ account, pending, update, query }: {
+type LoginFeedback = "pending" | "complete";
+
+function AccountCard({ account, pending, loginFeedback, update, query }: {
   account: GeminiWebAccountStatus;
   pending: boolean;
+  loginFeedback?: LoginFeedback;
   update: (id: GeminiWebAccountId, patch: { label?: string; enabled?: boolean }) => void;
-  query: (id: GeminiWebAccountId, action: "open" | "refresh") => void;
+  query: (id: GeminiWebAccountId, action: "login" | "open" | "refresh") => void;
 }) {
   const [label, setLabel] = useState(account.label);
   useEffect(() => setLabel(account.label), [account.label]);
   const tip = usageTooltip(account.usage);
   const windows = quotaWindows(account.usage);
   const busy = account.state === "busy";
+  const browserAction = account.state === "ready" || account.state === "busy" ? "open" : "login";
+  const showLoginFeedback = loginFeedback === "complete"
+    ? account.state === "ready" || account.state === "busy"
+    : loginFeedback === "pending" && (pending || (account.state !== "closed" && account.state !== "error"));
   return (
     <section className="grid gap-3 rounded-xl border bg-card p-4" data-testid="gemini-web-account" data-account-id={account.accountId}>
       <div className="flex items-center gap-2">
@@ -140,8 +147,13 @@ function AccountCard({ account, pending, update, query }: {
         </div>
       </Tooltip>
       <p className="min-h-8 text-[12px] text-muted-foreground">{account.message}</p>
+      {showLoginFeedback && (
+        <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-[12px] text-muted-foreground" data-testid="gemini-web-login-feedback" role="status" aria-live="polite">
+          {loginFeedback === "pending" ? "로그인 진행 중" : "로그인 완료"}
+        </div>
+      )}
       <div className="flex flex-wrap gap-2">
-        <Button type="button" size="sm" variant="outline" disabled={pending} onClick={() => query(account.accountId, "open")}><ExternalLink /> 로그인 / 브라우저</Button>
+        <Button type="button" size="sm" variant="outline" disabled={pending} onClick={() => query(account.accountId, browserAction)} data-testid="gemini-web-login"><ExternalLink /> 로그인 / 브라우저</Button>
         <Button type="button" size="sm" variant="outline" disabled={pending} onClick={() => query(account.accountId, "refresh")}><RefreshCw /> 사용량 확인</Button>
       </div>
     </section>
@@ -151,13 +163,52 @@ function AccountCard({ account, pending, update, query }: {
 export function GeminiWebDialog({ open, onOpenChange, onUseModel }: Props) {
   const [accounts, setAccounts] = useState<GeminiWebAccountStatus[]>([]);
   const [pending, setPending] = useState(false);
+  const [pendingAccounts, setPendingAccounts] = useState<Set<GeminiWebAccountId>>(() => new Set());
+  const [loginFeedback, setLoginFeedback] = useState<Partial<Record<GeminiWebAccountId, LoginFeedback>>>({});
   const [error, setError] = useState<string>();
-  const reload = useCallback(async () => setAccounts(await api.geminiWebAccounts("list")), []);
+  const listRequestInFlight = useRef(false);
+  const reload = useCallback(async () => {
+    if (listRequestInFlight.current) return;
+    listRequestInFlight.current = true;
+    try {
+      setAccounts(await api.geminiWebAccounts("list"));
+    } finally {
+      listRequestInFlight.current = false;
+    }
+  }, []);
   useEffect(() => {
     if (!open) return;
-    void reload().catch(e => setError(errorMessage(e)));
-    const timer = setInterval(() => void reload().catch(e => setError(errorMessage(e))), 3000);
-    return () => clearInterval(timer);
+    let active = true;
+    const refresh = () => {
+      if (active) void reload().catch(e => setError(errorMessage(e)));
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 3000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [open, reload]);
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    const unsubscribe = api.onGeminiWebLogin(status => {
+      if (!active) return;
+      setAccounts(current => current.map(account => account.accountId === status.accountId ? { ...account, ...status } : account));
+      if (status.state === "ready" || status.state === "busy") {
+        setLoginFeedback(current => ({ ...current, [status.accountId]: "complete" }));
+        setPendingAccounts(current => {
+          const next = new Set(current);
+          next.delete(status.accountId);
+          return next;
+        });
+      }
+      void reload().catch(e => setError(errorMessage(e)));
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, [open, reload]);
   const manage = async (action: "add" | "update", input?: { accountId?: GeminiWebAccountId; label?: string; enabled?: boolean }) => {
     setPending(true); setError(undefined);
@@ -165,11 +216,31 @@ export function GeminiWebDialog({ open, onOpenChange, onUseModel }: Props) {
     catch (e) { setError(errorMessage(e)); }
     finally { setPending(false); }
   };
-  const query = async (id: GeminiWebAccountId, action: "open" | "refresh") => {
-    setPending(true); setError(undefined);
-    try { await api.geminiWeb(action, id); await reload(); }
-    catch (e) { setError(errorMessage(e)); }
-    finally { setPending(false); }
+  const query = async (id: GeminiWebAccountId, action: "login" | "open" | "refresh") => {
+    setPendingAccounts(current => new Set(current).add(id));
+    setError(undefined);
+    if (action === "login") setLoginFeedback(current => ({ ...current, [id]: "pending" }));
+    try {
+      const status = await api.geminiWeb(action, id);
+      setAccounts(current => current.map(account => account.accountId === status.accountId ? { ...account, ...status } : account));
+      if (action === "login" && (status.state === "ready" || status.state === "busy")) setLoginFeedback(current => ({ ...current, [id]: "complete" }));
+      await reload();
+    }
+    catch (e) {
+      setError(errorMessage(e));
+      if (action === "login") setLoginFeedback(current => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
+    }
+    finally {
+      setPendingAccounts(current => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
+    }
   };
   const canUse = accounts.some(a => a.enabled && a.state !== "login_required" && a.state !== "error" && a.usage.status !== "limited" && a.remainingPercent !== 0
     && (a.state === "ready" || a.state === "busy" || (a.usage.status === "available" && (a.remainingPercent ?? 0) > 0)));
@@ -182,7 +253,14 @@ export function GeminiWebDialog({ open, onOpenChange, onUseModel }: Props) {
         </div>
         {error && <div role="alert" className="flex gap-2 rounded-lg border border-destructive/50 p-3 text-[12px] text-destructive"><CircleAlert className="size-4 shrink-0" />{error}</div>}
         <div className="grid max-h-[58vh] gap-3 overflow-y-auto pr-1 sm:grid-cols-2" data-testid="gemini-web-accounts">
-          {accounts.map(account => <AccountCard key={account.accountId} account={account} pending={pending} update={(id, patch) => void manage("update", { accountId: id, ...patch })} query={(id, action) => void query(id, action)} />)}
+          {accounts.map(account => <AccountCard
+            key={account.accountId}
+            account={account}
+            pending={pending || pendingAccounts.has(account.accountId)}
+            loginFeedback={loginFeedback[account.accountId]}
+            update={(id, patch) => void manage("update", { accountId: id, ...patch })}
+            query={(id, action) => void query(id, action)}
+          />)}
           {!accounts.length && <p className="text-[12px] text-muted-foreground">계정을 불러오는 중입니다.</p>}
         </div>
         <DialogFooter>
