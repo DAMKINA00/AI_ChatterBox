@@ -84,7 +84,7 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
       <TeamChips chat={chat} />
       {!node && <GoalBar chat={chat} />}
       {!node && plan && <PlanPanel chat={chat} plan={plan} onRevise={() => composer.current?.setText("/plan 수정: ")} />}
-      <Timeline items={items} chatId={chat.id} busy={busy} instructionAt={instructionAt} empty={!events?.length} loading={!events} />
+      <Timeline items={items} chatId={chat.id} busy={busy} instructionAt={instructionAt} empty={!events?.length} loading={!events} masterView={!node || node === "orch"} />
       {chat.status === "interrupted" && <InterruptedBanner chat={chat} />}
       {node && node !== "orch" ? (
         <div className="border-t px-6 py-2.5 text-center text-[12px] text-muted-foreground">
@@ -488,11 +488,15 @@ function InterruptedBanner({ chat }: { chat: Chat }) {
   );
 }
 
-function Timeline({ items, chatId, busy, instructionAt, empty, loading }: { items: ReturnType<typeof buildItems>; chatId: number; busy: boolean; instructionAt: number; empty: boolean; loading: boolean }) {
+function Timeline({ items, chatId, busy, instructionAt, empty, loading, masterView }: { items: ReturnType<typeof buildItems>; chatId: number; busy: boolean; instructionAt: number; empty: boolean; loading: boolean; masterView: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
   const stick = useRef(true);
   const [now, setNow] = useState(() => Date.now());
+  const { history, pending } = useMemo(() => masterView ? {
+    history: items.filter(item => item.kind !== "approval" || !!item.decision),
+    pending: items.filter(item => item.kind === "approval" && !item.decision),
+  } : { history: items, pending: [] }, [items, masterView]);
 
   useEffect(() => {
     if (!busy) return;
@@ -532,11 +536,16 @@ function Timeline({ items, chatId, busy, instructionAt, empty, loading }: { item
           ) : empty ? (
             <EmptyChat />
           ) : (
-            <ItemList items={items} chatId={chatId} />
+            <ItemList items={history} chatId={chatId} />
           )}
           {busy && (
             <div className="mt-4 flex items-center gap-2 text-[12px] text-muted-foreground" data-testid="working">
               <Loader2 className="size-3.5 animate-spin" /> 작업 중… · {formatElapsed(now - instructionAt)}
+            </div>
+          )}
+          {pending.length > 0 && (
+            <div className="mt-4" data-testid="pending-approvals" aria-label="승인 대기 요청">
+              <ItemList items={pending} chatId={chatId} />
             </div>
           )}
         </div>
