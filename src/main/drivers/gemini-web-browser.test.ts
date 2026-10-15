@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { test, type TestContext } from "node:test";
 import { GeminiWebBrowser } from "./gemini-web-browser";
 import { GeminiWebAccounts } from "./gemini-web-accounts";
@@ -273,4 +274,87 @@ test("account pool login callbacks and windows stay isolated for two simultaneou
   await (second as any).checkLogin((second as any).loginWatch);
   assert.deepEqual(confirmed.map(status => status.accountId), ["gemini-1", "gemini-2"]);
   assert.equal(secondHidden, 1);
+});
+
+test("authentication redirects allow cookie handoff while blocking unrelated hosts and keeping URL secrets out of feedback", () => {
+  const { browser, b } = fixture();
+  const win = Object.assign(new EventEmitter(), { webContents: Object.assign(new EventEmitter(), { setWindowOpenHandler() {} }) });
+  b.protectNavigation(win);
+  for (const url of ["https://accounts.google.com/signin", "https://www.google.com/accounts/SetSID", "https://www.google.co.kr/accounts/SetSID", "https://accounts.youtube.com/accounts/CheckCookie", "https://gemini.google.com/app"]) {
+    let blocked = false;
+    win.webContents.emit("will-redirect", { preventDefault: () => { blocked = true; } }, url);
+    assert.equal(blocked, false, url);
+  }
+  for (const url of ["http://accounts.google.com/signin", "https://accounts.google.com.evil.test/login?token=secret", "https://www.google.com/search?q=secret", "https://accounts.youtube.com/watch?v=secret"]) {
+    let blocked = false;
+    win.webContents.emit("will-navigate", { preventDefault: () => { blocked = true; } }, url);
+    assert.equal(blocked, true, url);
+    assert.equal(browser.status().state, "error");
+    assert.ok(!browser.status().message.includes("secret"));
+  }
+});
+
+test("startup abort after allowed sign-in navigation preserves the window, but real connection errors still fail", async () => {
+  for (const [code, redirected, expected] of [["ERR_ABORTED", true, true], ["ERR_ABORTED", false, false], ["ERR_CONNECTION_REFUSED", true, false]] as const) {
+    const { b } = fixture();
+    let destroyed = false;
+    const contents = new EventEmitter();
+    const win = Object.assign(new EventEmitter(), { webContents: contents, isDestroyed: () => destroyed, destroy: () => { destroyed = true; },
+      loadURL: async () => { if (redirected) contents.emit("did-start-navigation", {}, "https://gemini.google.com/signin?continue=fixture", false, true); throw Object.assign(new Error(code), { code }); } });
+    b.makeWindow = () => win;
+    if (expected) { assert.equal(await b.createWindow(true), win); assert.equal(destroyed, false); }
+    else { await assert.rejects(b.createWindow(true), new RegExp(code)); assert.equal(destroyed, true); }
+    assert.equal(contents.listenerCount("did-start-navigation"), 0);
+  }
+});
+
+test("login popup drafts are preserved and a new parent draft prevents an asynchronous return navigation", async t => {
+  for (const popupDraft of [true, false]) {
+    const { browser, b, win, confirmed } = loginFixture(t);
+    let navigated = 0;
+    (win as any).loadURL = async () => { navigated++; };
+    (win.webContents as any).getURL = () => "https://gemini.google.com/app";
+    let current = snapshot({ login: true });
+    browser.snapshot = async () => current;
+    const popup = { isDestroyed: () => false, webContents: { getURL: () => "https://gemini.google.com/app", executeJavaScript: async () => {
+      if (!popupDraft) current = snapshot({ draft: "parent draft typed during observation" });
+      return snapshot({ draft: popupDraft ? "popup draft" : "" });
+    } } };
+    b.authWindows.add(popup);
+    await browser.login();
+    assert.equal(navigated, 0);
+    assert.equal(confirmed.length, 0);
+    await assert.rejects(browser.claim("worker"), /로그인 창/);
+    b.authWindows.clear();
+  }
+});
+
+test("a failed return from an authenticated popup reports an error instead of waiting forever", async t => {
+  const { browser, b, win, confirmed } = loginFixture(t);
+  (win.webContents as any).getURL = () => "https://gemini.google.com/app";
+  (win as any).loadURL = async () => { throw Object.assign(new Error("offline"), { code: "ERR_CONNECTION_REFUSED" }); };
+  browser.snapshot = async () => snapshot({ login: true });
+  b.authWindows.add({ isDestroyed: () => false, webContents: { getURL: () => "https://gemini.google.com/app", executeJavaScript: async () => snapshot() } });
+  await browser.login();
+  assert.equal(browser.status().state, "error");
+  assert.match(browser.status().message, /Gemini 화면을 열지 못했습니다/);
+  assert.equal(b.loginWatch, undefined);
+  assert.equal(confirmed.length, 0);
+  b.authWindows.clear();
+});
+
+test("an authenticated opener never destroys a popup containing a draft or generating response", async t => {
+  for (const patch of [{ draft: "popup draft" }, { generating: true }]) {
+    const { browser, b, confirmed, counts } = loginFixture(t);
+    let destroyed = false;
+    b.authWindows.add({ isDestroyed: () => destroyed, destroy: () => { destroyed = true; }, webContents: {
+      getURL: () => "https://gemini.google.com/app", executeJavaScript: async () => snapshot(patch) } });
+    browser.snapshot = async () => snapshot();
+    await browser.login();
+    assert.equal(destroyed, false);
+    assert.equal(browser.status().state, "busy");
+    assert.equal(confirmed.length, 1);
+    assert.equal(counts().hidden, 0);
+    b.authWindows.clear();
+  }
 });

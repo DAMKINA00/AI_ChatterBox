@@ -4,9 +4,18 @@ import type { GeminiWebAccountId, GeminiWebStatus, GeminiWebUsage } from "../../
 import { SNAPSHOT_SCRIPT, USAGE_SCRIPT, GEMINI_ORIGIN, buttonScript, webUsage, webUsagePage, webConversationUrl, webConversationId, type WebSnapshot } from "./gemini-web-protocol";
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const allowedNavigation = (url: string) => {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" && (["gemini.google.com", "accounts.google.com", "myaccount.google.com"].includes(u.hostname)
+      || (["www.google.com", "www.google.co.kr", "accounts.youtube.com"].includes(u.hostname) && /^\/accounts\/(SetSID|CheckCookie)$/.test(u.pathname))
+      || (u.hostname === "www.google.com" && u.pathname.startsWith("/sorry/")));
+  } catch { return false; }
+};
 /** One isolated persistent Google account. No remote debugging listener or shared app preload. */
 export class GeminiWebBrowser {
   private win?: BrowserWindow;
+  private authWindows = new Set<BrowserWindow>();
   private opening?: Promise<BrowserWindow>;
   private owner?: string;
   private disposed = false;
@@ -14,7 +23,7 @@ export class GeminiWebBrowser {
   private usageReading?: Promise<GeminiWebUsage>;
   private verificationRequired = false;
   private lastUsageReadAt = 0;
-  private loginWatch?: { win: BrowserWindow; timer?: ReturnType<typeof setTimeout> };
+  private loginWatch?: { win: BrowserWindow; timer?: ReturnType<typeof setTimeout>; returning?: boolean };
   private last: GeminiWebStatus = { accountId: "gemini-1", state: "closed", message: "로그인 상태를 확인하세요.", checkedAt: 0, usage: webUsage([]) };
   constructor(private dataDir: string, private onUsage: (usage: GeminiWebUsage) => void, readonly accountId: GeminiWebAccountId = "gemini-1", usage?: GeminiWebUsage,
     private onLogin: (status: GeminiWebStatus) => void = () => {}) {
@@ -66,7 +75,7 @@ export class GeminiWebBrowser {
     await this.open(true);
     if (this.disposed || !this.win || this.win.isDestroyed()) { this.cancelLoginWatch(); return this.last; }
     if (this.owner) return this.last;
-    const watch = { win: this.win! };
+    const watch: NonNullable<GeminiWebBrowser["loginWatch"]> = { win: this.win! };
     this.loginWatch = watch;
     await this.checkLogin(watch);
     return this.last;
@@ -83,15 +92,51 @@ export class GeminiWebBrowser {
       if (this.loginWatch !== watch || watch.win.isDestroyed() || this.disposed) return;
       if (this.owner) { this.cancelLoginWatch(); return; }
       if (!s || s.login || !s.composer || !s.model) {
+        // A target=_blank sign-in may finish in its popup while the opener still shows Sign in.
+        if (this.authWindows.size && !watch.returning && watch.win.webContents.getURL().startsWith(GEMINI_ORIGIN + "/") && !s?.draft.trim() && !s?.generating) {
+          for (const popup of this.authWindows) {
+            if (popup.isDestroyed() || !popup.webContents.getURL().startsWith(GEMINI_ORIGIN + "/")) continue;
+            const signedIn: WebSnapshot = await popup.webContents.executeJavaScript(SNAPSHOT_SCRIPT);
+            if (this.loginWatch !== watch || this.disposed || this.owner || watch.win.isDestroyed()) return;
+            if (!signedIn.login && signedIn.composer && signedIn.model) {
+              if (signedIn.draft.trim() || signedIn.generating) {
+                this.publish("busy", "로그인됨 · 로그인 창에서 작성 중인 내용을 마무리하면 연결이 완료됩니다.", signedIn);
+                return;
+              }
+              const current = await this.snapshot();
+              if (this.loginWatch !== watch || this.disposed || this.owner || watch.win.isDestroyed()) return;
+              if (!watch.win.webContents.getURL().startsWith(GEMINI_ORIGIN + "/") || current?.draft.trim() || current?.generating || (current && !current.login && current.composer && current.model)) return;
+              watch.returning = true;
+              try { await watch.win.loadURL(GEMINI_ORIGIN + "/app"); }
+              catch (error) {
+                const aborted = (error as { code?: string; errno?: number }).code === "ERR_ABORTED" || (error as { errno?: number }).errno === -3;
+                if (!aborted && this.loginWatch === watch && !this.disposed && !this.owner && !watch.win.isDestroyed()) {
+                  this.cancelLoginWatch();
+                  this.publish("error", "로그인은 확인됐지만 Gemini 화면을 열지 못했습니다. 로그인 / 브라우저를 눌러 다시 확인해 주세요.");
+                }
+              }
+              return;
+            }
+          }
+        }
         const message = this.verificationRequired
           ? "Google 보안 확인을 완료해 주세요. 확인 후 연결 상태가 자동으로 갱신됩니다."
           : "브라우저에서 로그인해 주세요. 완료되면 연결을 확인하고 창을 자동으로 닫습니다.";
         if (this.last.state !== "login_required" || this.last.message !== message) this.publish("login_required", message);
         return;
       }
+      let popupBusy = false;
+      for (const popup of this.authWindows) {
+        if (popup.isDestroyed()) continue;
+        const content: WebSnapshot | undefined = popup.webContents.getURL().startsWith(GEMINI_ORIGIN + "/")
+          ? await popup.webContents.executeJavaScript(SNAPSHOT_SCRIPT) : undefined;
+        if (this.loginWatch !== watch || this.disposed || this.owner || watch.win.isDestroyed()) return;
+        if (content?.draft.trim() || content?.generating) popupBusy = true;
+        else if (!popup.isDestroyed()) popup.destroy();
+      }
       this.cancelLoginWatch();
       this.verificationRequired = false;
-      const keepOpen = !!s.draft.trim() || s.generating;
+      const keepOpen = popupBusy || !!s.draft.trim() || s.generating;
       if (!keepOpen) {
         watch.win.webContents.session.flushStorageData();
         watch.win.hide();
@@ -114,21 +159,38 @@ export class GeminiWebBrowser {
     ses.setPermissionCheckHandler(() => false);
     const win = new BrowserWindow({ width: 1100, height: 850, show, autoHideMenuBar: true,
       title: `ChatterBox · Gemini 웹 ${this.accountName}`, webPreferences: { session: ses, sandbox: true, nodeIntegration: false, contextIsolation: true, backgroundThrottling: false } });
-    const allowed = (url: string) => { try { const u = new URL(url); return u.protocol === "https:" && (["gemini.google.com", "accounts.google.com", "myaccount.google.com"].includes(u.hostname) || (u.hostname === "www.google.com" && u.pathname.startsWith("/sorry/"))); } catch { return false; } };
-    win.webContents.on("will-navigate", (event, url) => { if (!allowed(url)) event.preventDefault(); });
+    this.protectNavigation(win);
+    return win;
+  }
+  private protectNavigation(win: BrowserWindow) {
+    const guard = (event: Electron.Event, url: string) => {
+      if (allowedNavigation(url)) return;
+      event.preventDefault();
+      this.cancelLoginWatch();
+      let destination = "지원하지 않는 주소";
+      try { const u = new URL(url); destination = u.hostname + u.pathname; } catch { /* No query or credentials in feedback. */ }
+      this.publish("error", `로그인 이동이 차단되었습니다: ${destination}. 앱에서 연결 상태를 확인해 주세요.`);
+    };
+    win.webContents.on("will-navigate", guard);
     win.webContents.on("will-redirect", (event, url) => {
       if (/^https:\/\/www\.google\.com\/sorry\//.test(url)) {
         this.verificationRequired = true;
         this.publish("login_required", `Google 보안 확인이 필요합니다. ${this.accountName} 브라우저를 열어 직접 확인해 주세요.`);
       }
-      if (!allowed(url)) event.preventDefault();
+      guard(event, url);
     });
     win.webContents.setWindowOpenHandler(({ url }) => {
-      if (win === this.win && allowed(url) && !this.owner) void win.loadURL(url).catch(() => undefined);
-      return { action: "deny" };
+      if (this.disposed || this.owner || (win !== this.win && !this.authWindows.has(win)) || !allowedNavigation(url)) return { action: "deny" };
+      // Preserve window.opener and POST bodies rather than restarting navigation in the parent.
+      return { action: "allow", overrideBrowserWindowOptions: { parent: this.win, width: 800, height: 850, autoHideMenuBar: true,
+        title: `ChatterBox · Gemini 웹 ${this.accountName} 로그인`, webPreferences: { session: win.webContents.session, sandbox: true, nodeIntegration: false, contextIsolation: true, backgroundThrottling: false } } };
+    });
+    win.webContents.on("did-create-window", popup => {
+      this.authWindows.add(popup);
+      this.protectNavigation(popup);
+      popup.once("closed", () => this.authWindows.delete(popup));
     });
     win.on("page-title-updated", (event) => event.preventDefault());
-    return win;
   }
   private async createWindow(show: boolean) {
     const win = this.makeWindow(show);
@@ -139,8 +201,20 @@ export class GeminiWebBrowser {
       if (this.win === win) this.win = undefined;
       this.publish("closed", "브라우저가 닫혔습니다. 로그인 세션은 유지됩니다.");
     });
+    let redirected = false;
+    const contents = win.webContents;
+    const navigating = (_event: Electron.Event, url: string, _inPlace: boolean, main: boolean) => {
+      if (main && url !== GEMINI_ORIGIN + "/app" && allowedNavigation(url)) redirected = true;
+    };
+    contents.on("did-start-navigation", navigating);
     try { await win.loadURL(GEMINI_ORIGIN + "/app"); }
-    catch (error) { if (!win.isDestroyed()) win.destroy(); throw error; }
+    catch (error) {
+      const code = (error as { code?: string; errno?: number }).code;
+      if (this.disposed || this.owner || win.isDestroyed() || this.last.state === "error" || !redirected || (code !== "ERR_ABORTED" && (error as { errno?: number }).errno !== -3)) {
+        if (!win.isDestroyed()) win.destroy();
+        throw error;
+      }
+    } finally { contents.removeListener("did-start-navigation", navigating); }
     await delay(600);
     return win;
   }
@@ -204,6 +278,7 @@ export class GeminiWebBrowser {
     signal?.throwIfAborted();
     if (this.verificationRequired) throw new Error(`Google 보안 확인이 필요합니다. ${this.accountName} 브라우저를 열어 직접 확인한 뒤 새로 확인을 눌러 주세요.`);
     if (this.owner) throw new Error(`Gemini 웹 ${this.accountName}이 다른 작업을 처리 중입니다. 완료 후 다시 배정하세요.`);
+    if (this.authWindows.size) throw new Error(`Gemini 웹 ${this.accountName} 로그인 창을 먼저 마무리해 주세요. 로그인 중에는 작업을 배정하지 않습니다.`);
     this.cancelLoginWatch();
     this.owner = owner;
     const abort = () => { if (this.owner === owner && this.win && !this.win.isDestroyed()) this.win.webContents.stop(); };
@@ -277,6 +352,7 @@ export class GeminiWebBrowser {
   async dispose() {
     this.cancelLoginWatch();
     this.disposed = true; this.owner = undefined;
+    for (const popup of this.authWindows) if (!popup.isDestroyed()) popup.destroy();
     if (this.usageWindow && !this.usageWindow.isDestroyed()) this.usageWindow.destroy();
     if (this.win && !this.win.isDestroyed()) {
       this.win.webContents.stop();
