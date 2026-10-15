@@ -268,6 +268,7 @@ export class Store {
     this.db.exec(SCHEMA);
     this.addColumns();
     this.migrateGeminiAgents();
+    this.db.exec("UPDATE chats SET status = 'paused' WHERE status = 'pausing'");
     // The app was quit or crashed mid-run: those chats can be resumed ("이어서 진행").
     this.db.exec("UPDATE chats SET status = 'interrupted' WHERE status IN ('working','approval')");
     this.db.exec("UPDATE consults SET status = 'stopped', ended_at = COALESCE(ended_at, started_at) WHERE status = 'running'");

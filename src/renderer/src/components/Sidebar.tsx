@@ -15,6 +15,7 @@ import {
   MessageSquare,
   Moon,
   MoreHorizontal,
+  Pause,
   Pencil,
   Plus,
   Search,
@@ -54,6 +55,10 @@ export function StatusIcon({ status, unread }: { status: ChatStatus; unread?: bo
       return <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" aria-label="작업 중" />;
     case "approval":
       return <Hand className="size-3.5 shrink-0 animate-pulse-dot text-warning" aria-label="승인 필요" />;
+    case "pausing":
+      return <Loader2 className="size-3.5 shrink-0 animate-spin text-warning" aria-label="일시 중지 중" />;
+    case "paused":
+      return <Pause className="size-3.5 shrink-0 text-warning" aria-label="일시 정지" />;
     case "error":
       return <CircleAlert className="size-3.5 shrink-0 text-destructive" aria-label="오류" />;
     case "interrupted":

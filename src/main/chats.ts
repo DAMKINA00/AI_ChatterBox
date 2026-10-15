@@ -322,6 +322,7 @@ export class ChatManager {
   private refreshStatus(chatId: number, pending = this.approvals.pendingCount(chatId)) {
     const chat = this.store.chat(chatId);
     if (!chat) return;
+    if (chat.status === "pausing" || chat.status === "paused") return;
     if (pending > 0) this.updateChat(chatId, { status: "approval" });
     else if (chat.status === "approval") this.updateChat(chatId, { status: this.isBusy(chatId) ? "working" : "idle" });
   }
@@ -415,7 +416,7 @@ export class ChatManager {
         this.onDriverEvent?.(chatId, role, event);
         if (role === "orch" && event.type === "turn_end") this.orchTurnEnded(chatId, event);
         // A worker that outlived the orchestrator settles the chat when it ends.
-        else if (event.type === "turn_end" && !this.isBusy(chatId) && this.store.chat(chatId)?.status === "working") {
+        else if (event.type === "turn_end" && this.pendingFinal.has(chatId) && !this.isBusy(chatId) && this.store.chat(chatId)?.status === "working") {
           const final = this.pendingFinal.get(chatId) ?? "idle";
           this.pendingFinal.delete(chatId);
           this.updateChat(chatId, { status: final, unread: final !== "idle", touch: true });
@@ -542,7 +543,8 @@ export class ChatManager {
     const chat = this.store.chat(chatId);
     if (!chat) throw new Error("채팅이 없습니다.");
     const attachments = this.store.attachmentsFor(attachmentIds);
-    if (chat.status === "working" || chat.status === "approval" || this.isBusy(chatId)) {
+    if (chat.status === "pausing") throw new Error("마스터와 작업자의 중지 확인을 기다리고 있습니다.");
+    if (chat.status === "working" || chat.status === "approval" || chat.status === "paused" || this.isBusy(chatId)) {
       if (!this.busySend) throw new Error("작업이 진행 중입니다. 끝나거나 중지한 뒤 보내 주세요.");
       const ev = this.store.addEvent(chatId, "orch", null, { type: "user", text, attachments, queued: true, delivery });
       this.store.linkAttachments(attachmentIds, ev.id);
@@ -587,6 +589,7 @@ export class ChatManager {
   private pendingFinal = new Map<number, "done" | "error" | "idle">();
 
   orchTurnEnded(chatId: number, end: Extract<AgentEvent, { type: "turn_end" }>) {
+    if (["pausing", "paused"].includes(this.store.chat(chatId)?.status ?? "")) return;
     // A worker is still running (stop winding down, or a consult the orchestrator lost track of):
     // keep showing "working" until it ends.
     if (this.isBusy(chatId)) {
@@ -603,11 +606,12 @@ export class ChatManager {
 
   async stop(chatId: number) {
     this.approvals.cancelChat(chatId);
-    await Promise.all(Object.values(this.live.get(chatId) ?? {}).map((l) => l?.driver.stop()));
+    await Promise.allSettled(Object.values(this.live.get(chatId) ?? {}).map((l) => l?.driver.stop()));
+    this.pendingFinal.delete(chatId);
   }
 
   answerApproval(chatId: number, id: string, decision: ApprovalDecision) {
-    this.approvals.answer(chatId, id, decision);
+    return this.approvals.answer(chatId, id, decision);
   }
 
   async deleteChat(chatId: number) {

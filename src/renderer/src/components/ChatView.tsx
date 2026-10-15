@@ -1,5 +1,5 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, Check, ChevronDown, CircleAlert, History, ImagePlus, Loader2, Paperclip, RotateCcw, SendHorizontal, ShieldCheck, Square, Workflow, X } from "lucide-react";
+import { ArrowDown, Check, ChevronDown, CircleAlert, History, ImagePlus, Loader2, Paperclip, Pause, Play, RotateCcw, SendHorizontal, ShieldCheck, Workflow, X } from "lucide-react";
 import {
   APPROVAL_MODE_LABEL,
   parseOrchestrator,
@@ -80,7 +80,7 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
         composer.current?.addFiles([...e.dataTransfer.files]);
       }}
     >
-      <ChatHeader chat={chat} project={project} nodeLabel={nodeLabel} busy={busy} masterExpression={latestExpression(events ?? [], "orch")} />
+      <ChatHeader chat={chat} project={project} nodeLabel={nodeLabel} masterExpression={latestExpression(events ?? [], "orch")} />
       <TeamChips chat={chat} />
       {!node && <GoalBar chat={chat} />}
       {!node && plan && <PlanPanel chat={chat} plan={plan} onRevise={() => composer.current?.setText("/plan 수정: ")} />}
@@ -107,10 +107,9 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
   );
 }
 
-function ChatHeader({ chat, project, nodeLabel, busy, masterExpression }: { chat: Chat; project: Project; nodeLabel: string | null; busy: boolean; masterExpression: AgentExpression }) {
+function ChatHeader({ chat, project, nodeLabel, masterExpression }: { chat: Chat; project: Project; nodeLabel: string | null; masterExpression: AgentExpression }) {
   const updateChat = useStore((s) => s.updateChat);
   const models = useStore((s) => s.models);
-  const toast = useStore((s) => s.toast);
   const label = useModelLabel();
   const orch = parseOrchestrator(chat.orchestratorModelOverride ?? project.settings.orchestratorModel);
   const projectOrch = parseOrchestrator(project.settings.orchestratorModel);
@@ -121,11 +120,6 @@ function ChatHeader({ chat, project, nodeLabel, busy, masterExpression }: { chat
   const claudeEffort = chat.claudeEffortOverride ?? project.settings.claudeEffort ?? "auto";
   const codexEffort = chat.codexEffortOverride ?? project.settings.codexEffort ?? "auto";
   const geminiEffort = chat.geminiEffortOverride ?? project.settings.geminiEffort ?? "auto";
-  const [stopping, setStopping] = useState(false);
-  useEffect(() => {
-    if (!busy) setStopping(false);
-  }, [busy]);
-
   return (
     <header className="flex min-h-12 flex-wrap items-center gap-x-3 gap-y-1.5 border-b px-4 py-2">
       <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -252,26 +246,6 @@ function ChatHeader({ chat, project, nodeLabel, busy, masterExpression }: { chat
         />
       </div>
       <ApprovalModePicker chat={chat} project={project} />
-      {busy && (
-        <Button
-          size="sm"
-          variant="destructive"
-          disabled={stopping}
-          onClick={async () => {
-            setStopping(true);
-            try {
-              await api.stop(chat.id);
-            } catch (e) {
-              toast(errorMessage(e));
-              setStopping(false);
-            }
-          }}
-          data-testid="stop"
-        >
-          {stopping ? <Loader2 className="animate-spin" /> : <Square className="fill-current" />}
-          {stopping ? "중지하는 중" : "중지"}
-        </Button>
-      )}
     </header>
   );
 }
@@ -598,7 +572,21 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
   const [attachments, setAttachments] = useState<AttachmentRef[]>(() => drafts.get(chat.id)?.attachments ?? []);
   const [uploading, setUploading] = useState(0);
   const [sending, setSending] = useState(false);
+  const [pausePending, setPausePending] = useState<"pause" | "resume" | null>(null);
   const area = useRef<HTMLTextAreaElement>(null);
+  const paused = chat.status === "paused";
+  const pausing = chat.status === "pausing";
+  const pauseInFlight = pausing || !!pausePending;
+
+  useEffect(() => {
+    setPausePending(null);
+  }, [chat.id]);
+  useEffect(() => {
+    if (!busy && !pausing) setPausePending(null);
+  }, [busy, pausing]);
+  useEffect(() => {
+    if (busy && pausePending === "resume") setPausePending(null);
+  }, [busy, pausePending]);
 
   useEffect(() => {
     drafts.set(chat.id, { text, attachments });
@@ -693,6 +681,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
   };
 
   const send = async (delivery: "now" | "next" = "now") => {
+    if (pauseInFlight) return;
     const t = text.trim();
     // "/name arg" → command (attachments are not used by commands).
     const cmd = /^\/([a-z-]+)(?:\s+([\s\S]*))?$/i.exec(t);
@@ -716,7 +705,31 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
     }
   };
 
-  const canSend = (!!text.trim() || attachments.length > 0) && !sending && !uploading;
+  const canSend = (!!text.trim() || attachments.length > 0) && !sending && !uploading && !pauseInFlight;
+
+  const requestPause = async () => {
+    if (pauseInFlight || !busy) return;
+    setPausePending("pause");
+    try {
+      await api.pause(chat.id);
+    } catch (e) {
+      toast(errorMessage(e));
+    } finally {
+      setPausePending(null);
+    }
+  };
+
+  const requestResume = async () => {
+    if (pauseInFlight || !paused) return;
+    setPausePending("resume");
+    try {
+      await api.resume(chat.id);
+    } catch (e) {
+      toast(errorMessage(e));
+    } finally {
+      setPausePending(null);
+    }
+  };
 
   return (
     <div className="px-4 pt-1 pb-4">
@@ -766,7 +779,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
           ref={area}
           value={text}
           aria-label="메시지 입력"
-          placeholder={busy ? "추가 지시를 입력하세요. Enter 즉시 전달 · Alt+Enter 다음 단계 전달" : "지시를 입력하세요. Enter 즉시 전달 (/ 로 명령)"}
+          placeholder={paused ? "추가 지시는 재시작할 때 전달" : busy ? "추가 지시를 입력하세요. Enter 즉시 전달 · Alt+Enter 다음 단계 전달" : "지시를 입력하세요. Enter 즉시 전달 (/ 로 명령)"}
           className="block max-h-60 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[14px] leading-relaxed outline-none select-text placeholder:text-muted-foreground"
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => {
@@ -819,14 +832,31 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
             </Button>
           </Tooltip>
           <span className="ml-1 hidden text-[11.5px] text-muted-foreground xl:inline">
-            <Kbd>Enter</Kbd> 즉시 전달 · {busy && <><Kbd>Alt+Enter</Kbd> 다음 단계 · </>}
+            <Kbd>Enter</Kbd> {paused ? "지시 보관" : "즉시 전달"} · {busy && <><Kbd>Alt+Enter</Kbd> 다음 단계 · </>}
             <Kbd>Shift+Enter</Kbd> 줄바꿈 · <Kbd>Ctrl+V</Kbd> 이미지 붙여넣기
           </span>
           <div className="flex-1" />
+          {pauseInFlight ? (
+            <Button size="icon-sm" variant="ghost" disabled aria-label={pausePending === "resume" ? "재시작하는 중" : "일시 중지하는 중"} data-testid="pause">
+              <Loader2 className="animate-spin" />
+            </Button>
+          ) : paused ? (
+            <Tooltip content="재시작">
+              <Button size="icon-sm" variant="ghost" onClick={() => void requestResume()} aria-label="재시작" data-testid="resume">
+                <Play />
+              </Button>
+            </Tooltip>
+          ) : busy ? (
+            <Tooltip content="일시 중지">
+              <Button size="icon-sm" variant="ghost" onClick={() => void requestPause()} aria-label="일시 중지" data-testid="pause">
+                <Pause />
+              </Button>
+            </Tooltip>
+          ) : null}
           {busy && <Button size="sm" variant="outline" onClick={() => void send("next")} disabled={!canSend} aria-label="다음 단계로 전달" title="Alt+Enter" data-testid="send-next" className="rounded-full px-3.5">다음 단계 전달</Button>}
-          <Button size="sm" onClick={() => void send()} disabled={!canSend} aria-label={busy ? "마스터에게 즉시 전달" : "보내기"} title="Enter" data-testid="send" className={cn("rounded-full px-3.5")}>
+          <Button size="sm" onClick={() => void send()} disabled={!canSend} aria-label={paused ? "지시 보관" : busy ? "마스터에게 즉시 전달" : "보내기"} title="Enter" data-testid="send" className={cn("rounded-full px-3.5")}>
             {sending ? <Loader2 className="animate-spin" /> : <SendHorizontal />}
-            {busy ? "즉시 전달" : "보내기"}
+            {paused ? "지시 보관" : busy ? "즉시 전달" : "보내기"}
           </Button>
         </div>
       </div>

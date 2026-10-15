@@ -361,21 +361,32 @@ function ToolCard({ item, nested }: { item: Extract<Item, { kind: "tool" }>; nes
 function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval" }>; chatId: number }) {
   const { request: r, decision } = item;
   const [busy, setBusy] = useState(false);
+  const [pendingDecision, setPendingDecision] = useState<"once" | "chat" | "deny" | null>(null);
+  const [localDecision, setLocalDecision] = useState<"once" | "chat" | "deny" | "expired" | null>(null);
   const selection = useStore((s) => s.selection);
   const select = useStore((s) => s.select);
   const masterView = !selection?.node || selection.node === "orch";
   const toast = useStore((s) => s.toast);
   const answer = async (d: "once" | "chat" | "deny") => {
     setBusy(true);
+    setPendingDecision(d);
     try {
-      await api.answerApproval(chatId, r.id, d);
+      const effective = await api.answerApproval(chatId, r.id, d);
+      const receipt = effective === null ? "expired" : effective === "once" || effective === "chat" || effective === "deny" ? effective : null;
+      if (!receipt) return;
+      setLocalDecision(receipt);
+      setBusy(false);
+      setPendingDecision(null);
     } catch (e) {
       toast(errorMessage(e));
       setBusy(false);
+      setPendingDecision(null);
     }
   };
+  const shownDecision = decision ?? localDecision;
   const status =
-    decision === "once" ? "이번만 허용함" : decision === "chat" ? "이 채팅 동안 허용함" : decision === "deny" ? "거부함" : decision === "expired" ? "만료됨" : decision === "auto" ? "자동 허용" : null;
+    shownDecision === "once" ? "이번만 허용함" : shownDecision === "chat" ? "이 채팅 동안 허용함" : shownDecision === "deny" ? "거부함" : shownDecision === "expired" ? "만료됨" : shownDecision === "auto" ? "자동 허용" : null;
+  const receiptText = busy && !decision ? (pendingDecision === "deny" ? "거부 전달 중…" : "승인 전달 중…") : null;
   const high = r.risk === "high";
   return (
     <div
@@ -393,12 +404,17 @@ function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval"
         <RoleName chatId={chatId} role="orch" size={24} />
         <Badge className="font-mono">{r.title}</Badge>
         {high && <Badge className="border-destructive/40 text-destructive">위험 · {r.riskReason}</Badge>}
-        {status && (
+        {receiptText ? (
+          <span className="ml-auto flex items-center gap-1 text-[12px] text-primary" data-testid="approval-receipt" role="status" aria-live="polite">
+            <Loader2 className="size-3.5 animate-spin" />
+            {receiptText}
+          </span>
+        ) : status ? (
           <span className="ml-auto flex items-center gap-1 text-[12px] text-muted-foreground">
-            {decision === "deny" || decision === "expired" ? <X className="size-3.5" /> : <ShieldCheck className="size-3.5" />}
+            {shownDecision === "deny" || shownDecision === "expired" ? <X className="size-3.5" /> : <ShieldCheck className="size-3.5" />}
             {status}
           </span>
-        )}
+        ) : null}
       </div>
       {r.role !== "orch" && (
         <div className="flex items-center gap-2 text-[12.5px] text-muted-foreground" data-testid="approval-source">

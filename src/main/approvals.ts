@@ -240,7 +240,7 @@ export class ApprovalService {
 
   answer(chatId: number, id: string, decision: ApprovalDecision) {
     const p = this.pending.get(id);
-    if (!p || p.chatId !== chatId) return;
+    if (!p || p.chatId !== chatId) return null;
     this.pending.delete(id);
     const blocked = this.restriction(chatId, p.input);
     if (blocked) decision = "deny";
@@ -259,6 +259,7 @@ export class ApprovalService {
         ? { verdict: "deny", reason: blocked ?? "사용자가 AI_ChatterBox에서 거부했습니다." }
         : { verdict: effective === "chat" ? "allow_chat" : "allow" },
     );
+    return effective;
   }
 
   /** Deny everything still waiting in a chat (stop, process exit, quit). */

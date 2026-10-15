@@ -156,3 +156,19 @@ test("restriction is rechecked after async judgment and before human answer", as
   f.setGuard("plan mode"); f.service.answer(1, e.request.id, "once");
   assert.equal((await p).verdict, "deny");
 });
+
+test("human approval receipt does not wait for another chat's pending master judgment", async () => {
+  const f = fixture();
+  let release!: (answer: JudgeAnswer) => void;
+  f.setJudge(() => new Promise(resolve => { release = resolve; }));
+  const other = f.service.request(2, folder, write);
+  f.setMode("user");
+  const current = f.service.request(1, folder, write);
+  const request = f.events.find(e => e.type === "approval_request");
+  assert.ok(request?.type === "approval_request");
+  assert.equal(f.service.answer(1, request.request.id, "once"), "once");
+  assert.equal((await current).verdict, "allow");
+  assert.equal(f.service.answer(1, request.request.id, "once"), null);
+  release({ decision: "allow", reason: "other chat finished" });
+  assert.equal((await other).verdict, "allow");
+});

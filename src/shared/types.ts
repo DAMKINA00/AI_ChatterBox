@@ -195,7 +195,7 @@ export interface Project {
 }
 
 /** interrupted = the app was quit or crashed mid-run; the chat offers "이어서 진행". */
-export type ChatStatus = "idle" | "working" | "approval" | "done" | "error" | "interrupted";
+export type ChatStatus = "idle" | "working" | "approval" | "pausing" | "paused" | "done" | "error" | "interrupted";
 
 export interface Chat {
   id: number;
@@ -416,12 +416,13 @@ export interface ChatterBoxApi {
   searchChats(q: string): Promise<number[]>;
   send(chatId: number, text: string, attachmentIds: number[], delivery?: "now" | "next"): Promise<void>;
   stop(chatId: number): Promise<void>;
+  pause(chatId: number): Promise<void>;
   /** Continue a run the app quit or crashed in the middle of. */
   resume(chatId: number): Promise<void>;
   /** Slash command from the composer: /plan, /goal, /review, /compact … */
   command(chatId: number, name: string, arg: string): Promise<void>;
   dismissInterrupted(chatId: number): Promise<void>;
-  answerApproval(chatId: number, approvalId: string, decision: ApprovalDecision): Promise<void>;
+  answerApproval(chatId: number, approvalId: string, decision: ApprovalDecision): Promise<ApprovalDecision | null>;
   answerAskUser(chatId: number, askId: string, answer: string): Promise<void>;
   // attachments
   attachFromPaths(chatId: number, paths: string[]): Promise<AttachmentRef[]>;

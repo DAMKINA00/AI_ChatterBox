@@ -264,6 +264,15 @@ interface Instruction {
 }
 
 interface Discussion { topic: string; peers: ChatAgent[] }
+interface PausedAssignment {
+  caller: Role; target: ChatAgent; kind: ConsultKind; message: string; scope: string[];
+  attach: string[]; reason: string; effort?: string; discussion?: Discussion; consultId?: number;
+}
+interface PauseState {
+  folder: string;
+  instruction: Omit<Instruction, "requests"> & { requests: [string, number][] };
+  planning: boolean; reviewing: boolean; assignments: PausedAssignment[];
+}
 interface Running {
   consultId: number;
   caller: Role;
@@ -295,6 +304,14 @@ export class Orchestrator {
   private scopeWaiters = new Map<number, (() => void)[]>();
   private asks = new Map<string, { chatId: number; resolve: (a: string) => void }>();
   private stopped = new Set<number>();
+  private epochs = new Map<number, number>();
+  private nextEpoch(chatId: number) {
+    const epoch = (this.epochs.get(chatId) ?? 0) + 1;
+    this.epochs.set(chatId, epoch);
+    return epoch;
+  }
+  private pauseFlights = new Map<number, Promise<void>>();
+  private assignments = new Map<number, Map<string, PausedAssignment>>();
   /** /plan: the master is only planning (no asks) / running an approved plan. */
   private planning = new Set<number>();
   private reviewing = new Set<number>();
@@ -323,7 +340,7 @@ export class Orchestrator {
     chats.toolsFor = (chat, role) => ({ chatterbox_bridge: this.bridgeFor(chat.id, role) });
     chats.onDriverEvent = (chatId, role, event) => this.observe(chatId, role, event);
     chats.sendHandler = (chat, input) => this.instruct(chat, input);
-    chats.busySend = (chat, input, delivery) => delivery === "now" ? this.deliverNow(chat, input) : this.queue(chat, input);
+    chats.busySend = (chat, input, delivery) => chat.status !== "paused" && delivery === "now" ? this.deliverNow(chat, input) : this.queue(chat, input);
   }
 
   private agents(chatId: number) {
@@ -355,6 +372,7 @@ export class Orchestrator {
 
   private async call(chatId: number, caller: Role, name: string, args: any): Promise<ToolResult> {
     if (!this.chats.store.chat(chatId)) return textResult("채팅이 삭제되었습니다.", true);
+    if ((this.stopped.has(chatId) || ["pausing", "paused"].includes(this.chats.store.chat(chatId)!.status)) && name !== "agents") return textResult("사용자가 작업을 중지했습니다. 재시작 전까지 기다리세요.", true);
     const master = caller === "orch";
     if (master && this.instructions.get(chatId)?.pendingImmediate && ["spawn", "ask", "ask_parallel", "release", "checklist", "update_goal", "ask_user"].includes(name))
       return textResult("사용자의 즉시 추가 질문·수정 요청에 먼저 직접 답변하세요. 이미 아는 내용은 바로 설명하고, 수정 요청은 이해한 내용과 반영 방법을 사용자에게 먼저 말한 뒤 기존 작업을 계속하세요. 기존 작업자는 그대로 실행 중입니다.", true);
@@ -623,17 +641,18 @@ export class Orchestrator {
     for (const f of w) f();
   }
 
-  private async consult(chatId: number, caller: Role, target: ChatAgent, kind: ConsultKind, message: string, scope: string[], attach: string[], reason: string, supersedes?: number, requestedEffort?: string, discussion?: Discussion): Promise<ToolResult> {
+  private async consult(chatId: number, caller: Role, target: ChatAgent, kind: ConsultKind, message: string, scope: string[], attach: string[], reason: string, supersedes?: number, requestedEffort?: string, discussion?: Discussion, resuming = false): Promise<ToolResult> {
+    const epoch = this.epochs.get(chatId);
     const chat = this.chats.store.chat(chatId)!;
     const project = this.chats.store.project(chat.projectId)!;
     const callerName = this.name(chatId, caller);
-    const limited = this.limitCheck(chatId, project, target.key, kind, message);
+    const limited = resuming ? (this.stopped.has(chatId) || this.planning.has(chatId) ? "작업이 중지되었거나 계획 모드입니다." : null) : this.limitCheck(chatId, project, target.key, kind, message);
     if (limited) {
       this.chats.emit(chatId, this.chats.route(chatId, caller), caller, { type: "notice", text: `${target.nickname}에게 맡기기 거절 · ${limited.split(".")[0]}` });
       return textResult(limited + this.takeQueued(chatId), true);
     }
     const inst = this.instructions.get(chatId);
-    if (inst) {
+    if (inst && !resuming) {
       inst.asks++;
       if (kind === "review") inst.reviews++;
     }
@@ -645,12 +664,19 @@ export class Orchestrator {
     let done!: () => void;
     const mine = new Promise<void>((r) => (done = r));
     this.workerQueue.set(queueKey, prev.then(() => mine));
+    const assignmentKey = randomUUID();
+    const assignment: PausedAssignment = { caller, target, kind, message, scope, attach, reason, effort: requestedEffort, discussion };
+    const assignments = this.assignments.get(chatId) ?? new Map();
+    assignments.set(assignmentKey, assignment);
+    this.assignments.set(chatId, assignments);
     try {
       await prev; // the target finishes its current turn first
       const reasoning = await this.chats.assignmentEffort(chatId, target.key, requestedEffort);
-      if (this.stopped.has(chatId)) return textResult("사용자가 작업을 중지했습니다.", true);
+      assignment.effort = reasoning.effort;
+      if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch) return textResult("사용자가 작업을 중지했습니다.", true);
       const attachments = this.attachmentsFor(chatId, attach);
       const consult = this.chats.store.createConsult(chatId, caller, target.key, kind, message, scope, inst?.id, reason, supersedes, reasoning);
+      assignment.consultId = consult.id;
       this.chats.sink.consult(consult);
       const node = `consult:${consult.id}` as NodeId;
       // The card goes where the caller is (master's timeline, or inside the calling worker's consult).
@@ -695,11 +721,11 @@ export class Orchestrator {
         m.set(target.key, r);
         this.running.set(chatId, m);
         this.chats.agentsChanged(chatId);
-        if (this.stopped.has(chatId)) return r.resolve({ ok: false, interrupted: true });
+        if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch) return r.resolve({ ok: false, interrupted: true });
         void (async () => {
           try {
             const driver = await this.chats.driver(chatId, target.key, reasoning.effort);
-            if (this.stopped.has(chatId) || settled) return r.resolve({ ok: false, interrupted: true });
+            if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch || settled) return r.resolve({ ok: false, interrupted: true });
             await driver.send({
               text: kindPrefix(kind, callerName, scope) + message,
               attachments,
@@ -735,6 +761,7 @@ export class Orchestrator {
       const effortLabel = target.kind === "gemini" && this.chats.usesGeminiWeb(chat) ? "웹 모델 설정" : reasoning.effort || "CLI 기본";
       return textResult(`${head} 협의 id=${consult.id} · 추론 ${effortLabel}\n${summary}${files}${caller === "orch" ? this.takeQueued(chatId) : ""}`, status !== "done");
     } finally {
+      assignments.delete(assignmentKey);
       removeWait(this.graph(chatId), caller, target.key);
       done();
     }
@@ -742,6 +769,7 @@ export class Orchestrator {
 
   /** Writes a worker may make right now: its implement scope, nothing during review/opinion. */
   private guardApproval(chatId: number, input: ApprovalInput): string | null {
+    if (this.stopped.has(chatId) || ["pausing", "paused"].includes(this.chats.store.chat(chatId)?.status ?? "")) return "작업이 중지되었습니다.";
     const mutation = !!input.writes || !!input.diffs?.length || (!!input.command && !isReadCommand(input.command));
     if (!mutation) return null;
     if (this.stopped.has(chatId)) return "작업이 중지되었습니다.";
@@ -793,7 +821,7 @@ export class Orchestrator {
         const q = inst.queued.splice(0);
         setTimeout(() => {
           const chat = this.chats.store.chat(chatId);
-          if (!chat) return;
+          if (!chat || this.instructions.get(chatId) !== inst || this.stopped.has(chatId) || ["pausing", "paused"].includes(chat.status)) return;
           this.chats.updateChat(chatId, { status: "working", touch: true });
           this.instruct(chat, { text: q.map((x) => x.text).join("\n\n"), attachments: q.flatMap((x) => x.attachments) }).catch((e) => {
             this.chats.emit(chatId, "orch", "orch", { type: "error", kind: "process", message: String(e) });
@@ -806,6 +834,9 @@ export class Orchestrator {
     const r = this.running.get(chatId)?.get(role);
     if (!r) return;
     switch (event.type) {
+      case "text_delta":
+        r.text += event.text;
+        break;
       case "text":
         r.text = event.text;
         break;
@@ -871,7 +902,7 @@ export class Orchestrator {
     if (!chat) return end;
     // Immediate input may detach the master's native ask call while app workers continue.
     // Wait for those existing jobs and resume synthesis without spending the repair attempt.
-    if (this.chats.store.listConsults(chatId).some((c) => c.instructionId === inst.id && c.status === "running")) {
+    if (this.assignments.get(chatId)?.size || this.chats.store.listConsults(chatId).some((c) => c.instructionId === inst.id && c.status === "running")) {
       if (!inst.waitingForResults) {
         inst.waitingForResults = true;
         const pending = [...this.workerQueue].filter(([key]) => key.startsWith(`${chatId}:`)).map(([, promise]) => promise);
@@ -940,13 +971,18 @@ export class Orchestrator {
   }
 
   private async instruct(chat: Chat, input: AgentInput) {
+    const epoch = this.nextEpoch(chat.id);
     this.stopped.delete(chat.id);
     const prefix = this.handover(chat);
     if (prefix) input = { ...input, text: prefix + input.text };
     this.instructions.set(chat.id, this.newInstruction(chat.id, input.text));
-    const driver = await this.chats.driver(chat.id, "orch");
-    if (this.stopped.has(chat.id)) return;
-    await driver.send({ ...input, text: input.text + attachmentNote(input.attachments) + (this.planning.has(chat.id) ? "" : "\n\n[앱 협업 규칙] 먼저 route_request로 처리 방식을 기록하세요. 본 작업은 앱 spawn/ask로 배정하고 reason에 담당 선택 이유를 적으세요. CLI 내부 에이전트는 사용하지 마세요."), noWrites: this.planning.has(chat.id) || this.reviewing.has(chat.id) });
+    try {
+      const driver = await this.chats.driver(chat.id, "orch");
+      if (this.stopped.has(chat.id) || this.epochs.get(chat.id) !== epoch) return;
+      await driver.send({ ...input, text: input.text + attachmentNote(input.attachments) + (this.planning.has(chat.id) ? "" : "\n\n[앱 협업 규칙] 먼저 route_request로 처리 방식을 기록하세요. 본 작업은 앱 spawn/ask로 배정하고 reason에 담당 선택 이유를 적으세요. CLI 내부 에이전트는 사용하지 마세요."), noWrites: this.planning.has(chat.id) || this.reviewing.has(chat.id) });
+    } catch (error) {
+      if (!this.stopped.has(chat.id) && this.epochs.get(chat.id) === epoch) throw error;
+    }
   }
 
   /** Start a master turn with prepared text (same bookkeeping as a normal instruction). */
@@ -962,7 +998,9 @@ export class Orchestrator {
    */
   async resume(chatId: number) {
     const chat = this.chats.store.chat(chatId);
+    if (chat?.status === "paused") return this.resumePaused(chat);
     if (!chat || chat.status !== "interrupted") return;
+    const epoch = this.nextEpoch(chatId);
     const last = [...this.chats.store.events(chatId)].reverse().find((e) => e.event.type === "user" && !e.event.queued)?.event as { text: string } | undefined;
     const original = last?.text ?? "";
     // Runtime mode sets are empty after restart; restore the interrupted command's restriction.
@@ -981,9 +1019,10 @@ export class Orchestrator {
       this.chats.emit(chatId, "orch", null, { type: "notice", text: "이전 버전의 CLI 내부 작업자 대화는 앱에 저장되지 않았을 수 있습니다. 새 배정부터 앱 작업자 기록으로 표시합니다." });
     try {
       const driver = await this.chats.driver(chatId, "orch");
-      if (this.stopped.has(chatId)) return;
+      if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch) return;
       await driver.send({ text: this.handover(chat) + note, attachments: [], noWrites: this.planning.has(chatId) || this.reviewing.has(chatId) });
     } catch (e) {
+      if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch) return;
       const message = e instanceof Error ? e.message : String(e);
       this.planning.delete(chatId);
       this.reviewing.delete(chatId);
@@ -998,10 +1037,16 @@ export class Orchestrator {
 
   /** The user typed while the team was working: hand it to the master at the next boundary. */
   private async queue(chat: Chat, input: AgentInput) {
-    const inst = this.instructions.get(chat.id);
+    const state = chat.status === "paused" ? this.pauseState(chat.id) : undefined;
+    const inst = this.instructions.get(chat.id) ?? (state && this.restoreInstruction(state));
     if (!inst) throw new Error("작업이 진행 중입니다.");
+    this.instructions.set(chat.id, inst);
     inst.queued.push(input);
-    this.chats.emit(chat.id, "orch", null, { type: "notice", text: "추가 지시를 받았습니다. 다음 단계에서 마스터에게 전달합니다." });
+    if (state) {
+      state.instruction = { ...inst, requests: [...inst.requests] };
+      this.chats.store.setSetting(`pause:${chat.id}`, JSON.stringify(state));
+    }
+    this.chats.emit(chat.id, "orch", null, { type: "notice", text: state ? "추가 지시를 보관했습니다. 재시작할 때 마스터에게 전달합니다." : "추가 지시를 받았습니다. 다음 단계에서 마스터에게 전달합니다." });
   }
 
   private async deliverNow(chat: Chat, input: AgentInput) {
@@ -1053,7 +1098,7 @@ export class Orchestrator {
   async command(chatId: number, name: string, arg: string) {
     const chat = this.chats.store.chat(chatId);
     if (!chat) throw new Error("채팅이 없습니다.");
-    const busy = chat.status === "working" || chat.status === "approval" || this.chats.isBusy(chatId);
+    const busy = ["working", "approval", "pausing", "paused"].includes(chat.status) || this.chats.isBusy(chatId);
     const needIdle = () => {
       if (busy) throw new Error("작업이 진행 중입니다. 끝나거나 중지한 뒤 다시 시도하세요.");
     };
@@ -1178,7 +1223,7 @@ export class Orchestrator {
     }
     setTimeout(() => {
       const c = this.chats.store.chat(chatId);
-      if (!c?.goal || c.goal.status !== "active" || this.chats.isBusy(chatId) || c.status === "working") return;
+      if (!c?.goal || c.goal.status !== "active" || this.stopped.has(chatId) || ["working", "pausing", "paused"].includes(c.status) || this.chats.isBusy(chatId)) return;
       this.setGoal(chatId, { ...c.goal, turns: c.goal.turns + 1, updatedAt: Date.now() });
       const text = `[목표 계속] 목표: ${c.goal.objective}\n지금까지: ${c.goal.progress || "(보고 없음)"}\n남은 일을 이어서 하라. 다 이뤘으면 update_goal(status=complete)로 알리고 보고하라.`;
       void this.chats.startTurn(chatId, "목표를 향해 계속 진행", [], () => this.instructWith(c, text, c.goal!.objective));
@@ -1214,8 +1259,10 @@ export class Orchestrator {
   }
 
   // ---------- stop
-  async stop(chatId: number) {
+  async stop(chatId: number, preserve = false) {
+    this.nextEpoch(chatId);
     this.stopped.add(chatId);
+    if (!preserve) this.chats.store.setSetting(`pause:${chatId}`, "");
     this.wakeMasterConsults(chatId);
     for (const [id, a] of [...this.asks]) {
       if (a.chatId !== chatId) continue;
@@ -1224,15 +1271,93 @@ export class Orchestrator {
       a.resolve("사용자가 작업을 중지했습니다. 멈추세요.");
     }
     const inst = this.instructions.get(chatId);
-    if (inst) inst.queued = [];
+    if (inst && !preserve) inst.queued = [];
     // Wake anything waiting for a scope so it sees the stop.
     const w = this.scopeWaiters.get(chatId) ?? [];
     this.scopeWaiters.set(chatId, []);
     for (const f of w) f();
     await this.chats.stop(chatId);
+    if (!preserve && ["pausing", "paused"].includes(this.chats.store.chat(chatId)?.status ?? "")) this.chats.updateChat(chatId, { status: "idle" });
+  }
+
+  private pauseState(chatId: number): PauseState | undefined {
+    const raw = this.chats.store.getSetting(`pause:${chatId}`);
+    return raw ? JSON.parse(raw) as PauseState : undefined;
+  }
+
+  private restoreInstruction(state: PauseState): Instruction {
+    return { ...state.instruction, requests: new Map(state.instruction.requests), waitingForResults: false, pendingImmediate: false };
+  }
+
+  pause(chatId: number): Promise<void> {
+    const active = this.pauseFlights.get(chatId);
+    if (active) return active;
+    const chat = this.chats.store.chat(chatId);
+    if (!chat || !["working", "approval"].includes(chat.status)) return Promise.resolve();
+    const flight = this.pauseChat(chat).finally(() => this.pauseFlights.delete(chatId));
+    this.pauseFlights.set(chatId, flight);
+    return flight;
+  }
+
+  private async pauseChat(chat: Chat) {
+    const inst = this.instructions.get(chat.id) ?? this.newInstruction(chat.id, "", true);
+    const state: PauseState = {
+      folder: this.chats.store.project(chat.projectId)!.folder,
+      instruction: { ...inst, requests: [...inst.requests] },
+      planning: this.planning.has(chat.id), reviewing: this.reviewing.has(chat.id),
+      assignments: [...(this.assignments.get(chat.id)?.values() ?? [])],
+    };
+    this.stopped.add(chat.id);
+    this.chats.store.setSetting(`pause:${chat.id}`, JSON.stringify(state));
+    this.chats.updateChat(chat.id, { status: "pausing", touch: true });
+    this.chats.emit(chat.id, "orch", null, { type: "notice", text: "마스터와 실행 중인 모든 작업자에게 일시 중지를 요청했습니다." });
+    await Promise.all([this.stop(chat.id, true), this.judge.interrupt(chat.id)]);
+    while (this.chats.store.chat(chat.id) && this.chats.isBusy(chat.id)) await new Promise<void>(resolve => setTimeout(resolve, 25));
+    await Promise.allSettled([...this.workerQueue].filter(([key]) => key.startsWith(`${chat.id}:`)).map(([, job]) => job));
+    const saved = this.pauseState(chat.id);
+    if (!this.chats.store.chat(chat.id) || !saved) return;
+    this.instructions.set(chat.id, this.restoreInstruction(saved));
+    this.chats.updateChat(chat.id, { status: "paused", touch: true });
+    this.chats.emit(chat.id, "orch", null, { type: "notice", text: "일시 정지되었습니다. 재시작하면 같은 마스터와 작업자가 남은 작업을 이어갑니다." });
+  }
+
+  private async resumePaused(chat: Chat) {
+    const state = this.pauseState(chat.id);
+    if (!state) throw new Error("보관된 재시작 정보가 없습니다.");
+    if (state.folder !== this.chats.store.project(chat.projectId)?.folder) throw new Error("일시 정지 후 작업 폴더가 바뀌었습니다. 원래 폴더로 복원한 뒤 재시작하세요.");
+    const epoch = this.nextEpoch(chat.id);
+    const inst = this.restoreInstruction(state);
+    this.instructions.set(chat.id, inst);
+    if (state.planning) this.planning.add(chat.id); else this.planning.delete(chat.id);
+    if (state.reviewing) this.reviewing.add(chat.id); else this.reviewing.delete(chat.id);
+    this.stopped.delete(chat.id);
+    this.chats.updateChat(chat.id, { status: "working", touch: true });
+    this.chats.emit(chat.id, "orch", null, { type: "notice", text: "마스터와 일시 정지했던 작업자에게 재시작을 요청합니다." });
+    for (const assignment of state.assignments) {
+      const target = this.chats.store.agentByKey(chat.id, assignment.target.key);
+      if (!target || target.status !== "active") continue;
+      const prior = assignment.consultId ? this.chats.store.consult(assignment.consultId) : undefined;
+      const message = `[일시 정지한 작업 재시작]\n현재 파일과 이전 진행 상태를 확인하고 남은 부분만 이어가세요. 이미 완료된 변경은 반복하지 마세요.\n\n${assignment.message}${prior?.responseSummary ? `\n\n중지 전 진행 내용:\n${prior.responseSummary}` : ""}`;
+      void this.consult(chat.id, assignment.caller, target, assignment.kind, message, assignment.scope, assignment.attach, "일시 정지한 기존 작업을 같은 담당자에게 재전달", prior?.id, assignment.effort, assignment.discussion, true).catch(error => {
+        this.chats.emit(chat.id, target.key, target.key, { type: "error", message: `작업 재시작 실패: ${String(error)}` });
+      });
+    }
+    try {
+      const driver = await this.chats.driver(chat.id, "orch");
+      if (this.stopped.has(chat.id) || this.epochs.get(chat.id) !== epoch) return;
+      await driver.send({
+        text: `[일시 정지 후 기존 지시 계속]\n${inst.text}\n\n같은 작업자에게 미완료 요청을 재전달했습니다. 이미 끝난 작업은 반복하거나 중복 배정하지 말고 현재 상태를 확인하세요. 기존 배정 결과를 기다려 검토·취합하세요. 만료된 승인·질문은 필요한 경우 다시 요청하세요.${this.takeQueued(chat.id)}`,
+        attachments: [], noWrites: state.planning || state.reviewing,
+      });
+    } catch (error) {
+      if (this.stopped.has(chat.id) || this.epochs.get(chat.id) !== epoch) return;
+      this.chats.emit(chat.id, "orch", "orch", { type: "error", message: `마스터 재시작 실패: ${String(error)}` });
+      this.chats.orchTurnEnded(chat.id, { type: "turn_end", ok: false, error: String(error) });
+    }
   }
 
   forget(chatId: number) {
+    this.chats.store.setSetting(`pause:${chatId}`, "");
     this.wakeMasterConsults(chatId);
     this.judge.forget(chatId);
     for (const [id, reg] of [...this.bridgeKeys]) {

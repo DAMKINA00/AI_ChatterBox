@@ -163,6 +163,7 @@ function registerIpc() {
   ipcMain.handle("chats:search", (_e, q: string) => (q.trim() ? store.searchChats(q.trim()) : []));
   ipcMain.handle("chats:send", (_e, id: number, text: string, attachmentIds: number[], delivery?: "now" | "next") => chats.send(id, text, attachmentIds, delivery));
   ipcMain.handle("chats:stop", (_e, id: number) => orchestrator.stop(id));
+  ipcMain.handle("chats:pause", (_e, id: number) => orchestrator.pause(id));
   ipcMain.handle("chats:resume", (_e, id: number) => orchestrator.resume(id));
   ipcMain.handle("chats:command", (_e, id: number, name: string, arg: string) => orchestrator.command(id, name, arg));
   ipcMain.handle("chats:dismissInterrupted", (_e, id: number) => orchestrator.dismissInterrupted(id));

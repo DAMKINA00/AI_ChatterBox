@@ -27,6 +27,7 @@ const api: ChatterBoxApi = {
   searchChats: (q) => ipcRenderer.invoke("chats:search", q),
   send: (chatId, text, attachmentIds, delivery) => ipcRenderer.invoke("chats:send", chatId, text, attachmentIds, delivery),
   stop: (chatId) => ipcRenderer.invoke("chats:stop", chatId),
+  pause: (chatId) => ipcRenderer.invoke("chats:pause", chatId),
   resume: (chatId) => ipcRenderer.invoke("chats:resume", chatId),
   command: (chatId, name, arg) => ipcRenderer.invoke("chats:command", chatId, name, arg),
   dismissInterrupted: (chatId) => ipcRenderer.invoke("chats:dismissInterrupted", chatId),

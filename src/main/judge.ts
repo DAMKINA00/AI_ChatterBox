@@ -38,6 +38,7 @@ export interface JudgeContext {
 export class ApprovalJudge {
   private sessions = new Map<number, Session>();
   private generation = 0;
+  private chatGenerations = new Map<number, number>();
 
   constructor(
     private chats: ChatManager,
@@ -46,11 +47,12 @@ export class ApprovalJudge {
 
   private async session(chatId: number): Promise<Session> {
     const generation = this.generation;
+    const chatGeneration = this.chatGenerations.get(chatId) ?? 0;
     const chat = this.chats.store.chat(chatId)!;
     const project = this.chats.store.project(chat.projectId)!;
     const { agent, model } = chatOrchestrator(chat, project);
     const { effort } = await this.chats.assignmentEffort(chatId, "orch");
-    if (generation !== this.generation) throw new Error("승인 판단 초기화가 취소되었습니다.");
+    if (generation !== this.generation || chatGeneration !== (this.chatGenerations.get(chatId) ?? 0)) throw new Error("승인 판단 초기화가 취소되었습니다.");
     const key = `${agent}:${model}:${effort}:${project.folder}:${project.settings.delegateHighRisk}`;
     const cur = this.sessions.get(chatId);
     if (cur && cur.key === key) return cur;
@@ -152,10 +154,16 @@ export class ApprovalJudge {
   }
 
   forget(chatId: number) {
-    this.generation++;
+    void this.interrupt(chatId);
+  }
+
+  async interrupt(chatId: number) {
+    this.chatGenerations.set(chatId, (this.chatGenerations.get(chatId) ?? 0) + 1);
     const s = this.sessions.get(chatId);
     this.sessions.delete(chatId);
-    void s?.driver.dispose();
+    s?.done?.(false);
+    await s?.driver.stop().catch(() => undefined);
+    await s?.driver.dispose().catch(() => undefined);
   }
 
   async dispose() {
