@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { memo, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
   ArrowRight,
@@ -131,7 +131,7 @@ function groupItems(items: Item[]): ItemEntry[] {
   return entries;
 }
 
-export function ItemList({ items, chatId, nested = false }: { items: Item[]; chatId: number; nested?: boolean }) {
+export const ItemList = memo(function ItemList({ items, chatId, nested = false }: { items: Item[]; chatId: number; nested?: boolean }) {
   const entries = groupItems(items);
   return (
     <div className={cn("flex flex-col", nested ? "gap-0.5" : "gap-1")}>
@@ -144,7 +144,7 @@ export function ItemList({ items, chatId, nested = false }: { items: Item[]; cha
       )}
     </div>
   );
-}
+});
 
 function ToolGroup({ items, nested }: { items: ToolItem[]; nested: boolean }) {
   const [expanded, setExpanded] = useState(false);
@@ -189,7 +189,7 @@ function ToolGroup({ items, nested }: { items: ToolItem[]; nested: boolean }) {
   );
 }
 
-function ItemView({ item, chatId, nested }: { item: Item; chatId: number; nested: boolean }) {
+const ItemView = memo(function ItemView({ item, chatId, nested }: { item: Item; chatId: number; nested: boolean }) {
   const agents = useStore((s) => s.agents[chatId]);
   switch (item.kind) {
     case "user":
@@ -257,7 +257,7 @@ function ItemView({ item, chatId, nested }: { item: Item; chatId: number; nested
     case "notice":
       return <Notice tone={item.tone}>{item.text}</Notice>;
   }
-}
+});
 
 function ArtifactCard({ item, nested }: { item: ArtifactItem; nested: boolean }) {
   return (
@@ -315,7 +315,7 @@ function ImageCard({ item, chatId }: { item: Extract<Item, { kind: "image" }>; c
   );
 }
 
-function ToolCard({ item, nested }: { item: Extract<Item, { kind: "tool" }>; nested: boolean }) {
+const ToolCard = memo(function ToolCard({ item, nested }: { item: Extract<Item, { kind: "tool" }>; nested: boolean }) {
   const [open, setOpen] = useState(false);
   const state = !item.result ? "running" : item.result.ok ? "ok" : "fail";
   const shell = item.name === "Bash" || item.name === "PowerShell" || item.name === "명령";
@@ -356,7 +356,7 @@ function ToolCard({ item, nested }: { item: Extract<Item, { kind: "tool" }>; nes
       )}
     </div>
   );
-}
+});
 
 function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval" }>; chatId: number }) {
   const { request: r, decision } = item;

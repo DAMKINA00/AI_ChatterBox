@@ -124,12 +124,28 @@ export const useStore = create<State>((set, get) => ({
     document.documentElement.classList.toggle("dark", theme === "dark");
     set({ projects, chats, cli, theme, usage, ready: true });
 
-    api.onEvent((e) =>
+    const pendingEvents: TimelineEvent[] = [];
+    let eventTimer: number | undefined;
+    const flushEvents = () => {
+      window.clearTimeout(eventTimer);
+      eventTimer = undefined;
+      const batch = pendingEvents.splice(0);
+      if (!batch.length) return;
       set((s) => {
-        const list = s.events[e.chatId];
-        return list ? { events: { ...s.events, [e.chatId]: appendEvent(list, e) } } : {};
-      }),
-    );
+        const changed = new Map<number, TimelineEvent[]>();
+        for (const e of batch) {
+          const list = changed.get(e.chatId) ?? s.events[e.chatId];
+          if (list) changed.set(e.chatId, appendEvent(list, e));
+        }
+        return changed.size ? { events: { ...s.events, ...Object.fromEntries(changed) } } : s;
+      });
+    };
+    api.onEvent((e) => {
+      pendingEvents.push(e);
+      // Keep approvals/results immediate; paint token bursts at most twenty times a second.
+      if (e.event.type !== "text_delta") flushEvents();
+      else eventTimer ??= window.setTimeout(flushEvents, 50);
+    });
     api.onChatUpdated((c) => {
       set((s) => ({ chats: s.chats.some((x) => x.id === c.id) ? s.chats.map((x) => (x.id === c.id ? c : x)) : [c, ...s.chats] }));
       // The chat on screen is read as soon as it finishes.

@@ -145,11 +145,21 @@ function applyInConsult(items: Item[], consultId: number, e: TimelineEvent, expr
   return changed ? next : items;
 }
 
-export function buildItems(events: TimelineEvent[], view: View, live: boolean): Item[] {
-  let top: Item[] = [];
-  const consultTargets = new Map<number, Role>();
-  const expressions: ExpressionState = new Map();
-  for (const e of events) {
+interface FoldState {
+  top: Item[];
+  consultTargets: Map<number, Role>;
+  expressions: ExpressionState;
+}
+
+const emptyFold = (): FoldState => ({ top: [], consultTargets: new Map(), expressions: new Map() });
+const copyFold = (state: FoldState): FoldState => ({ top: state.top, consultTargets: new Map(state.consultTargets), expressions: new Map(state.expressions) });
+
+function foldEvents(events: TimelineEvent[], view: View, state: FoldState, start = 0, beforeEvent?: (index: number, state: FoldState) => void) {
+  let { top } = state;
+  const { consultTargets, expressions } = state;
+  for (let index = start; index < events.length; index++) {
+    if (beforeEvent) beforeEvent(index, { top, consultTargets, expressions });
+    const e = events[index];
     if (e.event.type === "consult_start") consultTarget(e, consultTargets);
     const where = belongs(e, view, consultTargets);
     if (!where) continue;
@@ -178,11 +188,61 @@ export function buildItems(events: TimelineEvent[], view: View, live: boolean): 
     top = apply(top, e, expression);
     if (ev.type === "turn_end") expressions.delete(expressionKey(node, role));
   }
-  if (!live) {
-    // History from a previous run: unanswered prompts can't be answered any more.
-    top = closeHistory(top);
-  }
-  return top;
+  state.top = top;
+  return state;
+}
+
+export function buildItems(events: TimelineEvent[], view: View, live: boolean): Item[] {
+  const state = foldEvents(events, view, emptyFold());
+  return live ? state.top : closeHistory(state.top);
+}
+
+/** Reuse the immutable prefix instead of folding hours of history for every streamed token. */
+export function createTimelineBuilder(): typeof buildItems {
+  const checkpoints = new Map<number, FoldState>([[0, emptyFold()]]);
+  let previous: TimelineEvent[] = [];
+  let previousView: View;
+  let previousLive: boolean | undefined;
+  let previousState = emptyFold();
+  let beforeLast: FoldState | undefined;
+  let result: Item[] = [];
+  return (events, view, live) => {
+    if (events === previous && view === previousView && live === previousLive) return result;
+    let common = 0;
+    if (view === previousView) {
+      while (common < events.length && common < previous.length && events[common] === previous[common]) common++;
+    }
+    for (const index of checkpoints.keys()) if (index > common) checkpoints.delete(index);
+    let start = 0;
+    let base = checkpoints.get(0)!;
+    for (const [index, state] of checkpoints) {
+      if (index <= common && index >= start) { start = index; base = state; }
+    }
+    if (view === previousView && previous.length <= common) {
+      start = previous.length;
+      base = previousState;
+    } else if (view === previousView && beforeLast && previous.length - 1 <= common && previous.length - 1 >= start) {
+      start = previous.length - 1;
+      base = beforeLast;
+    }
+    if (events !== previous) beforeLast = undefined;
+    const state = foldEvents(events, view, copyFold(base), start, (index, current) => {
+      if (index > 0 && index % 128 === 0) {
+        checkpoints.set(index, copyFold(current));
+        // Bound retained snapshots even when a chat runs for days; history itself stays intact.
+        if (checkpoints.size > 65) {
+          for (const oldest of checkpoints.keys()) if (oldest !== 0) { checkpoints.delete(oldest); break; }
+        }
+      }
+      if (index === events.length - 1) beforeLast = copyFold(current);
+    });
+    previous = events;
+    previousView = view;
+    previousLive = live;
+    previousState = state;
+    result = live ? state.top : closeHistory(state.top);
+    return result;
+  };
 }
 
 function closeHistory(items: Item[]): Item[] {

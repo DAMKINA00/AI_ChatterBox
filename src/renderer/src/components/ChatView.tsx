@@ -19,7 +19,7 @@ import {
 } from "../../../shared/types";
 import { api, cn, errorMessage } from "../lib/utils";
 import { useStore } from "../store";
-import { buildItems, latestExpression, planOf } from "../timeline";
+import { buildItems, createTimelineBuilder, latestExpression, planOf } from "../timeline";
 import { GoalBar, PlanPanel } from "./PlanGoal";
 import { SLASH_COMMANDS, StatusDialog, type SlashCommand } from "./Commands";
 import { AttachmentChip, ItemList } from "./Items";
@@ -46,7 +46,8 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
   const events = useStore((s) => s.events[chat.id]);
   const consults = useStore((s) => s.consults[chat.id]);
   const busy = chat.status === "working" || chat.status === "approval";
-  const items = useMemo(() => buildItems(events ?? [], node, busy), [events, node, busy]);
+  const buildTimeline = useMemo(() => createTimelineBuilder(), [chat.id]);
+  const items = useMemo(() => buildTimeline(events ?? [], node, busy), [buildTimeline, events, node, busy]);
   const instructionAt = useMemo(() => latestInstructionAt(events ?? [], chat.createdAt), [events, chat.createdAt]);
   const [dragging, setDragging] = useState(false);
   const composer = useRef<ComposerHandle>(null);

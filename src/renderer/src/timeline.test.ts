@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AgentEvent, NodeId, Role, TimelineEvent } from "../../shared/types";
-import { apply, buildItems, currentExpression, latestExpression } from "./timeline.ts";
+import { apply, buildItems, createTimelineBuilder, currentExpression, latestExpression } from "./timeline.ts";
 
 let nextId = 1;
 function event(node: NodeId, role: Role | null, payload: AgentEvent): TimelineEvent {
@@ -256,4 +256,152 @@ test("dispatch decisions appear as readable timeline notices", () => {
 test("critical routing explains that both families investigate without changing legacy notices", () => {
   const items = buildItems([event("orch", "orch", { type: "dispatch", instructionId: 5, mode: "delegated", reason: "safety impact", dualInvestigation: true })], undefined, false);
   assert.ok(items.some((x) => x.kind === "notice" && x.text.includes("클로드와 지피티") && x.text.includes("safety impact")));
+});
+
+function expectBuilderOracle(builder: ReturnType<typeof createTimelineBuilder>, events: TimelineEvent[], view: NodeId | undefined, live: boolean) {
+  const actual = builder(events, view, live);
+  assert.deepEqual(actual, buildItems(events, view, live));
+  return actual;
+}
+
+function builderFixture(): TimelineEvent[] {
+  return [
+    event("orch", "orch", { type: "consult_start", consultId: 501, kind: "implement", from: "orch", to: "w1", request: "parent", attachments: emptyAttachments }),
+    event("consult:501", "w1", { type: "expression", expression: "happy" }),
+    event("consult:501", "w1", { type: "consult_start", consultId: 502, kind: "review", from: "w1", to: "w2", request: "nested", attachments: emptyAttachments }),
+    event("consult:502", "w2", { type: "expression", expression: "worried" }),
+    event("consult:502", "w2", { type: "text", text: "nested answer" }),
+    event("consult:502", "w2", { type: "approval_request", request: { id: "nested-approval", role: "w2", title: "명령 실행", detail: "echo nested", risk: "low" } }),
+    event("consult:502", "w2", { type: "approval_resolved", id: "nested-approval", decision: "once" }),
+    event("consult:501", "w1", { type: "text_delta", text: "parent answer" }),
+    event("orch", "orch", { type: "consult_start", consultId: 503, kind: "opinion", from: "orch", to: "w2", request: "parallel", attachments: emptyAttachments }),
+    event("consult:503", "w2", { type: "expression", expression: "confident" }),
+    event("consult:503", "w2", { type: "text_delta", text: "worker two" }),
+    event("consult:501", "w1", { type: "tool_call", id: "parent-tool", name: "read_file", input: "{}" }),
+    event("consult:501", "w1", { type: "tool_result", id: "parent-tool", ok: true, output: "contents" }),
+    event("consult:501", "w1", { type: "consult_end", consultId: 502, status: "done", summary: "nested complete", files: [] }),
+    event("orch", "orch", { type: "consult_end", consultId: 501, status: "done", summary: "parent complete", files: ["parent.ts"] }),
+    event("orch", "orch", { type: "consult_end", consultId: 503, status: "done", summary: "parallel complete", files: [] }),
+    event("orch", "orch", { type: "approval_request", request: { id: "top-approval", role: "orch", title: "Write", detail: "parent.ts", risk: "high" } }),
+    event("orch", "orch", { type: "approval_resolved", id: "top-approval", decision: "deny" }),
+  ];
+}
+
+test("timeline builder matches the oracle and preserves unchanged item identity on append", () => {
+  const builder = createTimelineBuilder();
+  const base = [event("w1", "w1", { type: "text", text: "stable" })];
+  const before = expectBuilderOracle(builder, base, "w1", true);
+
+  const appended = [...base, event("w1", "w1", { type: "text_delta", text: "tail" })];
+  const afterAppend = expectBuilderOracle(builder, appended, "w1", true);
+  assert.strictEqual(afterAppend[0], before[0]);
+
+  const replaced = [...appended.slice(0, -1), event("w1", "w1", { type: "text_delta", text: "replacement" })];
+  const afterReplace = expectBuilderOracle(builder, replaced, "w1", true);
+  assert.notStrictEqual(afterReplace[1], afterAppend[1]);
+  assert.equal(afterReplace[1].kind, "message");
+  if (afterReplace[1].kind === "message") assert.equal(afterReplace[1].text, "replacement");
+});
+
+test("timeline builder handles interleaved worker replacement and removal, nested metadata, decisions, and view changes", () => {
+  const events = builderFixture();
+  const builder = createTimelineBuilder();
+  const all = expectBuilderOracle(builder, events, undefined, true);
+  const parent = all.find((item) => item.kind === "consult" && item.consultId === 501)!;
+  assert.equal(parent.kind, "consult");
+  const nested = parent.children.find((item) => item.kind === "consult" && item.consultId === 502)!;
+  assert.equal(nested.kind, "consult");
+  assert.equal(nested.children.find((item) => item.kind === "message")?.expression, "worried");
+  assert.equal(all.find((item) => item.kind === "approval" && item.request.id === "nested-approval")?.decision, "once");
+  assert.equal(all.find((item) => item.kind === "approval" && item.request.id === "top-approval")?.decision, "deny");
+
+  const replaced = [...events.slice(0, 4), event("consult:502", "w2", { type: "text", text: "nested replacement" }), ...events.slice(5)];
+  const afterReplace = expectBuilderOracle(builder, replaced, undefined, true);
+  const replacedParent = afterReplace.find((item) => item.kind === "consult" && item.consultId === 501)!;
+  assert.equal(replacedParent.kind, "consult");
+  const replacedNested = replacedParent.children.find((item) => item.kind === "consult" && item.consultId === 502)!;
+  assert.equal(replacedNested.kind, "consult");
+  assert.equal(replacedNested.children.find((item) => item.kind === "message")?.text, "nested replacement");
+
+  const removed = replaced.filter((_, index) => index !== 5);
+  const afterRemoval = expectBuilderOracle(builder, removed, undefined, true);
+  const removedParent = afterRemoval.find((item) => item.kind === "consult" && item.consultId === 501)!;
+  assert.equal(removedParent.kind, "consult");
+  const removedNested = removedParent.children.find((item) => item.kind === "consult" && item.consultId === 502)!;
+  assert.equal(removedNested.kind, "consult");
+  assert.equal(afterRemoval.some((item) => item.kind === "approval" && item.request.id === "nested-approval"), false);
+
+  const workerView = expectBuilderOracle(builder, events, "w1", true);
+  assert.equal(workerView.find((item) => item.kind === "message")?.expression, "happy");
+  expectBuilderOracle(builder, events, "consult:502", true);
+  expectBuilderOracle(builder, events, undefined, true);
+});
+
+test("timeline builder invalidates truncated and reset histories", () => {
+  const events = builderFixture();
+  const builder = createTimelineBuilder();
+  expectBuilderOracle(builder, events, undefined, false);
+  const truncated = events.slice(0, 11);
+  const truncatedItems = expectBuilderOracle(builder, truncated, undefined, false);
+  assert.equal(truncatedItems.some((item) => item.kind === "notice" && item.text.includes("stale")), false);
+
+  const reset = [event("w2", "w2", { type: "text", text: "fresh history" })];
+  const resetItems = expectBuilderOracle(builder, reset, "w2", false);
+  assert.deepEqual(resetItems.map((item) => item.kind), ["message"]);
+  const empty = expectBuilderOracle(builder, [], undefined, false);
+  assert.deepEqual(empty, []);
+});
+
+test("toggling historical mode closes prompts and streams without corrupting the live fold", () => {
+  const events: TimelineEvent[] = [
+    event("w1", "w1", { type: "expression", expression: "surprised" }),
+    event("w1", "w1", { type: "text_delta", text: "partial" }),
+    event("orch", "orch", { type: "approval_request", request: { id: "history-approval", role: "orch", title: "Write", detail: "file.ts", risk: "low" } }),
+  ];
+  const builder = createTimelineBuilder();
+  const live = expectBuilderOracle(builder, events, undefined, true);
+  const historical = expectBuilderOracle(builder, events, undefined, false);
+  assert.equal(historical.find((item) => item.kind === "message")?.streaming, false);
+  assert.equal(historical.find((item) => item.kind === "approval")?.decision, "expired");
+  const liveAgain = expectBuilderOracle(builder, events, undefined, true);
+  assert.equal(liveAgain.find((item) => item.kind === "message")?.streaming, true);
+  assert.equal(liveAgain.find((item) => item.kind === "approval")?.decision, undefined);
+  assert.equal(live.find((item) => item.kind === "message")?.expression, "surprised");
+});
+
+function largeTimelineFixture(): TimelineEvent[] {
+  const events: TimelineEvent[] = [];
+  for (let consultIndex = 0; consultIndex < 100; consultIndex++) {
+    const consultId = 10000 + consultIndex;
+    const role = `w${(consultIndex % 3) + 1}` as Role;
+    const node = `consult:${consultId}` as NodeId;
+    events.push(event("orch", "orch", { type: "consult_start", consultId, kind: "implement", from: "orch", to: role, request: `task ${consultIndex}`, attachments: emptyAttachments }));
+    for (let toolIndex = 0; toolIndex < 42; toolIndex++) {
+      const toolId = `large-${consultIndex}-${toolIndex}`;
+      events.push(event(node, role, { type: "tool_call", id: toolId, name: "worker_tool", input: `{"index":${toolIndex}}` }));
+      events.push(event(node, role, { type: "tool_result", id: toolId, ok: true, output: `result-${toolIndex}` }));
+    }
+    events.push(event(node, role, { type: "text", text: `completed-${consultIndex}` }));
+  }
+  return events;
+}
+
+test("timeline builder reuses the unchanged prefix for a large append", () => {
+  const events = largeTimelineFixture();
+  assert.equal(events.length, 8600);
+  const builder = createTimelineBuilder();
+  const before = expectBuilderOracle(builder, events, undefined, true);
+  const appended = [...events, event("consult:10099", "w1", { type: "text_delta", text: " final token" })];
+  const after = expectBuilderOracle(builder, appended, undefined, true);
+  assert.strictEqual(after[0], before[0]);
+  if (before[0].kind === "consult" && after[0].kind === "consult") {
+    assert.strictEqual(after[0].children[0], before[0].children[0]);
+  }
+
+  const earlyReplacement = [
+    ...events.slice(0, 85),
+    event("consult:10000", "w1", { type: "text", text: "changed early completion" }),
+    ...events.slice(86),
+  ];
+  expectBuilderOracle(builder, earlyReplacement, undefined, true);
 });
