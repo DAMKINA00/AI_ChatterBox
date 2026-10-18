@@ -141,12 +141,12 @@ function seedDatabase() {
     db.prepare("INSERT INTO consults (id, chat_id, seq, from_role, to_role, kind, request, response_summary, files_changed_json, status, started_at, ended_at, scope_json, instruction_id, reason, supersedes) VALUES (2, 1, 2, 'orch', 'w1', 'implement', ?, NULL, '[]', 'running', ?, NULL, '[]', 2, ?, NULL)").run(
       runningRequest,
       now + 2000,
-      "Claude 작업자에게 진행 중 구현을 맡겼습니다.",
+      "클로드 작업자에게 진행 중 구현을 맡겼습니다.",
     );
     db.prepare("INSERT INTO consults (id, chat_id, seq, from_role, to_role, kind, request, response_summary, files_changed_json, status, started_at, ended_at, scope_json, instruction_id, reason, supersedes) VALUES (3, 1, 3, 'orch', 'w1', 'review', ?, NULL, '[]', 'running', ?, NULL, '[]', 3, ?, NULL)").run(
       secondRunningRequest,
       now + 3000,
-      "Claude 작업자에게 병렬 검토를 맡겼습니다.",
+      "클로드 작업자에게 병렬 검토를 맡겼습니다.",
     );
     db.prepare("INSERT INTO attachments (id, chat_id, event_id, name, path, mime, size) VALUES (?, 1, NULL, ?, ?, ?, ?)").run(
       attachment.id,
@@ -195,7 +195,7 @@ function seedDatabase() {
       request: runningRequest,
       attachments: [attachment],
       instructionId: 2,
-      reason: "Claude 작업자에게 진행 중 구현을 맡겼습니다.",
+      reason: "클로드 작업자에게 진행 중 구현을 맡겼습니다.",
     });
     event(13, "consult:2", "w1", { type: "text", text: "진행 중 작업자 응답은 요청을 접어도 계속 표시됩니다." });
     event(14, "orch", "orch", {
@@ -207,7 +207,7 @@ function seedDatabase() {
       request: secondRunningRequest,
       attachments: [],
       instructionId: 3,
-      reason: "Claude 작업자에게 병렬 검토를 맡겼습니다.",
+      reason: "클로드 작업자에게 병렬 검토를 맡겼습니다.",
     });
     event(15, "consult:2", "w1", {
       type: "approval_request",

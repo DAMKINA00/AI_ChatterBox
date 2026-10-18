@@ -3,11 +3,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { DEFAULT_SETTINGS, GEMINI_WEB_MODEL, type AgentEvent, type AgentInput, type Role } from "../shared/types";
+import { DEFAULT_SETTINGS, GEMINI_WEB_MODEL, type AgentEvent, type Role } from "../shared/types";
 import { Store } from "./db";
 import { ChatManager } from "./chats";
 import { completionIssue } from "./dispatch";
 import { Orchestrator } from "./orchestrator";
+
+import type { AgentInput } from "./drivers/types";
 
 type Sent = { role: Role; effort?: string; input: AgentInput };
 
@@ -94,66 +96,54 @@ function fixture(options: { geminiModel?: string; geminiStrengths?: string } = {
 const call = (engine: any, chatId: number, caller: Role, kind: string, to: string) =>
   engine.call(chatId, caller, "ask", { to, kind, message: `${kind} 요청`, reason: "writing routing regression", effort: "medium" });
 
-test("Gemini web and CLI accept writing only, pass noWrites, and persist a writing consult", async () => {
+test("Antigravity accepts explicit code, review and writing; web retains local-tool limits", async () => {
   for (const geminiModel of [GEMINI_WEB_MODEL, "gemini-test-medium"]) {
     const f = fixture({ geminiModel });
     try {
-      const worker = f.store.createAgent(f.chat.id, "gemini", "writing task");
-      for (const kind of ["implement", "review", "opinion"] as const) {
-        const rejected = await call(f.engine, f.chat.id, "orch", kind, worker.nickname);
-        assert.equal(rejected.isError, true, `${geminiModel} should reject ${kind}`);
-        assert.match(rejected.content.map((part) => part.text).join("\n"), /글쓰기 전용/);
+      const worker = f.store.createAgent(f.chat.id, "gemini", "assigned work");
+      if (geminiModel === GEMINI_WEB_MODEL) f.store.updateAgent(worker.id, { webAccountId: "gemini-4" });
+      for (const kind of ["implement", "review", "opinion", "writing"] as const) {
+        const result = await call(f.engine, f.chat.id, "orch", kind, worker.nickname);
+        const blocked = geminiModel === GEMINI_WEB_MODEL && kind === "implement";
+        assert.equal(result.isError, blocked, `${geminiModel} ${kind}`);
+        if (!blocked) assert.equal(f.sent.at(-1)!.input.noWrites, kind !== "implement");
+        else assert.match(result.content[0].text, /로컬 파일/);
       }
-      assert.equal(f.store.listConsults(f.chat.id).length, 0);
-
-      const accepted = await call(f.engine, f.chat.id, "orch", "writing", worker.nickname);
-      assert.equal(accepted.isError, false);
-      assert.deepEqual(f.store.listConsults(f.chat.id).map((consult) => [consult.kind, consult.status]), [["writing", "done"]]);
-      assert.equal(f.sent.length, 1);
-      assert.equal(f.sent[0].input.noWrites, true);
-      assert.match(f.sent[0].input.text, /글쓰기 요청/);
-    } finally {
-      await f.close();
-    }
+      assert.ok(f.store.listConsults(f.chat.id).every(c => c.status === "done"));
+    } finally { await f.close(); }
   }
 });
 
-test("technical requests cannot cross into or out of a Gemini worker", async () => {
+test("technical questions can cross Antigravity peers without granting implementation from review", async () => {
   const f = fixture({ geminiModel: "gemini-test-medium" });
   try {
-    const gemini = f.store.createAgent(f.chat.id, "gemini", "writing only");
+    const gemini = f.store.createAgent(f.chat.id, "gemini", "technical peer");
     const claude = f.store.createAgent(f.chat.id, "claude", "technical work");
-    for (const kind of ["implement", "review", "opinion"] as const) {
-      const intoGemini = await call(f.engine, f.chat.id, claude.key, kind, gemini.nickname);
-      const outOfGemini = await call(f.engine, f.chat.id, gemini.key, kind, claude.nickname);
-      assert.equal(intoGemini.isError, true, `other worker -> Gemini ${kind}`);
-      assert.equal(outOfGemini.isError, true, `Gemini -> other worker ${kind}`);
+    for (const [from, to] of [[claude, gemini], [gemini, claude]]) {
+      for (const kind of ["review", "opinion"]) {
+        assert.equal((await call(f.engine, f.chat.id, from.key, kind, to.nickname)).isError, false);
+      }
+      assert.equal((await call(f.engine, f.chat.id, from.key, "implement", to.nickname)).isError, true);
     }
-    assert.equal(f.store.listConsults(f.chat.id).length, 0);
-  } finally {
-    await f.close();
-  }
+    assert.ok(f.sent.every(s => s.input.noWrites));
+  } finally { await f.close(); }
 });
 
-test("legacy technical Gemini preferences cannot widen prose-only instructions or capabilities", async () => {
+test("explicit assignments override default specialities while preserving custom preferences", async () => {
   const f = fixture({ geminiModel: "legacy-gemini", geminiStrengths: "코드 분석과 구현을 우선 담당" });
   try {
-    const worker = f.store.createAgent(f.chat.id, "gemini", "legacy technical preference");
-    const masterInstructions = f.chats.instructionsFor!(f.chat, f.project, "orch", "claude")!;
-    const workerInstructions = f.chats.instructionsFor!(f.chat, f.project, worker.key, "gemini")!;
-    assert.match(masterInstructions, /코드 분석과 구현을 우선 담당/);
-    assert.match(masterInstructions, /제미나이는 .*글쓰기 전용/);
-    assert.match(workerInstructions, /글쓰기 전용/);
-    assert.match(workerInstructions, /코드 분석·구현·디버깅·테스트·기술 리뷰·교차검증은 맡지 않는다/);
-
+    const worker = f.store.createAgent(f.chat.id, "gemini", "technical preference");
+    const master = f.chats.instructionsFor!(f.chat, f.project, "orch", "claude")!;
+    const instructions = f.chats.instructionsFor!(f.chat, f.project, worker.key, "gemini")!;
+    assert.match(master, /코드 분석과 구현을 우선 담당/);
+    assert.match(master, /명시적으로/);
+    assert.doesNotMatch(instructions, /글쓰기 전용|코드 분석·구현·디버깅·테스트·기술 리뷰·교차검증은 맡지 않는다/);
     const capabilities = await f.chats.teamCapabilities(f.chat);
-    assert.deepEqual(capabilities.gemini.supportedKinds, ["writing"]);
-    assert.equal(capabilities.gemini.fileWrites, false);
+    assert.deepEqual(new Set(capabilities.gemini.supportedKinds), new Set(["implement", "review", "opinion", "writing"]));
+    assert.equal(capabilities.gemini.fileWrites, true);
     assert.equal(capabilities.gemini.localTools, true);
     assert.equal(capabilities.gemini.webOnly, false);
-  } finally {
-    await f.close();
-  }
+  } finally { await f.close(); }
 });
 
 test("a writing result does not satisfy the code review gate, while its kind survives DB reload", async () => {

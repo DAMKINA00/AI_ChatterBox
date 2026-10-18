@@ -123,6 +123,7 @@ export const useStore = create<State>((set, get) => ({
     ]);
     document.documentElement.classList.toggle("dark", theme === "dark");
     set({ projects, chats, cli, theme, usage, ready: true });
+    void get().refreshCli().catch(() => undefined);
 
     const pendingEvents: TimelineEvent[] = [];
     let eventTimer: number | undefined;
@@ -159,13 +160,13 @@ export const useStore = create<State>((set, get) => ({
       }),
     );
     api.onUsage((usage) => set({ usage }));
-    api.onGeminiWebLogin((status) => get().toast(`Gemini 웹 계정 ${status.accountId.slice(7)} · ${status.message}`, "info"));
+    api.onGeminiWebLogin((status) => get().toast(`제미나이 웹 계정 ${status.accountId.slice(7)} · ${status.message}`, "info"));
     api.onAgentsUpdated((chatId, list) => set((s) => ({ agents: { ...s.agents, [chatId]: list } })));
     api.onSelectChat((chatId) => void get().select({ chatId }));
     window.addEventListener("focus", () => {
       const sel = get().selection;
       if (sel && get().chats.find((c) => c.id === sel.chatId)?.unread) void api.markViewed(sel.chatId);
-      if (get().cli.some((c) => !c.path)) void get().refreshCli().catch(() => undefined);
+      void get().refreshCli().catch(() => undefined);
     });
 
     // Reopen the last chat.
@@ -219,14 +220,14 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async refreshCli() {
-    set({ cli: await api.cliInfo() });
+    set({ cli: await api.cliInfo(true) });
   },
 
   async loadModels(agent) {
     if (get().models[agent]) return;
     set((s) => ({ modelErrors: { ...s.modelErrors, [agent]: undefined } }));
     try {
-      await get().refreshCli();
+      void get().refreshCli().catch(() => undefined);
       const list = await api.models(agent);
       set((s) => ({ models: { ...s.models, [agent]: list }, modelErrors: { ...s.modelErrors, [agent]: undefined } }));
     } catch (e) {

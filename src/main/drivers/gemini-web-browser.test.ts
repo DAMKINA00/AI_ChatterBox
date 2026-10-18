@@ -28,6 +28,25 @@ test("account lock refuses a second chat and a foreign release cannot unlock it"
   assert.equal(b.owner, "chat-two");
 });
 
+test("web image downloads require owner, trusted HTTPS host, image MIME and bounded bytes", async () => {
+  const { browser, b } = fixture();
+  const calls: any[] = [];
+  b.owner = "own";
+  b.win = { isDestroyed: () => false, webContents: { session: { fetch: async (url: string, options: any) => {
+    calls.push({ url, options }); return new Response(Buffer.from("image bytes"), { headers: { "Content-Type": "image/png" } });
+  } } } };
+  const signal = new AbortController().signal;
+  await assert.rejects(browser.imageBytes("foreign", "https://lh3.googleusercontent.com/image", signal), /소유 작업/);
+  for (const url of ["http://lh3.googleusercontent.com/a", "https://googleusercontent.com.evil.test/a", "file:///C:/private.png", "https://name:password@lh3.googleusercontent.com/a"]) await assert.rejects(browser.imageBytes("own", url, signal), /지원하지 않는/);
+  assert.equal(calls.length, 0);
+  assert.equal(await browser.imageBytes("own", "https://lh3.googleusercontent.com/a", signal), Buffer.from("image bytes").toString("base64"));
+  assert.equal(calls[0].options.redirect, "error");
+  b.win.webContents.session.fetch = async () => new Response("html", { headers: { "Content-Type": "text/html" } });
+  await assert.rejects(browser.imageBytes("own", "https://lh3.googleusercontent.com/a", signal), /다운로드/);
+  b.win.webContents.session.fetch = async () => new Response(new Uint8Array(32 * 1024 * 1024 + 1), { headers: { "Content-Type": "image/png" } });
+  await assert.rejects(browser.imageBytes("own", "https://lh3.googleusercontent.com/a", signal), /32MB/);
+});
+
 test("abort during browser opening stops navigation, releases lock and cannot submit", async () => {
   const { browser, b } = fixture();
   let reject!: (e: Error) => void, stopped = 0;

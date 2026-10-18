@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { isAgentExpression, type AgentExpression } from "../../../shared/types";
 import { cn } from "../lib/utils";
 
-export type AvatarKind = "orch" | "claude" | "gpt" | "gemini" | "admin";
+export type AvatarKind = "orch" | "claude" | "gpt" | "gemini" | "grok" | "admin";
 export type AvatarSize = 24 | 32 | 36;
 
 const SIZE_CLASS: Record<AvatarSize, string> = { 24: "size-6", 32: "size-8", 36: "size-9" };

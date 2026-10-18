@@ -47,7 +47,7 @@ function fixture() {
 }
 async function flush() { for (let n = 0; n < 15; n++) await Promise.resolve(); await new Promise<void>(r => setImmediate(r)); }
 async function pulse(t: any) { await flush(); t.mock.timers.tick(750); await flush(); }
-const input = { text: "사서의 목소리와 도서관 이름을 유지해 안내문을 완성하세요.", attachments: [], noWrites: true };
+const input = { text: "사서의 목소리와 도서관 이름을 유지해 안내문을 완성하세요.", attachments: [], noWrites: true, webAccountId: "gemini-1" as const };
 function run(pool: GeminiWebAccounts, memory?: { load(): WebContext; save(c: WebContext): void }, nativeId: string | null = null) {
   const events: AgentEvent[] = [], ids: string[] = [];
   const driver = new GeminiWebDriver({ cwd: "unused", exePath: "unused", nativeId }, pool, { emit: e => events.push(e), nativeId: id => ids.push(id), approve: async () => ({ verdict: "allow" }) }, memory);
@@ -75,236 +75,194 @@ test("ten account metadata entries preserve account 1, names and exclusion after
   assert.throws(() => f.pool.update("gemini-1", { label: " " }), /1~60/);
 });
 
-test("assignment picks the most available bottleneck and separates concurrent workers", async () => {
+
+test("the master can inspect all balances without assigning work", async () => {
   const f = fixture(); f.pool.add(); f.pool.add();
   f.state("gemini-1").usage = usage(1, 80);
   f.state("gemini-2").usage = usage(30, 20);
   f.state("gemini-3").usage = { status: "unknown", detail: "모름", checkedAt: Date.now() };
-  const signal = new AbortController().signal;
-  const [a, b] = await Promise.all([f.pool.acquire("one", signal), f.pool.acquire("two", signal)]);
-  assert.equal(a.accountId, "gemini-2");
+  const list = await f.pool.inspect(new AbortController().signal);
+  assert.deepEqual(list.map(a => a.remainingPercent), [20, 70, undefined]);
+  assert.ok(list.every(a => !f.state(a.accountId).owner));
+});
+
+test("only the master-selected account is claimed, even when another has more quota", async () => {
+  const f = fixture(); f.pool.add();
+  f.state("gemini-1").usage = usage(70); f.state("gemini-2").usage = usage(1);
+  const b = await f.pool.acquireSelected("one", new AbortController().signal, "gemini-1");
   assert.equal(b.accountId, "gemini-1");
-  assert.throws(() => f.pool.update("gemini-2", { enabled: false }), /작업 중/);
-  a.release("not-owner"); assert.equal(a.busy, true);
-  a.release("one"); b.release("two");
-  f.pool.update("gemini-2", { enabled: false });
-  assert.equal((await f.pool.acquire("three", signal)).accountId, "gemini-1");
+  await assert.rejects(f.pool.acquireSelected("two", new AbortController().signal, "gemini-1"), /지정 계정/);
+  assert.equal(f.state("gemini-1").owner, "one");
+  assert.equal(f.state("gemini-2").owner, undefined);
+  b.release("wrong-owner"); assert.equal(b.busy, true);
+  b.release("one"); assert.equal(b.busy, false);
 });
 
-test("the previous account is checked first and retains its conversation when its quota is sufficient", async t => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const f = fixture(); f.pool.add();
-  const first = f.state("gemini-1"), second = f.state("gemini-2");
-  first.usage = usage(99); first.read = async () => usage(60);
-  second.usage = usage(1);
-  let otherReads = 0; second.read = async () => { otherReads++; return second.usage; };
-  const nativeId = "web:gemini-1:/app/previous-story";
-  const r = run(f.pool, undefined, nativeId);
-  await r.driver.send(input);
-  for (let n = 0; n < 4; n++) await pulse(t);
-  await r.task();
-  assert.deepEqual(first.resumes, [nativeId]);
-  assert.equal(first.prompts.length, 1); assert.equal(second.prompts.length, 0);
-  assert.equal(otherReads, 0, "other accounts need not be queried before a usable previous account");
-  assert.equal(r.events.findLast(e => e.type === "turn_end")?.ok, true);
+test("concurrent claims of one selected account never release the winner's lease", async () => {
+  const f = fixture(); const signal = new AbortController().signal;
+  const result = await Promise.allSettled([f.pool.acquireSelected("one", signal, "gemini-1"), f.pool.acquireSelected("two", signal, "gemini-1")]);
+  assert.equal(result.filter(r => r.status === "fulfilled").length, 1);
+  assert.equal(result.filter(r => r.status === "rejected").length, 1);
+  assert.ok(f.state("gemini-1").owner);
+  await f.pool.dispose();
 });
 
-test("an insufficient or busy previous account falls back to the idle account with most quota", async () => {
-  const f = fixture(); f.pool.add(); f.pool.add(); f.pool.add();
-  const first = f.state("gemini-1"), second = f.state("gemini-2"), third = f.state("gemini-3"), fourth = f.state("gemini-4");
-  first.usage = usage(90); second.usage = usage(1); second.owner = "other-job";
-  third.usage = usage(40); fourth.usage = usage(70);
+test("low, stale, unknown, logged-out, disabled and unregistered accounts cannot be selected", async () => {
+  const f = fixture(); f.pool.add(); const first = f.state("gemini-1");
   const signal = new AbortController().signal;
-  const chosen = await f.pool.acquire("worker", signal, "gemini-1");
-  assert.equal(chosen.accountId, "gemini-3"); chosen.release("worker");
-  first.usage = usage(1); first.owner = "previous-job";
-  const fallback = await f.pool.acquire("worker", signal, "gemini-1");
-  assert.equal(fallback.accountId, "gemini-3");
-  assert.equal(first.owner, "previous-job"); assert.equal(second.owner, "other-job");
-});
-
-test("low, unknown, blocked and disabled accounts wait without assignment and can be cancelled", async () => {
-  const f = fixture(); f.pool.add(); f.pool.add(); f.pool.add();
-  f.state("gemini-1").usage = usage(90);
-  f.state("gemini-2").state = "login_required";
-  f.pool.update("gemini-3", { enabled: false });
-  f.state("gemini-4").usage = { status: "unknown", detail: "조회 전", checkedAt: Date.now() };
-  const controller = new AbortController(); let waits = 0;
-  const task = f.pool.acquire("job", controller.signal, "gemini-1", () => { waits++; });
-  await flush();
-  assert.equal(waits, 1);
-  assert.ok(f.pool.list().every(a => !f.state(a.accountId).owner));
-  controller.abort(); await assert.rejects(task);
-});
-
-test("all busy accounts wait and a completed account is assigned on the next periodic check", async t => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const f = fixture(); f.pool.add();
-  const first = f.state("gemini-1"), second = f.state("gemini-2");
-  first.owner = "one"; first.usage = usage(40);
-  second.owner = "two"; second.usage = usage(1);
-  let waits = 0, assigned = false;
-  const task = f.pool.acquire("queued", new AbortController().signal, "gemini-1", () => { waits++; }).then(b => { assigned = true; return b; });
-  await flush(); t.mock.timers.tick(WEB_RECHECK_MS); await flush();
-  assert.equal(assigned, false); assert.equal(waits, 1);
-  second.browser.release("two");
-  t.mock.timers.tick(WEB_RECHECK_MS); await flush();
-  assert.equal((await task).accountId, "gemini-2");
-  assert.equal(first.owner, "one"); assert.equal(first.interrupts, 0);
-});
-
-test("a waiting request rechecks the previous account before newly available alternatives", async t => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const f = fixture(); f.pool.add();
-  const first = f.state("gemini-1"), second = f.state("gemini-2");
-  first.usage = usage(100); second.owner = "other-job"; second.usage = usage(1);
-  const task = f.pool.acquire("queued", new AbortController().signal, "gemini-1");
-  await flush(); first.read = async () => usage(50); second.browser.release("other-job");
-  t.mock.timers.tick(WEB_RECHECK_MS); await flush();
-  assert.equal((await task).accountId, "gemini-1");
-});
-
-test("disposing the account pool cancels waiting allocations", async () => {
-  const f = fixture(); f.state("gemini-1").usage = usage(100);
-  const task = f.pool.acquire("queued", new AbortController().signal);
-  await flush();
-  const rejected = assert.rejects(task, /종료/);
-  await f.pool.dispose(); await rejected;
-});
-
-test("new ready accounts wake a waiting request even while the previous account's quota lookup is stalled", async t => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const f = fixture(), first = f.state("gemini-1");
-  first.usage = usage(100);
-  const controller = new AbortController();
-  let chosen: GeminiWebBrowser | undefined, releaseRead!: (u: GeminiWebUsage) => void;
-  const task = f.pool.acquire("waiting-job", controller.signal, "gemini-1").then(b => { chosen = b; }, () => {});
-  try {
-    await flush();
-    first.read = () => new Promise(resolve => { releaseRead = resolve; });
-    t.mock.timers.tick(WEB_RECHECK_MS); await flush();
-    assert.ok(releaseRead, "the previous account has a pending lookup");
-    for (let n = 2; n <= 4; n++) {
-      f.pool.add();
-      f.state(`gemini-${n}` as GeminiWebAccountId).usage = usage(n * 10);
-    }
-    await Promise.all([2, 3, 4].map(n => f.state(`gemini-${n}` as GeminiWebAccountId).browser.refreshUsage()));
-    await flush();
-    assert.equal(chosen?.accountId, "gemini-2", "fresh available accounts must be selected without waiting for account 1");
-    assert.equal(first.owner, undefined);
-    assert.equal(f.state("gemini-2").owner, "waiting-job");
-  } finally {
-    controller.abort();
-    releaseRead?.(usage(100));
-    await task; await f.pool.dispose();
+  for (const u of [usage(90), { ...usage(20), checkedAt: Date.now() - 600001 }, { status: "unknown", detail: "조회 전", checkedAt: Date.now() } as GeminiWebUsage]) {
+    first.usage = u;
+    await assert.rejects(f.pool.acquireSelected("worker", signal, "gemini-1"));
   }
+  first.usage = usage(10); first.state = "login_required";
+  await assert.rejects(f.pool.acquireSelected("worker", signal, "gemini-1"));
+  first.state = "ready"; f.pool.update("gemini-1", { enabled: false });
+  await assert.rejects(f.pool.acquireSelected("worker", signal, "gemini-1"));
+  await assert.rejects(f.pool.acquireSelected("worker", signal, "gemini-10"));
+  assert.equal(f.state("gemini-2").owner, undefined);
 });
 
-test("a simultaneous account change releases a lease returned by the abandoned allocation pass", async () => {
-  const f = fixture(), first = f.state("gemini-1");
-  const original = (f.pool as any).pick.bind(f.pool);
-  let race = true;
-  (f.pool as any).pick = (owner: string, signal: AbortSignal, preferred: GeminiWebAccountId | null, refresh: boolean) => {
-    if (!race) return original(owner, signal, preferred, refresh);
-    race = false;
-    return new Promise(resolve => setImmediate(() => {
-      first.owner = owner;
-      f.pool.add();
-      resolve(first.browser);
-    }));
-  };
-  try {
-    const chosen = await f.pool.acquire("racing-job", new AbortController().signal);
-    const owned = f.pool.list().filter(a => f.state(a.accountId).owner === "racing-job");
-    assert.deepEqual(owned.map(a => a.accountId), [chosen.accountId]);
-    chosen.release("racing-job");
-    assert.ok(f.pool.list().every(a => !f.state(a.accountId).owner));
-  } finally { await f.pool.dispose(); }
+test("manual drafts prevent selected work without modifying or switching accounts", async () => {
+  const f = fixture(); f.pool.add(); const first = f.state("gemini-1");
+  first.browser.snapshot = async () => snapshot("gemini-1", { draft: "직접 작성한 내용" });
+  await assert.rejects(f.pool.acquireSelected("worker", new AbortController().signal, "gemini-1"));
+  assert.equal(first.interrupts, 0); assert.equal(first.owner, undefined);
+  assert.equal(f.state("gemini-2").owner, undefined);
 });
 
-test("a newly usable account resumes the same waiting driver request with its saved context and partial draft", async t => {
+test("master waits for a busy account and receives a fresh list, without claiming it", async t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  const f = fixture(), first = f.state("gemini-1");
-  first.usage = usage(100);
-  let stored: WebContext = { history: [{ request: "독자와 인물을 유지하세요.", response: "확인된 설정" }], pending: { request: input.text, partial: "이어 쓸 초안" } };
-  const r = run(f.pool, { load: () => stored, save: c => { stored = structuredClone(c); } }, "web:gemini-1:/app/previous-story");
-  await r.driver.send(input); await flush();
-  assert.ok(r.events.some(e => e.type === "notice" && e.text.includes("배정 대기")));
-  assert.equal(r.events.some(e => e.type === "turn_end"), false);
-  f.pool.add();
-  const second = f.state("gemini-2");
-  second.usage = usage(1);
-  await second.browser.refreshUsage(); await flush();
-  for (let n = 0; n < 4; n++) await pulse(t);
-  await r.task();
+  const f = fixture(); f.pool.add();
+  f.state("gemini-1").owner = "one"; f.state("gemini-2").owner = "two";
+  let finished = false;
+  const task = f.pool.inspect(new AbortController().signal, true).then(a => { finished = true; return a; });
+  await flush(); assert.equal(finished, false);
+  f.state("gemini-2").browser.release("two");
+  t.mock.timers.tick(WEB_RECHECK_MS); await flush();
+  const list = await task;
+  assert.equal(list[1].state, "ready"); assert.equal(list[0].state, "busy");
+  assert.equal(f.state("gemini-2").owner, undefined);
+});
+
+test("master waits for quota reset and can cancel without later dispatch", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = fixture(); const first = f.state("gemini-1"); first.usage = usage(100);
+  const controller = new AbortController();
+  const task = f.pool.inspect(controller.signal, true);
+  await flush(); first.read = async () => usage(50);
+  t.mock.timers.tick(WEB_RECHECK_MS); await flush();
+  assert.equal((await task)[0].remainingPercent, 50); assert.equal(first.owner, undefined);
+  first.read = undefined; first.usage = usage(100);
+  const waiting = f.pool.inspect(controller.signal, true); await flush();
+  const rejected = assert.rejects(waiting); controller.abort(); await rejected;
+  first.usage = usage(1); t.mock.timers.tick(WEB_RECHECK_MS * 2); await flush();
   assert.equal(first.prompts.length, 0);
-  assert.equal(second.prompts.length, 1);
-  assert.match(second.prompts[0], /확인된 설정/);
-  assert.match(second.prompts[0], /이어 쓸 초안/);
-  assert.match(second.prompts[0], /사서의 목소리/);
-  assert.equal(stored.pending, undefined);
-  assert.equal(r.events.filter(e => e.type === "turn_end").length, 1);
-  assert.equal(r.events.findLast(e => e.type === "turn_end")?.ok, true);
-  await f.pool.dispose();
 });
 
-test("accounts added after the user stops a waiting request cannot restart that request", async t => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("pool disposal cancels master inspection", async () => {
   const f = fixture(); f.state("gemini-1").usage = usage(100);
-  const r = run(f.pool);
-  await r.driver.send(input); await flush();
-  await r.driver.stop();
-  f.pool.add();
-  await f.state("gemini-2").browser.refreshUsage();
-  t.mock.timers.tick(WEB_RECHECK_MS); await flush();
-  assert.ok(f.pool.list().every(a => !f.state(a.accountId).owner && f.state(a.accountId).prompts.length === 0));
-  assert.equal(r.events.filter(e => e.type === "turn_end").length, 1);
-  assert.equal(r.events.findLast(e => e.type === "turn_end")?.interrupted, true);
-  await f.pool.dispose();
+  const task = f.pool.inspect(new AbortController().signal, true); await flush();
+  const rejected = assert.rejects(task, /종료/); await f.pool.dispose(); await rejected;
 });
 
-test("manual drafts are skipped without interruption when another account can work", async () => {
-  const f = fixture(); f.pool.add();
-  const first = f.state("gemini-1"), second = f.state("gemini-2");
-  first.usage = usage(5); second.usage = usage(30);
-  first.browser.snapshot = async () => snapshot("gemini-1", { draft: "사용자가 직접 쓰던 내용" });
-  assert.equal((await f.pool.acquire("worker", new AbortController().signal, "gemini-1")).accountId, "gemini-2");
-  assert.equal(first.owner, undefined); assert.equal(first.interrupts, 0); assert.equal(first.prompts.length, 0);
-});
-
-test("quota that falls during browser preparation is reassigned before the request is submitted", async t => {
+test("new account wakes master inspection even when another account's lookup is stalled", async t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  const f = fixture(); f.pool.add();
-  const first = f.state("gemini-1"), second = f.state("gemini-2");
-  first.usage = usage(1); second.usage = usage(50);
-  first.browser.prepare = async () => { first.usage = usage(95); return snapshot("gemini-1"); };
+  const f = fixture(); const first = f.state("gemini-1"); first.usage = usage(100);
+  let releaseRead!: (u: GeminiWebUsage) => void;
+  first.read = () => new Promise(resolve => { releaseRead = resolve; });
+  const task = f.pool.inspect(new AbortController().signal, true); await flush();
+  f.pool.add(); await f.state("gemini-2").browser.refreshUsage(); await flush();
+  const list = await task;
+  assert.equal(list[1].remainingPercent, 50); assert.equal(f.state("gemini-2").owner, undefined);
+  releaseRead(usage(100)); await flush(); await f.pool.dispose();
+});
+
+test("web driver rejects missing master selection before claiming a profile", async () => {
+  const f = fixture(), r = run(f.pool);
+  await assert.rejects(r.driver.send({ ...input, webAccountId: undefined }), /마스터/);
+  assert.equal(f.state("gemini-1").owner, undefined);
+});
+
+test("explicitly retaining an account resumes its previous conversation", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = fixture(); f.pool.add(); f.state("gemini-2").usage = usage(1);
   const r = run(f.pool, undefined, "web:gemini-1:/app/previous-story");
-  await r.driver.send(input);
-  for (let n = 0; n < 4; n++) await pulse(t);
-  await r.task();
-  assert.equal(first.prompts.length, 0); assert.equal(first.interrupts, 0); assert.equal(first.owner, undefined);
-  assert.equal(second.prompts.length, 1); assert.match(second.prompts[0], /사서의 목소리/);
-  assert.equal(r.events.findLast(e => e.type === "turn_end")?.ok, true);
+  await r.driver.send(input); for (let n = 0; n < 4; n++) await pulse(t); await r.task();
+  assert.deepEqual(f.state("gemini-1").resumes, ["web:gemini-1:/app/previous-story"]);
+  assert.equal(f.state("gemini-2").prompts.length, 0);
+  assert.equal(r.events.find(e => e.type === "notice" && e.webAccountId)?.webAccountId, "gemini-1");
 });
 
-test("the last accepted in-flight account remains preferred after a quota reset", async t => {
+test("quota falling before submission returns control to the master without switching", async () => {
+  const f = fixture(); f.pool.add(); const first = f.state("gemini-1");
+  first.browser.prepare = async () => { first.usage = usage(95); return snapshot("gemini-1"); };
+  let stored: WebContext = { history: [] };
+  const r = run(f.pool, { load: () => stored, save: c => { stored = structuredClone(c); } });
+  await r.driver.send(input); await r.task();
+  assert.equal(first.prompts.length, 0); assert.equal(first.owner, undefined);
+  assert.equal(f.state("gemini-2").prompts.length, 0);
+  assert.match(stored.pending!.request, /사서/);
+  assert.match(r.events.findLast(e => e.type === "turn_end")?.error ?? "", /마스터/);
+});
+
+test("low quota preserves draft; only a new master assignment transfers it to the selected account", async t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  const f = fixture(); f.pool.add();
-  const first = f.state("gemini-1"), second = f.state("gemini-2");
-  first.owner = "other-job"; first.usage = usage(1); second.usage = usage(50);
-  second.poll = (_n, prompt) => { second.usage = usage(95); return snapshot("gemini-2", { users: [prompt], generating: true, responses: [{ text: "이전 작업을 이어갈 초안", complete: false }] }); };
-  const r = run(f.pool);
-  await r.driver.send(input); await pulse(t);
-  assert.equal(r.ids.at(-1), "web:gemini-2:/app/gemini-2-chat");
-  assert.equal(r.driver.running, true);
-  first.browser.release("other-job"); second.read = async () => usage(50); second.poll = undefined;
-  t.mock.timers.tick(WEB_RECHECK_MS); await flush();
-  for (let n = 0; n < 4; n++) await pulse(t);
-  await r.task();
-  assert.equal(first.prompts.length, 0); assert.equal(second.prompts.length, 2);
-  assert.equal(second.resumes.at(-1), "web:gemini-2:/app/gemini-2-chat");
-  assert.match(second.prompts.at(-1)!, /이전 작업을 이어갈 초안/);
-  assert.equal(r.events.findLast(e => e.type === "turn_end")?.ok, true);
+  const f = fixture(); f.pool.add(); const first = f.state("gemini-1"), second = f.state("gemini-2");
+  first.poll = (_n, prompt) => { first.usage = usage(96); return snapshot("gemini-1", { users: [prompt], generating: true, responses: [{ text: "도서관 초안과 사서의 말투", complete: false }] }); };
+  let stored: WebContext = { history: [{ request: "도서관은 별빛도서관이다.", response: "별빛도서관" }] };
+  const memory = { load: () => structuredClone(stored), save: (c: WebContext) => { stored = structuredClone(c); } };
+  const r = run(f.pool, memory);
+  await r.driver.send(input); await pulse(t); await r.task();
+  assert.equal(r.driver.running, false); assert.equal(first.owner, undefined); assert.equal(first.interrupts, 1);
+  assert.equal(second.prompts.length, 0); assert.equal(stored.pending?.partial, "도서관 초안과 사서의 말투");
+  assert.equal(r.events.findLast(e => e.type === "turn_end")?.ok, false);
+  const resumed = run(f.pool, memory, r.ids.at(-1)!);
+  await resumed.driver.send({ ...input, webAccountId: "gemini-2" });
+  for (let n = 0; n < 4; n++) await pulse(t); await resumed.task();
+  assert.equal(second.prompts.length, 1); assert.match(second.prompts[0], /도서관 초안과 사서의 말투/);
+  assert.match(second.prompts[0], /별빛도서관/); assert.match(second.prompts[0], /사서의 목소리/);
+  assert.equal(second.prompts[0].split(input.text).length - 1, 1);
+  assert.deepEqual(second.resumes, [null]); assert.equal(stored.pending, undefined);
+  assert.equal(resumed.events.findLast(e => e.type === "turn_end")?.ok, true);
+});
+
+test("after quota reset, the master can resume the same account with its partial draft", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = fixture(), first = f.state("gemini-1");
+  first.poll = (_n, prompt) => { first.usage = usage(100); return snapshot("gemini-1", { users: [prompt], generating: true, responses: [{ text: "보존할 초안", complete: false }] }); };
+  let stored: WebContext = { history: [] };
+  const r = run(f.pool, { load: () => stored, save: c => { stored = structuredClone(c); } });
+  await r.driver.send(input); await pulse(t); await r.task();
+  assert.equal(stored.pending?.partial, "보존할 초안"); assert.equal(r.driver.running, false);
+  first.usage = usage(20); first.poll = undefined;
+  await r.driver.send(input); for (let n = 0; n < 4; n++) await pulse(t); await r.task();
+  assert.equal(first.prompts.length, 2); assert.match(first.prompts[1], /보존할 초안/);
+  assert.equal(first.resumes.at(-1), "web:gemini-1:/app/gemini-1-chat");
+  assert.equal(stored.pending, undefined); assert.equal(r.events.findLast(e => e.type === "turn_end")?.ok, true);
+});
+
+test("quota downgrade transfers only the verified Argon draft on master reassignment", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = fixture(); f.pool.add(); const first = f.state("gemini-1");
+  first.poll = (n, prompt) => {
+    if (n === 1) return snapshot("gemini-1", { users: [prompt], generating: true, responses: [{ text: "검증된 Argon 초안", complete: false }] });
+    first.usage = { ...usage(100), status: "limited" };
+    return snapshot("gemini-1", { users: [prompt], model: "Flash", responses: [{ text: "넘기면 안 되는 응답", complete: true }] });
+  };
+  const r = run(f.pool); await r.driver.send(input); await pulse(t); await pulse(t); await r.task();
+  assert.equal(f.state("gemini-2").prompts.length, 0);
+  await r.driver.send({ ...input, webAccountId: "gemini-2" });
+  for (let n = 0; n < 4; n++) await pulse(t); await r.task();
+  assert.match(f.state("gemini-2").prompts[0], /검증된 Argon 초안/);
+  assert.doesNotMatch(f.state("gemini-2").prompts[0], /넘기면 안 되는/);
+});
+
+test("stop during quota lookup prevents later submission and releases the selected account", async () => {
+  const f = fixture(), first = f.state("gemini-1"); let resolve!: (u: GeminiWebUsage) => void;
+  first.read = () => new Promise(r => { resolve = r; });
+  const r = run(f.pool); await r.driver.send(input); await flush(); await r.driver.stop();
+  assert.equal(r.driver.running, false); assert.equal(r.events.findLast(e => e.type === "turn_end")?.interrupted, true);
+  resolve(usage(20)); await flush(); assert.equal(first.prompts.length, 0); assert.equal(first.owner, undefined);
 });
 
 test("conversation identities isolate all ten accounts and reject path traversal", () => {
@@ -316,113 +274,4 @@ test("conversation identities isolate all ten accounts and reject path traversal
     if (n !== 1) assert.equal(webConversationUrl(id), "https://gemini.google.com/app");
   }
   for (const bad of ["gemini-0", "gemini-11", "gemini-01", "../gemini-1", "gemini-1/../../other"]) assert.equal(webAccountId(bad), null);
-});
-
-test("low quota hands the current request and partial draft to another account without completing early", async t => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const f = fixture(); f.pool.add();
-  const first = f.state("gemini-1"), second = f.state("gemini-2");
-  first.usage = usage(10); second.usage = usage(40);
-  first.poll = (_n, prompt) => { first.usage = usage(96); return snapshot("gemini-1", { users: [prompt], generating: true, responses: [{ text: "도서관 초안과 사서의 말투", complete: false }] }); };
-  let stored: WebContext = { history: [{ request: "도서관은 별빛도서관이다.", response: "별빛도서관" }] };
-  const history: WebContext[] = [];
-  const memory = { load: () => structuredClone(stored), save: (c: WebContext) => { stored = structuredClone(c); history.push(stored); } };
-  const r = run(f.pool, memory);
-  await r.driver.send(input);
-  for (let n = 0; n < 6; n++) await pulse(t);
-  await r.task();
-  assert.equal(first.prompts.length, 1); assert.equal(second.prompts.length, 1);
-  assert.match(second.prompts[0], /도서관 초안과 사서의 말투/);
-  assert.match(second.prompts[0], /별빛도서관/);
-  assert.match(second.prompts[0], /사서의 목소리/);
-  assert.equal(second.prompts[0].split(input.text).length - 1, 1, "an in-flight request must not be included twice in a handover");
-  assert.deepEqual(second.resumes, [null]);
-  assert.equal(first.interrupts, 1);
-  assert.equal(r.events.filter(e => e.type === "turn_end").length, 1);
-  assert.equal(r.events.findLast(e => e.type === "turn_end")?.ok, true);
-  assert.equal(r.events.some(e => e.type === "error"), false);
-  assert.equal(history.some(c => c.pending?.partial.includes("초안")), true);
-  assert.equal(stored.pending, undefined);
-  assert.equal(stored.history.at(-1)?.response, "완료 gemini-2");
-  first.usage = usage(5); second.usage = usage(90);
-  first.poll = undefined;
-  const restarted = run(f.pool, memory, r.ids.at(-1)!);
-  await restarted.driver.send({ ...input, text: "이전 도서관 안내를 이어서 다듬으세요." });
-  for (let n = 0; n < 4; n++) await pulse(t);
-  await restarted.task();
-  assert.match(first.prompts.at(-1)!, /완료 gemini-2/);
-  assert.equal(restarted.events.findLast(e => e.type === "turn_end")?.ok, true);
-});
-
-test("exhausted work remains pending and resumes with its draft after the same account's quota resets", async t => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const f = fixture(), first = f.state("gemini-1");
-  first.usage = usage(10);
-  first.poll = (_n, prompt) => { first.usage = { ...usage(100), status: "limited" }; return snapshot("gemini-1", { users: [prompt], generating: true, responses: [{ text: "보존할 초안", complete: false }] }); };
-  let stored: WebContext = { history: [] };
-  const r = run(f.pool, { load: () => stored, save: c => { stored = structuredClone(c); } });
-  await r.driver.send(input); await pulse(t);
-  assert.equal(stored.pending?.partial, "보존할 초안");
-  assert.equal(r.driver.running, true);
-  assert.equal(r.events.some(e => e.type === "turn_end"), false);
-  assert.equal(r.events.some(e => e.type === "text"), false);
-  t.mock.timers.tick(WEB_RECHECK_MS); await flush();
-  assert.equal(first.prompts.length, 1);
-  first.read = async () => usage(20); first.poll = undefined;
-  t.mock.timers.tick(WEB_RECHECK_MS); await flush();
-  for (let n = 0; n < 4; n++) await pulse(t);
-  await r.task();
-  assert.equal(first.prompts.length, 2); assert.match(first.prompts[1], /보존할 초안/);
-  assert.equal(stored.pending, undefined);
-  assert.equal(r.events.filter(e => e.type === "turn_end").length, 1);
-  assert.equal(r.events.findLast(e => e.type === "turn_end")?.ok, true);
-});
-
-test("low quota pauses an unfinished response and stop while waiting prevents any later submission", async t => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const f = fixture(), first = f.state("gemini-1");
-  first.poll = (_n, prompt) => { first.usage = usage(91); return snapshot("gemini-1", { users: [prompt], generating: true, responses: [{ text: "계속할 초안", complete: false }] }); };
-  let stored: WebContext = { history: [] };
-  const r = run(f.pool, { load: () => stored, save: c => { stored = structuredClone(c); } });
-  await r.driver.send(input); await pulse(t);
-  assert.equal(r.driver.running, true); assert.equal(first.interrupts, 1); assert.equal(first.owner, undefined);
-  assert.equal(r.events.some(e => e.type === "notice" && e.text.includes("배정 대기")), true);
-  await r.driver.stop();
-  first.read = async () => usage(1); first.poll = undefined;
-  t.mock.timers.tick(WEB_RECHECK_MS * 2); await flush();
-  assert.equal(first.prompts.length, 1); assert.equal(first.interrupts, 1);
-  assert.equal(stored.pending?.partial, "계속할 초안");
-  assert.equal(r.events.findLast(e => e.type === "turn_end")?.interrupted, true);
-});
-
-test("a quota-triggered model downgrade transfers only the last verified Argon draft", async t => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const f = fixture(); f.pool.add();
-  const first = f.state("gemini-1"), second = f.state("gemini-2");
-  first.usage = usage(10); second.usage = usage(40);
-  first.poll = (n, prompt) => {
-    if (n === 1) return snapshot("gemini-1", { users: [prompt], generating: true, responses: [{ text: "검증된 Argon 초안", complete: false }] });
-    first.usage = { ...usage(100), status: "limited" };
-    return snapshot("gemini-1", { users: [prompt], model: "Flash", responses: [{ text: "넘기면 안 되는 다른 모델 응답", complete: true }] });
-  };
-  const r = run(f.pool);
-  await r.driver.send(input);
-  for (let n = 0; n < 7; n++) await pulse(t);
-  await r.task();
-  assert.match(second.prompts[0], /검증된 Argon 초안/);
-  assert.doesNotMatch(second.prompts[0], /넘기면 안 되는/);
-  assert.equal(r.events.findLast(e => e.type === "turn_end")?.ok, true);
-});
-
-test("stop during quota lookup cancels allocation promptly and cannot submit afterward", async () => {
-  const f = fixture(), first = f.state("gemini-1");
-  let resolve!: (u: GeminiWebUsage) => void;
-  first.read = () => new Promise(r => { resolve = r; });
-  const r = run(f.pool);
-  await r.driver.send(input); await flush();
-  await r.driver.stop();
-  assert.equal(r.driver.running, false);
-  assert.equal(r.events.findLast(e => e.type === "turn_end")?.interrupted, true);
-  resolve(usage(20)); await flush();
-  assert.equal(first.prompts.length, 0); assert.equal(first.owner, undefined);
 });

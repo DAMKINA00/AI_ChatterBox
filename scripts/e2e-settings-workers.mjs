@@ -161,7 +161,7 @@ try {
   // Settings dialog: repeated switch toggles must not submit or close it.
   let dialog = await openSettings(page, "UI 상태 점검");
   const settingsLayout = await dialog.evaluate((dialogNode) => {
-    const workerGrid = [...dialogNode.querySelectorAll("div")].find((el) => el.children.length === 3 && el.querySelector('textarea[aria-label="제미나이 작업자 주의점"]'));
+    const workerGrid = [...dialogNode.querySelectorAll("div")].find((el) => el.children.length === 4 && el.querySelector('textarea[aria-label="제미나이 작업자 주의점"]'));
     const textareas = [...dialogNode.querySelectorAll("textarea")];
     const dialogRect = dialogNode.getBoundingClientRect();
     const gridRect = workerGrid?.getBoundingClientRect();
@@ -184,7 +184,7 @@ try {
     settingsLayout.dialogWidth >= expectedDialogWidth - 2 && settingsLayout.dialogScrollWidth <= settingsLayout.dialogClientWidth + 1 && settingsLayout.workerGridScrollWidth <= (settingsLayout.workerGridClientWidth ?? 0) + 1,
     JSON.stringify(settingsLayout),
   );
-  check("settings textareas disable the native resize handle", settingsLayout.textareaResize.length === 6 && settingsLayout.textareaResize.every((resize) => resize === "none"), JSON.stringify(settingsLayout.textareaResize));
+  check("settings textareas disable the native resize handle", settingsLayout.textareaResize.length === 8 && settingsLayout.textareaResize.every((resize) => resize === "none"), JSON.stringify(settingsLayout.textareaResize));
   await page.screenshot({ path: join(screenshots, "settings-dark.png") });
   await dialog.getByRole("button", { name: "취소" }).click();
   await page.waitForSelector('[role="dialog"]', { state: "detached" });

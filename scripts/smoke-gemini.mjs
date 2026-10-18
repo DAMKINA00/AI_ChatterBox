@@ -57,20 +57,14 @@ try {
   check("writing turn completes", (await turn(`다음 공개 문장을 자연스럽게 다듬어 주세요: ${publicSentence} 결과는 한국어 문장으로만 답하세요. 답변 전에 chatterbox_bridge set_expression(happy)를 호출하세요.`)).ok);
   check("writing text returned", events.slice(polishStart).some((e) => e.type === "text" && /별빛|도서관/.test(e.text)));
   check("expression MCP called", expression);
-  const hookCount = hooks.length, approvalCount = approvals.length, eventCount = events.length;
-  let writableError = "";
-  try { await driver.send({ text: `파일을 수정하지 말고 ${join(cwd, "forbidden.txt")}에 내용을 쓰세요.`, noWrites: false, attachments: [] }); }
-  catch (error) { writableError = error instanceof Error ? error.message : String(error); }
-  const writableRejected = /글쓰기 전용/.test(writableError);
-  check("writable send is rejected before execution", writableRejected);
-  check("rejected writable send runs no hook or approval", hooks.length === hookCount && approvals.length === approvalCount && events.length === eventCount);
+  check("explicit writable mode can start without prose-only rejection", (await turn("이번에는 구현 모드 연결 확인입니다. 도구나 파일은 사용하지 말고 WRITABLE_READY라고만 답하세요.", false)).ok);
   const savedNativeId = nativeId;
   await driver.dispose(); driver = create(savedNativeId);
   const resumeStart = events.length;
   check("saved native session resumes with writing", (await turn(`앞서 다듬은 공개 문장 ${publicSentence}을 바탕으로, 방문객에게 건네는 사서의 대사를 한국어 한 문장으로 작성하세요. 파일이나 도구는 사용하지 마세요.`)).ok);
   check("saved native session id is reused", !!savedNativeId && nativeId === savedNativeId);
   check("resumed writing text returned", events.slice(resumeStart).some((e) => e.type === "text" && /사서|도서관/.test(e.text)));
-  check("writing turns use noWrites", turnInputs.every(Boolean));
+  check("writing turns stay read-only and explicit writable mode is distinct", turnInputs.filter(v => !v).length === 1);
   check("usage recorded", events.some((e) => e.type === "agent_usage" && e.metrics.outputTokens > 0));
   const metrics = events.filter((e) => e.type === "agent_usage").map((e) => e.metrics);
   check("usage token total increases after resume", metrics.length >= 2 && metrics.at(-1).total.outputTokens > metrics[0].total.outputTokens);

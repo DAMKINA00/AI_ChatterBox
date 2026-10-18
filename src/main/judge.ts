@@ -5,6 +5,9 @@
 import { chatOrchestrator, roleName, CONSULT_KIND_LABEL, type AgentEvent, type ApprovalRequest, type ConsultKind, type Role, type UsageInfo } from "../shared/types";
 import type { ChatManager } from "./chats";
 import type { ApprovalInput, JudgeAnswer } from "./approvals";
+import { join, dirname } from "node:path";
+import { GeminiDriver } from "./drivers/gemini";
+import { GrokDriver } from "./drivers/grok";
 import { ClaudeDriver } from "./drivers/claude";
 import { CodexDriver } from "./drivers/codex";
 import type { AgentDriver } from "./drivers/types";
@@ -88,6 +91,8 @@ export class ApprovalJudge {
             },
             host,
           )
+        : agent === "gemini" ? new GeminiDriver({ ...opts, exePath: this.chats.geminiExe() }, { bridge: this.chats.bridge, hookScript: join(dirname(this.chats.bridgeScript), "antigravity-hook.js"), tmpDir: this.chats.tmpDir }, host)
+        : agent === "grok" ? new GrokDriver({ ...opts, exePath: this.chats.grokExe() }, () => ({}), host)
         : new CodexDriver(opts, this.chats.codex(), host);
     this.sessions.set(chatId, s);
     return s;

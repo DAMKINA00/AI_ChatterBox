@@ -10,7 +10,7 @@ const root = resolve(scriptDir, "..");
 const assetRoot = join(root, "src", "renderer", "public", "characters");
 const galleryPath = join(root, "docs", "character-gallery.html");
 const previewPath = join(root, ".scratch", "character-gallery.png");
-const roles = ["orch", "claude", "gpt", "gemini"];
+const roles = ["orch", "claude", "gpt", "gemini", "grok"];
 const expressions = ["neutral", "thinking", "speaking", "happy", "confident", "surprised", "embarrassed", "worried", "sad", "angry", "tired", "waiting"];
 const entries = roles.flatMap((role) => expressions.map((expression) => ({ role, expression })));
 entries.push({ role: "admin", expression: "neutral" });

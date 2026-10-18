@@ -24,7 +24,7 @@ function Bar({ name, d, color, error, updatedAt }: { name: string; d: UsageDispl
   return (
     <Tooltip content={updatedAt ? `${tip} · ${new Date(updatedAt).toLocaleString("ko-KR")} 조회` : tip}>
       <div className="flex items-center gap-2 text-[11px] text-muted-foreground" data-testid="usage-bar">
-        <span className="w-[86px] shrink-0 whitespace-nowrap">
+        <span className="w-[108px] shrink-0 whitespace-nowrap">
           {name} <span className={cn(d?.warn && "font-semibold text-destructive")}>{error ? "조회 실패" : d ? d.window : "정보 없음"}</span>
         </span>
         <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
@@ -47,10 +47,11 @@ export function UsageBar() {
   return (
     <div className="space-y-1">
       <div className="text-[11px] font-medium text-muted-foreground">남은 사용량</div>
-      <Bar name="Claude" d={pickUsage(usage.claude)} color="bg-claude" />
-      <Bar name="GPT" d={pickUsage(usage.codex)} color="bg-gpt" />
-      <Bar name="Gemini CLI" d={pickUsage(usage.gemini)} color="bg-gemini" error={usage.gemini?.error} updatedAt={usage.gemini?.updatedAt} />
-      <Button type="button" size="sm" variant="ghost" className="h-7 w-full justify-start text-[11px]" onClick={() => setWebOpen(true)} data-testid="gemini-web-manage"><Globe2 /> Gemini 웹 계정 관리</Button>
+      <Bar name="클로드" d={pickUsage(usage.claude)} color="bg-claude" />
+      <Bar name="지피티" d={pickUsage(usage.codex)} color="bg-gpt" />
+      <Bar name="제미나이" d={pickUsage(usage.gemini)} color="bg-gemini" error={usage.gemini?.error} updatedAt={usage.gemini?.updatedAt} />
+      <Bar name="그록" d={pickUsage(usage.grok)} color="bg-grok" error={usage.grok?.error} updatedAt={usage.grok?.updatedAt} />
+      <Button type="button" size="sm" variant="ghost" className="h-7 w-full justify-start text-[11px]" onClick={() => setWebOpen(true)} data-testid="gemini-web-manage"><Globe2 /> 제미나이 웹 계정 관리</Button>
       <GeminiWebDialog open={webOpen} onOpenChange={setWebOpen} />
     </div>
   );

@@ -34,12 +34,14 @@ try {
       const a = state.accounts.find(a => a.accountId === id);
       if(action === 'login') {
         a.state='login_required'; a.message='로그인 진행 중';
-        if (!state.holdLogin.includes(id)) setTimeout(() => {
+        state.finishLogin ??= {};
+        state.finishLogin[id] = () => {
           a.state='ready'; a.message='로그인 완료 · 브라우저 창을 닫았습니다.'; a.model='Gemini 4 Argon';
           a.usage={status:'available',detail:'현재 20% 사용 · 주간 5% 사용',checkedAt:Date.now(),current:{usedPercent:20,resetText:'오늘 저녁'},weekly:{usedPercent:5,resetText:'다음 주'}};
           a.remainingPercent=80;
           BrowserWindow.getAllWindows()[0]?.webContents.send('gemini:web-login', status(a));
-        }, 500);
+        };
+        if (!state.holdLogin.includes(id)) setTimeout(state.finishLogin[id], 500);
       } else if(action === 'open' && (a.state === 'ready' || a.state === 'busy')) {
         a.message='브라우저 열림';
       }
@@ -58,11 +60,11 @@ try {
   await page.locator(`[data-testid="chat-node"][data-chat-id="${chatId}"] [role="treeitem"]`).click();
   check('main sidebar has no separate Gemini web usage bar', await page.locator('[data-provider="gemini-web"]').count() === 0);
   await page.getByTestId('gemini-web-manage').click();
-  let dialog = page.getByRole('dialog').filter({hasText:'Gemini 웹 계정 관리'});
+  let dialog = page.getByRole('dialog').filter({hasText:'제미나이 웹 계정 관리'});
   await dialog.getByTestId('gemini-web-account').waitFor();
   check('management starts with the existing account 1', await dialog.getByTestId('gemini-web-account').count() === 1);
   const dialogText = await dialog.innerText();
-  check('management explains previous-account preference, idle fallback and waiting', ['10개', '이전 계정', '10% 이하', '쉬고 있는 계정', '대기', '주기적으로'].every(text => dialogText.includes(text)));
+  check('management explains previous-account preference, idle fallback and waiting', ['마스터가 전체 계정', '직접 보고', '10개', '이전 계정', '10% 이하', '쉬고 있는 계정', '대기', '주기적으로'].every(text => dialogText.includes(text)));
   check('opening management never opens Google or starts a model', await app.evaluate(() => !globalThis.__webAccountsUi.calls.some(c=>c.action==='open')));
   for(let n=2;n<=10;n++) {
     await dialog.getByTestId('gemini-web-add-account').click();
@@ -77,19 +79,20 @@ try {
   await card.getByRole('button',{name:'저장',exact:true}).click();
   await page.waitForFunction(()=>globalThis.document.querySelector('[aria-label="계정 2 이름"]')?.value==='문서 편집 계정');
   check('account label update reaches the intended account', await app.evaluate(()=>globalThis.__webAccountsUi.accounts.find(a=>a.accountId==='gemini-2').label==='문서 편집 계정'));
-  await card.getByRole('checkbox',{name:'계정 2 자동 배정'}).uncheck();
+  await card.getByRole('checkbox',{name:'계정 2 마스터 배정'}).uncheck();
   check('account exclusion reaches the intended account', await app.evaluate(()=>globalThis.__webAccountsUi.accounts.find(a=>a.accountId==='gemini-2').enabled===false));
-  await app.evaluate(()=>{const a=globalThis.__webAccountsUi.accounts.find(a=>a.accountId==='gemini-3');a.state='login_required';a.message='다른 계정 로그인 대기';});
+  await app.evaluate(()=>{globalThis.__webAccountsUi.holdLogin.push('gemini-2');const a=globalThis.__webAccountsUi.accounts.find(a=>a.accountId==='gemini-3');a.state='login_required';a.message='다른 계정 로그인 대기';});
   await card.getByRole('button',{name:'로그인 / 브라우저',exact:true}).click();
   await card.getByTestId('gemini-web-login-feedback').getByText('로그인 진행 중',{exact:true}).waitFor();
+  await app.evaluate(()=>globalThis.__webAccountsUi.finishLogin['gemini-2']());
   await card.getByTestId('gemini-web-login-feedback').getByText('로그인 완료',{exact:true}).waitFor();
   check('login action targets the selected profile without a manual refresh', await app.evaluate(()=>globalThis.__webAccountsUi.calls.some(c=>c.action==='login'&&c.id==='gemini-2') && !globalThis.__webAccountsUi.calls.some(c=>c.action==='refresh')));
   check('authenticated status updates only the matching card', await app.evaluate(()=>{const a=globalThis.__webAccountsUi.accounts.find(a=>a.accountId==='gemini-2');return a.state==='ready'&&a.message.includes('로그인 완료');}));
-  check('another pending account remains unchanged', await app.evaluate(()=>{const a=globalThis.__webAccountsUi.accounts.find(a=>a.accountId==='gemini-3');return a.state==='login_required'&&a.message==='다른 계정 로그인 대기';}));
+  check('another pending account remains unchanged', await app.evaluate(()=>{globalThis.__webAccountsUi.holdLogin.push('gemini-2');const a=globalThis.__webAccountsUi.accounts.find(a=>a.accountId==='gemini-3');return a.state==='login_required'&&a.message==='다른 계정 로그인 대기';}));
   await page.waitForTimeout(100);
-  const loginToast = page.locator('[role="alert"]').filter({hasText:'Gemini 웹 계정 2'});
+  const loginToast = page.locator('[role="alert"]').filter({hasText:'제미나이 웹 계정 2'});
   await loginToast.waitFor();
-  check('login toast names the matching account', (await loginToast.innerText()).includes('Gemini 웹 계정 2') && !(await loginToast.innerText()).includes('계정 3'));
+  check('login toast names the matching account', (await loginToast.innerText()).includes('제미나이 웹 계정 2') && !(await loginToast.innerText()).includes('계정 3'));
   check('current and weekly quota are shown inside management', (await card.getByTestId('gemini-web-account-usage').innerText()).includes('80% 남음') && (await card.getByTestId('gemini-web-account-usage').innerText()).includes('95% 남음'));
   check('quota tooltip preserves reset information', (await card.getByTestId('gemini-web-account-usage').getAttribute('title')).includes('오늘 저녁'));
   await card.getByRole('button',{name:'로그인 / 브라우저',exact:true}).click();
@@ -105,9 +108,9 @@ try {
   await page.waitForTimeout(3400);
   const cancelledText = await cancelledCard.innerText();
   check('cancelled login clears stale pending feedback', await cancelledCard.getByTestId('gemini-web-login-feedback').count()===0 && cancelledText.includes('브라우저가 닫혔습니다.'));
-  await app.evaluate(()=>{const a=globalThis.__webAccountsUi.accounts.find(a=>a.accountId==='gemini-3');a.state='busy';a.message='다른 글쓰기 작업 중';});
+  await app.evaluate(()=>{globalThis.__webAccountsUi.holdLogin.push('gemini-2');const a=globalThis.__webAccountsUi.accounts.find(a=>a.accountId==='gemini-3');a.state='busy';a.message='다른 글쓰기 작업 중';});
   await page.waitForTimeout(3100);
-  check('busy account cannot be excluded from under a running job', await dialog.getByRole('checkbox',{name:'계정 3 자동 배정'}).isDisabled());
+  check('busy account cannot be excluded from under a running job', await dialog.getByRole('checkbox',{name:'계정 3 마스터 배정'}).isDisabled());
   await app.evaluate(()=>{const a=globalThis.__webAccountsUi.accounts.find(a=>a.accountId==='gemini-4');a.usage={status:'error',detail:'로그인 확인 필요',checkedAt:Date.now(),current:{usedPercent:15}};a.remainingPercent=undefined;});
   await page.waitForTimeout(3100);
   const failedText=await dialog.locator('[data-account-id="gemini-4"] [data-testid="gemini-web-account-usage"]').innerText();
@@ -116,18 +119,18 @@ try {
   await dialog.getByText('닫기',{exact:true}).click();
   await page.getByLabel('테마 전환').click();
   await page.getByTestId('gemini-web-manage').click();
-  dialog=page.getByRole('dialog').filter({hasText:'Gemini 웹 계정 관리'});
+  dialog=page.getByRole('dialog').filter({hasText:'제미나이 웹 계정 관리'});
   await dialog.getByRole('textbox',{name:'계정 2 이름'}).waitFor();
-  check('labels and exclusions remain after closing and reopening management', await dialog.getByRole('textbox',{name:'계정 2 이름'}).inputValue()==='문서 편집 계정' && !(await dialog.getByRole('checkbox',{name:'계정 2 자동 배정'}).isChecked()));
+  check('labels and exclusions remain after closing and reopening management', await dialog.getByRole('textbox',{name:'계정 2 이름'}).inputValue()==='문서 편집 계정' && !(await dialog.getByRole('checkbox',{name:'계정 2 마스터 배정'}).isChecked()));
   await page.setViewportSize({width:760,height:900});
   const layout=await dialog.evaluate(el=>({width:el.clientWidth,scrollWidth:el.scrollWidth}));
   check('management fits a narrow window without horizontal overflow', layout.scrollWidth<=layout.width+1,JSON.stringify(layout));
   await page.screenshot({path:join(screenshots,'accounts-light-narrow.png'),fullPage:true});
-  await dialog.getByRole('checkbox',{name:'계정 2 자동 배정'}).check();
+  await dialog.getByRole('checkbox',{name:'계정 2 마스터 배정'}).check();
   await dialog.getByText('닫기',{exact:true}).click();
-  await page.getByLabel('이 채팅의 Gemini 모델').click();
+  await page.getByLabel('이 채팅의 제미나이 모델').click();
   await page.getByTestId('gemini-web-connect').click();
-  dialog=page.getByRole('dialog').filter({hasText:'Gemini 웹 계정 관리'});
+  dialog=page.getByRole('dialog').filter({hasText:'제미나이 웹 계정 관리'});
   await dialog.getByTestId('gemini-web-use-argon').waitFor();
   check('the model picker opens the same account management page', await dialog.getByTestId('gemini-web-account').count()===10);
   await dialog.getByTestId('gemini-web-use-argon').click();

@@ -7,8 +7,9 @@ import { textResult, type LocalBridge } from "../local-bridge";
 import { readLines, shutdown } from "../proc";
 import { isReadCommand } from "../execution-policy";
 import { fileNote, type AgentDriver, type AgentInput, type DriverHost, type DriverOptions } from "./types";
+import { imageFileSnapshot, publishGeneratedImages } from "./generated-images";
 import type { FileDiff, TokenCounts } from "../../shared/types";
-import { GEMINI_WRITING_INSTRUCTIONS } from "../../shared/types";
+
 import { GEMINI_READ_TOOLS, GEMINI_WRITE_TOOLS, geminiBridgeTool, geminiDiffs, geminiPaths, geminiTokens, listGeminiModels, tokenDelta, geminiEffortModel } from "./gemini-protocol";
 
 export interface GeminiEnv {
@@ -36,6 +37,7 @@ export class GeminiDriver implements AgentDriver {
   private texts = new Map<number, string>();
   private completedText = new Set<number>();
   private diffs = new Map<string, FileDiff[]>();
+  private imageCalls = new Map<string, { directory?: string; before: Map<string, string> }>();
   private hooksReady = false;
   private epoch = 0;
   private readonly sessionDir: string;
@@ -51,13 +53,19 @@ export class GeminiDriver implements AgentDriver {
   async hook(phase: string, payload: any): Promise<Record<string, unknown>> {
     if (phase === "start" || phase === "instructions") {
       this.hooksReady = true;
-      return { injectSteps: [{ ephemeralMessage: `${this.opts.instructions ?? ""}\n${GEMINI_WRITING_INSTRUCTIONS}\n실제 작업 폴더: ${this.opts.cwd}\n제어용 폴더(${this.sessionDir})는 수정하지 않는다. 네이티브 하위 작업자·브라우저·이미지 도구는 사용하지 않는다. 추가 인력은 마스터에게 결과로 요청한다.` }] };
+      return { injectSteps: [{ ephemeralMessage: `${this.opts.instructions ?? ""}\n실제 작업 폴더: ${this.opts.cwd}\n제어용 폴더(${this.sessionDir})는 수정하지 않는다. 네이티브 하위 작업자는 사용하지 않는다. 협업은 앱 chatterbox_bridge 도구를 사용한다. 이미지 작업은 제공된 도구로 수행하고 결과 파일 경로를 보고한다.` }] };
     }
     const tool = payload?.toolCall;
     const name = tool?.name;
     const args = tool?.args;
     const id = `gemini:${payload?.conversationId ?? this.nativeId}:${payload?.stepIdx}`;
     if (phase === "post") {
+      const generated = this.imageCalls.get(id);
+      this.imageCalls.delete(id);
+      if (generated && !payload.error && this._running && !this.stopping) {
+        const changed = [...imageFileSnapshot(generated.directory)].filter(([path, stamp]) => generated.before.get(path) !== stamp).map(([path]) => path);
+        publishGeneratedImages([changed, payload.toolResponse ?? payload.toolResult ?? payload.result ?? payload.output], id, this.host);
+      }
       this.host.emit({ type: "tool_result", id, ok: !payload.error, output: payload.error || "완료" });
       const files = this.diffs.get(id);
       if (files?.length) this.host.emit({ type: "file_change", id, files, ok: !payload.error });
@@ -71,22 +79,27 @@ export class GeminiDriver implements AgentDriver {
     if (phase !== "pre" || !this._running || this.stopping) return { decision: "deny", reason: "진행 중인 ChatterBox 작업이 없습니다." };
     if (typeof name !== "string" || !args || typeof args !== "object" || Array.isArray(args)) return deny("잘못된 도구 요청입니다.");
     if (!this.hooksReady) return deny("Antigravity 승인 연결을 초기화하지 못했습니다.");
+    if (this.opts.readOnly) return deny("승인 판단 세션은 도구를 사용하지 않습니다.");
     const bridge = geminiBridgeTool(name, args);
+    const imageTool = name === "generate_image";
     const writes = GEMINI_WRITE_TOOLS.has(name);
+    if (imageTool && this.opts.allowImages === false) return deny("이미지 생성은 지정한 앱 작업자에게 배정하세요.");
     const readOnly = GEMINI_READ_TOOLS.has(name) || (name === "manage_task" && ["list", "status"].includes(args.Action));
     const command = name === "run_command" ? String(args.CommandLine ?? "") : undefined;
     const files = writes ? geminiDiffs(name, args, this.opts.cwd) : undefined;
     const display = bridge && name === "call_mcp_tool" ? `mcp__chatterbox_bridge__${args.ToolName}` : command ? "PowerShell" : name;
     this.host.emit({ type: "tool_call", id, name: display, input: command ?? JSON.stringify(bridge && name === "call_mcp_tool" ? args.Arguments ?? {} : args), diffs: files });
-    if (!bridge && !writes && !readOnly && !command) return deny(`이 작업자는 ${name} 도구를 지원하지 않습니다. 앱 마스터에게 필요한 작업을 보고하세요.`);
-    if (this.noWrites && (writes || (command && !isReadCommand(command)))) return deny("계획·리뷰·의견 작업에서는 수정이나 변경 명령을 실행할 수 없습니다.");
+    if (!bridge && !writes && !readOnly && !command && !imageTool) return deny(`이 작업자는 ${name} 도구를 지원하지 않습니다. 앱 마스터에게 필요한 작업을 보고하세요.`);
+    if (this.noWrites && (imageTool || writes || (command && !isReadCommand(command)))) return deny("계획·리뷰·의견 작업에서는 수정이나 변경 명령을 실행할 수 없습니다.");
     const paths = geminiPaths(args).map((p) => resolve(this.opts.cwd, p));
     if (paths.some((p) => p === this.sessionDir || p.startsWith(this.sessionDir + "/") || p.startsWith(this.sessionDir + "\\"))) return deny("ChatterBox 제어 설정에는 접근할 수 없습니다.");
     if (bridge) return { decision: "auto_approve" };
     if (writes && !files?.length) return deny("수정할 파일 경로를 확인하지 못했습니다.");
-    const approval = await this.host.approve({ title: display, detail: command ?? JSON.stringify(args), key: name, paths, command, diffs: files, writes, readOnly });
+    // Generated images are CLI artifacts, subsequently copied into app attachments; project edits remain scoped.
+    const approval = await this.host.approve({ title: display, detail: command ?? JSON.stringify(args), key: name, paths, command, diffs: files, writes: writes || (imageTool && paths.length > 0), readOnly });
     if (approval.verdict === "deny" || !this._running || this.stopping) return deny(approval.reason || "실행이 거부되거나 중지되었습니다.");
     if (files?.length) this.diffs.set(id, files);
+    if (imageTool) this.imageCalls.set(id, { directory: payload.artifactDirectoryPath, before: imageFileSnapshot(payload.artifactDirectoryPath) });
     return { decision: "auto_approve" };
   }
 
@@ -176,7 +189,6 @@ export class GeminiDriver implements AgentDriver {
 
   async send(input: AgentInput) {
     if (this._running) throw new Error("제미나이 작업자가 이미 작업 중입니다.");
-    if (!input.noWrites) throw new Error("Gemini CLI는 글쓰기 전용입니다. 파일 수정은 Claude/GPT에 맡기세요.");
     this._running = true;
     this.stopping = false;
     const epoch = ++this.epoch;
@@ -184,13 +196,13 @@ export class GeminiDriver implements AgentDriver {
     if (this.child && this.noWrites !== noWrites) await this.closeProcess();
     if (epoch !== this.epoch || this.stopping) return;
     this.noWrites = noWrites;
-    this.texts.clear(); this.completedText.clear(); this.diffs.clear();
+    this.texts.clear(); this.completedText.clear(); this.diffs.clear(); this.imageCalls.clear();
     try { if (!this.child) await this.start(epoch); }
     catch (error) { if (epoch === this.epoch) this._running = false; throw error; }
     if (epoch !== this.epoch || this.stopping) return;
     this.baseline = { ...this.total };
     this.startedAt = Date.now(); this.turnId = randomUUID(); this._running = true;
-    this.child!.stdin!.write(JSON.stringify({ event: "user", message: { content: `[AI_ChatterBox 작업 지시]\n${this.opts.instructions ?? ""}\n${GEMINI_WRITING_INSTRUCTIONS}\n작업 폴더: ${this.opts.cwd}\n\n${input.text}${fileNote(input.attachments)}` } }) + "\n");
+    this.child!.stdin!.write(JSON.stringify({ event: "user", message: { content: `[AI_ChatterBox 작업 지시]\n${this.opts.instructions ?? ""}\n작업 폴더: ${this.opts.cwd}\n\n${input.text}${fileNote(input.attachments)}` } }) + "\n");
   }
   async stop() {
     this.stopping = true;

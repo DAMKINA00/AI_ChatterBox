@@ -51,14 +51,17 @@ test("Gemini writing rejects writes and compound shell but permits reading refer
   assert.equal(f.approvals.length, 1);
 });
 
-test("Gemini CLI refuses writable turns and injects the prose-only role even without caller instructions", async () => {
+test("Antigravity allows explicitly assigned writes only after app approval", async () => {
   const f = fixture();
-  (f.driver as any)._running = false;
-  await assert.rejects(f.driver.send({ text: "change code", attachments: [], noWrites: false }), /글쓰기 전용/);
-  assert.equal(f.driver.running, false);
+  (f.driver as any).noWrites = false;
+  assert.equal((await f.call("write_to_file", { TargetFile: "a.txt", CodeContent: "hello" })).decision, "auto_approve");
+  assert.equal(f.approvals.length, 1);
+  assert.equal(f.approvals[0].writes, true);
+  f.verdict("deny");
+  assert.equal((await f.call("generate_image", { Prompt: "a flower" })).decision, "deny");
   const instructions = await f.driver.hook("instructions", {});
-  assert.match(JSON.stringify(instructions), /웹·CLI 모두 글쓰기 전용/);
-  assert.match(JSON.stringify(instructions), /코드 분석·구현·디버깅·테스트·기술 리뷰·교차검증은 맡지 않는다/);
+  assert.match(JSON.stringify(instructions), /협업은 앱 chatterbox_bridge/);
+  assert.doesNotMatch(JSON.stringify(instructions), /글쓰기 전용/);
 });
 
 test("Gemini blocks native subagents, arbitrary MCP and tools after stop", async () => {
@@ -66,10 +69,10 @@ test("Gemini blocks native subagents, arbitrary MCP and tools after stop", async
   for (const name of ["invoke_subagent", "define_subagent", "send_message", "schedule", "ask_permission", "generate_image", "mcp__other__write", "unknown"])
     assert.equal((await f.call(name)).decision, "deny");
   assert.equal(geminiBridgeTool("mcp__chatterbox_bridge__set_expression"), true);
-  assert.equal(geminiBridgeTool("mcp__chatterbox_bridge__spawn"), false);
+  assert.equal(geminiBridgeTool("mcp__chatterbox_bridge__spawn"), true);
   assert.equal(geminiBridgeTool("call_mcp_tool", { ServerName: "chatterbox_bridge", ToolName: "set_expression" }), true);
   assert.equal(geminiBridgeTool("call_mcp_tool", { ServerName: "other", ToolName: "set_expression" }), false);
-  assert.equal(geminiBridgeTool("call_mcp_tool", { ServerName: "chatterbox_bridge", ToolName: "spawn" }), false);
+  assert.equal(geminiBridgeTool("call_mcp_tool", { ServerName: "chatterbox_bridge", ToolName: "spawn" }), true);
   assert.equal((await f.call("mcp__chatterbox_bridge__set_expression", { expression: "neutral" })).decision, "auto_approve");
   (f.driver as any).stopping = true;
   assert.equal((await f.call("run_command", { CommandLine: "git status" })).decision, "deny");

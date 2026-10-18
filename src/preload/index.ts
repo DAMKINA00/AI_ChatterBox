@@ -40,7 +40,7 @@ const api: ChatterBoxApi = {
   removeAttachment: (id) => ipcRenderer.invoke("att:remove", id),
   pathForFile: (file) => webUtils.getPathForFile(file),
 
-  cliInfo: () => ipcRenderer.invoke("cli:info"),
+  cliInfo: (checkAuth) => ipcRenderer.invoke("cli:info", checkAuth),
   models: (agent) => ipcRenderer.invoke("models:list", agent),
   geminiWeb: (action, accountId) => ipcRenderer.invoke("gemini:web", action, accountId),
   geminiWebAccounts: (action, input) => ipcRenderer.invoke("gemini:web-accounts", action, input),

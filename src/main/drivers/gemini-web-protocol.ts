@@ -63,7 +63,7 @@ export interface WebSnapshot {
   chatMode: boolean;
   generating: boolean;
   users: string[];
-  responses: { text: string; complete: boolean }[];
+  responses: { text: string; complete: boolean; images?: string[] }[];
   notices: string[];
 }
 
@@ -89,7 +89,8 @@ export const SNAPSHOT_SCRIPT = String.raw`(() => {
       for (const cell of copy.querySelectorAll('td,th')) cell.append(' | ');
       text = copy.textContent || text;
     }
-    return { text: text.trim(), complete: Array.from(el.querySelectorAll('button')).some(b => /복사|copy response/i.test(label(b))) };
+    const images = Array.from(el.querySelectorAll('generated-image img,.generated-image img,[data-test-id="generated-image"] img,img[alt*="Generated"],img[alt*="생성된"]')).filter(img => img.naturalWidth >= 128 && img.naturalHeight >= 128 && /^https:\/\/[^/]+\.googleusercontent\.com\//i.test(img.currentSrc || img.src)).map(img => img.currentSrc || img.src);
+    return { text: text.trim(), images, complete: Array.from(el.querySelectorAll('button')).some(b => /복사|copy response|다운로드|download/i.test(label(b))) };
   });
   return { url: location.origin + location.pathname, login: !!document.querySelector('a[href*="accounts.google.com/ServiceLogin"]') || buttons.some(b => /^(로그인|Sign in)$/i.test((b.innerText || '').trim())),
     composer: !!editor && visible(editor), draft: editor?.innerText || '', model: mode?.innerText?.trim() || '',

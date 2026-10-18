@@ -4,15 +4,18 @@ This document records the generated character art used by the desktop chat UI.
 
 ## Delivered files
 
-The final asset set contains four agent characters with twelve expressions each, plus one neutral administrator portrait (49 PNG files). Gemini's dedicated generation record is in [`docs/gemini-character-art.md`](gemini-character-art.md); the human administrator's record is in [`docs/admin-character-art.md`](admin-character-art.md):
+The final asset set contains five agent characters with twelve expressions each, plus one neutral administrator portrait (61 PNG files). Gemini's dedicated generation record is in [`docs/gemini-character-art.md`](gemini-character-art.md); the human administrator's record is in [`docs/admin-character-art.md`](admin-character-art.md):
 
 - `src/renderer/public/characters/orch/{neutral,thinking,speaking,happy,confident,surprised,embarrassed,worried,sad,angry,tired,waiting}.png`
 - `src/renderer/public/characters/claude/{neutral,thinking,speaking,happy,confident,surprised,embarrassed,worried,sad,angry,tired,waiting}.png`
 - `src/renderer/public/characters/gpt/{neutral,thinking,speaking,happy,confident,surprised,embarrassed,worried,sad,angry,tired,waiting}.png`
 - `src/renderer/public/characters/gemini/{neutral,thinking,speaking,happy,confident,surprised,embarrassed,worried,sad,angry,tired,waiting}.png`
+- `src/renderer/public/characters/grok/{neutral,thinking,speaking,happy,confident,surprised,embarrassed,worried,sad,angry,tired,waiting}.png`
 - `src/renderer/public/characters/admin/neutral.png`
 
-All files are front-facing head-and-shoulders chibi portraits on a square canvas with genuine RGBA transparency. The visual system is shared across all five characters: a thick dark outline, large simple chibi proportions, restrained pastel cel shading, minimal interior detail, and matte flat-color irises. The irises contain no white catchlights, sparkle, gloss, shine, reflective dots, or gradients.
+All files are front-facing head-and-shoulders chibi portraits on a square canvas with genuine RGBA transparency. The visual system is shared across all six characters: a thick dark outline, large simple chibi proportions, restrained pastel cel shading, minimal interior detail, and matte flat-color irises. The irises contain no white catchlights, sparkle, gloss, shine, reflective dots, or gradients.
+
+Grok generation prompts and the user-provided meme reference are recorded in [grok-character-art.md](grok-character-art.md).
 
 ## Character references
 

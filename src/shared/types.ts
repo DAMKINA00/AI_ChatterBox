@@ -1,10 +1,10 @@
 // Types shared by main, preload and renderer.
 import type { ProviderUsage } from "./usage";
 
-export type AgentKind = "claude" | "codex" | "gemini";
+export type AgentKind = "claude" | "codex" | "gemini" | "grok";
 export const GEMINI_WEB_MODEL = "gemini-web-argon";
 export type GeminiWebAccountId = `gemini-${1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10}`;
-export const GEMINI_WRITING_INSTRUCTIONS = "제미나이는 웹·CLI 모두 글쓰기 전용이다. 문장 다듬기·캐릭터 대사·시나리오·문서 본문 작성·요약·번역을 맡는다. 코드 분석·구현·디버깅·테스트·기술 리뷰·교차검증은 맡지 않는다. 기술 문서는 마스터나 클로드·지피티가 확인해 제공한 사실을 유지하며 문장과 구성을 다듬는다. 불확실한 사실을 만들지 말고 필요한 확인을 마스터에게 보고한다. 결과는 텍스트로 반환하며 로컬 파일 반영은 클로드·지피티가 맡는다.";
+export const GEMINI_WRITING_INSTRUCTIONS = "기본 글쓰기 담당은 Antigravity/Gemini다. 사용자가 다른 작업을 명시적으로 지정하면 해당 요청을 수행한다. 사용 가능한 도구만 사용하고, 없는 기능이나 실행하지 않은 결과를 꾸며내지 않는다.";
 
 export interface GeminiWebUsage {
   status: "unknown" | "available" | "limited" | "error";
@@ -56,7 +56,7 @@ export function isAgentExpression(value: unknown): value is AgentExpression {
   return typeof value === "string" && (AGENT_EXPRESSIONS as readonly string[]).includes(value);
 }
 
-export const AGENT_LABEL: Record<AgentKind, string> = { claude: "Claude", codex: "Codex", gemini: "Gemini" };
+export const AGENT_LABEL: Record<AgentKind, string> = { claude: "클로드", codex: "지피티", gemini: "제미나이", grok: "그록" };
 
 /**
  * Who said / did something in a chat: "orch" = the master (마스터), or "w<agent id>" = a worker
@@ -66,9 +66,9 @@ export type Role = "orch" | `w${number}`;
 
 export const MASTER_LABEL = "마스터";
 
-export type WorkerKind = "claude" | "gpt" | "gemini";
-export const WORKER_KIND_LABEL: Record<WorkerKind, string> = { claude: "클로드", gpt: "지피티", gemini: "제미나이" };
-export const WORKER_AGENT: Record<WorkerKind, AgentKind> = { claude: "claude", gpt: "codex", gemini: "gemini" };
+export type WorkerKind = "claude" | "gpt" | "gemini" | "grok";
+export const WORKER_KIND_LABEL: Record<WorkerKind, string> = { claude: "클로드", gpt: "지피티", gemini: "제미나이", grok: "그록" };
+export const WORKER_AGENT: Record<WorkerKind, AgentKind> = { claude: "claude", gpt: "codex", gemini: "gemini", grok: "grok" };
 
 export interface ChatAgent {
   id: number;
@@ -83,6 +83,8 @@ export interface ChatAgent {
   /** What the master spawned it for. */
   job: string;
   sessionId: string | null;
+  /** Gemini web account explicitly selected by the master; absent on legacy/unbound workers. */
+  webAccountId?: GeminiWebAccountId;
   status: "active" | "released";
   createdAt: number;
 }
@@ -103,7 +105,7 @@ export function roleTone(role: Role | null | undefined, agents: ChatAgent[] | un
 }
 
 /** Orchestrator model, encoded as "<agent>:<model id>", e.g. "claude:opus" or "codex:gpt-6-astra". */
-export type OrchestratorModel = `${"claude" | "codex"}:${string}`;
+export type OrchestratorModel = `${AgentKind}:${string}`;
 
 /** The orchestrator model a chat uses (its own override, else the project's). */
 export function chatOrchestrator(chat: { orchestratorModelOverride: string | null }, project: { settings: { orchestratorModel: string } }) {
@@ -112,7 +114,8 @@ export function chatOrchestrator(chat: { orchestratorModelOverride: string | nul
 
 export function parseOrchestrator(m: string): { agent: AgentKind; model: string } {
   const i = m.indexOf(":");
-  const agent = m.slice(0, i) === "codex" ? "codex" : "claude";
+  const prefix = m.slice(0, i);
+  const agent: AgentKind = ["claude", "codex", "gemini", "grok"].includes(prefix) ? prefix as AgentKind : "claude";
   return { agent, model: m.slice(i + 1) };
 }
 
@@ -130,11 +133,15 @@ export interface ProjectSettings {
   codexModel: string;
   /** Antigravity model slug. Empty selects an available Pro-compatible Gemini model. */
   geminiModel: string;
+  grokModel: string;
+  grokStrengths: string;
+  grokCautions: string;
   /** Empty = CLI default; auto = master chooses medium/high/xhigh for each worker assignment. */
   orchestratorEffort: string;
   claudeEffort: string;
   codexEffort: string;
   geminiEffort: string;
+  grokEffort: string;
   /** Lead must get a Codex/Claude review before finishing code changes. */
   reviewGate: boolean;
   /** Max consults per user instruction. */
@@ -145,6 +152,7 @@ export interface ProjectSettings {
   maxClaudeWorkers: number;
   maxGptWorkers: number;
   maxGeminiWorkers: number;
+  maxGrokWorkers: number;
   /** Who answers workers' approval requests. */
   approvalMode: ApprovalMode;
   /** Let the orchestrator also allow high-risk requests (otherwise they go to the user). */
@@ -169,18 +177,23 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   claudeModel: "opus",
   codexModel: "gpt-6-astra",
   geminiModel: "",
+  grokModel: "",
+  grokStrengths: "사용자가 지정한 작업, 조사·구현·이미지 생성과 동료 협업.",
+  grokCautions: "실제 CLI·모델·도구 제공 여부를 확인하고 불가능한 기능은 실행한 것처럼 보고하지 않습니다.",
   orchestratorEffort: "xhigh",
   claudeEffort: "auto",
   codexEffort: "auto",
   geminiEffort: "auto",
-  geminiStrengths: "웹·CLI 모두 글쓰기 전담. 문장 다듬기, 캐릭터 대사·시나리오, 문서 본문 작성·요약·번역을 우선 배정합니다.",
-  geminiCautions: "코드 분석·구현·디버깅·테스트·기술 리뷰·교차검증은 맡기지 않습니다. 검증된 사실과 캐릭터 말투를 유지하고 텍스트만 반환합니다. 실제 파일 반영은 클로드·지피티가 수행합니다. Google AI Pro 계정에서 제공되는 모델만 사용합니다.",
+  grokEffort: "auto",
+  geminiStrengths: "문장 다듬기, 대사·시나리오, 문서 작성·요약·번역을 우선 배정하며 명시적으로 지정한 다른 작업도 수행합니다.",
+  geminiCautions: "CLI는 승인과 작업 범위 안에서 코드·이미지 도구를 사용합니다. Gemini 웹은 로컬 파일·명령·MCP를 실행할 수 없습니다. 실제 계정에서 제공되는 모델과 도구만 사용합니다.",
   reviewGate: true,
   maxConsults: 100,
   maxReviews: 20,
   maxClaudeWorkers: 3,
   maxGptWorkers: 3,
   maxGeminiWorkers: 1,
+  maxGrokWorkers: 3,
   approvalMode: "orchestrator",
   delegateHighRisk: false,
 };
@@ -212,10 +225,12 @@ export interface Chat {
   claudeModelOverride: string | null;
   codexModelOverride: string | null;
   geminiModelOverride: string | null;
+  grokModelOverride: string | null;
   orchestratorEffortOverride: string | null;
   claudeEffortOverride: string | null;
   codexEffortOverride: string | null;
   geminiEffortOverride: string | null;
+  grokEffortOverride: string | null;
   /** Per-chat approval mode; null = follow the project. */
   approvalModeOverride: ApprovalMode | null;
   goal: ChatGoal | null;
@@ -297,6 +312,7 @@ export type ApprovalDecision = "once" | "chat" | "deny";
 
 /** Normalized event stream. Every event also carries the agent that produced it (see TimelineEvent). */
 export type AgentEvent =
+  | { type: "peer_message"; from: Role; to: Role; text: string }
   | { type: "artifacts"; paths: string[] }
   | { type: "agent_usage"; metrics: AgentMetrics }
   | { type: "dispatch"; instructionId: number; mode: "direct" | "delegated"; reason: string; dualInvestigation?: boolean }
@@ -316,7 +332,7 @@ export type AgentEvent =
   | { type: "consult_end"; consultId: number; status: ConsultStatus; summary: string; files: string[] }
   | { type: "ask_user"; id: string; question: string; options: string[] }
   | { type: "ask_user_answer"; id: string; answer: string }
-  | { type: "notice"; text: string }
+  | { type: "notice"; text: string; webAccountId?: GeminiWebAccountId }
   /** Checklist from the orchestrator's native plan tool (Claude TodoWrite / Codex update_plan). */
   | { type: "plan_update"; steps: PlanStep[]; explanation?: string }
   /** /plan proposal lifecycle: proposed → running → done / cancelled. */
@@ -356,6 +372,7 @@ export interface TimelineEvent {
 export interface CliInfo {
   agent: AgentKind;
   path: string | null;
+  authStatus?: "authenticated" | "required" | "unknown";
   error?: string;
 }
 
@@ -378,6 +395,7 @@ export interface UsageInfo {
   claude?: ProviderUsage;
   codex?: ProviderUsage;
   gemini?: ProviderUsage;
+  grok?: ProviderUsage;
   geminiWeb?: GeminiWebUsage;
 }
 
@@ -400,10 +418,12 @@ export interface ChatterBoxApi {
       claudeModelOverride?: string | null;
       codexModelOverride?: string | null;
       geminiModelOverride?: string | null;
+      grokModelOverride?: string | null;
       orchestratorEffortOverride?: string | null;
       claudeEffortOverride?: string | null;
       codexEffortOverride?: string | null;
       geminiEffortOverride?: string | null;
+      grokEffortOverride?: string | null;
       approvalModeOverride?: ApprovalMode | null;
     },
   ): Promise<Chat>;
@@ -431,7 +451,7 @@ export interface ChatterBoxApi {
   removeAttachment(id: number): Promise<void>;
   pathForFile(file: File): string;
   // misc
-  cliInfo(): Promise<CliInfo[]>;
+  cliInfo(checkAuth?: boolean): Promise<CliInfo[]>;
   models(agent: AgentKind): Promise<ModelOption[]>;
   geminiWeb(action: "status" | "open" | "login" | "refresh", accountId?: GeminiWebAccountId): Promise<GeminiWebStatus>;
   geminiWebAccounts(action: "list" | "add" | "update", input?: { accountId?: GeminiWebAccountId; label?: string; enabled?: boolean }): Promise<GeminiWebAccountStatus[]>;

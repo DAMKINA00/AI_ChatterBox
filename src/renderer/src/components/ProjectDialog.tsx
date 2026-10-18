@@ -97,7 +97,7 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
             <ModelRow label="마스터" hint="지시를 받아 팀을 꾸리고 일을 나눕니다 (승인 설정에 따라 파일 수정·명령 실행)">
               <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
                 <ModelPicker
-                  agents={["claude", "codex"]}
+                  agents={["claude", "codex", "gemini", "grok"]}
                   value={settings.orchestratorModel}
                   onChange={(v) => setModel("orchestratorModel", "orchestratorEffort", parseOrchestrator(v).agent, false, v)}
                   ariaLabel="마스터 모델"
@@ -123,10 +123,10 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
                   agents={["claude"]}
                   value={settings.claudeModel}
                   onChange={(v) => setModel("claudeModel", "claudeEffort", "claude", true, v)}
-                  ariaLabel="Claude 모델"
+                  ariaLabel="클로드 모델"
                   className="min-w-0"
                 />
-                <EffortPicker agent="claude" model={settings.claudeModel} worker value={settings.claudeEffort ?? "auto"} onChange={(v) => set("claudeEffort", v)} ariaLabel="Claude 작업자 추론 수준" />
+                <EffortPicker agent="claude" model={settings.claudeModel} worker value={settings.claudeEffort ?? "auto"} onChange={(v) => set("claudeEffort", v)} ariaLabel="클로드 작업자 추론 수준" />
               </div>
             </ModelRow>
             <ModelRow label="지피티 작업자" hint="지피티 N호 (Codex)">
@@ -135,22 +135,28 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
                   agents={["codex"]}
                   value={settings.codexModel}
                   onChange={(v) => setModel("codexModel", "codexEffort", "codex", true, v)}
-                  ariaLabel="GPT 모델"
+                  ariaLabel="지피티 모델"
                   className="min-w-0"
                 />
-                <EffortPicker agent="codex" model={settings.codexModel} worker value={settings.codexEffort ?? "auto"} onChange={(v) => set("codexEffort", v)} ariaLabel="GPT 작업자 추론 수준" />
+                <EffortPicker agent="codex" model={settings.codexModel} worker value={settings.codexEffort ?? "auto"} onChange={(v) => set("codexEffort", v)} ariaLabel="지피티 작업자 추론 수준" />
               </div>
             </ModelRow>
-            <ModelRow label="제미나이 작업자" hint="제미나이 N호 (Antigravity)">
+            <ModelRow label="제미나이 작업자" hint="Antigravity CLI / 제미나이 웹">
               <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
                 <ModelPicker
                   agents={["gemini"]}
                   value={settings.geminiModel}
                   onChange={(v) => setModel("geminiModel", "geminiEffort", "gemini", true, v)}
-                  ariaLabel="Gemini 모델"
+                  ariaLabel="제미나이 모델"
                   className="min-w-0"
                 />
-                <EffortPicker agent="gemini" model={settings.geminiModel} worker value={settings.geminiEffort ?? "auto"} onChange={(v) => set("geminiEffort", v)} ariaLabel="Gemini 작업자 추론 수준" />
+                <EffortPicker agent="gemini" model={settings.geminiModel} worker value={settings.geminiEffort ?? "auto"} onChange={(v) => set("geminiEffort", v)} ariaLabel="제미나이 작업자 추론 수준" />
+              </div>
+            </ModelRow>
+            <ModelRow label="그록 작업자" hint="Grok CLI">
+              <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                <ModelPicker agents={["grok"]} value={settings.grokModel} onChange={v => setModel("grokModel", "grokEffort", "grok", true, v)} ariaLabel="그록 모델" />
+                <EffortPicker agent="grok" model={settings.grokModel} worker value={settings.grokEffort} onChange={v => set("grokEffort", v)} ariaLabel="그록 작업자 추론 수준" />
               </div>
             </ModelRow>
           </div>
@@ -209,7 +215,7 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
               </div>
               <div className="grid content-start gap-2 rounded-md border p-2.5">
                 <div className="text-[13px] font-medium">제미나이 작업자</div>
-                <div className="text-[11.5px] leading-snug text-muted-foreground">웹·CLI 모두 문장 다듬기·캐릭터 대사·문서 본문 등 글쓰기 전용입니다. 로컬 파일 반영은 CLI Claude/GPT가 맡습니다.</div>
+                <div className="text-[11.5px] leading-snug text-muted-foreground">글쓰기를 우선 배정하며 명시적으로 지정한 코드·이미지 작업도 수행합니다. 제미나이 웹은 로컬 도구를 사용할 수 없습니다.</div>
                 <label className="grid gap-1.5">
                   <span className="text-[11.5px] text-muted-foreground">잘 맡는 작업</span>
                   <textarea
@@ -227,6 +233,30 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
                     value={settings.geminiCautions}
                     onChange={(e) => set("geminiCautions", e.target.value)}
                     aria-label="제미나이 작업자 주의점"
+                    className="min-h-24 w-full resize-none rounded-md border border-input bg-transparent px-2.5 py-2 text-[12px] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+                  />
+                </label>
+              </div>
+              <div className="grid content-start gap-2 rounded-md border p-2.5">
+                <div className="text-[13px] font-medium">그록 작업자</div>
+                <div className="text-[11.5px] leading-snug text-muted-foreground">공식 Grok CLI의 계정·모델과 도구를 사용합니다.</div>
+                <label className="grid gap-1.5">
+                  <span className="text-[11.5px] text-muted-foreground">잘 맡는 작업</span>
+                  <textarea
+                    rows={4}
+                    value={settings.grokStrengths}
+                    onChange={(e) => set("grokStrengths", e.target.value)}
+                    aria-label="그록이 잘 맡는 작업"
+                    className="min-h-24 w-full resize-none rounded-md border border-input bg-transparent px-2.5 py-2 text-[12px] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+                  />
+                </label>
+                <label className="grid gap-1.5">
+                  <span className="text-[11.5px] text-muted-foreground">주의할 점</span>
+                  <textarea
+                    rows={4}
+                    value={settings.grokCautions}
+                    onChange={(e) => set("grokCautions", e.target.value)}
+                    aria-label="그록 작업자 주의점"
                     className="min-h-24 w-full resize-none rounded-md border border-input bg-transparent px-2.5 py-2 text-[12px] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
                   />
                 </label>
@@ -279,6 +309,7 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
               <NumberField label="동시 클로드 작업자" suffix="명" value={settings.maxClaudeWorkers} onChange={(v) => set("maxClaudeWorkers", v)} min={1} max={6} />
               <NumberField label="동시 지피티 작업자" suffix="명" value={settings.maxGptWorkers} onChange={(v) => set("maxGptWorkers", v)} min={1} max={6} />
               <NumberField label="동시 제미나이 작업자 (0=사용 안 함)" suffix="명" value={settings.maxGeminiWorkers} onChange={(v) => set("maxGeminiWorkers", v)} min={0} max={6} />
+              <NumberField label="동시 그록 작업자 (0=사용 안 함)" suffix="명" value={settings.maxGrokWorkers} onChange={(v) => set("maxGrokWorkers", v)} min={0} max={6} />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <NumberField label="지시당 배정 한도" suffix="회" value={settings.maxConsults} onChange={(v) => set("maxConsults", v)} min={1} max={MAX_CONSULTS} />

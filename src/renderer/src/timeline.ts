@@ -32,6 +32,7 @@ export type Item =
     }
   | { kind: "image"; key: string; role: Role; node: NodeId; id: string; status: "running" | "done" | "error"; prompt?: string; attachment?: AttachmentRef; error?: string }
   | { kind: "ask"; key: string; id: string; question: string; options: string[]; answer?: string }
+  | { kind: "peer"; key: string; from: Role; to: Role; text: string }
   | { kind: "notice"; key: string; tone: "error" | "auth" | "info"; text: string };
 
 type View = NodeId | undefined;
@@ -50,6 +51,7 @@ function belongs(e: TimelineEvent, view: View, consultTargets: Map<number, Role>
     if (cId !== null) return "child";
     return "top";
   }
+  if (ev.type === "peer_message" && (ev.from === view || ev.to === view)) return "top";
   if (view === "orch") return ev.type === "approval_request" || ev.type === "approval_resolved" || e.role === "orch" || e.role === null ? "top" : false;
   if (isWorkerKey(view)) {
     if ((ev.type === "consult_start" || ev.type === "consult_end") && consultTarget(e, consultTargets) === view) return "top";
@@ -290,6 +292,8 @@ export function apply(items: Item[], e: TimelineEvent, expression?: AgentExpress
   // Stable keys keep React state (open cards) across rebuilds; live deltas have no id yet.
   const key = e.id ? `e${e.id}` : `live-${e.node}-${role}`;
   switch (ev.type) {
+    case "peer_message":
+      return [...items, { kind: "peer", key, from: ev.from, to: ev.to, text: ev.text }];
     case "agent_usage":
       return items;
     case "expression":

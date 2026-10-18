@@ -16,6 +16,16 @@ function liveEvent(node: NodeId, role: Role | null, payload: AgentEvent, at: num
 
 const emptyAttachments = [];
 
+test("direct collaboration messages appear in sender and recipient views", () => {
+  const events = [event("consult:2", "w1", { type: "peer_message", from: "w1", to: "w2", text: "resultId contract" })];
+  for (const view of ["w1", "w2", "consult:2"] as const) {
+    const items = buildItems(events, view);
+    assert.equal(items.length, 1);
+    assert.deepEqual(items[0], { kind: "peer", key: `e${events[0].id}`, from: "w1", to: "w2", text: "resultId contract" });
+  }
+  assert.equal(buildItems(events, "w3").length, 0);
+});
+
 test("master conversation relays worker approvals and resolutions while preserving original request roles", () => {
   const events = [
     event("consult:1", "w1", { type: "approval_request", request: { id: "a1", role: "w1", title: "Write", detail: "one", risk: "low" } }),

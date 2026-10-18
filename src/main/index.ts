@@ -185,7 +185,7 @@ function registerIpc() {
   ipcMain.handle("att:remove", (_e, id: number) => store.deleteAttachment(id));
 
   // misc
-  ipcMain.handle("cli:info", () => chats.cliInfo());
+  ipcMain.handle("cli:info", (_e, checkAuth?: boolean) => checkAuth ? chats.checkedCliInfo() : chats.cliInfo());
   ipcMain.handle("models:list", (_e, agent: AgentKind) => chats.models(agent));
   ipcMain.handle("gemini:web", (_e, action: string, accountId: GeminiWebAccountId = "gemini-1") => {
     const browser = chats.geminiWeb(accountId);

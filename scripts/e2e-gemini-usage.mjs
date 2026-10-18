@@ -53,7 +53,7 @@ try {
   await warning().getByRole("button", { name: "설치 경로 다시 확인" }).click();
   check("missing executable remains visible after retry", /Gemini 설치 경로 없음/.test(await warning().innerText()));
   const beforeOpen = await app.evaluate(() => globalThis.__geminiQueryTest.count);
-  await page.getByRole("button", { name: "이 채팅의 Gemini 모델", exact: true }).click();
+  await page.getByRole("button", { name: "이 채팅의 제미나이 모델", exact: true }).click();
   await page.getByText("격리 테스트: 일시적 CLI 탐색 실패", { exact: false }).waitFor();
   check("failed model query offers retry", await page.getByRole("menuitem", { name: "목록 다시 확인" }).isVisible());
   check("reopening failed picker automatically retries", await app.evaluate(() => globalThis.__geminiQueryTest.count) > beforeOpen);

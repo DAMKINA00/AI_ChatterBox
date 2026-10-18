@@ -32,6 +32,27 @@ export class GeminiWebBrowser {
   private get accountName() { return `계정 ${this.accountId.slice(7)}`; }
   get busy() { return !!this.owner; }
 
+  async imageBytes(owner: string, url: string, signal: AbortSignal): Promise<string> {
+    if (this.owner !== owner || !this.win || this.win.isDestroyed()) throw new Error("웹 이미지 소유 작업을 확인하지 못했습니다.");
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" || !parsed.hostname.endsWith(".googleusercontent.com") || parsed.username || parsed.password) throw new Error("지원하지 않는 웹 이미지 주소입니다.");
+    const response = await this.win.webContents.session.fetch(url, { signal, redirect: "error" });
+    if (!response.ok || !/^image\/(png|jpeg|webp)/i.test(response.headers.get("content-type") ?? "")) throw new Error("웹 이미지 다운로드를 확인하지 못했습니다.");
+    const reader = response.body!.getReader();
+    const chunks: Uint8Array[] = []; let size = 0;
+    try {
+      for (;;) {
+        const part = await reader.read();
+        signal.throwIfAborted();
+        if (part.done) break;
+        size += part.value.byteLength;
+        if (size > 32 * 1024 * 1024) throw new Error("웹 이미지가 32MB를 초과합니다.");
+        chunks.push(part.value);
+      }
+    } finally { await reader.cancel(); }
+    return Buffer.concat(chunks).toString("base64");
+  }
+
   status() { return this.last; }
   private setUsage(usage: GeminiWebUsage) {
     this.last = { ...this.last, usage };

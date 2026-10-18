@@ -165,7 +165,7 @@ try {
     (await page.locator('[data-testid="agent-message"][data-role="w2"]').textContent())?.includes("해제된 제미나이 작업자의 이전 기록"),
   );
 
-  const geminiPicker = page.getByLabel("이 채팅의 Gemini 모델");
+  const geminiPicker = page.getByLabel("이 채팅의 제미나이 모델");
   check("Gemini header model picker renders Pro automatic selection", (await geminiPicker.textContent())?.includes("Pro 자동 선택"));
   await geminiPicker.click();
   const automatic = page.getByRole("menuitem", { name: "Pro 자동 선택", exact: true });
@@ -175,15 +175,15 @@ try {
   await page.evaluate(async () => {
     await window.chatterbox.updateChat(1, { geminiModelOverride: "gemini-test-model" });
   });
-  await page.waitForFunction(() => document.querySelector('[aria-label="이 채팅의 Gemini 모델"]')?.textContent?.includes("gemini-test-model"));
+  await page.waitForFunction(() => document.querySelector('[aria-label="이 채팅의 제미나이 모델"]')?.textContent?.includes("gemini-test-model"));
   await geminiPicker.click();
   const reset = page.getByRole("menuitem", { name: /프로젝트 값 사용/ });
   check("Gemini chat override can return to the project value", (await reset.count()) === 1);
   await reset.click();
-  await page.waitForFunction(() => document.querySelector('[aria-label="이 채팅의 Gemini 모델"]')?.textContent?.includes("Pro 자동 선택"));
+  await page.waitForFunction(() => document.querySelector('[aria-label="이 채팅의 제미나이 모델"]')?.textContent?.includes("Pro 자동 선택"));
 
   const dialog = await openSettings(page);
-  const projectGeminiPicker = dialog.getByLabel("Gemini 모델");
+  const projectGeminiPicker = dialog.getByLabel("제미나이 모델");
   check("project Gemini model picker uses the automatic selection label", (await projectGeminiPicker.textContent())?.includes("Pro 자동 선택"));
   await projectGeminiPicker.click();
   check("project Gemini model list can select automatic selection", (await page.getByRole("menuitem", { name: "Pro 자동 선택", exact: true }).count()) === 1);

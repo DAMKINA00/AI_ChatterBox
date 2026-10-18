@@ -106,8 +106,8 @@ test("webPrompt includes UTF-8 text attachments explicitly", async () => {
   try {
     const prompt = await webPrompt(input([attachment(file.path, "자료.txt", "text/plain")]), "marker-utf8");
     assert.match(prompt, /^\[ChatterBox marker-utf8\]/);
-    assert.match(prompt, /웹·CLI 모두 글쓰기 전용/);
-    assert.match(prompt, /코드 분석·구현·디버깅·테스트·기술 리뷰·교차검증은 맡지 않는다/);
+    assert.doesNotMatch(prompt, /웹·CLI 모두 글쓰기 전용/);
+    assert.match(prompt, /로컬 파일/);
     assert.match(prompt, /\[참고 자료: 자료\.txt\]/);
     assert.match(prompt, /한글 자료\nUTF-8 본문/);
     assert.match(prompt, /\[참고 자료 끝\]/);

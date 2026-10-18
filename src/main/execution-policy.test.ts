@@ -14,7 +14,7 @@ test("planning command gate rejects composition and executable read options", ()
 });
 
 function engine() {
-  const chats: any = { store: { chat: () => ({ id: 1 }), listAgents: () => [] }, emit() {}, route: (_id: number, role: string) => role };
+  const chats: any = { store: { chat: () => ({ id: 1 }), listAgents: () => [], events: () => [], listConsults: () => [], getSetting: () => undefined, setSetting() {} }, emit() {}, route: (_id: number, role: string) => role };
   chats.assignmentEffort = async () => ({ requestedEffort: "medium", effort: "medium" });
   const orchestrator: any = new Orchestrator(chats);
   return { chats, orchestrator };

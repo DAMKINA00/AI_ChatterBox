@@ -113,11 +113,28 @@ test("Gemini web driver rejects writes before claiming the shared browser", asyn
   const fake = fakeBrowser(() => snapshot());
   const run = runWith(fake.browser);
 
-  await assert.rejects(run.driver.send({ ...input, noWrites: false }), /분석|리뷰|파일 수정/);
+  await assert.rejects(run.driver.send({ ...input, noWrites: false }), /로컬 파일을 수정할 수 없습니다/);
 
   assert.equal(fake.state.claims.length, 0);
   assert.equal(fake.state.submittedPrompts.length, 0);
   assert.equal(run.events.length, 0);
+});
+
+test("Gemini web image-only response becomes an attachment; missing images cannot finish image work", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  for (const withImage of [true, false]) {
+    const fake = fakeBrowser((_poll, prompt) => snapshot({ users: [prompt ?? ""], responses: [{ text: withImage ? "" : "이미지를 만들었습니다", complete: true, images: withImage ? ["https://lh3.googleusercontent.com/image"] : [] }] }));
+    fake.browser.imageBytes = async () => "png-base64";
+    const run = runWith(fake.browser);
+    run.host.image = () => ({ id: 1, path: "generated.png", name: "generated.png", size: 68, mime: "image/png" });
+    await run.driver.send({ ...input, noWrites: false, requiresImage: true });
+    for (let i = 0; i < 5; i++) await pulse(t);
+    await waitForTask(run.driver);
+    const end = run.events.findLast(e => e.type === "turn_end");
+    assert.equal(end?.type === "turn_end" && end.ok, withImage);
+    assert.equal(run.events.filter(e => e.type === "image_generation").length, withImage ? 1 : 0);
+    assert.equal(fake.state.owner, undefined);
+  }
 });
 
 test("Gemini web driver waits for its request marker and associates a native id only after acceptance", async (t) => {

@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { DEFAULT_SETTINGS, type AgentInput, type AgentKind, type Role } from "../shared/types";
+import { DEFAULT_SETTINGS, type AgentKind, type Role } from "../shared/types";
 import { Store } from "./db";
 import { ChatManager } from "./chats";
 import { Orchestrator } from "./orchestrator";
+
+import type { AgentInput } from "./drivers/types";
 
 type Sent = { role: Role; effort?: string; input: AgentInput };
 type Behavior = (input: AgentInput, role: Role) => Promise<void> | void;
@@ -49,7 +51,7 @@ function fixture(options: { dualInvestigation?: boolean } = {}) {
   const agentFor = (role: Role): AgentKind => {
     if (role === "orch") return "claude";
     const kind = store.agentByKey(chat.id, role)?.kind;
-    return kind === "gpt" ? "codex" : kind === "gemini" ? "gemini" : "claude";
+    return kind === "gpt" ? "codex" : kind === "gemini" ? "gemini" : kind === "grok" ? "grok" : "claude";
   };
 
   chats.driver = async (_chatId, role, effort) => ({
@@ -182,8 +184,6 @@ test("invalid discussion groups dispatch no worker and never create a consult", 
       { caller: "orch", target: leader, kind: "opinion", discussion: { topic: "duplicate", peers: [peer.nickname, peer.nickname] } },
       { caller: "orch", target: leader, kind: "opinion", discussion: { topic: "leader included", peers: [leader.nickname] } },
       { caller: "orch", target: leader, kind: "opinion", discussion: { topic: "unknown", peers: ["클로드 99호"] } },
-      { caller: "orch", target: leader, kind: "opinion", discussion: { topic: "technical Gemini", peers: [gemini.nickname] } },
-      { caller: "orch", target: gemini, kind: "writing", discussion: { topic: "Gemini leader", peers: [leader.nickname] } },
       { caller: leader.key, target: peer, kind: "opinion", discussion: { topic: "worker expansion", peers: [gemini.nickname] } },
     ];
 
@@ -264,7 +264,7 @@ test("a coordinator cannot expand the group or write, and missing peer participa
   }
 });
 
-test("writing discussions may include Gemini, while technical Gemini groups remain forbidden", async () => {
+test("Antigravity participates in writing and technical discussions", async () => {
   const f = fixture();
   try {
     const leader = f.store.createAgent(f.chat.id, "claude", "writing leader");
@@ -273,8 +273,8 @@ test("writing discussions may include Gemini, while technical Gemini groups rema
     f.behavior.set(leader.key, async (_input, role) => {
       const response = await f.engine.call(f.chat.id, role, "ask", {
         to: gemini.nickname,
-        kind: "writing",
-        message: "다음 장면의 대사를 다듬어 주세요.",
+        kind: _input.text.includes("technical Gemini") ? "opinion" : "writing",
+        message: "배정받은 주제를 검토해 주세요.",
       });
       assert.equal(response.isError, false);
       f.finish(role, "Claude와 Gemini의 문장 취합");
@@ -297,10 +297,9 @@ test("writing discussions may include Gemini, while technical Gemini groups rema
     const technical = await ask(f, "orch", leader, "opinion", {
       discussion: { topic: "technical Gemini", peers: [gemini.nickname] },
     });
-    assert.equal(technical.isError, true);
-    assert.match(textOf(technical), /글쓰기 토의/);
-    assert.equal(f.sent.length, sentBeforeTechnical);
-    assert.equal(f.store.listConsults(f.chat.id).length, recordsBeforeTechnical);
+    assert.equal(technical.isError, false);
+    assert.equal(f.sent.length, sentBeforeTechnical + 2);
+    assert.equal(f.store.listConsults(f.chat.id).length, recordsBeforeTechnical + 2);
   } finally {
     await f.close();
   }
@@ -395,4 +394,91 @@ test("group cycle guard and stop handling remain active", async () => {
   } finally {
     await f.close();
   }
+});
+
+test("parallel parts exchange direct messages while both workers remain active", { timeout: 8000 }, async () => {
+  const f = fixture();
+  try {
+    const a = f.store.createAgent(f.chat.id, "gemini", "API contract");
+    const b = f.store.createAgent(f.chat.id, "grok", "UI contract");
+    let ready = 0, release!: () => void;
+    const barrier = new Promise<void>(r => { release = r; });
+    for (const [self, peer] of [[a, b], [b, a]]) f.behavior.set(self.key, async (_input, role) => {
+      const sent = await f.engine.call(f.chat.id, role, "send_message", { to: peer.nickname, message: `${self.key}: use field resultId` });
+      assert.equal(sent.isError, false);
+      if (++ready === 2) release();
+      await barrier;
+      const inbox = await f.engine.call(f.chat.id, role, "read_messages", {});
+      const all = textOf(sent) + textOf(inbox) + _input.text;
+      assert.match(all, new RegExp(`${peer.key}: use field resultId`));
+      assert.equal(textOf(await f.engine.call(f.chat.id, role, "read_messages", {})), "새 협업 메시지가 없습니다.");
+      f.finish(role, "resultId contract applied");
+    });
+    const result = await f.engine.call(f.chat.id, "orch", "ask_parallel", { tasks: [a, b].map((w, i) => ({ to: w.nickname, kind: "implement", message: `part ${i}`, scope: [i ? "src/ui/**" : "src/api/**"], reason: "independent parts", effort: "medium" })) });
+    assert.equal(result.isError, false);
+    assert.equal(ready, 2);
+    assert.equal(f.store.events(f.chat.id).filter(e => e.event.type === "peer_message").length, 2);
+    assert.ok(f.store.listConsults(f.chat.id).every(c => c.status === "done"));
+    assert.equal((await f.engine.call(f.chat.id, a.key, "send_message", { to: b.nickname, message: "after completion" })).isError, true);
+  } finally { await f.close(); }
+});
+
+test("workers use ask_parallel for direct peer reviews and reject nested overlapping writes", { timeout: 8000 }, async () => {
+  const f = fixture();
+  try {
+    const leader = f.store.createAgent(f.chat.id, "grok", "implementation");
+    const a = f.store.createAgent(f.chat.id, "claude", "first review");
+    const b = f.store.createAgent(f.chat.id, "gemini", "second review");
+    f.behavior.set(leader.key, async (_input, role) => {
+      const blocked = await f.engine.call(f.chat.id, role, "ask", { to: a.nickname, kind: "implement", message: "overlap", scope: ["src/api/a.ts"] });
+      assert.equal(blocked.isError, true);
+      assert.match(textOf(blocked), /겹치지 않는/);
+      const peers = await f.engine.call(f.chat.id, role, "ask_parallel", { tasks: [a, b].map(w => ({ to: w.nickname, kind: "review", message: "review this contract" })) });
+      assert.equal(peers.isError, false);
+      f.finish(role, "integrated both peer reviews");
+    });
+    const result = await f.engine.call(f.chat.id, "orch", "ask", { to: leader.nickname, kind: "implement", scope: ["src/api/**"], message: "implement and collaborate", reason: "named worker", effort: "high" });
+    assert.equal(result.isError, false);
+    const nested = f.store.listConsults(f.chat.id).filter(c => c.fromRole === leader.key);
+    assert.equal(nested.length, 2);
+    assert.ok(nested.every(c => c.kind === "review" && c.effort === "high" && c.status === "done"));
+  } finally { await f.close(); }
+});
+
+test("explicit Antigravity and Grok images need a real artifact, not a completion claim", async () => {
+  const f = fixture();
+  try {
+    for (const kind of ["gemini", "grok"] as const) {
+      const worker = f.store.createAgent(f.chat.id, kind, "image");
+      const args = { to: worker.nickname, kind: "implement", message: "generate requested image", requiresImage: true, reason: "user explicitly selected this worker", effort: "medium", scope: ["images/**"] };
+      const missing = await f.engine.call(f.chat.id, "orch", "ask", args);
+      assert.equal(missing.isError, true);
+      assert.match(textOf(missing), /이미지 생성 미완료/);
+      const file = join(f.root, `${kind}.png`);
+      writeFileSync(file, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/3XkAAAAASUVORK5CYII=", "base64"));
+      f.behavior.set(worker.key, async (input, role) => {
+        assert.equal(input.requiresImage, true);
+        assert.equal(input.noWrites, false);
+        f.chats.onDriverEvent?.(f.chat.id, role, { type: "image_generation", id: "actual", status: "done", attachment: { id: 1, name: `${kind}.png`, mime: "image/png", path: file, size: 68 } });
+        f.finish(role, "image attached");
+      });
+      assert.equal((await f.engine.call(f.chat.id, "orch", "ask", { ...args, message: "retry with image tool" })).isError, false);
+    }
+  } finally { await f.close(); }
+});
+
+test("Antigravity and Grok can lead a discussion and collect actual peer results", async () => {
+  const f = fixture();
+  try {
+    const peer = f.store.createAgent(f.chat.id, "claude", "peer");
+    for (const kind of ["gemini", "grok"] as const) {
+      const leader = f.store.createAgent(f.chat.id, kind, "coordinator");
+      f.behavior.set(leader.key, async (_input, role) => {
+        assert.equal((await f.engine.call(f.chat.id, role, "ask", { to: peer.nickname, kind: "opinion", message: `verify ${kind} design` })).isError, false);
+        f.finish(role, "peer evidence incorporated");
+      });
+      assert.equal((await ask(f, "orch", leader, "opinion", { discussion: { topic: `design ${kind}`, peers: [peer.nickname] } })).isError, false);
+    }
+    assert.equal(f.store.listConsults(f.chat.id).length, 4);
+  } finally { await f.close(); }
 });

@@ -119,7 +119,7 @@ async function hasOverride(picker) {
   return n > 0;
 }
 // ---- model inheritance in the chat header
-const claudePicker = page.getByLabel("이 채팅의 Claude 모델");
+const claudePicker = page.getByLabel("이 채팅의 클로드 모델");
 check("chat follows the project's Claude model (no override, no label)", !(await hasOverride(claudePicker)) && !(await claudePicker.textContent()).includes("프로젝트 기본값"));
 await claudePicker.click();
 await page.getByRole("menuitem", { name: /Sonnet/ }).first().click();
@@ -131,14 +131,14 @@ const p1 = projects.find((p) => p.name === "웹 쇼핑몰");
 await page.evaluate(([id, s]) => window.chatterbox.updateProject(id, { settings: s }), [p1.id, { ...p1.settings, codexModel: "gpt-6-sol", claudeModel: "haiku" }]);
 await page.reload();
 await page.waitForSelector('[data-testid="chat-title"]');
-const gptText = await page.getByLabel("이 채팅의 GPT 모델").textContent();
-const claudeText = await page.getByLabel("이 채팅의 Claude 모델").textContent();
-check("non-overridden GPT model follows the project change", /Sol/i.test(gptText) && !(await hasOverride(page.getByLabel("이 채팅의 GPT 모델"))), gptText);
-check("overridden Claude model keeps the chat value", /Sonnet/.test(claudeText) && (await hasOverride(page.getByLabel("이 채팅의 Claude 모델"))), claudeText);
-await page.getByLabel("이 채팅의 Claude 모델").click();
+const gptText = await page.getByLabel("이 채팅의 지피티 모델").textContent();
+const claudeText = await page.getByLabel("이 채팅의 클로드 모델").textContent();
+check("non-overridden GPT model follows the project change", /Sol/i.test(gptText) && !(await hasOverride(page.getByLabel("이 채팅의 지피티 모델"))), gptText);
+check("overridden Claude model keeps the chat value", /Sonnet/.test(claudeText) && (await hasOverride(page.getByLabel("이 채팅의 클로드 모델"))), claudeText);
+await page.getByLabel("이 채팅의 클로드 모델").click();
 await page.getByRole("menuitem", { name: /프로젝트 값 사용/ }).click();
 await page.waitForTimeout(300);
-check("reset to project value", /Haiku/.test(await page.getByLabel("이 채팅의 Claude 모델").textContent()) && !(await hasOverride(page.getByLabel("이 채팅의 Claude 모델"))));
+check("reset to project value", /Haiku/.test(await page.getByLabel("이 채팅의 클로드 모델").textContent()) && !(await hasOverride(page.getByLabel("이 채팅의 클로드 모델"))));
 
 // ---- rename + delete through the context menu
 const thirdChat = page.locator('[data-testid="chat-node"] [role="treeitem"]').nth(1);

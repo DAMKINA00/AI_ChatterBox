@@ -115,6 +115,7 @@ export class GeminiWebAccounts {
         Promise.all(accounts.slice(n, n + 2).map(async a => {
           const browser = this.browser(a.accountId);
           await browser.refreshUsage().catch(() => undefined);
+          signal.throwIfAborted();
           if (!browser.busy) await browser.refresh(false);
         }))
           .then(() => resolve(), reject).finally(() => signal.removeEventListener("abort", abort));
@@ -122,14 +123,44 @@ export class GeminiWebAccounts {
     }
     signal.throwIfAborted();
   }
+  /** Inspect balances for the master. Waiting never claims or chooses an account. */
+  async inspect(signal: AbortSignal, waitForAvailable = false) {
+    signal = AbortSignal.any([signal, this.closing.signal]);
+    if (!waitForAvailable) { await this.refresh(new Set(), signal); return this.list(); }
+    for (;;) {
+      signal.throwIfAborted();
+      const revision = this.revision;
+      const pass = new AbortController(), wake = this.waitForChange(signal, revision);
+      const refresh = this.refresh(new Set(), AbortSignal.any([signal, pass.signal]));
+      // A newly ready account must be visible even if an older profile's read stalls.
+      let refreshed: boolean;
+      try { refreshed = await Promise.race([refresh.then(() => true), wake.promise.then(() => false)]); }
+      finally { wake.cancel(); pass.abort(); await refresh.catch(() => undefined); }
+      signal.throwIfAborted();
+      if (this.candidates(new Set()).length) return this.list();
+      if (!refreshed) continue;
+      const idle = this.waitForChange(signal, revision);
+      try { await idle.promise; } finally { idle.cancel(); }
+    }
+  }
+  /** Revalidate and atomically claim only the account the master selected. */
+  async acquireSelected(owner: string, signal: AbortSignal, accountId: GeminiWebAccountId) {
+    signal = AbortSignal.any([signal, this.closing.signal]);
+    if (!this.accounts.some(a => a.accountId === accountId && a.enabled))
+      throw new Error("마스터가 등록된 활성 Gemini 웹 계정을 지정해야 합니다.");
+    const excluded = new Set(this.accounts.filter(a => a.accountId !== accountId).map(a => a.accountId));
+    const browser = await this.claimAvailable(owner, excluded, signal);
+    if (!browser) throw new Error(`지정 계정 ${accountId}은 작업 중이거나 잔여량·로그인을 확인할 수 없습니다. 마스터가 gemini_web_accounts로 다시 확인하고 직접 재배정하세요.`);
+    return browser;
+  }
   private candidates(excluded: Set<GeminiWebAccountId>) {
     return this.list().filter(a => a.enabled && !excluded.has(a.accountId) && a.state !== "busy" && a.state !== "login_required"
       && a.remainingPercent !== undefined && a.remainingPercent > WEB_LOW_REMAINING)
       .sort((a, b) => b.remainingPercent! - a.remainingPercent! || Number(a.accountId.slice(7)) - Number(b.accountId.slice(7)));
   }
-  private async claimAvailable(owner: string, excluded: Set<GeminiWebAccountId>, signal: AbortSignal, refresh = true) {
+  private async claimAvailable(owner: string, excluded: Set<GeminiWebAccountId>, signal: AbortSignal) {
     signal.throwIfAborted();
-    if (refresh) await this.refresh(excluded, signal);
+    await this.refresh(excluded, signal);
     for (const account of this.candidates(excluded)) {
       signal.throwIfAborted();
       const browser = this.browser(account.accountId);
@@ -149,47 +180,6 @@ export class GeminiWebAccounts {
         signal.throwIfAborted();
         if (this.disposed) throw error;
       }
-    }
-  }
-  private async pick(owner: string, signal: AbortSignal, preferred: GeminiWebAccountId | null, refresh = true) {
-    if (preferred && this.accounts.some(a => a.accountId === preferred && a.enabled)) {
-      const others = new Set(this.accounts.filter(a => a.accountId !== preferred).map(a => a.accountId));
-      const browser = await this.claimAvailable(owner, others, signal, refresh);
-      if (browser) return browser;
-    }
-    return this.claimAvailable(owner, new Set(preferred ? [preferred] : []), signal, refresh);
-  }
-  async acquire(owner: string, signal: AbortSignal, preferred: GeminiWebAccountId | null = null, onWaiting?: () => void): Promise<GeminiWebBrowser> {
-    signal = AbortSignal.any([signal, this.closing.signal]);
-    let waiting = false;
-    let quick = false;
-    for (;;) {
-      signal.throwIfAborted();
-      const revision = this.revision;
-      if (quick) {
-        const browser = await this.pick(owner, signal, preferred, false);
-        if (browser) return browser;
-      }
-      const pass = new AbortController(), wake = this.waitForChange(signal, revision);
-      const attempt = this.pick(owner, AbortSignal.any([signal, pass.signal]), preferred);
-      let result: { browser?: GeminiWebBrowser } | { retry: true; changed: boolean };
-      try {
-        // New usable accounts must not wait behind an old profile's stalled browser lookup.
-        result = await Promise.race([attempt.then(browser => ({ browser })), wake.promise.then(changed => ({ retry: true as const, changed }))]);
-      } catch (error) { pass.abort(); (await attempt.catch(() => undefined))?.release(owner); throw error; }
-      finally { wake.cancel(); }
-      if ("retry" in result) {
-        pass.abort(); (await attempt.catch(() => undefined))?.release(owner);
-        signal.throwIfAborted();
-        if (!result.changed && !waiting) { onWaiting?.(); waiting = true; }
-        quick = true;
-        continue;
-      }
-      if (result.browser) return result.browser;
-      if (!waiting) { onWaiting?.(); waiting = true; }
-      // Reconsider every profile after a reset, including ones used earlier in this request.
-      const idle = this.waitForChange(signal, revision);
-      try { quick = await idle.promise; } finally { idle.cancel(); }
     }
   }
   async dispose() {

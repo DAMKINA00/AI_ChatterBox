@@ -10,6 +10,7 @@ import {
   type AgentEvent,
   type AttachmentRef,
   type ChatAgent,
+  type GeminiWebAccountId,
   type Role,
   type Chat,
   type ChatStatus,
@@ -102,7 +103,7 @@ CREATE TABLE IF NOT EXISTS approvals (
 CREATE TABLE IF NOT EXISTS agents (
   id INTEGER PRIMARY KEY,
   chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
-  kind TEXT NOT NULL CHECK (kind IN ('claude','gpt','gemini')),
+  kind TEXT NOT NULL CHECK (kind IN ('claude','gpt','gemini','grok')),
   number INTEGER NOT NULL,
   nickname TEXT NOT NULL,
   job TEXT NOT NULL DEFAULT '',
@@ -159,10 +160,12 @@ export type ChatPatch = Partial<
     | "claudeModelOverride"
     | "codexModelOverride"
     | "geminiModelOverride"
+    | "grokModelOverride"
     | "orchestratorEffortOverride"
     | "claudeEffortOverride"
     | "codexEffortOverride"
     | "geminiEffortOverride"
+    | "grokEffortOverride"
     | "approvalModeOverride"
     | "orchestratorModelOverride"
     | "goal"
@@ -182,8 +185,8 @@ function projectSettings(json: string): ProjectSettings {
     claudeCautions: ["이미지 생성은 이미지 도구를 사용할 수 있는 지피티에게 맡깁니다. 성능 우열은 작업마다 다를 수 있습니다."],
     gptStrengths: ["이미지 생성·편집, 시각 자료 제작. 구현·테스트·문서 작성은 맥락에 따라 배정."],
     gptCautions: ["이미지 생성 도구의 실제 사용 가능 여부를 확인합니다. 소스 분석은 기본적으로 클로드를 우선 고려합니다.", "일반 분석·구현·테스트·문서와 모션그래픽은 클로드 우선입니다. 이미지 도구가 필요하거나 교차검증의 필요성이 크거나 클로드가 실행 불가·과부하일 때 배정합니다."],
-    geminiStrengths: ["사용자 지정 제미나이 작업, 문서 요약·자료 비교와 추가 관점의 검토. 클로드가 바쁘거나 사용 한도에 도달했을 때 보조 담당."],
-    geminiCautions: ["Google AI Pro 계정에서 실제 제공되는 Gemini 모델만 사용합니다. Ultra 전용 모델·API 결제로 전환하지 않습니다. 일반 업무는 클로드 우선, 이미지 생성은 지피티, 중요한 오류는 기존 클로드·지피티 양쪽 조사 규칙을 유지합니다."],
+    geminiStrengths: ["사용자 지정 제미나이 작업, 문서 요약·자료 비교와 추가 관점의 검토. 클로드가 바쁘거나 사용 한도에 도달했을 때 보조 담당.", "웹·CLI 모두 글쓰기 전담. 문장 다듬기, 캐릭터 대사·시나리오, 문서 본문 작성·요약·번역을 우선 배정합니다."],
+    geminiCautions: ["Google AI Pro 계정에서 실제 제공되는 Gemini 모델만 사용합니다. Ultra 전용 모델·API 결제로 전환하지 않습니다. 일반 업무는 클로드 우선, 이미지 생성은 지피티, 중요한 오류는 기존 클로드·지피티 양쪽 조사 규칙을 유지합니다.", "코드 분석·구현·디버깅·테스트·기술 리뷰·교차검증은 맡기지 않습니다. 검증된 사실과 캐릭터 말투를 유지하고 텍스트만 반환합니다. 실제 파일 반영은 클로드·지피티가 수행합니다. Google AI Pro 계정에서 제공되는 모델만 사용합니다."],
   };
   for (const [key, values] of Object.entries(previous)) if (values.includes(saved[key])) delete saved[key];
   const settings = { ...DEFAULT_SETTINGS, ...saved };
@@ -212,10 +215,12 @@ const toChat = (r: Row): Chat => ({
   claudeModelOverride: r.claude_model_override,
   codexModelOverride: r.codex_model_override,
   geminiModelOverride: r.gemini_model_override ?? null,
+  grokModelOverride: r.grok_model_override ?? null,
   orchestratorEffortOverride: r.orchestrator_effort_override ?? null,
   claudeEffortOverride: r.claude_effort_override ?? null,
   codexEffortOverride: r.codex_effort_override ?? null,
   geminiEffortOverride: r.gemini_effort_override ?? null,
+  grokEffortOverride: r.grok_effort_override ?? null,
   approvalModeOverride: r.approval_mode_override ?? null,
   orchestratorModelOverride: r.orchestrator_model_override ?? null,
   goal: r.goal_json ? JSON.parse(r.goal_json) : null,
@@ -254,6 +259,7 @@ const toAgent = (r: Row): ChatAgent => ({
   nickname: r.nickname,
   job: r.job,
   sessionId: r.session_id,
+  webAccountId: r.web_account_id ?? undefined,
   status: r.status,
   createdAt: r.created_at,
 });
@@ -266,14 +272,19 @@ export class Store {
     this.db = new DatabaseSync(file);
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
     this.db.exec(SCHEMA);
-    this.addColumns();
     this.migrateGeminiAgents();
+    this.addColumns();
     this.db.exec("UPDATE chats SET status = 'paused' WHERE status = 'pausing'");
     // The app was quit or crashed mid-run: those chats can be resumed ("이어서 진행").
     this.db.exec("UPDATE chats SET status = 'interrupted' WHERE status IN ('working','approval')");
     this.db.exec("UPDATE consults SET status = 'stopped', ended_at = COALESCE(ended_at, started_at) WHERE status = 'running'");
     this.migrateV1();
     this.migrateAgents();
+    // Rename only generated defaults; keep custom names, IDs and conversation history.
+    const rename = this.db.prepare("UPDATE agents SET nickname = ? || ' ' || number || '호' WHERE kind = ? AND nickname = ? || ' ' || number || '호'");
+    for (const [kind, old] of [["claude", "Claude"], ["gpt", "Codex"], ["gpt", "짚피티"], ["gemini", "Antigravity"], ["gemini", "Gemini"], ["grok", "Grok"]] as const) {
+      rename.run(WORKER_KIND_LABEL[kind], kind, old);
+    }
     this.migrateAllocationLimits();
   }
 
@@ -336,13 +347,13 @@ export class Store {
   // ---- agents (pooled workers)
   private migrateGeminiAgents() {
     const schema = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='agents'").get() as Row;
-    if (schema.sql.includes("'gemini'")) return;
+    if (schema.sql.includes("'grok'")) return;
     // SQLite cannot extend a CHECK constraint. Preserve every identity and session atomically.
     this.db.exec("BEGIN");
     try {
       this.db.exec(`CREATE TABLE agents_next (
         id INTEGER PRIMARY KEY, chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
-        kind TEXT NOT NULL CHECK (kind IN ('claude','gpt','gemini')), number INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('claude','gpt','gemini','grok')), number INTEGER NOT NULL,
         nickname TEXT NOT NULL, job TEXT NOT NULL DEFAULT '', session_id TEXT,
         status TEXT NOT NULL DEFAULT 'active', created_at INTEGER NOT NULL);
         INSERT INTO agents_next SELECT * FROM agents;
@@ -377,11 +388,11 @@ export class Store {
       .run(chatId, kind, n, `${WORKER_KIND_LABEL[kind]} ${n}호`, job, Date.now());
     return this.agent(Number(r.lastInsertRowid))!;
   }
-  updateAgent(id: number, patch: { sessionId?: string; status?: "active" | "released"; job?: string }) {
+  updateAgent(id: number, patch: { sessionId?: string; status?: "active" | "released"; job?: string; webAccountId?: GeminiWebAccountId }) {
     const a = this.agent(id)!;
     this.db
-      .prepare("UPDATE agents SET session_id = ?, status = ?, job = ? WHERE id = ?")
-      .run(patch.sessionId ?? a.sessionId, patch.status ?? a.status, patch.job ?? a.job, id);
+      .prepare("UPDATE agents SET session_id = ?, status = ?, job = ?, web_account_id = ? WHERE id = ?")
+      .run(patch.sessionId ?? a.sessionId, patch.status ?? a.status, patch.job ?? a.job, patch.webAccountId ?? a.webAccountId ?? null, id);
     return this.agent(id)!;
   }
 
@@ -391,14 +402,17 @@ export class Store {
       const cols = (this.db.prepare(`PRAGMA table_info(${table})`).all() as Row[]).map((c) => c.name);
       if (!cols.includes(column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
     };
+    add("agents", "web_account_id", "web_account_id TEXT");
     add("chats", "approval_mode_override", "approval_mode_override TEXT");
     add("chats", "orchestrator_model_override", "orchestrator_model_override TEXT");
     add("chats", "goal_json", "goal_json TEXT");
     add("chats", "gemini_model_override", "gemini_model_override TEXT");
+    add("chats", "grok_model_override", "grok_model_override TEXT");
     add("chats", "orchestrator_effort_override", "orchestrator_effort_override TEXT");
     add("chats", "claude_effort_override", "claude_effort_override TEXT");
     add("chats", "codex_effort_override", "codex_effort_override TEXT");
     add("chats", "gemini_effort_override", "gemini_effort_override TEXT");
+    add("chats", "grok_effort_override", "grok_effort_override TEXT");
     add("consults", "scope_json", "scope_json TEXT");
     add("consults", "instruction_id", "instruction_id INTEGER");
     add("consults", "reason", "reason TEXT");
@@ -500,6 +514,8 @@ export class Store {
     return this.project(id)!;
   }
   deleteProject(id: number) {
+    const chats = this.db.prepare("SELECT id FROM chats WHERE project_id = ?").all(id) as { id: number }[];
+    for (const chat of chats) this.clearChatSettings(chat.id);
     this.db.prepare("DELETE FROM projects WHERE id = ?").run(id);
   }
 
@@ -525,7 +541,7 @@ export class Store {
     this.db
       .prepare(
         `UPDATE chats SET title = ?, orch_claude_session_id = ?, orch_codex_thread_id = ?, claude_session_id = ?, codex_thread_id = ?,
-         claude_model_override = ?, codex_model_override = ?, gemini_model_override = ?, orchestrator_effort_override = ?, claude_effort_override = ?, codex_effort_override = ?, gemini_effort_override = ?, approval_mode_override = ?, orchestrator_model_override = ?, goal_json = ?, status = ?, unread = ?, archived = ?, last_active_at = ? WHERE id = ?`,
+         claude_model_override = ?, codex_model_override = ?, gemini_model_override = ?, grok_model_override = ?, orchestrator_effort_override = ?, claude_effort_override = ?, codex_effort_override = ?, gemini_effort_override = ?, grok_effort_override = ?, approval_mode_override = ?, orchestrator_model_override = ?, goal_json = ?, status = ?, unread = ?, archived = ?, last_active_at = ? WHERE id = ?`,
       )
       .run(
         pick("title"),
@@ -536,10 +552,12 @@ export class Store {
         pick("claudeModelOverride"),
         pick("codexModelOverride"),
         pick("geminiModelOverride"),
+        pick("grokModelOverride"),
         pick("orchestratorEffortOverride"),
         pick("claudeEffortOverride"),
         pick("codexEffortOverride"),
         pick("geminiEffortOverride"),
+        pick("grokEffortOverride"),
         pick("approvalModeOverride"),
         pick("orchestratorModelOverride"),
         (() => {
@@ -555,7 +573,13 @@ export class Store {
     return this.chat(id)!;
   }
   deleteChat(id: number) {
+    this.clearChatSettings(id);
     this.db.prepare("DELETE FROM chats WHERE id = ?").run(id);
+  }
+
+  private clearChatSettings(id: number) {
+    for (const prefix of ["orchSession", "teamMessages", "gemini-web-context"])
+      this.db.prepare("DELETE FROM settings WHERE key LIKE ?").run(`${prefix}:${id}:%`);
   }
 
   // ---- consults

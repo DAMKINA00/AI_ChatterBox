@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentKind, AttachmentRef, UsageInfo, TokenCounts } from "../../shared/types";
+import type { AgentEvent, AgentKind, AttachmentRef, UsageInfo, TokenCounts, GeminiWebAccountId } from "../../shared/types";
 import type { ApprovalInput, VerdictResult } from "../approvals";
 
 export interface AgentInput {
@@ -6,6 +6,10 @@ export interface AgentInput {
   attachments: AttachmentRef[];
   /** Enforced planning/review turn: never grant mutations or shell escalation. */
   noWrites?: boolean;
+  /** Require an actual image result, including web workers. */
+  requiresImage?: boolean;
+  /** Master-selected web account. The driver must not select a substitute. */
+  webAccountId?: GeminiWebAccountId;
 }
 
 /** What a driver needs from the chat that owns it. */

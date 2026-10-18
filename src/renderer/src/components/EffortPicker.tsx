@@ -7,7 +7,7 @@ import { Button, DropdownMenu, DropdownMenuCheckItem, DropdownMenuContent, Dropd
 
 const WORKER_EFFORTS = new Set(["medium", "high", "xhigh"]);
 const EFFORT_ORDER = ["low", "medium", "high", "xhigh"];
-const WEB_EFFORT_TITLE = "Gemini 웹은 medium/high/xhigh 추론 수준을 제공하지 않습니다. 웹 서비스가 모델 설정을 관리합니다.";
+const WEB_EFFORT_TITLE = "제미나이 웹은 medium/high/xhigh 추론 수준을 제공하지 않습니다. 웹 서비스가 모델 설정을 관리합니다.";
 
 export function effortLabel(value: string | null | undefined): string {
   if (!value) return "CLI 기본값";

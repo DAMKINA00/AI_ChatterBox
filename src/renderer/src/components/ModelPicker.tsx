@@ -21,12 +21,13 @@ import {
 } from "./ui";
 
 const MODEL_GROUP_LABEL: Record<AgentKind, string> = {
-  claude: "Claude 모델 (Claude Code)",
-  codex: "GPT 모델 (Codex)",
-  gemini: "Gemini 모델 (Antigravity)",
+  claude: "클로드 모델 (Claude Code)",
+  codex: "지피티 모델",
+  gemini: "제미나이 모델",
+  grok: "그록 모델",
 };
 
-const GEMINI_WEB_LABEL = "Gemini 웹 · Argon (계정 1)";
+const GEMINI_WEB_LABEL = "제미나이 웹 · Argon";
 
 /** "claude:opus" for the orchestrator (both CLIs), or a plain model id for a worker. */
 export function useModelLabel() {
@@ -104,15 +105,15 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
             <div key={a}>
               {i > 0 && <DropdownMenuSeparator />}
               <DropdownMenuLabel>{MODEL_GROUP_LABEL[a]}</DropdownMenuLabel>
-              {a === "gemini" && (
+              {(a === "gemini" || a === "grok") && (
                 <>
-                  <DropdownMenuItem onSelect={() => setGeminiWebOpen(true)} data-testid="gemini-web-connect">
+                  {a === "gemini" && !encoded && <DropdownMenuItem onSelect={() => setGeminiWebOpen(true)} data-testid="gemini-web-connect">
                     <Globe2 />
-                    웹 계정 관리…
-                  </DropdownMenuItem>
+                    제미나이 웹 계정 관리…
+                  </DropdownMenuItem>}
                   <DropdownMenuSeparator />
                   <DropdownMenuCheckItem checked={current.agent === a && current.id === ""} onSelect={() => onChange(make(a, ""))}>
-                    <span className="flex-1 truncate">Pro 자동 선택</span>
+                    <span className="flex-1 truncate">{a === "gemini" ? "Pro 자동 선택" : "CLI 기본 모델"}</span>
                   </DropdownMenuCheckItem>
                 </>
               )}
@@ -128,7 +129,7 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
                 </DropdownMenuItem>
               </>}
               {models[a] &&
-                latestModels(a, models[a]!, current.agent === a ? [current.id] : []).map((m) => (
+                latestModels(a, models[a]!.filter(m => !encoded || m.id !== GEMINI_WEB_MODEL), current.agent === a ? [current.id] : []).map((m) => (
                   <DropdownMenuCheckItem
                     key={m.id}
                     checked={current.agent === a && current.id === m.id}
@@ -160,7 +161,7 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
               ? "Codex가 받는 모델 id (예: gpt-6-astra)"
               : custom === "gemini"
                 ? "Antigravity가 받는 Gemini 모델 id"
-                : "Claude Code --model 값 (별칭 또는 전체 id)"
+                : custom === "grok" ? "Grok CLI 모델 id" : "Claude Code --model 값 (별칭 또는 전체 id)"
           }
           className="w-[420px]"
         >

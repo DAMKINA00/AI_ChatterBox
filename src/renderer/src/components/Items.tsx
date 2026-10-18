@@ -29,8 +29,8 @@ import { AgentAvatar, type AvatarSize } from "./AgentAvatar";
 import { effortLabel } from "./EffortPicker";
 import { Badge, Button, Input } from "./ui";
 
-export type Tone = "orch" | "claude" | "gpt" | "gemini";
-const TONE_TEXT: Record<Tone, string> = { orch: "text-orch", claude: "text-claude", gpt: "text-gpt", gemini: "text-gemini" };
+export type Tone = "orch" | "claude" | "gpt" | "gemini" | "grok";
+const TONE_TEXT: Record<Tone, string> = { orch: "text-orch", claude: "text-claude", gpt: "text-gpt", gemini: "text-gemini", grok: "text-grok" };
 
 /** Name + color of a role in a chat: 마스터, 클로드 2호, 지피티 1호 … */
 export function useRole(chatId: number, role: Role | null | undefined) {
@@ -192,6 +192,11 @@ function ToolGroup({ items, nested }: { items: ToolItem[]; nested: boolean }) {
 const ItemView = memo(function ItemView({ item, chatId, nested }: { item: Item; chatId: number; nested: boolean }) {
   const agents = useStore((s) => s.agents[chatId]);
   switch (item.kind) {
+    case "peer":
+      return <div className="rounded-md border border-dashed px-3 py-2" data-testid="peer-message">
+        <div className="mb-1 text-[12px] font-medium">{roleName(item.from, agents)} → {roleName(item.to, agents)} · 협업 메시지</div>
+        <Markdown text={item.text} />
+      </div>;
     case "user":
       return (
         <div className="group grid grid-cols-[36px_minmax(0,1fr)_auto] items-start gap-x-3 rounded-md px-2 py-1.5 transition-colors hover:bg-accent/30" data-testid="user-message">

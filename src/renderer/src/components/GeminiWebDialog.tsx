@@ -20,7 +20,7 @@ const STATE_CLASS: Record<GeminiWebStatus["state"], string> = {
   error: "bg-destructive",
 };
 
-const WEB_DESCRIPTION = "최대 10개 계정의 로그인을 분리해 관리합니다. 이전 계정에 잔여량이 충분하면 이어서 배정합니다. 잔여량이 10% 이하이거나 작업 중이면 쉬고 있는 계정 중 가장 여유 있는 계정에 맥락과 초안을 인계합니다. 모두 작업 중이거나 한도가 부족하면 대기하며 주기적으로 다시 확인합니다.";
+const WEB_DESCRIPTION = "최대 10개 계정의 로그인을 분리해 관리합니다. 마스터가 전체 계정의 잔여량·조회 시각·작업 상태를 직접 보고 계정을 지정해 작업자를 생성합니다. 이전 계정에 잔여량이 충분하면 이어서 배정합니다. 잔여량이 10% 이하이거나 작업 중이면 쉬고 있는 계정 중 가장 여유 있는 계정에 맥락과 초안을 인계합니다. 모두 작업 중이거나 한도가 부족하면 대기하며 주기적으로 다시 확인합니다.";
 
 interface GeminiWebQuotaWindow {
   usedPercent: number;
@@ -125,8 +125,8 @@ function AccountCard({ account, pending, loginFeedback, update, query }: {
         <span className={`size-2 shrink-0 rounded-full ${STATE_CLASS[account.state]}`} />
         <span className="text-[12px] font-medium">계정 {account.accountId.slice(7)} · {STATE_LABEL[account.state]}</span>
         <label className="ml-auto flex items-center gap-1.5 text-[12px]">
-          <input type="checkbox" checked={account.enabled} disabled={pending || busy} aria-label={`계정 ${account.accountId.slice(7)} 자동 배정`} onChange={e => update(account.accountId, { enabled: e.target.checked })} />
-          자동 배정
+          <input type="checkbox" checked={account.enabled} disabled={pending || busy} aria-label={`계정 ${account.accountId.slice(7)} 마스터 배정`} onChange={e => update(account.accountId, { enabled: e.target.checked })} />
+          마스터 배정
         </label>
       </div>
       <div className="flex gap-2">
@@ -246,7 +246,7 @@ export function GeminiWebDialog({ open, onOpenChange, onUseModel }: Props) {
     && (a.state === "ready" || a.state === "busy" || (a.usage.status === "available" && (a.remainingPercent ?? 0) > 0)));
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent title="Gemini 웹 계정 관리" description={WEB_DESCRIPTION} className="w-[min(920px,calc(100vw-32px))]">
+      <DialogContent title="제미나이 웹 계정 관리" description={WEB_DESCRIPTION} className="w-[min(920px,calc(100vw-32px))]">
         <div className="flex items-center gap-3 text-[12px]">
           <span className="text-muted-foreground">등록 {accounts.length}/10 · 계정마다 한 작업씩 배정합니다.</span>
           <Button className="ml-auto" type="button" variant="outline" disabled={pending || accounts.length >= 10} onClick={() => void manage("add")} data-testid="gemini-web-add-account"><Plus /> 계정 추가</Button>
@@ -266,7 +266,7 @@ export function GeminiWebDialog({ open, onOpenChange, onUseModel }: Props) {
         <DialogFooter>
           {pending && <Loader2 className="mr-auto size-4 animate-spin" aria-label="계정 처리 중" />}
           <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>닫기</Button>
-          {onUseModel && <Button type="button" onClick={() => { onUseModel(); onOpenChange(false); }} disabled={!canUse || pending} data-testid="gemini-web-use-argon"><Sparkles /> Argon 자동 배정 사용</Button>}
+          {onUseModel && <Button type="button" onClick={() => { onUseModel(); onOpenChange(false); }} disabled={!canUse || pending} data-testid="gemini-web-use-argon"><Sparkles /> Argon 마스터 배정 사용</Button>}
         </DialogFooter>
       </DialogContent>
     </Dialog>

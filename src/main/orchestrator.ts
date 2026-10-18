@@ -15,6 +15,7 @@ import {
   chatOrchestrator,
   AGENT_EXPRESSIONS,
   GEMINI_WRITING_INSTRUCTIONS,
+  AGENT_LABEL,
   isAgentExpression,
   CONSULT_KIND_LABEL,
   MASTER_LABEL,
@@ -34,6 +35,7 @@ import {
   type Project,
   type Role,
   type WorkerKind,
+  type GeminiWebAccountId,
 } from "../shared/types";
 import type { ChatManager } from "./chats";
 import { bridgeServerConfig, textResult, type ToolDef, type ToolResult } from "./local-bridge";
@@ -46,10 +48,18 @@ import type { ApprovalInput } from "./approvals";
 import { addWait, checkAsk, removeWait, type WaitGraph } from "./team";
 import { completionIssue, dualInvestigationIssue } from "./dispatch";
 import { WORKER_EFFORTS } from "./effort";
+import { conversationAccount, webAccountId } from "./drivers/gemini-web-protocol";
+import { WEB_LOW_REMAINING } from "./drivers/gemini-web-accounts";
 
 const KINDS: ConsultKind[] = ["implement", "review", "opinion", "writing"];
 const MAX_DEPTH = 3;
 const MAX_GOAL_TURNS = 6;
+const WEB_ACCOUNT_INPUT = { type: "string", pattern: "^gemini-([1-9]|10)$", description: "마스터가 잔여량을 확인해 선택한 Gemini 웹 계정 ID. spawn 시 필수이며 ask에서는 기존 작업자의 계정을 변경할 때 지정합니다. 자동으로 다른 계정으로 바꾸지 않습니다." };
+const WEB_ACCOUNTS_TOOL: ToolDef = {
+  name: "gemini_web_accounts",
+  description: "마스터가 직접 전체 Gemini 웹 계정의 잔여량·조회 시각·로그인·작업 상태와 작업자 연결을 확인합니다. 기본은 사용량 갱신. 모두 작업 중/잔여량 부족이면 waitForAvailable=true로 10초마다 재확인하며 기다립니다. 계정을 선택하거나 작업자를 실행하지 않으며 선택은 마스터가 spawn/ask의 webAccountId로 합니다.",
+  inputSchema: { type: "object", properties: { refresh: { type: "boolean" }, waitForAvailable: { type: "boolean" } }, additionalProperties: false },
+};
 const DISCUSSION_INPUT = {
   type: "object", description: "관련 쟁점을 작업자끼리 직접 토의할 그룹. to는 진행자, peers는 의견을 주고받을 다른 작업자 닉네임입니다. opinion 또는 writing 전용이며 진행자는 각 참여자의 실제 응답을 취합해야 합니다.",
   properties: { topic: { type: "string" }, peers: { type: "array", items: { type: "string" }, minItems: 1, uniqueItems: true } },
@@ -73,9 +83,9 @@ const ASK_TOOL = (forMaster: boolean): ToolDef => ({
   name: "ask",
   description:
     "작업자에게 닉네임으로 일을 맡기거나 질문하고 결과를 기다립니다 (예: to=\"클로드 2호\"). 받는 쪽은 이 대화를 보지 못하므로 message에 목표, 관련 파일, 조건, 완료 기준을 모두 적으세요. " +
-    "kind: implement=구현·수정(받는 작업자가 파일을 고침, scope로 고칠 범위를 지정), review=기술 리뷰, opinion=의견·분석, writing=문장 다듬기·캐릭터 대사·문서 본문 등 글쓰기(파일을 고치지 않고 텍스트만 반환). 제미나이는 웹·CLI 모두 writing만 허용하며 코드 작업·기술 리뷰를 맡기지 않습니다. " +
+    "kind: implement=구현·수정(받는 작업자가 파일을 고침, scope로 고칠 범위를 지정), review=기술 리뷰, opinion=의견·분석, writing=문장 다듬기·캐릭터 대사·문서 본문 등 글쓰기(파일을 고치지 않고 텍스트만 반환). 사용자가 담당을 명시하면 그 작업자에게 지정한 종류 그대로 맡깁니다. Gemini 웹은 로컬 코드·명령을 실행할 수 없습니다. " +
     "scope(implement 전용): 고쳐도 되는 경로 glob 목록(작업 폴더 기준, 예: [\"src/ui/**\", \"README.md\"]). 범위가 겹치지 않는 구현은 동시에 진행되고, 범위 밖 쓰기는 거부됩니다. " +
-    (forMaster ? "관련 쟁점을 묶어 토의하려면 discussion={topic, peers}를 지정해 클로드/지피티 진행자에게 맡기세요. 진행자가 참여자에게 직접 ask로 묻고 결과를 취합합니다. 독립적인 일은 ask_parallel을 사용하세요." : "토의 진행자로 지정되면 참여 작업자에게 직접 ask하고 합의·이견·근거를 취합하세요. 마스터에게는 ask를 쓰지 말고 결과 보고에 질문을 포함하세요."),
+    (forMaster ? "관련 쟁점을 묶어 토의하려면 discussion={topic, peers}를 지정해 CLI 진행자에게 맡기세요. 진행자가 참여자에게 직접 ask로 묻고 결과를 취합합니다. 독립적인 일은 ask_parallel을 사용하세요." : "토의 진행자로 지정되면 참여 작업자에게 직접 ask하고 합의·이견·근거를 취합하세요. 마스터에게는 ask를 쓰지 말고 결과 보고에 질문을 포함하세요."),
   inputSchema: {
     type: "object",
     properties: {
@@ -85,6 +95,7 @@ const ASK_TOOL = (forMaster: boolean): ToolDef => ({
       reason: { type: "string", description: "이 작업자를 선택한 이유. 마스터 배정 시 필수." },
       ...(forMaster ? { effort: { type: "string", enum: [...WORKER_EFFORTS], description: "추론 수준. 일반 작업 medium, 복잡한 분석·구현 high, 가장 어려운 추론·검증 xhigh. 모델 지원 범위를 확인하고 reason에 선택 근거를 적으세요." } } : {}),
       ...(forMaster ? { discussion: DISCUSSION_INPUT } : {}),
+      ...(forMaster ? { webAccountId: WEB_ACCOUNT_INPUT } : {}),
       requiresImage: { type: "boolean", description: "실제 이미지 생성·편집 도구가 필요한 작업이면 true" },
       supersedes: { type: "integer", description: "이 배정으로 보완할 실패한 협의 id" },
       scope: { type: "array", items: { type: "string" } },
@@ -116,6 +127,7 @@ const ASK_PARALLEL_TOOL: ToolDef = {
             attach: { type: "array", items: { type: "string" } },
             scope: { type: "array", items: { type: "string" } },
             discussion: DISCUSSION_INPUT,
+            webAccountId: WEB_ACCOUNT_INPUT,
           },
           required: ["to", "message", "kind", "reason", "effort"],
         },
@@ -128,10 +140,10 @@ const ASK_PARALLEL_TOOL: ToolDef = {
 const SPAWN_TOOL: ToolDef = {
   name: "spawn",
   description:
-    "해제된 같은 계열의 작업자를 낮은 번호부터 다시 활성화하며, 없을 때 새로 만듭니다. kind=claude → 클로드 N호(Claude Code), kind=gpt → 지피티 N호(Codex), kind=gemini → 제미나이 N호(Antigravity/Google AI Pro). 이전 번호·대화 기록을 유지합니다. job에 맡길 역할을 한 줄로 적으세요. 동시에 필요한 수만 확보하세요.",
+    "해제된 같은 계열의 작업자를 낮은 번호부터 다시 활성화하며, 없을 때 새로 만듭니다. kind=claude → 클로드 N호(Claude Code), kind=gpt → 지피티 N호(Codex), kind=gemini → Antigravity N호, kind=grok → Grok N호. 이전 번호·대화 기록을 유지합니다. job에 맡길 역할을 한 줄로 적으세요. 동시에 필요한 수만 확보하세요.",
   inputSchema: {
     type: "object",
-    properties: { kind: { type: "string", enum: ["claude", "gpt", "gemini"] }, job: { type: "string" } },
+    properties: { kind: { type: "string", enum: ["claude", "gpt", "gemini", "grok"] }, job: { type: "string" }, webAccountId: WEB_ACCOUNT_INPUT },
     required: ["kind", "job"],
   },
 };
@@ -139,6 +151,15 @@ const RELEASE_TOOL: ToolDef = {
   name: "release",
   description: "더 필요 없는 작업자를 해제합니다 (닉네임). 다음 spawn에서 같은 번호와 대화 기록으로 다시 활성화할 수 있습니다.",
   inputSchema: { type: "object", properties: { nickname: { type: "string" } }, required: ["nickname"] },
+};
+const MESSAGE_TOOL: ToolDef = {
+  name: "send_message",
+  description: "동료 또는 마스터에게 진행 상황·인터페이스·질문을 보내고 즉시 계속 작업합니다. 상대의 다음 앱 도구 호출/작업 시작 시 전달됩니다. 작업 중인 동료에게는 ask로 기다리지 말고 이 도구를 쓰세요. 명령 실행이나 새 작업 시작을 대신하지 않습니다.",
+  inputSchema: { type: "object", properties: { to: { type: "string" }, message: { type: "string" } }, required: ["to", "message"], additionalProperties: false },
+};
+const MESSAGES_TOOL: ToolDef = {
+  name: "read_messages", description: "나에게 온 새 협업 메시지를 확인합니다. 인터페이스 변경 전과 결과 보고 전에 확인하세요.",
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
 };
 const AGENTS_TOOL: ToolDef = {
   name: "agents",
@@ -192,27 +213,31 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     `너는 사용자의 지시를 받아 팀을 꾸리고 일을 나눠 맡기는 마스터다. 작업 폴더: ${project.folder}`,
     "- 너는 배정·검토·취합 담당이다. 간단한 질문·짧은 설명·이미 주어진 정보만으로 답할 수 있는 확인은 direct로 기록한 뒤 작업자를 생성하거나 호출하지 않고 직접 답한다. 소스 분석·원인 조사·구현·이미지·문서 제작 등 본 작업은 반드시 앱 작업자에게 맡긴다. 결과에 누락·모순이 있으면 보완 요청하고 최종 답변을 취합한다. 사용자가 명시적으로 직접 수행을 요구한 예외에도 기존 승인·작업 범위 규칙을 지킨다.",
     `- 지시마다 먼저 ${t("route_request")}(mode=direct|delegated, reason=이유)를 호출한다. 반환되는 실제 사용 가능 도구·모델·사용량으로 후보를 확인한다. 도구 사용 불가/미확인은 가능하다고 가정하지 않는다.`,
-    "- 모든 위임은 이 앱의 chatterbox_bridge spawn/ask/ask_parallel만 사용한다. CLI 내부 spawn_agent/Agent/Task/팀 도구나 별도 CLI 프로세스로 작업자를 만들지 않는다. 글로벌 스킬의 Luna 선호와 관계없이 앱 상단에서 선택한 클로드·지피티·제미나이 모델을 사용한다.",
+    "- 모든 위임은 이 앱의 chatterbox_bridge spawn/ask/ask_parallel만 사용한다. CLI 내부 spawn_agent/Agent/Task/팀 도구나 별도 CLI 프로세스로 작업자를 만들지 않는다. 글로벌 스킬의 Luna 선호와 관계없이 앱 상단에서 선택한 Claude·Codex·Antigravity·Grok 모델을 사용한다.",
     "- 마스터 기본 추론은 xhigh다. 작업자의 추론은 마스터가 배정마다 effort=medium|high|xhigh로 선택한다. 일반·범위가 명확한 작업은 medium, 복잡한 분석·구현은 high, 가장 어려운 원인 추론·중요 검증은 xhigh를 쓴다. route_request의 reasoningEfforts에 나온 지원 수준 안에서 고르고 reason에 담당자와 추론 수준 선택 근거를 함께 적는다. Gemini Pro가 medium/high만 제공하면 그중 고른다. low/max를 지정하거나 CLI·환경 설정으로 우회하지 않는다. 사용자가 수동 지정한 추론은 우선 적용된다.",
     `- 클로드 선호 작업: ${s.claudeStrengths}\n  주의점: ${s.claudeCautions}`,
     `- 지피티 선호 작업: ${s.gptStrengths}\n  주의점: ${s.gptCautions}`,
+    `- Grok 선호 작업: ${s.grokStrengths} 주의점: ${s.grokCautions}`,
+    "- 사용자가 이름·봇·CLI를 명시한 작업은 그 담당에게 우선 배정한다. 글쓰기·코드·이미지의 기본 선호는 명시적 지정을 덮어쓰지 않는다. Gemini는 Antigravity 작업자를 뜻하며 웹 모델을 선택했을 때만 Gemini 웹으로 실행한다. 다른 봇으로 임의 변경하지 말고 실제 도구 오류와 한도를 보고한다.",
     `- 제미나이 선호 작업: ${s.geminiStrengths}\n  주의점: ${s.geminiCautions}` ,
-    `- ${GEMINI_WRITING_INSTRUCTIONS} 이 역할 제한은 이전 프로젝트 선호나 사용 한도에 따른 재배정에도 적용한다. 제미나이에 코드 일을 글쓰기라고 바꿔 맡기지 않는다.`,
     "- 글쓰기 본 작업은 제미나이에게 kind=writing으로 배정한다. 요청에 독자·목적·분량·말투와 확인된 사실, 캐릭터 대사에는 성격·관계·상황·말투 예시를 전달한다. 기술 문서는 클로드·지피티가 사실을 확인 → 제미나이가 본문을 작성·다듬기 → 클로드·지피티가 기술 내용과 파일 반영을 확인한다. 제미나이가 비활성·한도·실패 상태면 이유를 기록하고 글쓰기를 클로드·지피티에 재배정할 수 있다. 간단한 답변은 마스터가 직접 한다.",
-    "- Gemini 웹 모델은 등록된 별도 계정의 Argon 채팅이다. 계정마다 한 작업만 실행하며 앱이 잔여량·작업량에 따라 계정을 배정하고 맥락을 인계한다. 로컬 파일·명령·MCP를 실행할 수 없으므로 message에 필요한 자료를 포함하거나 attach에 UTF-8 텍스트 파일을 명시한다. 웹에는 추론 단계 설정·토큰 수가 없으므로 effort는 배정 의도로만 기록된다.",
-    "- 기술 업무의 기본 배정은 클로드 중심이다. 일반 분석·구현·테스트·문서의 기술 검증과 파일 제작은 먼저 클로드에게 맡기고, 독립 작업이 많으면 클로드 작업자를 추가해 나눈다. 지피티는 이미지 도구가 필요한 작업, 중요한 양쪽 조사·다른 관점의 검증, 사용자의 지피티 지정, 또는 클로드의 한도·실행 불가·과부하에 따른 재배정에 우선 사용한다. 매번 두 계열을 균등하게 배정하지 않는다. 글쓰기 전용인 제미나이를 기술 작업의 대체자로 사용하지 않는다.",
+    "- Gemini 웹 계정 판단·선택은 마스터가 직접 한다. 제미나이 1호 등 작업자에게 계정 선택을 맡기지 않는다. gemini_web_accounts로 전체 계정의 remainingPercent, usage.checkedAt, state, enabled를 확인한다. 이전 작업자의 계정이 대기 상태이고 잔여량 10% 초과이면 유지한다. 부족하거나 작업 중이면 대기 중인 활성 계정 중 잔여량이 가장 많은 계정을 선택해 spawn(kind=gemini, webAccountId=선택한 ID)으로 작업자를 만든다. 기존 작업의 맥락을 이어갈 때는 같은 작업자에게 ask(webAccountId=새 계정)로 지정한다. 작업자 수 제한이면 기존 작업자를 재사용한다. 미조회·오래된 잔여량을 가용으로 추정하지 않는다.",
+    "- 모든 웹 계정이 작업 중이거나 잔여량 부족이면 gemini_web_accounts(waitForAvailable=true)로 완료·초기화를 기다린 뒤 마스터가 다시 선택한다. 선택 이후 한도가 부족해지면 작업자는 요청·대화·초안을 보존하고 마스터에게 실패를 반환한다. 마스터가 계정 목록을 갱신해 직접 새 계정을 지정하고 실패 협의 id를 supersedes로 이어받는다. 작업자가 임의로 계정을 바꾸지 않는다. agents와 ask 결과의 지정/실행 계정 ID를 보고하며 작업자 번호를 계정 번호로 추정하지 않는다.",
+    "- Gemini 웹은 로컬 파일·명령·MCP를 실행할 수 없으므로 message에 필요한 자료를 포함하거나 attach에 UTF-8 텍스트 파일을 명시한다. 웹에는 추론 단계 설정·토큰 수가 없으므로 effort는 배정 의도로만 기록된다.",
+    "- 기술 업무의 기본 배정은 클로드 중심이다. 일반 분석·구현·테스트·문서의 기술 검증과 파일 제작은 먼저 클로드에게 맡기고, 독립 작업이 많으면 클로드 작업자를 추가해 나눈다. 지피티는 이미지 도구가 필요한 작업, 중요한 양쪽 조사·다른 관점의 검증, 사용자의 지피티 지정, 또는 클로드의 한도·실행 불가·과부하에 따른 재배정에 우선 사용한다. 매번 두 계열을 균등하게 배정하지 않는다. 명시적인 담당 지정이 있으면 그 CLI 작업자에게 배정한다.",
     "- 위 기준은 기본 선호이며 절대적인 우열이 아니다. 필요한 도구 사용 가능 여부를 먼저 확인하고, 사용자가 지정한 담당·선호 기준·관련 맥락·작업량·사용 한도를 고려한다. 두 계열을 매번 모두 부르지 않는다. 실패하면 원인을 반영해 재배정하고 가능한 담당자가 없으면 미완료 사유를 알린다.",
-    "- 시각 작업도 구분한다. 이미지 생성·편집은 이미지 도구가 있는 지피티에게, 모션그래픽·애니메이션의 코드·타임라인·연출 제작은 클로드에게 우선 배정한다. 모션그래픽에 새 이미지 소재가 필요하면 그 이미지 생성만 지피티에 맡기고 클로드가 결과를 통합한다.",
+    "- 시각 작업도 구분한다. 이미지 생성·편집은 지정이 없을 때 이미지 도구가 있는 Codex에게, 명시적으로 Antigravity/Grok 등 다른 작업자를 지정하면 그 작업자에게 requiresImage=true로 배정한다. 제공된 이미지 도구의 실제 결과만 완료로 인정한다. 그 밖의 모션그래픽·애니메이션의 코드·타임라인·연출 제작은 클로드에게 우선 배정한다. 모션그래픽에 새 이미지 소재가 필요하면 그 이미지 생성만 지피티에 맡기고 클로드가 결과를 통합한다.",
     `- 중요한 버그 수정·오류 분석이라고 판단하면 ${t("route_request")}(mode=delegated, dualInvestigation=true, reason=중요도 판단 근거)를 기록한다. 예: 데이터 손실·보안·설비 안전·서비스 중단에 영향이 크거나, 반복 장애의 원인이 불확실하고 잘못 고쳤을 때 피해가 큰 경우. 사용자에게 양쪽 조사를 명시적으로 요청받은 경우도 적용한다. 단순 문구·서식 수정이나 일반 질문에 모두 호출하지 않는다.`,
     `- 양쪽 조사: 클로드와 지피티에게 동일한 문제·증상·소스·로그·완료 기준을 주고 ${t("ask_parallel")}(각 kind=opinion)로 독립 조사시킨다. 다른 쪽 결론을 먼저 전달하거나 파일 수정을 맡기지 않는다. 각각 원인 후보·근거(파일/로그)·재현 방법·수정안·불확실성을 보고하게 한다. 두 결과가 오면 공통점과 차이를 대조하고, 충돌은 추가 증거로 확인해 마스터가 최종 원인·수정 방향을 취합한다. 이후 구현은 정한 담당자에게 맡기고 교차 리뷰 규칙을 유지한다. 한쪽을 실행할 수 없으면 양쪽 조사를 완료했다고 하지 말고 제한과 확인된 결과를 보고한다.`,
-    `- 팀: ${t("spawn")}(kind=claude|gpt|gemini)로 작업자를 만든다 → 클로드 N호 / 지피티 N호 / 제미나이 N호. 작업자 수는 일의 양에 맞춘다: 작은 일은 한 명, 큰 일은 범위를 나눠 여러 명(동시에 클로드 최대 ${s.maxClaudeWorkers}명, 지피티 최대 ${s.maxGptWorkers}명, 제미나이 최대 ${s.maxGeminiWorkers}명). 다 쓴 작업자는 ${t("release")}로 해제한다. ${t("agents")}로 팀을 확인한다.`,
+    `- 팀: ${t("spawn")}(kind=claude|gpt|gemini|grok)로 작업자를 만든다 → 클로드 N호 / 지피티 N호 / 제미나이 N호. 작업자 수는 일의 양에 맞춘다: 작은 일은 한 명, 큰 일은 범위를 나눠 여러 명(동시에 클로드 최대 ${s.maxClaudeWorkers}명, 지피티 최대 ${s.maxGptWorkers}명, Antigravity 최대 ${s.maxGeminiWorkers}명, Grok 최대 ${s.maxGrokWorkers}명). 다 쓴 작업자는 ${t("release")}로 해제한다. ${t("agents")}로 팀을 확인한다.`,
+    "- 한 요청 안에서도 UI·로직·테스트·자료 조사처럼 독립 가능한 파트를 나누고 담당·파일 범위·입출력 계약·의존성을 체크리스트에 기록한다. 파트는 ask_parallel로 동시에 맡긴다. 각 파트 담당에게 동료 닉네임과 연결되는 부분을 명시하고 직접 협의하게 한다. 마스터가 모든 대화를 중계하지 않는다. 작업 중인 동료와는 send_message로 계약·진행·질문을 주고받고, 대기 동료의 결과가 필요하면 ask/ask_parallel을 사용한다. 결과는 read_messages와 agents로 확인한 뒤 통합·검증한다.",
     `- 일 맡기기: ${t("ask")}(to=닉네임, kind, message, scope). 서로 독립적인 일은 반드시 ${t("ask_parallel")}(tasks=[…])로 한 번에 맡겨 동시에 진행한다(하나씩 기다리지 말 것). 구현(implement)은 고칠 범위(scope)를 겹치지 않게 나눈다. 리뷰·의견은 언제든 동시에 가능하다.`,
     `- 관련 쟁점·서로 맞물린 설계·문장과 연출 등 직접 논의가 필요한 항목은 주제별 토의 그룹으로 묶는다. ${t("ask")}(to=클로드/지피티 진행자, kind=opinion|writing, discussion={topic:주제, peers:[참여 닉네임]}, message=목표·공통 자료·쟁점·완료 기준, reason, effort)로 맡긴다. 진행자가 참여자에게 직접 ask로 초안과 근거를 주고받아 합의·이견·남은 확인을 정리하고, 너는 그룹별 결과와 필요한 최종 결정만 취합한다. 사소한 확인까지 매번 중계하지 않는다.`,
-    "- 토의는 파일을 고치지 않는다. 기술 그룹은 클로드·지피티로 구성하고, 제미나이는 글쓰기 그룹에만 참여한다. 참여자는 토의 시점에 대기 상태로 두고 다른 병렬 작업·토의 그룹에 중복 배정하지 않는다. 중요한 오류는 먼저 양쪽 독립 조사 결과를 확보한 뒤 토의 그룹에서 대조한다. 토의 결과를 교차 리뷰로 대신하지 않는다. 실제 참여 응답이 없으면 토의 완료로 보고하지 말고 보완하거나 미완료 사유를 알린다.",
+    "- 토의는 파일을 고치지 않는다. 주제와 사용자의 지정을 따라 Claude·Codex·Antigravity·Grok에서 진행자와 참여자를 정한다. Gemini 웹은 MCP가 없어 진행자는 될 수 없으며 제공된 자료로 참여한다. 참여자는 토의 시점에 대기 상태로 두고 다른 병렬 작업·토의 그룹에 중복 배정하지 않는다. 중요한 오류는 먼저 양쪽 독립 조사 결과를 확보한 뒤 토의 그룹에서 대조한다. 토의 결과를 교차 리뷰로 대신하지 않는다. 실제 참여 응답이 없으면 토의 완료로 보고하지 말고 보완하거나 미완료 사유를 알린다.",
     s.reviewGate
       ? "- 너 자신 또는 작업자가 코드를 바꾸면 끝내기 전에, 그 코드를 만들지 않은 작업자에게 리뷰를 맡긴다 (kind=review). 일반 변경의 리뷰는 다른 클로드 작업자도 가능하다. 중요한 오류·보안·안전 등 다른 계열 관점이 꼭 필요한 경우 지피티로 교차검증한다. 네가 직접 바꾼 파일도 빠짐없이 넘긴다. 지적이 나오면 고치고 다시 리뷰받는다."
       : "- 리뷰는 필요하다고 판단할 때만 맡긴다 (kind=review).",
-    "- ask/ask_parallel의 각 배정에 reason(선택 이유)을 넣는다. 이미지 생성·편집은 requiresImage=true, kind=implement로 지피티에게 맡긴다. 배정 내용에는 목표, 제약, 산출물, 완료 기준을 포함한다.",
+    "- ask/ask_parallel의 각 배정에 reason(선택 이유)을 넣는다. 이미지 생성·편집은 requiresImage=true, kind=implement로 요청한다. 기본은 Codex이며 사용자가 다른 작업자를 지정하면 그 지정을 우선한다. 배정 내용에는 목표, 제약, 산출물, 완료 기준을 포함한다.",
     "- 작업자는 이 대화를 보지 못한다. message에 목표, 관련 파일 경로, 제약, 완료 기준을 빠짐없이 적는다. 사용자가 첨부한 파일이 필요하면 attach로 경로를 넘긴다.",
     `- 작업 중 사용자의 즉시 추가 지시를 받으면 기존 작업자를 유지한다. CLI가 ask 응답 수신을 중단해도 작업자는 계속 실행될 수 있다. ${t("agents")}로 상태와 저장된 최근 결과를 확인하고, 이미 완료한 작업을 응답 재수신만을 위해 다시 배정하지 않는다.`,
     "- 즉시 추가 질문·수정 요청에는 작업자의 완료를 기다리지 말고 먼저 사용자에게 한국어로 직접 답한다. 이미 아는 내용은 바로 설명하고 수정 요청은 이해한 내용과 반영 방법을 먼저 말한다. 기존 지시의 위임·교차 검증 요건은 그대로 유지하며, 추가 질문에 답하려고 기존 지시를 direct로 변경하지 않는다. 답변하기 전에 작업 배정이나 체크리스트 갱신으로 넘어가지 않는다.",
@@ -230,11 +255,10 @@ function workerInstructions(a: ChatAgent): string {
   return [
     `# 역할: AI_ChatterBox ${a.nickname} (${WORKER_KIND_LABEL[a.kind]} 작업자)`,
     `너는 마스터가 이끄는 팀의 작업자 "${a.nickname}"이다.${a.job ? ` 맡은 역할: ${a.job}` : ""}`,
-    "- 너의 모델은 앱이 지정한다. 네이티브 spawn_agent/Agent/Task 또는 별도 CLI로 하위 작업자를 생성하지 않는다. 추가 인력이 필요하면 결과 보고에서 마스터에게 요청한다. 기존 팀과의 질문은 앱 ask만 사용한다.",
-    ...(a.kind === "gemini" ? [GEMINI_WRITING_INSTRUCTIONS, "- 글쓰기 이외 요청이면 수행하지 말고 마스터에게 재배정을 요청한다. 다른 작업자에게 코드 조사·리뷰를 다시 위임하지 않는다."] : [
-      "- 구현 지시(implement): 지정된 범위(scope) 안의 파일만 고친다. 범위 밖 쓰기는 거부된다. 가능하면 빌드·테스트로 확인한다.",
-      "- 리뷰 지시(review)·의견 지시(opinion): 파일을 고치지 않는다. 리뷰는 버그, 빠진 처리, 개선점을 심각도와 함께 보고하고, 문제가 없으면 분명히 말한다.",
-    ]),
+    "- 너의 모델은 앱이 지정한다. 네이티브 spawn_agent/Agent/Task 또는 별도 CLI로 하위 작업자를 생성하지 않는다. 추가 인력이 필요하면 마스터에게 send_message로 요청한다. 기존 팀과는 앱 ask/ask_parallel/send_message/read_messages로 협업한다.",
+    "- 구현 지시(implement): 지정된 범위(scope) 안의 파일만 고친다. 사용자에게 지정받은 종류의 작업을 수행한다. 승인·범위·도구 한계는 지킨다.",
+    "- 리뷰(review)·의견(opinion)은 파일을 고치지 않고 근거를 보고한다.",
+    "- 다른 파트와 인터페이스·전제·변경 사항을 직접 협의한다. 작업 중인 동료에게는 send_message로 보내고 본 작업을 계속한다. read_messages를 작업 단계마다, 특히 최종 보고 전에 확인한다. 대기 동료는 ask/ask_parallel로 질문할 수 있다. 자신의 잠근 파일 범위를 다시 위임하지 않는다.",
     "- 글쓰기 지시(writing): 문장·대사·문서 본문만 작성해 반환한다. 로컬 파일과 기술적 사실은 바꾸지 않는다. 독자·캐릭터의 말투·길이 조건을 지킨다.",
     "- 다른 작업자에게 확인할 것이 있으면 ask(to=닉네임)로 직접 묻는다. 팀 목록은 agents. 마스터에게는 ask를 쓰지 말고 결과 보고에 질문을 적는다.",
     "- 토의 그룹의 진행자로 지정되면 공통 주제와 너의 초안·근거·질문을 각 참여자에게 앱 ask로 직접 보내고, 실제 의견을 받아 대조·보완한 뒤 합의, 이견, 근거, 남은 결정을 한 번에 보고한다. 참여자로 질문을 받으면 쟁점에 답하고 반론·확인 질문을 이번 응답에 담는다. 너의 답을 기다리는 진행자에게 다시 ask하여 순환 대기를 만들지 않는다. 그룹 밖 쟁점이나 사용자 결정만 마스터에게 최종 보고한다.",
@@ -274,6 +298,7 @@ interface PauseState {
   planning: boolean; reviewing: boolean; assignments: PausedAssignment[];
 }
 interface Running {
+  webAccountId?: GeminiWebAccountId;
   consultId: number;
   caller: Role;
   target: Role;
@@ -304,6 +329,7 @@ export class Orchestrator {
   private scopeWaiters = new Map<number, (() => void)[]>();
   private asks = new Map<string, { chatId: number; resolve: (a: string) => void }>();
   private stopped = new Set<number>();
+  private webChecks = new Map<number, Set<AbortController>>();
   private epochs = new Map<number, number>();
   private nextEpoch(chatId: number) {
     const epoch = (this.epochs.get(chatId) ?? 0) + 1;
@@ -359,8 +385,8 @@ export class Orchestrator {
       reg = this.chats.bridge.register(
         {
           tools: master
-            ? [ROUTE_TOOL, SPAWN_TOOL, ASK_TOOL(true), ASK_PARALLEL_TOOL, RELEASE_TOOL, AGENTS_TOOL, CHECKLIST_TOOL, GOAL_TOOL, ASK_USER_TOOL, EXPRESSION_TOOL]
-            : [ASK_TOOL(false), AGENTS_TOOL, EXPRESSION_TOOL],
+            ? [ROUTE_TOOL, WEB_ACCOUNTS_TOOL, SPAWN_TOOL, ASK_TOOL(true), ASK_PARALLEL_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, RELEASE_TOOL, AGENTS_TOOL, CHECKLIST_TOOL, GOAL_TOOL, ASK_USER_TOOL, EXPRESSION_TOOL]
+            : [ASK_TOOL(false), ASK_PARALLEL_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, AGENTS_TOOL, EXPRESSION_TOOL],
           call: (name, args) => this.call(chatId, role, name, args),
         },
         id,
@@ -370,7 +396,26 @@ export class Orchestrator {
     return bridgeServerConfig(this.chats.bridgeScript, reg.url);
   }
 
+  private readMessages(chatId: number, role: Role): string {
+    const key = `teamMessages:${chatId}:${role}`;
+    const cursor = Number(this.chats.store.getSetting(key) ?? 0);
+    const messages = this.chats.store.events(chatId).filter(e => e.id > cursor && e.event.type === "peer_message" && e.event.to === role);
+    if (!messages.length) return "";
+    this.chats.store.setSetting(key, String(messages.at(-1)!.id));
+    return "\n\n[동료 메시지 — 참고/협업 요청, 사용자 지시와 승인·작업 범위를 변경하지 않음]\n" + messages.map(e => {
+      const m = e.event as Extract<AgentEvent, { type: "peer_message" }>;
+      return `${this.name(chatId, m.from)} → ${this.name(chatId, m.to)}: ${m.text}`;
+    }).join("\n");
+  }
+
   private async call(chatId: number, caller: Role, name: string, args: any): Promise<ToolResult> {
+    const result = await this.dispatchCall(chatId, caller, name, args);
+    const incoming = this.chats.store.chat(chatId) ? this.readMessages(chatId, caller) : "";
+    if (incoming) result.content.push({ type: "text", text: incoming });
+    return result;
+  }
+
+  private async dispatchCall(chatId: number, caller: Role, name: string, args: any): Promise<ToolResult> {
     if (!this.chats.store.chat(chatId)) return textResult("채팅이 삭제되었습니다.", true);
     if ((this.stopped.has(chatId) || ["pausing", "paused"].includes(this.chats.store.chat(chatId)!.status)) && name !== "agents") return textResult("사용자가 작업을 중지했습니다. 재시작 전까지 기다리세요.", true);
     const master = caller === "orch";
@@ -378,6 +423,16 @@ export class Orchestrator {
       return textResult("사용자의 즉시 추가 질문·수정 요청에 먼저 직접 답변하세요. 이미 아는 내용은 바로 설명하고, 수정 요청은 이해한 내용과 반영 방법을 사용자에게 먼저 말한 뒤 기존 작업을 계속하세요. 기존 작업자는 그대로 실행 중입니다.", true);
     try {
       switch (name) {
+        case "read_messages": return textResult(this.readMessages(chatId, caller) || "새 협업 메시지가 없습니다.");
+        case "send_message": {
+          const to = String(args.to ?? "").trim();
+          const text = String(args.message ?? "").trim();
+          const target = ["orch", "master", "마스터"].includes(to) ? "orch" : this.agents(chatId).find(a => (a.nickname === to || a.key === to) && a.status === "active")?.key;
+          if (!target || target === caller || !text || text.length > 16000) return textResult("활성 동료/마스터와 1~16000자의 메시지를 지정하세요. 자신에게는 보낼 수 없습니다.", true);
+          if (caller !== "orch" && !this.running.get(chatId)?.has(caller)) return textResult("현재 배정받은 작업이 없습니다.", true);
+          this.chats.emit(chatId, this.chats.route(chatId, target), caller, { type: "peer_message", from: caller, to: target, text });
+          return textResult(`${this.name(chatId, target)}에게 메시지를 저장했습니다. 다음 앱 도구 호출 또는 작업 시작 시 전달됩니다. 답을 기다리지 않고 맡은 작업을 계속하세요.`);
+        }
         case "route_request": {
           if (!master) break;
           const inst = this.instructions.get(chatId);
@@ -403,21 +458,36 @@ export class Orchestrator {
           return await (master ? this.waitForMasterConsult(chatId, task) : task);
         }
         case "ask_parallel": {
-          if (!master) break;
           const tasks: any[] = Array.isArray(args.tasks) ? args.tasks : [];
           if (!tasks.length) return textResult("tasks가 비었습니다.", true);
           const result = Promise.all(tasks.map((t) => this.askTool(chatId, caller, t).catch((error) => textResult(error instanceof Error ? error.message : String(error), true)))).then((results) => textResult(
             results.map((r, i) => `## ${i + 1}. ${String(tasks[i]?.to ?? "")}\n${r.content.map((c) => c.text).join("\n")}`).join("\n\n"),
             results.every((r) => r.isError),
           ));
-          return await this.waitForMasterConsult(chatId, result);
+          return await (master ? this.waitForMasterConsult(chatId, result) : result);
+        }
+        case "gemini_web_accounts": {
+          if (!master) return textResult("Gemini 웹 계정 선택·조회는 마스터가 직접 합니다.", true);
+          if ((args.refresh !== undefined && typeof args.refresh !== "boolean") || (args.waitForAvailable !== undefined && typeof args.waitForAvailable !== "boolean"))
+            return textResult("refresh와 waitForAvailable은 boolean이어야 합니다.", true);
+          const controller = new AbortController();
+          const checks = this.webChecks.get(chatId) ?? new Set<AbortController>();
+          checks.add(controller); this.webChecks.set(chatId, checks);
+          try {
+            if (args.waitForAvailable) this.chats.emit(chatId, "orch", "orch", { type: "notice", text: "마스터가 Gemini 웹 계정의 작업 완료·사용량 초기화를 기다립니다. 10초마다 상태를 다시 확인하며 중지로 취소할 수 있습니다." });
+            if (args.refresh !== false || args.waitForAvailable) await this.chats.geminiWebAccounts().inspect(controller.signal, !!args.waitForAvailable);
+            return textResult(JSON.stringify({ accounts: this.chats.webAccountInfo(chatId), minimumRemainingPercent: WEB_LOW_REMAINING, selection: "master", note: "remainingPercent가 없으면 미확인/오래된 값입니다. usage.checkedAt와 로그인·busy 상태를 함께 확인하세요." }));
+          } finally {
+            checks.delete(controller);
+            if (!checks.size) this.webChecks.delete(chatId);
+          }
         }
         case "agents":
-          return textResult(this.agentsText(chatId, master));
+          return textResult(this.agentsText(chatId, true));
         case "spawn":
           if (!master) break;
-          if (!["claude", "gpt", "gemini"].includes(args.kind)) return textResult("지원하지 않는 작업자 종류입니다.", true);
-          return this.spawn(chatId, args.kind, String(args.job ?? ""));
+          if (!["claude", "gpt", "gemini", "grok"].includes(args.kind)) return textResult("지원하지 않는 작업자 종류입니다.", true);
+          return this.spawn(chatId, args.kind, String(args.job ?? ""), args.webAccountId);
         case "release":
           if (!master) break;
           return await this.release(chatId, String(args.nickname ?? ""));
@@ -455,6 +525,7 @@ export class Orchestrator {
   }
 
   private wakeMasterConsults(chatId: number) {
+    for (const controller of this.webChecks.get(chatId) ?? []) controller.abort(new Error("계정 조회 대기를 해제했습니다. 사용자의 추가 지시 또는 중지를 먼저 처리하세요."));
     for (const wake of this.masterConsultWaiters.get(chatId) ?? []) wake();
   }
 
@@ -463,6 +534,7 @@ export class Orchestrator {
     const list = this.agents(chatId);
     if (!list.length) return "아직 작업자가 없습니다. spawn으로 만드세요.";
     const busy = this.running.get(chatId);
+    const accounts = list.some(a => a.kind === "gemini") && this.chats.usesGeminiWeb(this.chats.store.chat(chatId)!) ? this.chats.geminiWebAccounts().list() : [];
     const instructionId = this.instructions.get(chatId)?.id;
     const consults = includeResults && instructionId !== undefined ? this.chats.store.listConsults(chatId).filter((c) => c.instructionId === instructionId) : [];
     return list
@@ -471,26 +543,42 @@ export class Orchestrator {
         const state = a.status === "released" ? "해제됨" : r ? `작업 중 (${CONSULT_KIND_LABEL[r.kind]}${r.scope.length ? ` · ${r.scope.join(", ")}` : ""})` : "대기";
         const latest = consults.findLast((c) => c.toRole === a.key);
         const result = latest ? `\n  최근 협의 id=${latest.id} · ${latest.status}${latest.responseSummary ? `\n${latest.responseSummary}` : ""}${latest.filesChanged.length ? `\n산출물:\n${latest.filesChanged.join("\n")}` : ""}` : "";
-        return `- ${a.nickname} (${WORKER_KIND_LABEL[a.kind]}) · ${a.job || "역할 미정"} · ${state}${result}`;
+        const account = a.kind === "gemini" && this.chats.usesGeminiWeb(this.chats.store.chat(chatId)!)
+          ? ` · 지정 계정=${a.webAccountId ?? "마스터 선택 필요"} · 현재 실행 계정=${r?.webAccountId ?? "없음"} · 최근 대화 계정=${conversationAccount(a.sessionId) ?? "없음"}` : "";
+        const quota = accounts.find(x => x.accountId === (r?.webAccountId ?? a.webAccountId ?? conversationAccount(a.sessionId)));
+        const balance = quota ? ` · 잔여=${quota.remainingPercent === undefined ? "미확인" : `${quota.remainingPercent}%`} · 사용량 조회=${quota.usage.checkedAt || "미조회"}` : "";
+        return `- ${a.nickname} (${WORKER_KIND_LABEL[a.kind]}) · ${a.job || "역할 미정"} · ${state}${account}${balance}${result}`;
       })
       .join("\n");
   }
 
-  private spawn(chatId: number, kind: WorkerKind, job: string): ToolResult {
+  private selectedWebAccount(value: unknown): GeminiWebAccountId {
+    const id = webAccountId(value);
+    if (!id) throw new Error("마스터가 gemini_web_accounts로 잔여량을 확인하고 webAccountId=gemini-1~gemini-10 중 하나를 지정하세요.");
+    const account = this.chats.geminiWebAccounts().list().find(a => a.accountId === id);
+    if (!account?.enabled || account.state === "busy" || account.state === "login_required" || account.remainingPercent === undefined || account.remainingPercent <= WEB_LOW_REMAINING)
+      throw new Error(`계정 ${id}은 미등록·비활성·작업 중이거나 잔여량이 부족/미확인입니다. gemini_web_accounts로 갱신 후 선택하세요. 모두 불가이면 waitForAvailable=true로 기다리세요.`);
+    return id;
+  }
+
+  private spawn(chatId: number, kind: WorkerKind, job: string, requestedAccount?: unknown): ToolResult {
     const chat = this.chats.store.chat(chatId)!;
     const project = this.chats.store.project(chat.projectId)!;
     if (this.planning.has(chatId)) return textResult("지금은 계획 모드입니다. 작업자를 만들지 말고 계획만 세우세요.", true);
     const web = kind === "gemini" && this.chats.usesGeminiWeb(chat);
+    if (!web && requestedAccount !== undefined) return textResult("webAccountId는 Gemini 웹 작업자에게만 지정할 수 있습니다.", true);
+    const accountId = web ? this.selectedWebAccount(requestedAccount) : undefined;
     if (!web && !this.chats.cliInfo().find((c) => c.agent === WORKER_AGENT[kind])?.path)
       return textResult(`${WORKER_KIND_LABEL[kind]} CLI가 설치되지 않았습니다. 사용 가능한 작업자를 선택하거나 미완료 사유를 보고하세요.`, true);
-    const max = kind === "claude" ? project.settings.maxClaudeWorkers : kind === "gpt" ? project.settings.maxGptWorkers : web ? Math.min(1, project.settings.maxGeminiWorkers) : project.settings.maxGeminiWorkers;
+    const max = kind === "claude" ? project.settings.maxClaudeWorkers : kind === "gpt" ? project.settings.maxGptWorkers : kind === "grok" ? project.settings.maxGrokWorkers : project.settings.maxGeminiWorkers;
     const active = this.agents(chatId).filter((a) => a.kind === kind && a.status === "active").length;
     if (active >= max)
       return textResult(`${WORKER_KIND_LABEL[kind]}는 동시에 ${max}명까지입니다. 기존 작업자에게 맡기거나 다 쓴 작업자를 release 하세요.`, true);
     const a = this.chats.store.createAgent(chatId, kind, job);
+    if (accountId) this.chats.store.updateAgent(a.id, { webAccountId: accountId });
     this.chats.agentsChanged(chatId);
-    this.chats.emit(chatId, "orch", "orch", { type: "notice", text: `${a.nickname} 합류${job ? ` · ${job}` : ""}` });
-    return textResult(`${a.nickname}이(가) 준비되었습니다. ask(to="${a.nickname}")로 일을 맡기세요. 이전 기록이 있으면 유지됩니다.`);
+    this.chats.emit(chatId, "orch", "orch", { type: "notice", text: `${a.nickname} 합류${accountId ? ` · 마스터 지정 웹 계정 ${accountId.slice(7)}` : ""}${job ? ` · ${job}` : ""}` });
+    return textResult(`${a.nickname}이(가) 준비되었습니다.${accountId ? ` 마스터 지정 계정=${accountId}.` : ""} ask(to="${a.nickname}")로 일을 맡기세요. 이전 기록이 있으면 유지됩니다.`);
   }
 
   private async release(chatId: number, nickname: string): Promise<ToolResult> {
@@ -548,8 +636,8 @@ export class Orchestrator {
     let discussion: Discussion | undefined;
     if (args.discussion !== undefined) {
       if (caller !== "orch") return textResult("토의 그룹 구성은 마스터가 지정합니다.", true);
-      if (!["opinion", "writing"].includes(kind) || target.kind === "gemini")
-        return textResult("토의 진행자는 클로드·지피티이며 opinion 또는 writing으로 파일 변경 없이 맡기세요.", true);
+      if (!["opinion", "writing"].includes(kind) || (target.kind === "gemini" && this.chats.usesGeminiWeb(this.chats.store.chat(chatId)!)))
+        return textResult("토의 진행자는 MCP를 사용하는 CLI 작업자이며 opinion 또는 writing으로 파일 변경 없이 맡기세요.", true);
       const raw = args.discussion;
       if (!raw || typeof raw !== "object" || typeof raw.topic !== "string" || !raw.topic.trim() || !Array.isArray(raw.peers) || !raw.peers.length || raw.peers.some((p: unknown) => typeof p !== "string" || !p.trim()))
         return textResult("토의 주제(topic)와 참여자(peers)를 지정하세요.", true);
@@ -559,7 +647,6 @@ export class Orchestrator {
       if (peers.some(p => !p)) return textResult("토의 참여자는 현재 활성 작업자여야 합니다.", true);
       const available = peers as ChatAgent[];
       if (available.some(p => this.running.get(chatId)?.has(p.key))) return textResult("토의 참여자가 작업 중입니다. 완료 후 대기 상태에서 그룹으로 묶으세요.", true);
-      if (kind !== "writing" && available.some(p => p.kind === "gemini")) return textResult("제미나이는 글쓰기 토의(writing)에만 참여할 수 있습니다.", true);
       const issue = this.investigationIssue(chatId);
       if (issue) return textResult(`독립 조사 결과를 확보한 뒤 토의하세요. ${issue}`, true);
       discussion = { topic: raw.topic.trim(), peers: available };
@@ -571,12 +658,20 @@ export class Orchestrator {
         return textResult("마스터가 지정한 토의 참여자에게 같은 opinion/writing 종류로만 직접 질문하세요. 파일 변경이나 그룹 확장은 마스터에게 보고하세요.", true);
       message = `[토의 주제: ${parent.discussion.topic}]\n${callerName}이(가) 토의를 진행하며 너의 의견을 기다린다. 이번 응답에 반론·근거·확인 질문을 담고 진행자에게 다시 ask하지 마라.\n\n${message}`;
     }
-    if ((target.kind === "gemini" || this.agents(chatId).find((a) => a.key === caller)?.kind === "gemini") && kind !== "writing")
-      return textResult("제미나이는 웹·CLI 모두 글쓰기 전용입니다. 문장 다듬기·캐릭터 대사·문서 본문은 writing으로 요청하고, 코드 분석·구현·테스트·기술 리뷰는 클로드·지피티에게 직접 맡기세요.", true);
+    if (target.kind === "gemini" && this.chats.usesGeminiWeb(this.chats.store.chat(chatId)!) && kind === "implement" && !args.requiresImage)
+      return textResult("Gemini 웹은 로컬 파일·명령을 실행할 수 없습니다. Antigravity CLI를 선택하거나 분석/글쓰기로 요청하세요.", true);
     if (args.requiresImage) {
-      if (target.kind !== "gpt" || kind !== "implement") return textResult("이미지 생성은 지피티에게 implement로 맡기세요.", true);
-      const caps = await this.chats.teamCapabilities(this.chats.store.chat(chatId)!);
-      if (caps.gpt.imageGeneration !== true) return textResult("선택된 지피티의 이미지 생성 도구 사용을 확인하지 못했습니다. 모델·로그인·도구 설정을 확인하고 미완료 사유를 보고하세요.", true);
+      if (kind !== "implement") return textResult("이미지 생성은 implement로 요청하세요.", true);
+      // Codex is the default; an explicitly chosen worker gets the chance to use its own tools.
+      if (target.kind === "gpt") {
+        const caps = await this.chats.teamCapabilities(this.chats.store.chat(chatId)!);
+        if (caps.gpt.imageGeneration !== true) return textResult("선택된 Codex의 이미지 생성 도구를 확인하지 못했습니다. 모델·로그인·도구 설정을 확인하세요.", true);
+      }
+      message += "\n[이미지 결과 필수] 실제 이미지 도구를 사용하고 생성 파일/이미지 첨부를 반환하세요. 도구가 없거나 실패하면 그 사실을 보고하세요. 이미지를 만들었다고 추정하지 마세요.";
+    }
+    if (caller !== "orch" && kind === "implement") {
+      if (!scope.length || (parent?.scope && scopesOverlap(parent.scope, scope)))
+        return textResult("자신이 수정 중인 범위를 동료에게 다시 맡기면 대기가 막힙니다. 겹치지 않는 별도 범위를 명시하거나 send_message로 협의하세요.", true);
     }
     const refusal = checkAsk(this.graph(chatId), caller, target.key, MAX_DEPTH);
     if (refusal === "self") return textResult("자기 자신에게는 맡길 수 없습니다.", true);
@@ -600,13 +695,25 @@ export class Orchestrator {
         return textResult("supersedes는 이번 지시에서 실패·중단된 협의 id여야 합니다.", true);
     }
     // Worker-to-worker questions inherit the level chosen by the master for the caller.
+    const web = target.kind === "gemini" && this.chats.usesGeminiWeb(this.chats.store.chat(chatId)!);
+    if (args.webAccountId !== undefined) {
+      if (caller !== "orch") return textResult("웹 계정 지정은 마스터만 할 수 있습니다. 선택 요청은 마스터에게 보고하세요.", true);
+      if (!web) return textResult("webAccountId는 Gemini 웹 작업자에게만 지정할 수 있습니다.", true);
+      if ([...(this.assignments.get(chatId)?.values() ?? [])].some(a => a.target.key === target.key))
+        return textResult("해당 작업자는 실행/대기 중입니다. 완료 후 계정을 지정하세요.", true);
+      const accountId = this.selectedWebAccount(args.webAccountId);
+      target.webAccountId = accountId;
+      this.chats.store.updateAgent(target.id, { webAccountId: accountId });
+      this.chats.agentsChanged(chatId);
+    }
+    if (web && !target.webAccountId) return textResult("기존 Gemini 웹 작업자의 계정이 지정되지 않았습니다. 마스터가 gemini_web_accounts 조회 후 ask의 webAccountId를 직접 지정하세요.", true);
     const inherited = caller === "orch" ? args.effort : this.chats.store.consult(this.running.get(chatId)?.get(caller)?.consultId ?? -1)?.effort || "medium";
     const response = await this.consult(chatId, caller, target, kind, message, scope, attach, reason || (parent?.discussion ? `토의 ${parent.discussion.topic} · ${callerName} → ${target.nickname}` : ""), supersedes, inherited, discussion);
     if (parent?.discussion && !response.isError) parent.discussionReplies!.add(target.key);
     return response;
   }
 
-  private limitCheck(chatId: number, project: Project, target: Role, kind: ConsultKind, message: string): string | null {
+  private limitCheck(chatId: number, project: Project, target: Role, kind: ConsultKind, message: string, accountId?: GeminiWebAccountId): string | null {
     const inst = this.instructions.get(chatId);
     if (!inst) return null;
     const s = project.settings;
@@ -615,7 +722,7 @@ export class Orchestrator {
     const maxAsks = s.maxConsults;
     if (inst.asks >= maxAsks) return `한도 도달: 이번 지시에서 ${maxAsks}번 맡겼습니다. 더 맡기지 말고 지금까지의 결과를 보고하세요.`;
     if (kind === "review" && inst.reviews >= s.maxReviews) return `한도 도달: 리뷰를 ${s.maxReviews}회 했습니다. 지금까지의 결과와 남은 지적 사항을 보고하세요.`;
-    const h = createHash("sha1").update(`${target}|${kind}|${message.trim()}`).digest("hex");
+    const h = createHash("sha1").update(`${target}|${kind}|${accountId ?? ""}|${message.trim()}`).digest("hex");
     const n = (inst.requests.get(h) ?? 0) + 1;
     inst.requests.set(h, n);
     if (n > 2) return "같은 요청을 이미 두 번 보냈습니다. 반복하지 말고 방법을 바꾸거나 지금까지의 결과를 보고하세요.";
@@ -646,7 +753,7 @@ export class Orchestrator {
     const chat = this.chats.store.chat(chatId)!;
     const project = this.chats.store.project(chat.projectId)!;
     const callerName = this.name(chatId, caller);
-    const limited = resuming ? (this.stopped.has(chatId) || this.planning.has(chatId) ? "작업이 중지되었거나 계획 모드입니다." : null) : this.limitCheck(chatId, project, target.key, kind, message);
+    const limited = resuming ? (this.stopped.has(chatId) || this.planning.has(chatId) ? "작업이 중지되었거나 계획 모드입니다." : null) : this.limitCheck(chatId, project, target.key, kind, message, target.kind === "gemini" && this.chats.usesGeminiWeb(chat) ? target.webAccountId : undefined);
     if (limited) {
       this.chats.emit(chatId, this.chats.route(chatId, caller), caller, { type: "notice", text: `${target.nickname}에게 맡기기 거절 · ${limited.split(".")[0]}` });
       return textResult(limited + this.takeQueued(chatId), true);
@@ -672,7 +779,8 @@ export class Orchestrator {
     try {
       await prev; // the target finishes its current turn first
       const reasoning = await this.chats.assignmentEffort(chatId, target.key, requestedEffort);
-      assignment.effort = reasoning.effort;
+      // Web models have no effective effort; retain the master's valid intent for resume.
+      assignment.effort = reasoning.effort || reasoning.requestedEffort;
       if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch) return textResult("사용자가 작업을 중지했습니다.", true);
       const attachments = this.attachmentsFor(chatId, attach);
       const consult = this.chats.store.createConsult(chatId, caller, target.key, kind, message, scope, inst?.id, reason, supersedes, reasoning);
@@ -695,7 +803,7 @@ export class Orchestrator {
       if (kind === "implement") await this.acquireScope(chatId, consult.id, scope);
       this.chats.setRoute(chatId, target.key, node);
 
-      const result = await new Promise<{ ok: boolean; interrupted?: boolean; error?: string; text: string; files: string[] }>((resolve) => {
+      const result = await new Promise<{ ok: boolean; interrupted?: boolean; error?: string; text: string; files: string[]; webAccountId?: GeminiWebAccountId }>((resolve) => {
         let settled = false;
         const r: Running = {
           consultId: consult.id,
@@ -713,8 +821,9 @@ export class Orchestrator {
             if (settled) return;
             settled = true;
             const missing = discussion?.peers.filter(p => !r.discussionReplies!.has(p.key));
-            const issue = end.ok && missing?.length ? `토의 미완료: ${missing.map(p => p.nickname).join(", ")}의 실제 참여 응답이 없습니다. 보완하거나 미완료 사유를 보고하세요.` : "";
-            resolve({ ...end, ...(issue ? { ok: false, error: issue } : {}), text: issue ? `${issue}\n${r.text}` : r.text, files: [...r.files] });
+            const issue = end.ok && missing?.length ? `토의 미완료: ${missing.map(p => p.nickname).join(", ")}의 실제 참여 응답이 없습니다. 보완하거나 미완료 사유를 보고하세요.`
+              : end.ok && message.includes("[이미지 결과 필수]") && ![...r.files].some(path => /\.(png|jpe?g|webp)$/i.test(path) && existsSync(resolvePath(project.folder, path))) ? "이미지 생성 미완료: 실제 이미지 파일이나 첨부 결과를 확인하지 못했습니다." : "";
+            resolve({ ...end, ...(issue ? { ok: false, error: issue } : {}), text: issue ? `${issue}\n${r.text}` : r.text, files: [...r.files], webAccountId: r.webAccountId });
           },
         };
         const m = this.running.get(chatId) ?? new Map<Role, Running>();
@@ -727,7 +836,9 @@ export class Orchestrator {
             const driver = await this.chats.driver(chatId, target.key, reasoning.effort);
             if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch || settled) return r.resolve({ ok: false, interrupted: true });
             await driver.send({
-              text: kindPrefix(kind, callerName, scope) + message,
+              text: kindPrefix(kind, callerName, scope) + message + `\n\n[현재 팀과 최근 결과]\n${this.agentsText(chatId, true)}` + this.readMessages(chatId, target.key),
+              requiresImage: message.includes("[이미지 결과 필수]"),
+              webAccountId: target.kind === "gemini" && this.chats.usesGeminiWeb(chat) ? target.webAccountId : undefined,
               attachments,
               noWrites: kind !== "implement",
             });
@@ -742,7 +853,10 @@ export class Orchestrator {
       this.chats.agentsChanged(chatId);
       const hasResult = !!result.text.trim() || result.files.length > 0;
       const status = this.stopped.has(chatId) ? "stopped" : result.ok && hasResult ? "done" : result.interrupted ? "stopped" : "error";
-      const summary = result.text.trim() || result.error || (result.files.length ? `산출물 ${result.files.length}개를 생성·수정했습니다.` : "작업자의 응답과 산출물이 없습니다.");
+      const accountInfo = target.kind === "gemini" && this.chats.usesGeminiWeb(chat)
+        ? `[Gemini 웹 지정 계정=${target.webAccountId ?? "없음"} · 실제 실행 계정=${result.webAccountId ?? "연결 전 실패/중지"}]\n` : "";
+      const summary = accountInfo + [!result.ok ? result.error : undefined, result.text.trim()].filter(Boolean).join("\n")
+        + (!result.text.trim() && !result.error ? (result.files.length ? `산출물 ${result.files.length}개를 생성·수정했습니다.` : "작업자의 응답과 산출물이 없습니다.") : "");
       const finished = this.chats.store.finishConsult(consult.id, status, summary, result.files);
       this.chats.sink.consult(finished);
       this.chats.emit(chatId, this.chats.route(chatId, caller), caller, { type: "consult_end", consultId: consult.id, status, summary, files: result.files });
@@ -834,6 +948,9 @@ export class Orchestrator {
     const r = this.running.get(chatId)?.get(role);
     if (!r) return;
     switch (event.type) {
+      case "notice":
+        if (event.webAccountId) r.webAccountId = event.webAccountId;
+        break;
       case "text_delta":
         r.text += event.text;
         break;
@@ -965,7 +1082,7 @@ export class Orchestrator {
     }
     const team = agents.filter((a) => a.status === "active").map((a) => `${a.nickname}(${a.job || "역할 미정"})`).join(", ");
     const recent = lines.slice(-16).join("\n").slice(-6000);
-    const name = (a: string) => (a === "claude" ? "Claude" : "GPT");
+    const name = (a: string) => AGENT_LABEL[a as AgentKind] ?? a;
     this.chats.emit(chat.id, "orch", null, { type: "notice", text: `마스터가 ${name(agent)}로 바뀌어 지금까지의 요약을 넘깁니다` });
     return `[AI_ChatterBox] 이 채팅의 마스터가 ${name(prev)}에서 ${name(agent)}로 바뀌었습니다.${team ? ` 지금 팀: ${team}.` : ""} 지금까지의 대화 요약:\n${recent}\n\n---\n`;
   }
@@ -1262,6 +1379,7 @@ export class Orchestrator {
   async stop(chatId: number, preserve = false) {
     this.nextEpoch(chatId);
     this.stopped.add(chatId);
+    for (const controller of this.webChecks.get(chatId) ?? []) controller.abort(new Error("사용자가 계정 조회 대기를 중지했습니다."));
     if (!preserve) this.chats.store.setSetting(`pause:${chatId}`, "");
     this.wakeMasterConsults(chatId);
     for (const [id, a] of [...this.asks]) {
@@ -1357,6 +1475,7 @@ export class Orchestrator {
   }
 
   forget(chatId: number) {
+    for (const controller of this.webChecks.get(chatId) ?? []) controller.abort(new Error("채팅이 종료되었습니다."));
     this.chats.store.setSetting(`pause:${chatId}`, "");
     this.wakeMasterConsults(chatId);
     this.judge.forget(chatId);

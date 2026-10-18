@@ -69,6 +69,7 @@
   --color-sidebar: var(--sidebar);
   --color-claude: var(--claude);
   --color-gpt: var(--gpt);
+  --color-grok: #7298b0;
   --color-gemini: var(--gemini);
   --color-orch: var(--orch);
   --color-user-bubble: var(--user-bubble);
