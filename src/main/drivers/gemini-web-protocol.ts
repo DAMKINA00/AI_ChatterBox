@@ -46,12 +46,41 @@ export function webUsagePage(current: string, weekly: string, now = Date.now()):
     ...(c ? { current: c } : {}), ...(w ? { weekly: w } : {}) };
 }
 
-export const USAGE_SCRIPT = `(() => {
-  if(location.origin !== '${GEMINI_ORIGIN}' || location.pathname !== '/usage') return null;
-  return { current: document.querySelector('[data-test-id="gxu-currently"]')?.innerText || '',
-    weekly: document.querySelector('[data-test-id="gxu-weekly"]')?.innerText || '',
-    login: !!document.querySelector('a[href*="accounts.google.com/ServiceLogin"]'),
-    loaded: !!document.querySelector('usage-metrics-window .usage-metrics-container') };
+export const USAGE_SCRIPT = String.raw`(() => {
+  if(location.origin !== 'https://gemini.google.com' || location.pathname !== '/usage') return null;
+  const visible = el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden';
+  const text = el => {
+    const parts = [], walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let node; node = walker.nextNode();) {
+      const parent = node.parentElement;
+      if (parent && visible(parent) && !parent.closest('script,style,[aria-hidden="true"]')) parts.push(node.textContent.trim());
+    }
+    return parts.filter(Boolean).join('\n');
+  };
+  const currentLabel = /^(현재 사용량|Current usage)$/i, weeklyLabel = /^(주간 한도|주간 사용량|Weekly (?:limit|usage))$/i;
+  const hasPercent = /\d\s*%\s*(?:사용됨|사용|used)/i;
+  const headings = Array.from(document.querySelectorAll('strong,h2,h3')).filter(el => visible(el) && !el.closest('nav,aside,[role="navigation"],model-response,user-query'));
+  const card = (selector, label, otherLabel) => {
+    const known = Array.from(document.querySelectorAll(selector)).find(visible);
+    if (known && hasPercent.test(text(known))) return text(known);
+    // New accounts can omit the old component IDs; keep the search within one labelled quota card.
+    const heading = headings.find(el => label.test(el.innerText.trim()));
+    let result = '';
+    for (let el = heading?.parentElement; el && el !== document.body; el = el.parentElement) {
+      const value = text(el), lines = value.split('\n');
+      if (value.length > 1600 || lines.some(line => otherLabel.test(line))) break;
+      if (hasPercent.test(value)) {
+        result = value;
+        if (/초기화|재설정|reset/i.test(value)) break;
+      }
+    }
+    return result;
+  };
+  const current = card('[data-test-id="gxu-currently"],[data-testid="current-usage"]', currentLabel, weeklyLabel);
+  const weekly = card('[data-test-id="gxu-weekly"],[data-testid="weekly-usage"]', weeklyLabel, currentLabel);
+  return { current, weekly,
+    login: !!document.querySelector('a[href*="accounts.google.com/ServiceLogin"]') || Array.from(document.querySelectorAll('button,[role="button"]')).some(el => visible(el) && /^(로그인|Sign in)$/i.test(el.innerText.trim())),
+    loaded: !!(current || weekly) };
 })()`;
 
 export interface WebSnapshot {
