@@ -254,7 +254,7 @@ export class GeminiWebBrowser {
         return this.last;
       }
       if (!s || s.login) return this.publish("login_required", "전용 브라우저에서 Google 계정 로그인을 완료하세요.");
-      if (!s.composer) return this.publish("error", "Gemini 입력창을 확인하지 못했습니다. 브라우저의 안내를 확인하세요.");
+      if (!s.composer && s.url !== GEMINI_ORIGIN + "/usage") return this.publish("error", "Gemini 입력창을 확인하지 못했습니다. 브라우저의 안내를 확인하세요.");
       this.verificationRequired = false;
       const manual = !this.owner && (s.generating || !!s.draft.trim());
       this.publish(this.owner || manual ? "busy" : "ready", this.owner ? `웹 ${this.accountName} 작업 중` : manual ? `${this.accountName} 브라우저에서 직접 작성 중입니다.` : /argon/i.test(s.model) ? `${this.accountName} · Argon 연결 준비 완료` : "로그인됨 · 작업 시작 전에 Argon을 확인합니다.", s);
@@ -262,7 +262,7 @@ export class GeminiWebBrowser {
       return this.last;
     } catch { return this.publish("error", "웹 상태를 읽지 못했습니다. 브라우저에서 연결을 확인하세요."); }
   }
-  /** A separate hidden page shares only account 1's session; never navigate the active chat. */
+  /** A separate hidden page shares this account's session; never navigate the active chat. */
   refreshUsage(force = false): Promise<GeminiWebUsage> {
     if (this.usageReading) return this.usageReading;
     if (this.disposed || this.verificationRequired) return Promise.resolve(this.last.usage);
@@ -277,16 +277,19 @@ export class GeminiWebBrowser {
     const timer = setTimeout(() => { if (!win.isDestroyed()) win.destroy(); }, 20000);
     try {
       await win.loadURL(GEMINI_ORIGIN + "/usage");
+      let usage = webUsage([]);
       for (let n = 0; n < 30; n++) {
         if (this.disposed || win.isDestroyed()) throw new Error("사용량 연결이 종료되었습니다.");
         if (this.verificationRequired) return this.last.usage;
         if (!win.webContents.getURL().startsWith(GEMINI_ORIGIN + "/")) return this.setUsage({ status: "unknown", detail: `웹 ${this.accountName} 로그인이 필요합니다.`, checkedAt: Date.now() });
         const s = await win.webContents.executeJavaScript(USAGE_SCRIPT);
         if (s?.login) return this.setUsage({ status: "unknown", detail: `웹 ${this.accountName} 로그인이 필요합니다.`, checkedAt: Date.now() });
-        if (s?.current || s?.weekly) return this.setUsage(webUsagePage(s.current, s.weekly));
+        usage = webUsagePage(s?.current ?? "", s?.weekly ?? "");
+        // Card headings render before quota numbers; current and weekly may arrive separately.
+        if (usage.current && usage.weekly) return this.setUsage(usage);
         await delay(400);
       }
-      return this.setUsage(webUsage([]));
+      return this.setUsage(usage);
     } catch {
       return this.setUsage({ status: "error", detail: "웹 사용량을 읽지 못했습니다. 로그인과 연결 상태를 확인하세요.", checkedAt: Date.now() });
     } finally {

@@ -17,6 +17,105 @@ function fixture() {
   return { browser, b, updates };
 }
 
+function usageFixture(t: TestContext, frames: { current: string; weekly: string; login?: boolean }[]) {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const updates: any[] = [];
+  const browser = new GeminiWebBrowser("unused", usage => updates.push(usage));
+  let reads = 0, destroyed = false;
+  (browser as any).makeWindow = (show: boolean) => {
+    assert.equal(show, false);
+    return {
+      isDestroyed: () => destroyed, destroy() { destroyed = true; },
+      async loadURL(url: string) { assert.equal(url, "https://gemini.google.com/usage"); },
+      webContents: { getURL: () => "https://gemini.google.com/usage",
+        async executeJavaScript() { return frames[Math.min(reads++, frames.length - 1)]; } },
+    };
+  };
+  return { browser, updates, reads: () => reads, destroyed: () => destroyed,
+    async tick(count: number) {
+      await new Promise(resolve => setImmediate(resolve));
+      for (let n = 0; n < count; n++) {
+        t.mock.timers.tick(400);
+        await new Promise(resolve => setImmediate(resolve));
+      }
+    } };
+}
+
+test("usage refresh waits past headings and a partial window for both visible percentages", async t => {
+  const f = usageFixture(t, [
+    { current: "현재 사용량", weekly: "주간 한도" },
+    { current: "현재 사용량\n0% 사용됨\n오전 12:45에 초기화", weekly: "주간 한도" },
+    { current: "현재 사용량\n0% 사용됨\n오전 12:45에 초기화", weekly: "주간 한도\n10월 21일 오후 3:45에 초기화\n12% 사용됨" },
+  ]);
+  const pending = f.browser.refreshUsage(true);
+  assert.equal(f.browser.refreshUsage(true), pending);
+  await f.tick(2);
+  const usage = await pending;
+  assert.equal(f.reads(), 3);
+  assert.equal(usage.current?.usedPercent, 0);
+  assert.equal(usage.weekly?.usedPercent, 12);
+  assert.equal(usage.current?.resetText, "오전 12:45에 초기화");
+  assert.equal(usage.weekly?.resetText, "10월 21일 오후 3:45에 초기화");
+  assert.equal(f.updates.length, 1);
+  assert.equal(f.destroyed(), true);
+});
+
+test("usage polling is bounded and reports only numbers actually present at completion", async t => {
+  for (const current of ["현재 사용량", "현재 사용량\n0% 사용됨", "현재 사용량\n100% 사용됨"]) {
+    const f = usageFixture(t, [{ current, weekly: "주간 한도" }]);
+    const pending = f.browser.refreshUsage(true);
+    await f.tick(30);
+    const usage = await pending;
+    assert.equal(f.reads(), 30);
+    assert.equal(usage.weekly, undefined);
+    assert.equal(usage.status, current.includes("100%") ? "limited" : current.includes("0%") ? "available" : "unknown");
+    assert.equal(f.destroyed(), true);
+    t.mock.timers.reset();
+  }
+});
+
+test("login redirect during quota loading clears old numeric usage", async t => {
+  const f = usageFixture(t, [
+    { current: "현재 사용량", weekly: "주간 한도" },
+    { current: "", weekly: "", login: true },
+  ]);
+  (f.browser as any).setUsage({ status: "available", detail: "old", checkedAt: 1, current: { usedPercent: 20 } });
+  const pending = f.browser.refreshUsage(true);
+  await f.tick(1);
+  const usage = await pending;
+  assert.match(usage.detail, /로그인이 필요/);
+  assert.equal(usage.current, undefined);
+  assert.equal(f.destroyed(), true);
+});
+
+test("manual quota refresh still runs while the account browser displays its usage page", async () => {
+  const { browser, b } = fixture();
+  b.win = {};
+  browser.snapshot = async () => snapshot({ url: "https://gemini.google.com/usage", composer: false, model: "" });
+  let reads = 0;
+  browser.refreshUsage = async () => {
+    reads++;
+    return b.setUsage({ status: "available", detail: "new", checkedAt: Date.now(), current: { usedPercent: 0 }, weekly: { usedPercent: 12 } });
+  };
+  const status = await GeminiWebBrowser.prototype.refresh.call(browser);
+  assert.equal(reads, 1);
+  assert.equal(status.state, "ready");
+  assert.equal(status.usage.current?.usedPercent, 0);
+  assert.equal(status.usage.weekly?.usedPercent, 12);
+});
+
+test("usage-page exception still rejects sign-in pages and missing editors on chat pages", async () => {
+  for (const patch of [{ url: "https://gemini.google.com/usage", login: true }, { url: "https://gemini.google.com/app" }]) {
+    const { browser, b } = fixture();
+    b.win = {};
+    browser.snapshot = async () => snapshot({ ...patch, composer: false });
+    browser.refreshUsage = async () => { throw new Error("must not query"); };
+    const status = await GeminiWebBrowser.prototype.refresh.call(browser);
+    assert.equal(status.state, patch.login ? "login_required" : "error");
+    assert.match(status.message, patch.login ? /로그인을 완료/ : /입력창/);
+  }
+});
+
 test("account lock refuses a second chat and a foreign release cannot unlock it", async () => {
   const { browser, b } = fixture();
   await browser.claim("chat-one");
