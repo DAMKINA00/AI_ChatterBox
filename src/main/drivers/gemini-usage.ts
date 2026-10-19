@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import type { ProviderUsage } from "../../shared/usage";
 
 const MAX_BUFFER = 1024 * 1024;
-const GEMINI_USAGE_ERROR = "Gemini 사용량을 가져오지 못했습니다. Antigravity 로그인 상태와 CLI를 확인해 주세요.";
+const GEMINI_USAGE_ERROR = "Gemini 사용량을 가져오지 못했습니다. 네트워크 상태와 Antigravity CLI를 확인해 주세요.";
 
 /** Parse the JSON returned by `agy -p /usage --output-format json`. */
 export function parseGeminiUsage(text: string): ProviderUsage | null {
@@ -14,6 +14,8 @@ export function parseGeminiUsage(text: string): ProviderUsage | null {
   }
 
   if (!isRecord(value) || value.status !== "SUCCESS" || !isRecord(value.command) || value.command.name !== "usage") return null;
+  if (value.conversation_id || (value.num_turns !== undefined && value.num_turns !== 0)
+    || (isRecord(value.usage) && value.usage.total_tokens !== undefined && value.usage.total_tokens !== 0)) return null;
   const data = value.command.data;
   if (!isRecord(data) || !Array.isArray(data.groups)) return null;
 
@@ -37,12 +39,17 @@ export function readGeminiUsage(exe: string, cwd: string): Promise<ProviderUsage
   return new Promise((resolve, reject) => {
     const fail = () => reject(new Error(GEMINI_USAGE_ERROR));
     try {
-      execFile(exe, ["-p", "/usage", "--output-format", "json"], { cwd, windowsHide: true, timeout: 30_000, maxBuffer: MAX_BUFFER }, (error, stdout) => {
-        if (error) return fail();
+      const child = execFile(exe, ["-p", "/usage", "--output-format", "json"], { cwd, windowsHide: true, timeout: 45_000, maxBuffer: MAX_BUFFER }, (error, stdout, stderr) => {
         const usage = parseGeminiUsage(stdout);
-        if (!usage) return fail();
-        resolve(usage);
+        // A complete read-only snapshot remains valid if process teardown subsequently times out.
+        if (usage) return resolve(usage);
+        if (/not logged|sign in|log.?in|authenticate|unauthorized|401/i.test(stdout + stderr))
+          return reject(new Error("Antigravity 로그인이 필요합니다. agy에서 로그인한 뒤 다시 조회하세요."));
+        if (error?.killed) return reject(new Error("Antigravity 사용량 응답 시간이 초과되었습니다. 잠시 후 다시 조회하세요."));
+        if (!error) return reject(new Error("Antigravity 사용량 응답 형식을 확인하지 못했습니다. CLI 버전을 확인하세요."));
+        fail();
       });
+      child.stdin?.end();
     } catch {
       fail();
     }

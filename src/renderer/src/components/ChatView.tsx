@@ -117,7 +117,7 @@ function ProviderControls({ agent, web = false, master = false, children }: { ag
   const [checking, setChecking] = useState(false);
   const inactive = !web && cli?.authStatus !== "authenticated";
   const status = !cli?.path ? "CLI 미설치" : cli.authStatus === "required" ? "로그인 필요" : "로그인 확인 필요";
-  return <div className="flex min-w-0 flex-wrap items-center gap-1.5" data-testid={master ? "orch-badge" : "provider-controls"} data-provider={agent} data-state={web ? "web" : inactive ? "inactive" : "ready"}>
+  return <div className="flex shrink-0 flex-nowrap items-center gap-1.5" data-testid={master ? "orch-badge" : "provider-controls"} data-provider={agent} data-state={web ? "web" : inactive ? "inactive" : "ready"}>
     <div className={cn("flex min-w-0 items-center gap-1.5", inactive && "opacity-45 grayscale")}>{children}</div>
     {inactive && <button type="button" disabled={checking} className="rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground" aria-label={`${master ? "마스터 " : ""}${AGENT_LABEL[agent]} 로그인 상태 다시 확인`} title="로그인이 확인되지 않았습니다. 로그인 후 눌러서 다시 확인하세요. 모델 설정은 변경할 수 있습니다." onClick={async () => {
       setChecking(true);
@@ -143,142 +143,146 @@ function ChatHeader({ chat, project, nodeLabel, masterExpression }: { chat: Chat
   const codexEffort = chat.codexEffortOverride ?? project.settings.codexEffort ?? "auto";
   const geminiEffort = chat.geminiEffortOverride ?? project.settings.geminiEffort ?? "auto";
   return (
-    <header className="flex min-h-12 flex-wrap items-center gap-x-3 gap-y-1.5 border-b px-4 py-2">
-      <div className="flex min-w-0 flex-1 items-center gap-2">
+    <header className="flex w-full min-w-0 max-w-full flex-col gap-1.5 overflow-hidden border-b px-4 py-2">
+      <div className="flex w-full min-w-0 max-w-full items-start gap-2" data-testid="chat-header-title-row">
         <StatusIcon status={chat.status} unread={false} />
-        <div className="min-w-0">
-          <div className="flex items-center gap-1.5 text-[14px] font-semibold">
-            <span className="truncate" data-testid="chat-title">
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 text-[14px] font-semibold">
+            <span className="min-w-0 break-words" data-testid="chat-title">
               {chat.title}
             </span>
             {nodeLabel && <span className="shrink-0 font-normal text-muted-foreground">· {nodeLabel}</span>}
           </div>
-          <div className="truncate text-[11.5px] text-muted-foreground" title={project.folder}>
-            {project.name} · {project.folder}
-          </div>
+        </div>
+        <div className="max-w-[35%] truncate text-[11.5px] text-muted-foreground" title={`${project.name} · ${project.folder}`}>
+          {project.name} · {project.folder}
         </div>
       </div>
-      <ProviderControls agent={orch.agent} master>
-        <AgentAvatar kind="orch" expression={masterExpression} size={24} alt="마스터 캐릭터" />
-        <span className="text-[12px] text-muted-foreground">마스터</span>
-        <ModelPicker
-          compact
-          agents={["claude", "codex", "gemini", "grok"]}
-          ariaLabel="이 채팅의 마스터 모델"
-          value={chat.orchestratorModelOverride ?? project.settings.orchestratorModel}
-          inherited={chat.orchestratorModelOverride === null}
-          onChange={(v) => {
-            const next = parseOrchestrator(v);
-            void updateChat(chat.id, {
-              orchestratorModelOverride: v as Project["settings"]["orchestratorModel"],
-              orchestratorEffortOverride: defaultEffortForModel(models, next.agent, next.model, false),
-            });
-          }}
-          onReset={() => void updateChat(chat.id, { orchestratorModelOverride: null })}
-          resetLabel={`프로젝트 값 사용 (${AGENT_LABEL[projectOrch.agent]} · ${label(projectOrch.agent, projectOrch.model)})`}
-        />
-        <EffortPicker
-          compact
-          agent={orch.agent}
-          model={orch.model}
-          value={orchEffort}
-          inherited={chat.orchestratorEffortOverride === null}
-          onChange={(v) => void updateChat(chat.id, { orchestratorEffortOverride: v })}
-          onReset={() => void updateChat(chat.id, { orchestratorEffortOverride: null })}
-          resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.orchestratorEffort ?? "xhigh")})`}
-          ariaLabel="이 채팅의 마스터 추론 수준"
-        />
-      </ProviderControls>
-      <ProviderControls agent="claude">
-        <AgentAvatar kind="claude" size={24} alt="클로드 캐릭터" />
-        <span className="text-[12px] text-muted-foreground">클로드</span>
-        <ModelPicker
-          compact
-          agents={["claude"]}
-          ariaLabel="이 채팅의 클로드 모델"
-          value={claudeModel}
-          inherited={chat.claudeModelOverride === null}
-          onChange={(v) => void updateChat(chat.id, { claudeModelOverride: v, claudeEffortOverride: defaultEffortForModel(models, "claude", v, true) })}
-          onReset={() => void updateChat(chat.id, { claudeModelOverride: null })}
-          resetLabel={`프로젝트 값 사용 (${label("claude", project.settings.claudeModel)})`}
-        />
-        <EffortPicker
-          compact
-          agent="claude"
-          model={claudeModel}
-          worker
-          value={claudeEffort}
-          inherited={chat.claudeEffortOverride === null}
-          onChange={(v) => void updateChat(chat.id, { claudeEffortOverride: v })}
-          onReset={() => void updateChat(chat.id, { claudeEffortOverride: null })}
-          resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.claudeEffort ?? "auto")})`}
-          ariaLabel="이 채팅의 클로드 추론 수준"
-        />
-      </ProviderControls>
-      <ProviderControls agent="codex">
-        <AgentAvatar kind="gpt" size={24} alt="지피티 캐릭터" />
-        <span className="text-[12px] text-muted-foreground">지피티</span>
-        <ModelPicker
-          compact
-          agents={["codex"]}
-          ariaLabel="이 채팅의 지피티 모델"
-          value={codexModel}
-          inherited={chat.codexModelOverride === null}
-          onChange={(v) => void updateChat(chat.id, { codexModelOverride: v, codexEffortOverride: defaultEffortForModel(models, "codex", v, true) })}
-          onReset={() => void updateChat(chat.id, { codexModelOverride: null })}
-          resetLabel={`프로젝트 값 사용 (${label("codex", project.settings.codexModel)})`}
-        />
-        <EffortPicker
-          compact
-          agent="codex"
-          model={codexModel}
-          worker
-          value={codexEffort}
-          inherited={chat.codexEffortOverride === null}
-          onChange={(v) => void updateChat(chat.id, { codexEffortOverride: v })}
-          onReset={() => void updateChat(chat.id, { codexEffortOverride: null })}
-          resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.codexEffort ?? "auto")})`}
-          ariaLabel="이 채팅의 지피티 추론 수준"
-        />
-      </ProviderControls>
-      <ProviderControls agent="gemini" web={geminiModel === GEMINI_WEB_MODEL}>
-        <AgentAvatar kind="gemini" size={24} alt="제미나이 캐릭터" />
-        <span className="text-[12px] text-muted-foreground">제미나이</span>
-        <ModelPicker
-          compact
-          agents={["gemini"]}
-          ariaLabel="이 채팅의 제미나이 모델"
-          value={geminiModel}
-          inherited={chat.geminiModelOverride === null}
-          onChange={(v) => void updateChat(chat.id, { geminiModelOverride: v, geminiEffortOverride: defaultEffortForModel(models, "gemini", v, true) })}
-          onReset={() => void updateChat(chat.id, { geminiModelOverride: null })}
-          resetLabel={`프로젝트 값 사용 (${label("gemini", project.settings.geminiModel)})`}
-        />
-        <EffortPicker
-          compact
-          agent="gemini"
-          model={geminiModel}
-          worker
-          value={geminiEffort}
-          inherited={chat.geminiEffortOverride === null}
-          onChange={(v) => void updateChat(chat.id, { geminiEffortOverride: v })}
-          onReset={() => void updateChat(chat.id, { geminiEffortOverride: null })}
-          resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.geminiEffort ?? "auto")})`}
-          ariaLabel="이 채팅의 제미나이 추론 수준"
-        />
-      </ProviderControls>
-      <ProviderControls agent="grok">
-        <AgentAvatar kind="grok" size={24} alt="그록 캐릭터" />
-        <span className="text-[12px] text-muted-foreground">그록</span>
-        <ModelPicker compact agents={["grok"]} ariaLabel="이 채팅의 그록 모델" value={grokModel}
-          inherited={chat.grokModelOverride === null}
-          onChange={v => void updateChat(chat.id, { grokModelOverride: v, grokEffortOverride: defaultEffortForModel(models, "grok", v, true) })}
-          onReset={() => void updateChat(chat.id, { grokModelOverride: null })} />
-        <EffortPicker compact agent="grok" model={grokModel} worker value={grokEffort} ariaLabel="이 채팅의 그록 추론 수준"
-          inherited={chat.grokEffortOverride === null} onChange={v => void updateChat(chat.id, { grokEffortOverride: v })}
-          onReset={() => void updateChat(chat.id, { grokEffortOverride: null })} />
-      </ProviderControls>
-      <ApprovalModePicker chat={chat} project={project} />
+      <div className="flex w-full min-w-0 max-w-full items-center gap-2 overflow-x-auto whitespace-nowrap" data-testid="chat-header-master-row">
+        <ProviderControls agent={orch.agent} master>
+          <AgentAvatar kind="orch" expression={masterExpression} size={24} alt="마스터 캐릭터" />
+          <span className="text-[12px] text-muted-foreground">마스터</span>
+          <ModelPicker
+            compact
+            agents={["claude", "codex", "gemini", "grok"]}
+            ariaLabel="이 채팅의 마스터 모델"
+            value={chat.orchestratorModelOverride ?? project.settings.orchestratorModel}
+            inherited={chat.orchestratorModelOverride === null}
+            onChange={(v) => {
+              const next = parseOrchestrator(v);
+              void updateChat(chat.id, {
+                orchestratorModelOverride: v as Project["settings"]["orchestratorModel"],
+                orchestratorEffortOverride: defaultEffortForModel(models, next.agent, next.model, false),
+              });
+            }}
+            onReset={() => void updateChat(chat.id, { orchestratorModelOverride: null })}
+            resetLabel={`프로젝트 값 사용 (${AGENT_LABEL[projectOrch.agent]} · ${label(projectOrch.agent, projectOrch.model)})`}
+          />
+          <EffortPicker
+            compact
+            agent={orch.agent}
+            model={orch.model}
+            value={orchEffort}
+            inherited={chat.orchestratorEffortOverride === null}
+            onChange={(v) => void updateChat(chat.id, { orchestratorEffortOverride: v })}
+            onReset={() => void updateChat(chat.id, { orchestratorEffortOverride: null })}
+            resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.orchestratorEffort ?? "xhigh")})`}
+            ariaLabel="이 채팅의 마스터 추론 수준"
+          />
+        </ProviderControls>
+        <ApprovalModePicker chat={chat} project={project} />
+      </div>
+      <div className="flex w-full min-w-0 max-w-full items-center gap-3 overflow-x-auto whitespace-nowrap" data-testid="chat-header-agents-row">
+        <ProviderControls agent="claude">
+          <AgentAvatar kind="claude" size={24} alt="클로드 캐릭터" />
+          <span className="text-[12px] text-muted-foreground">클로드</span>
+          <ModelPicker
+            compact
+            agents={["claude"]}
+            ariaLabel="이 채팅의 클로드 모델"
+            value={claudeModel}
+            inherited={chat.claudeModelOverride === null}
+            onChange={(v) => void updateChat(chat.id, { claudeModelOverride: v, claudeEffortOverride: defaultEffortForModel(models, "claude", v, true) })}
+            onReset={() => void updateChat(chat.id, { claudeModelOverride: null })}
+            resetLabel={`프로젝트 값 사용 (${label("claude", project.settings.claudeModel)})`}
+          />
+          <EffortPicker
+            compact
+            agent="claude"
+            model={claudeModel}
+            worker
+            value={claudeEffort}
+            inherited={chat.claudeEffortOverride === null}
+            onChange={(v) => void updateChat(chat.id, { claudeEffortOverride: v })}
+            onReset={() => void updateChat(chat.id, { claudeEffortOverride: null })}
+            resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.claudeEffort ?? "auto")})`}
+            ariaLabel="이 채팅의 클로드 추론 수준"
+          />
+        </ProviderControls>
+        <ProviderControls agent="codex">
+          <AgentAvatar kind="gpt" size={24} alt="지피티 캐릭터" />
+          <span className="text-[12px] text-muted-foreground">지피티</span>
+          <ModelPicker
+            compact
+            agents={["codex"]}
+            ariaLabel="이 채팅의 지피티 모델"
+            value={codexModel}
+            inherited={chat.codexModelOverride === null}
+            onChange={(v) => void updateChat(chat.id, { codexModelOverride: v, codexEffortOverride: defaultEffortForModel(models, "codex", v, true) })}
+            onReset={() => void updateChat(chat.id, { codexModelOverride: null })}
+            resetLabel={`프로젝트 값 사용 (${label("codex", project.settings.codexModel)})`}
+          />
+          <EffortPicker
+            compact
+            agent="codex"
+            model={codexModel}
+            worker
+            value={codexEffort}
+            inherited={chat.codexEffortOverride === null}
+            onChange={(v) => void updateChat(chat.id, { codexEffortOverride: v })}
+            onReset={() => void updateChat(chat.id, { codexEffortOverride: null })}
+            resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.codexEffort ?? "auto")})`}
+            ariaLabel="이 채팅의 지피티 추론 수준"
+          />
+        </ProviderControls>
+        <ProviderControls agent="gemini" web={geminiModel === GEMINI_WEB_MODEL}>
+          <AgentAvatar kind="gemini" size={24} alt="제미나이 캐릭터" />
+          <span className="text-[12px] text-muted-foreground">제미나이</span>
+          <ModelPicker
+            compact
+            agents={["gemini"]}
+            ariaLabel="이 채팅의 제미나이 모델"
+            value={geminiModel}
+            inherited={chat.geminiModelOverride === null}
+            onChange={(v) => void updateChat(chat.id, { geminiModelOverride: v, geminiEffortOverride: defaultEffortForModel(models, "gemini", v, true) })}
+            onReset={() => void updateChat(chat.id, { geminiModelOverride: null })}
+            resetLabel={`프로젝트 값 사용 (${label("gemini", project.settings.geminiModel)})`}
+          />
+          <EffortPicker
+            compact
+            agent="gemini"
+            model={geminiModel}
+            worker
+            value={geminiEffort}
+            inherited={chat.geminiEffortOverride === null}
+            onChange={(v) => void updateChat(chat.id, { geminiEffortOverride: v })}
+            onReset={() => void updateChat(chat.id, { geminiEffortOverride: null })}
+            resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.geminiEffort ?? "auto")})`}
+            ariaLabel="이 채팅의 제미나이 추론 수준"
+          />
+        </ProviderControls>
+        <ProviderControls agent="grok">
+          <AgentAvatar kind="grok" size={24} alt="그록 캐릭터" />
+          <span className="text-[12px] text-muted-foreground">그록</span>
+          <ModelPicker compact agents={["grok"]} ariaLabel="이 채팅의 그록 모델" value={grokModel}
+            inherited={chat.grokModelOverride === null}
+            onChange={v => void updateChat(chat.id, { grokModelOverride: v, grokEffortOverride: defaultEffortForModel(models, "grok", v, true) })}
+            onReset={() => void updateChat(chat.id, { grokModelOverride: null })} />
+          <EffortPicker compact agent="grok" model={grokModel} worker value={grokEffort} ariaLabel="이 채팅의 그록 추론 수준"
+            inherited={chat.grokEffortOverride === null} onChange={v => void updateChat(chat.id, { grokEffortOverride: v })}
+            onReset={() => void updateChat(chat.id, { grokEffortOverride: null })} />
+        </ProviderControls>
+      </div>
     </header>
   );
 }

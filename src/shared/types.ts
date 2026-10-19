@@ -457,7 +457,7 @@ export interface ChatterBoxApi {
   geminiWebAccounts(action: "list" | "add" | "update", input?: { accountId?: GeminiWebAccountId; label?: string; enabled?: boolean }): Promise<GeminiWebAccountStatus[]>;
   getTheme(): Promise<Theme>;
   setTheme(theme: Theme): Promise<void>;
-  usage(): Promise<UsageInfo>;
+  usage(wait?: boolean): Promise<UsageInfo>;
   openPath(path: string): Promise<void>;
   previewImage(chatId: number, href: string): Promise<AttachmentRef | null>;
   linkAction(chatId: number, href: string, action: "open" | "reveal" | "save"): Promise<{ canceled?: boolean; path?: string }>;

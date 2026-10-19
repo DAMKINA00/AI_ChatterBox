@@ -26,7 +26,7 @@ import type { ChatPatch, Store } from "./db";
 import { LocalBridge } from "./local-bridge";
 import { ApprovalService, type ApprovalInput, type JudgeAnswer } from "./approvals";
 import { findClaude, findCodex, findGemini, findGrok } from "./locate";
-import { GrokDriver, listGrokModels, readGrokAuth } from "./drivers/grok";
+import { GrokDriver, listGrokModels, readGrokAuth, readGrokUsage } from "./drivers/grok";
 import { readClaudeAuth } from "./cli-auth";
 import { GeminiDriver } from "./drivers/gemini";
 import { GeminiWebDriver, type WebContext } from "./drivers/gemini-web";
@@ -78,6 +78,7 @@ export class ChatManager {
   readonly tmpDir: string;
   private usageState: UsageInfo = {};
   private geminiUsageRefresh?: Promise<void>;
+  private grokUsageRefresh?: Promise<void>;
   private webAccounts?: GeminiWebAccounts;
   private attachments: AttachmentStore;
   /** Where a role's events currently go (its own node, or a consult it is serving). */
@@ -339,6 +340,30 @@ export class ChatManager {
       .catch((error) => { if (!this.disposing) this.mergeUsage({ gemini: { error: error instanceof Error ? error.message : "Gemini 사용량 조회에 실패했습니다." } }); })
       .finally(() => { this.geminiUsageRefresh = undefined; });
     return this.geminiUsageRefresh;
+  }
+
+  refreshGrokUsage(): Promise<void> {
+    if (this.grokUsageRefresh) return this.grokUsageRefresh;
+    const exe = findGrok(this.store.getSetting("grokPath"));
+    if (!exe) {
+      this.mergeUsage({ grok: { error: "Grok CLI를 찾지 못했습니다. 설치 경로를 확인해 주세요." } });
+      return Promise.resolve();
+    }
+    this.grokUsageRefresh = readGrokUsage(exe, this.tmpDir)
+      .then(usage => { if (!this.disposing) this.mergeUsage({ grok: { ...usage, updatedAt: Date.now() } }); })
+      .catch(error => { if (!this.disposing) this.mergeUsage({ grok: { error: error instanceof Error ? error.message : "Grok 사용량 조회에 실패했습니다." } }); })
+      .finally(() => { this.grokUsageRefresh = undefined; });
+    return this.grokUsageRefresh;
+  }
+
+  /** Independent providers: a missing Codex installation must not skip Gemini/Grok refreshes. */
+  async refreshUsage(): Promise<void> {
+    await Promise.allSettled([
+      Promise.resolve().then(() => this.codex().readUsage()),
+      Promise.resolve().then(() => this.refreshClaudeUsage()),
+      Promise.resolve().then(() => this.refreshGeminiUsage()),
+      Promise.resolve().then(() => this.refreshGrokUsage()),
+    ]);
   }
 
   /** Set by the orchestrator: what a worker may write right now (its implement scope). */

@@ -114,6 +114,9 @@ export const useStore = create<State>((set, get) => ({
   search: "",
 
   async init() {
+    let receivedUsage: UsageInfo | undefined;
+    // Subscribe before slow CLI/auth initialization so fresh limits cannot be lost to a cached error.
+    api.onUsage((usage) => { receivedUsage = usage; set({ usage }); });
     const [projects, chats, cli, theme, usage] = await Promise.all([
       api.listProjects(),
       api.listChats(),
@@ -122,7 +125,7 @@ export const useStore = create<State>((set, get) => ({
       api.usage(),
     ]);
     document.documentElement.classList.toggle("dark", theme === "dark");
-    set({ projects, chats, cli, theme, usage, ready: true });
+    set({ projects, chats, cli, theme, usage: receivedUsage ?? usage, ready: true });
     void get().refreshCli().catch(() => undefined);
 
     const pendingEvents: TimelineEvent[] = [];
@@ -159,7 +162,6 @@ export const useStore = create<State>((set, get) => ({
         return { consults: { ...s.consults, [c.chatId]: next } };
       }),
     );
-    api.onUsage((usage) => set({ usage }));
     api.onGeminiWebLogin((status) => get().toast(`제미나이 웹 계정 ${status.accountId.slice(7)} · ${status.message}`, "info"));
     api.onAgentsUpdated((chatId, list) => set((s) => ({ agents: { ...s.agents, [chatId]: list } })));
     api.onSelectChat((chatId) => void get().select({ chatId }));

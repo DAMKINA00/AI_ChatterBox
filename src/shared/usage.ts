@@ -11,12 +11,13 @@ export interface UsageWindow {
 export interface ProviderUsage {
   fiveHour?: UsageWindow;
   weekly?: UsageWindow;
+  monthly?: UsageWindow;
   updatedAt?: number;
   error?: string;
 }
 
 export interface UsageDisplay {
-  window: "주간" | "5시간";
+  window: "주간" | "5시간" | "월간";
   /** 0–100, remaining */
   remaining: number;
   resetsAt?: number | null;
@@ -36,6 +37,7 @@ export function pickUsage(u: ProviderUsage | undefined): UsageDisplay | null {
   if (u.fiveHour && five !== undefined && five <= FIVE_HOUR_SWITCH_AT)
     return { window: "5시간", remaining: five, resetsAt: u.fiveHour.resetsAt, warn: true };
   if (u.weekly) return { window: "주간", remaining: remainingOf(u.weekly), resetsAt: u.weekly.resetsAt, warn: false };
+  if (u.monthly) return { window: "월간", remaining: remainingOf(u.monthly), resetsAt: u.monthly.resetsAt, warn: false };
   if (u.fiveHour) return { window: "5시간", remaining: five!, resetsAt: u.fiveHour.resetsAt, warn: false, note: "주간 정보 없음" };
   return null;
 }

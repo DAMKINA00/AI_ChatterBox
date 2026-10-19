@@ -5,6 +5,8 @@ import { readLines, shutdown } from "../proc";
 import { isReadCommand } from "../execution-policy";
 import { claudeToolDiffs } from "../diffs";
 import { publishGeneratedImages } from "./generated-images";
+import { parseGrokUsage } from "./grok-usage";
+import type { ProviderUsage } from "../../shared/usage";
 import type { FileDiff, ModelOption } from "../../shared/types";
 import { fileNote, type AgentDriver, type AgentInput, type DriverHost, type DriverOptions } from "./types";
 
@@ -91,6 +93,27 @@ export async function readGrokAuth(exe: string, cwd: string): Promise<"authentic
     return "authenticated";
   } catch { return "unknown"; }
   finally { await connection.close(); }
+}
+
+/** Reads the logged-in account allowance without creating a session or sending a prompt. */
+export async function readGrokUsage(exe: string, cwd: string): Promise<ProviderUsage> {
+  const connection = new GrokConnection(exe, cwd);
+  try {
+    const init = await connection.request("initialize", initialize, 15000);
+    const methodId = grokAuthMethod(init);
+    if (!methodId) throw new Error("Grok 로그인이 필요합니다. 터미널에서 grok login 후 다시 조회하세요.");
+    await connection.request("authenticate", { methodId, _meta: { headless: true } }, 15000);
+    const response = await connection.request("_x.ai/billing", {}, 20000);
+    const usage = parseGrokUsage(response);
+    if (!usage) throw new Error("Grok CLI가 계정 한도 정보를 제공하지 않았습니다. CLI 버전과 계정을 확인하세요.");
+    return usage;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (/^(Grok 로그인|Grok CLI가)/.test(message)) throw error;
+    if (/method not found/i.test(message)) throw new Error("Grok CLI가 사용량 조회를 지원하지 않습니다. CLI를 업데이트해 주세요.");
+    if (/auth|login|sign in|unauthorized|401/i.test(message)) throw new Error("Grok 로그인이 만료되었습니다. grok login 후 다시 조회하세요.");
+    throw new Error("Grok 사용량 조회가 지연되거나 실패했습니다. 네트워크 상태를 확인하고 다시 조회하세요.");
+  } finally { await connection.close(); }
 }
 
 export async function listGrokModels(exe: string, cwd: string): Promise<ModelOption[]> {

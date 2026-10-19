@@ -207,13 +207,9 @@ function registerIpc() {
     store.setSetting("theme", theme);
     nativeTheme.themeSource = theme;
   });
-  ipcMain.handle("usage:get", () => {
-    void chats
-      .codex()
-      .readUsage()
-      .catch(() => undefined);
-    void chats.refreshClaudeUsage();
-    void chats.refreshGeminiUsage();
+  ipcMain.handle("usage:get", async (_e, wait = false) => {
+    const refresh = chats.refreshUsage();
+    if (wait === true) await refresh;
     return chats.usage();
   });
   ipcMain.handle("shell:openPath", async (_e, p: string) => {

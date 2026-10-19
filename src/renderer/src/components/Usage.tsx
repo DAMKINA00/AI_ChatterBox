@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { Globe2 } from "lucide-react";
+import { Globe2, RotateCw } from "lucide-react";
 import { pickUsage, type UsageDisplay } from "../../../shared/usage";
-import { api, cn } from "../lib/utils";
+import { api, cn, errorMessage } from "../lib/utils";
 import { useStore } from "../store";
 import { Button, Tooltip } from "./ui";
 import { GeminiWebDialog } from "./GeminiWebDialog";
@@ -39,6 +39,7 @@ function Bar({ name, d, color, error, updatedAt }: { name: string; d: UsageDispl
 /** Remaining usage: weekly by default, the 5-hour window when it has ≤ 10% left. */
 export function UsageBar() {
   const [webOpen, setWebOpen] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const usage = useStore((s) => s.usage);
   useEffect(() => {
     const t = setInterval(() => void api.usage().then((u) => useStore.setState({ usage: u })), 5 * 60 * 1000);
@@ -46,7 +47,15 @@ export function UsageBar() {
   }, []);
   return (
     <div className="space-y-1">
-      <div className="text-[11px] font-medium text-muted-foreground">남은 사용량</div>
+      <div className="flex items-center justify-between text-[11px] font-medium text-muted-foreground">
+        <span>남은 사용량</span>
+        <button type="button" disabled={refreshing} aria-label="CLI 사용량 새로고침" title="로그인한 CLI 계정의 사용량 다시 조회" data-testid="usage-refresh" className="rounded p-1 hover:bg-accent disabled:opacity-50" onClick={async () => {
+          setRefreshing(true);
+          try { useStore.setState({ usage: await api.usage(true) }); }
+          catch (error) { useStore.getState().toast(errorMessage(error)); }
+          finally { setRefreshing(false); }
+        }}><RotateCw className={cn("size-3", refreshing && "animate-spin")} /></button>
+      </div>
       <Bar name="클로드" d={pickUsage(usage.claude)} color="bg-claude" />
       <Bar name="지피티" d={pickUsage(usage.codex)} color="bg-gpt" />
       <Bar name="제미나이" d={pickUsage(usage.gemini)} color="bg-gemini" error={usage.gemini?.error} updatedAt={usage.gemini?.updatedAt} />
