@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
-import { ChevronDown, Globe2, Loader2, PencilLine, RotateCcw } from "lucide-react";
+import { ChevronDown, Globe2, Loader2, PencilLine, RotateCcw, Sparkles } from "lucide-react";
+import { isAIStudioModel } from "../../../shared/aistudio";
 import { AGENT_LABEL, GEMINI_WEB_MODEL, type AgentKind } from "../../../shared/types";
 import { cn } from "../lib/utils";
 import { latestModels } from "../../../shared/models";
 import { useStore } from "../store";
 import { GeminiWebDialog } from "./GeminiWebDialog";
+import { AIStudioDialog } from "./AIStudioDialog";
 import {
   Button,
   Dialog,
@@ -33,7 +35,7 @@ const GEMINI_WEB_LABEL = "제미나이 웹 · Argon";
 export function useModelLabel() {
   const models = useStore((s) => s.models);
   return (agent: AgentKind, id: string) =>
-    models[agent]?.find((m) => m.id === id)?.label ?? (agent === "gemini" && id === GEMINI_WEB_MODEL ? GEMINI_WEB_LABEL : id || (agent === "gemini" ? "Pro 자동 선택" : "기본값"));
+    models[agent]?.find((m) => m.id === id)?.label ?? (agent === "gemini" && isAIStudioModel(id) ? "AI Studio · Argon" : agent === "gemini" && id === GEMINI_WEB_MODEL ? GEMINI_WEB_LABEL : id || (agent === "gemini" ? "Pro 자동 선택" : "기본값"));
 }
 
 interface Props {
@@ -58,23 +60,25 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
   const [custom, setCustom] = useState<AgentKind | null>(null);
   const [customText, setCustomText] = useState("");
   const [geminiWebOpen, setGeminiWebOpen] = useState(false);
+  const [aiStudioOpen, setAiStudioOpen] = useState(false);
   const encoded = agents.length > 1;
   const encodedAgent = agents.find((a) => value.startsWith(`${a}:`)) ?? agents[0];
   const current = encoded
     ? { agent: encodedAgent, id: value.slice(value.indexOf(":") + 1) }
     : { agent: agents[0], id: value };
   const webSelected = current.agent === "gemini" && current.id === GEMINI_WEB_MODEL;
+  const aiStudioSelected = current.agent === "gemini" && isAIStudioModel(current.id);
 
   useEffect(() => {
-    for (const a of agents) if (!(webSelected && a === "gemini")) void loadModels(a);
-  }, [agents.join(","), loadModels, webSelected]);
+    for (const a of agents) if (!(a === "gemini" && (webSelected || aiStudioSelected))) void loadModels(a);
+  }, [agents.join(","), aiStudioSelected, loadModels, webSelected]);
 
   const make = (agent: AgentKind, id: string) => (encoded ? `${agent}:${id}` : id);
 
   return (
     <>
       <DropdownMenu onOpenChange={(open) => {
-        if (open) for (const a of agents) if (!(webSelected && a === "gemini") && errors[a]) void loadModels(a);
+        if (open) for (const a of agents) if (!(a === "gemini" && (webSelected || aiStudioSelected)) && errors[a]) void loadModels(a);
       }}>
         <DropdownMenuTrigger asChild>
           <Button
@@ -111,18 +115,22 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
                     <Globe2 />
                     제미나이 웹 계정 관리…
                   </DropdownMenuItem>}
+                  {a === "gemini" && <DropdownMenuItem onSelect={() => setAiStudioOpen(true)} data-testid="aistudio-connect">
+                    <Sparkles />
+                    AI Studio · Argon 설정…
+                  </DropdownMenuItem>}
                   <DropdownMenuSeparator />
                   <DropdownMenuCheckItem checked={current.agent === a && current.id === ""} onSelect={() => onChange(make(a, ""))}>
                     <span className="flex-1 truncate">{a === "gemini" ? "Pro 자동 선택" : "CLI 기본 모델"}</span>
                   </DropdownMenuCheckItem>
                 </>
               )}
-              {!models[a] && !errors[a] && !(webSelected && a === "gemini") && (
+              {!models[a] && !errors[a] && !(a === "gemini" && (webSelected || aiStudioSelected)) && (
                 <div className="flex items-center gap-2 px-2 py-1.5 text-[12px] text-muted-foreground">
                   <Loader2 className="size-3.5 animate-spin" /> 목록을 불러오는 중…
                 </div>
               )}
-              {errors[a] && !(webSelected && a === "gemini") && <>
+              {errors[a] && !(a === "gemini" && (webSelected || aiStudioSelected)) && <>
                 <div className="px-2 py-1.5 text-[12px] text-destructive">{errors[a]}</div>
                 <DropdownMenuItem onSelect={(event) => { event.preventDefault(); void loadModels(a); }}>
                   <RotateCcw /> 목록 다시 확인
@@ -189,6 +197,11 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
         open={geminiWebOpen}
         onOpenChange={setGeminiWebOpen}
         onUseModel={() => onChange(make("gemini", GEMINI_WEB_MODEL))}
+      />
+      <AIStudioDialog
+        open={aiStudioOpen}
+        onOpenChange={setAiStudioOpen}
+        onUseModel={(id) => onChange(make("gemini", id))}
       />
     </>
   );

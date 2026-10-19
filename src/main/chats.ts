@@ -2,6 +2,7 @@
 // persists normalized events, tracks chat status, and forwards everything to the renderer.
 // The Orchestrator (orchestrator.ts) plugs in through the hooks at the bottom.
 import { mkdirSync } from "node:fs";
+import { safeStorage } from "electron";
 import { join, dirname } from "node:path";
 import {
   GEMINI_WEB_MODEL,
@@ -41,6 +42,9 @@ import { parseClaudeUsageText } from "../shared/usage";
 import { CodexDriver, CodexServer } from "./drivers/codex";
 import { AttachmentStore } from "./attachments";
 import type { AgentDriver, AgentInput, DriverHost } from "./drivers/types";
+import { AIStudioService } from "./aistudio";
+import { AIStudioDriver, type StudioMessage } from "./drivers/aistudio";
+import { AISTUDIO_MODEL, isAIStudioModel } from "../shared/aistudio";
 
 export interface Sink {
   agents(chatId: number, agents: ChatAgent[]): void;
@@ -80,6 +84,7 @@ export class ChatManager {
   private geminiUsageRefresh?: Promise<void>;
   private grokUsageRefresh?: Promise<void>;
   private webAccounts?: GeminiWebAccounts;
+  private studio?: AIStudioService;
   private attachments: AttachmentStore;
   /** Where a role's events currently go (its own node, or a consult it is serving). */
   private routes = new Map<number, Partial<Record<Role, NodeId>>>();
@@ -194,8 +199,26 @@ export class ChatManager {
 
   geminiModels() { return listGeminiModels(this.geminiExe(), this.tmpDir); }
 
+  aiStudio() {
+    return this.studio ??= new AIStudioService(this.store, {
+      encrypt: value => {
+        if (!safeStorage.isEncryptionAvailable()) throw new Error("Windows 보안 저장소를 사용할 수 없습니다.");
+        return safeStorage.encryptString(value).toString("base64");
+      },
+      decrypt: value => safeStorage.decryptString(Buffer.from(value, "base64")),
+    });
+  }
+
   geminiWebAccounts() {
-    return this.webAccounts ??= new GeminiWebAccounts(this.dataDir, this.store, undefined, status => this.sink.webLogin?.(status));
+    return this.webAccounts ??= new GeminiWebAccounts(this.dataDir, this.store, undefined, status => {
+      this.sink.webLogin?.(status);
+      if (this.aiStudio().linkedAccount(status.accountId)) void this.syncStudioWeb(status.accountId, false).catch(() => undefined);
+    });
+  }
+  async syncStudioWeb(accountId: GeminiWebAccountId, show = true) {
+    const account = this.geminiWebAccounts().list().find(a => a.accountId === accountId);
+    if (!account) throw new Error("등록되지 않은 웹 계정입니다.");
+    await this.aiStudio().syncWeb(accountId, account.enabled, () => this.geminiWeb(accountId).studioState(show));
   }
   geminiWeb(accountId: GeminiWebAccountId = "gemini-1") {
     return this.geminiWebAccounts().browser(accountId);
@@ -207,7 +230,7 @@ export class ChatManager {
   async models(agent: AgentKind): Promise<ModelOption[]> {
     const cached = this.modelLists.get(agent);
     if (cached && cached.expires > Date.now()) return cached.promise;
-    const promise = agent === "grok" ? listGrokModels(this.grokExe(), this.tmpDir) : agent === "codex" ? this.codex().models() : agent === "gemini" ? Promise.resolve().then(() => this.geminiModels()).catch(() => []).then((models) => [...models, { id: GEMINI_WEB_MODEL, label: "웹 · Gemini 4 Argon", reasoningEfforts: [] }])
+    const promise = agent === "grok" ? listGrokModels(this.grokExe(), this.tmpDir) : agent === "codex" ? this.codex().models() : agent === "gemini" ? Promise.resolve().then(() => this.geminiModels()).catch(() => []).then((models) => [...models, { id: GEMINI_WEB_MODEL, label: "웹 · Gemini 4 Argon", reasoningEfforts: [] }, { id: AISTUDIO_MODEL, label: "AI Studio · Argon", reasoningEfforts: [] }])
       : listClaudeModels(this.claudeExe(), this.tmpDir).then((list) => list.map((m) => ({
         id: m.value, label: m.displayName, isDefault: m.value === "opus",
         reasoningEfforts: m.supportsEffort ? m.supportedEffortLevels ?? [] : [],
@@ -220,8 +243,8 @@ export class ChatManager {
   async assignmentEffort(chatId: number, role: Role, requested?: string): Promise<{ requestedEffort: string; effort: string }> {
     const chat = this.store.chat(chatId)!;
     const cfg = this.roleConfig(chat, this.store.project(chat.projectId)!, role);
-    if (cfg.agent === "gemini" && cfg.model === GEMINI_WEB_MODEL) {
-      workerEffort("auto", requested); // Validate the assignment, but do not pretend to control web thinking levels.
+    if (cfg.agent === "gemini" && (cfg.model === GEMINI_WEB_MODEL || isAIStudioModel(cfg.model))) {
+      if (role !== "orch") workerEffort("auto", requested); // Workers still record the master's assignment; this transport uses default thinking.
       return { requestedEffort: requested ?? "", effort: "" };
     }
     const choice = role === "orch" ? cfg.effort : workerEffort(cfg.effort, requested);
@@ -247,6 +270,7 @@ export class ChatManager {
     const installed = this.cliInfo();
     const gptModel = chat.codexModelOverride ?? project.settings.codexModel;
     const geminiWeb = this.usesGeminiWeb(chat);
+    const geminiStudio = isAIStudioModel(chat.geminiModelOverride ?? project.settings.geminiModel);
     let imageGeneration: boolean | null = null;
     let codexAuthenticated: boolean | null = null;
     if (installed.find((c) => c.agent === "codex")?.path) {
@@ -285,7 +309,7 @@ export class ChatManager {
       claude: { installed: !!installed.find((c) => c.agent === "claude")?.path, model: chat.claudeModelOverride ?? project.settings.claudeModel, reasoningEfforts: effortLevels.claude, effortSetting: chat.claudeEffortOverride ?? project.settings.claudeEffort, imageGeneration: false, authentication: "실행 시 확인", usage: this.usageState.claude },
       gpt: { installed: !!installed.find((c) => c.agent === "codex")?.path, model: gptModel, reasoningEfforts: effortLevels.codex, effortSetting: chat.codexEffortOverride ?? project.settings.codexEffort, imageGeneration, authenticated: codexAuthenticated, usage: this.usageState.codex },
       grok: { installed: !!installed.find(c => c.agent === "grok")?.path, model: chat.grokModelOverride ?? project.settings.grokModel, reasoningEfforts: effortLevels.grok, effortSetting: chat.grokEffortOverride ?? project.settings.grokEffort, imageGeneration: null, authentication: "Grok 로그인과 도구는 실행 시 확인", usage: this.usageState.grok },
-      gemini: { installed: geminiWeb || !!installed.find((c) => c.agent === "gemini")?.path, model: (chat.geminiModelOverride ?? project.settings.geminiModel) || "Pro 계정 제공 모델 자동 선택", reasoningEfforts: geminiWeb ? [] : effortLevels.gemini, effortSetting: geminiWeb ? "웹 모델 설정" : chat.geminiEffortOverride ?? project.settings.geminiEffort, imageGeneration: null, authentication: geminiWeb ? "계정별 로그인·잔여량은 webAccounts에서 확인하고 gemini_web_accounts로 갱신" : "Antigravity 로그인·모델 목록은 실행 시 확인", enabled: project.settings.maxGeminiWorkers > 0, usage: geminiWeb ? undefined : this.usageState.gemini, webAccounts: geminiWeb ? this.webAccountInfo(chat.id) : undefined, webOnly: geminiWeb, localTools: !geminiWeb, fileWrites: !geminiWeb, supportedKinds: geminiWeb ? ["writing", "opinion", "review"] : ["implement", "writing", "opinion", "review"], role: "기본은 글쓰기, 사용자가 지정하면 해당 작업 우선" },
+      gemini: { installed: geminiStudio || geminiWeb || !!installed.find((c) => c.agent === "gemini")?.path, model: (chat.geminiModelOverride ?? project.settings.geminiModel) || "Pro 계정 제공 모델 자동 선택", reasoningEfforts: geminiWeb ? [] : effortLevels.gemini, effortSetting: geminiWeb ? "웹 모델 설정" : chat.geminiEffortOverride ?? project.settings.geminiEffort, imageGeneration: null, aiStudio: geminiStudio ? await this.aiStudio().status() : undefined, videoGeneration: geminiStudio && this.aiStudio().settings().videoEnabled, authentication: geminiStudio ? "AI Studio 연결·계정 한도는 aiStudio 상태에서 확인" : geminiWeb ? "계정별 로그인·잔여량은 webAccounts에서 확인하고 gemini_web_accounts로 갱신" : "Antigravity 로그인·모델 목록은 실행 시 확인", enabled: project.settings.maxGeminiWorkers > 0, usage: geminiWeb || geminiStudio ? undefined : this.usageState.gemini, webAccounts: geminiWeb ? this.webAccountInfo(chat.id) : undefined, webOnly: geminiWeb, localTools: !geminiWeb, fileWrites: !geminiWeb, supportedKinds: geminiWeb ? ["writing", "opinion", "review"] : ["implement", "writing", "opinion", "review"], role: "기본은 글쓰기, 사용자가 지정하면 해당 작업 우선" },
     };
   }
 
@@ -467,7 +491,7 @@ export class ChatManager {
     const chat = this.store.chat(chatId)!;
     const project = this.store.project(chat.projectId)!;
     const cfg = this.roleConfig(chat, project, role);
-    if (role === "orch" && cfg.agent === "gemini" && cfg.model === GEMINI_WEB_MODEL) throw new Error("마스터는 Antigravity CLI 모델을 선택하세요. Gemini 웹은 작업자로 사용할 수 있습니다.");
+    if (role === "orch" && cfg.agent === "gemini" && cfg.model === GEMINI_WEB_MODEL) throw new Error("마스터는 Antigravity CLI 또는 AI Studio 모델을 선택하세요. Gemini 웹은 작업자로 사용할 수 있습니다.");
     const effort = assignmentEffort ?? (await this.assignmentEffort(chatId, role)).effort;
     const instructions = this.instructionsFor?.(chat, project, role, cfg.agent);
     const slot = this.live.get(chatId) ?? {};
@@ -561,6 +585,19 @@ export class ChatManager {
         },
         save: context => this.store.setSetting(contextKey, JSON.stringify(context)),
       });
+    } else if (cfg.agent === "gemini" && isAIStudioModel(cfg.model)) {
+      const key = `aistudio-context:${chatId}:${role}:${cfg.model}`;
+      driver = new AIStudioDriver(driverOpts, {
+        service: this.aiStudio(),
+        bridgeUrl: () => this.toolsFor?.(this.store.chat(chatId)!, role, "gemini")?.chatterbox_bridge?.env?.CHATTERBOX_URL,
+        context: {
+          load: (): StudioMessage[] => {
+            try { const value = JSON.parse(this.store.getSetting(key) ?? "[]"); return Array.isArray(value) ? value : []; }
+            catch { return []; }
+          },
+          save: messages => this.store.setSetting(key, JSON.stringify(messages)),
+        },
+      }, host);
     } else if (cfg.agent === "gemini") {
       // Web conversation paths must never be passed as CLI conversation identifiers.
       if (driverOpts.nativeId?.startsWith("web:")) driverOpts.nativeId = null;

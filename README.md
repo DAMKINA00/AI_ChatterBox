@@ -13,6 +13,12 @@
 - 한 작업도 UI·API·테스트 등 겹치지 않는 파트로 나눠 `ask_parallel`로 배정합니다. 작업자는 `send_message`로 진행 중인 동료와 직접 협의하며 다음 앱 도구 호출이나 배정 때 메시지를 받습니다. `read_messages`로 새 메시지를 확인하고 대기 동료에게 `ask`/`ask_parallel`로 의견·리뷰를 요청합니다. 메시지는 양쪽 작업자 대화에 저장됩니다. 실제 분담과 도구 선택은 선택한 모델의 지시 이행에 따릅니다.
 - 기본 협업 흐름은 계획 → 작업자 구성 → 범위를 나눠 구현 → 다른 작업자가 리뷰 → 수정 → 최종 보고 순으로 이어집니다. 협의 내용은 채팅 안에 카드로 실시간 표시됩니다 (예: "마스터 → 클로드 2호 · 구현 · src/ui/**").
 
+### AI Studio · Argon (0.4.16)
+- 기존 제미나이 Web 방식 옆에 로컬 AIStudio2API를 사용하는 Argon 마스터·작업자를 추가했습니다. 파일 읽기·수정·명령 실행은 기존 승인과 작업 범위 정책을 적용합니다.
+- **제미나이 웹 계정 관리 → AI Studio 연결**에서 같은 로그인 세션을 동기화합니다. 최대 10개 계정을 관리하고, 모델별 한도 전환은 AIStudio2API의 계정 라우팅을 사용합니다. 실제 쿨다운과 계정별 모델 목록을 표시합니다.
+- 영상 도구는 기본적으로 꺼져 있습니다. 영상 검증을 위한 추가 생성은 수행하지 않습니다.
+- Antigravity Custom Model Enabler용 설정을 내보낼 수 있습니다. 설치와 검증 범위는 [AI Studio · Argon 안내](docs/aistudio-argon.md), 참조 프로젝트는 [제3자 구성요소](docs/third-party-aistudio.md)를 확인하세요.
+
 ### Gemini 웹 사용량 조회 (0.4.14)
 - 일부 계정에 적용된 새 사용량 화면과 기존 화면을 모두 읽습니다. 카드의 실제 표시 텍스트에서 현재·주간 수치와 초기화 시각을 수집하며, 숨겨진 요소나 진행 막대 너비로 비율을 추정하지 않습니다.
 - 사용량 카드의 제목이 먼저 표시돼도 현재·주간 퍼센트가 준비될 때까지 기다립니다. 숫자가 끝내 나타나지 않으면 사용량을 추정하지 않습니다.
@@ -64,7 +70,7 @@
   1. `%LOCALAPPDATA%\OpenAI\Codex\bin\<ver>\codex.exe`
   2. PATH
   3. `~\.codex\packages\standalone\releases`
-- **제미나이 작업자를 쓸 경우(선택):** Antigravity CLI(`agy`)에 Google AI Pro 계정으로 로그인하거나 Gemini 웹 계정을 연결합니다. [Gemini 설치 안내](docs/gemini-pro.md) · [Gemini 웹 연결](docs/gemini-web.md)
+- **제미나이 작업자를 쓸 경우(선택):** Antigravity CLI(`agy`)에 Google AI Pro 계정으로 로그인하거나 Gemini 웹 계정을 연결합니다. AI Studio · Argon은 별도 로컬 AIStudio2API가 필요합니다. [Gemini 설치 안내](docs/gemini-pro.md) · [Gemini 웹 연결](docs/gemini-web.md) · [AI Studio 연결](docs/aistudio-argon.md)
 
 - **Grok 작업자 또는 마스터(선택):** `npm install -g @xai-official/grok` 후 `grok login`. Windows 공식 네이티브 실행 파일 `%USERPROFILE%\.grok\bin\grok.exe`를 자동 탐색합니다. ACP 세션과 승인 hook을 지원하는 CLI가 필요합니다. [공식 CLI 안내](https://docs.x.ai/build/cli/reference).
 

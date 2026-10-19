@@ -7,6 +7,8 @@ import type { ChatManager } from "./chats";
 import type { ApprovalInput, JudgeAnswer } from "./approvals";
 import { join, dirname } from "node:path";
 import { GeminiDriver } from "./drivers/gemini";
+import { AIStudioDriver } from "./drivers/aistudio";
+import { isAIStudioModel } from "../shared/aistudio";
 import { GrokDriver } from "./drivers/grok";
 import { ClaudeDriver } from "./drivers/claude";
 import { CodexDriver } from "./drivers/codex";
@@ -91,6 +93,7 @@ export class ApprovalJudge {
             },
             host,
           )
+        : agent === "gemini" && isAIStudioModel(model) ? new AIStudioDriver(opts, { service: this.chats.aiStudio() }, host)
         : agent === "gemini" ? new GeminiDriver({ ...opts, exePath: this.chats.geminiExe() }, { bridge: this.chats.bridge, hookScript: join(dirname(this.chats.bridgeScript), "antigravity-hook.js"), tmpDir: this.chats.tmpDir }, host)
         : agent === "grok" ? new GrokDriver({ ...opts, exePath: this.chats.grokExe() }, () => ({}), host)
         : new CodexDriver(opts, this.chats.codex(), host);

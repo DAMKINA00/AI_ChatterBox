@@ -11,6 +11,10 @@ test("planning command gate rejects composition and executable read options", ()
     assert.equal(isReadCommand(command), false, command);
   assert.equal(isMutatingTool("Bash", "npm test"), true);
   assert.equal(isMutatingTool("Read", "a.txt"), false);
+  assert.equal(isMutatingTool("run_command", JSON.stringify({ command: "Get-Content a.txt" })), false);
+  assert.equal(isMutatingTool("run_command", JSON.stringify({ command: "Set-Content a.txt x" })), true);
+  assert.equal(isMutatingTool("run_command", "broken JSON"), true);
+  for (const tool of ["write_file", "edit_file", "save_video"]) assert.equal(isMutatingTool(tool, "{}"), true);
 });
 
 function engine() {
@@ -20,6 +24,22 @@ function engine() {
   return { chats, orchestrator };
 }
 const write: any = { role: "orch", node: "orch", title: "Write", detail: "a", key: "Write", writes: true, paths: ["a"] };
+
+test("Gemini CLI and AI Studio switches hand over context without mixing model histories", () => {
+  const { chats, orchestrator: o } = engine();
+  const settings = new Map<string, string>();
+  chats.store.getSetting = (key: string) => settings.get(key);
+  chats.store.setSetting = (key: string, value: string) => settings.set(key, value);
+  chats.store.project = () => ({ settings: { orchestratorModel: "gemini:gemini-pro" } });
+  chats.store.events = () => [{ role: "orch", event: { type: "text", text: "previous verified result" } }];
+  const chat = { id: 1, projectId: 1, orchestratorModelOverride: null };
+  assert.equal(o.handover(chat), "");
+  const studio = { ...chat, orchestratorModelOverride: "gemini:aistudio:gemini-4-argon" };
+  assert.match(o.handover(studio), /previous verified result/);
+  assert.equal(o.handover(studio), "");
+  assert.match(o.handover({ ...studio, orchestratorModelOverride: "gemini:aistudio:another-model" }), /previous verified result/);
+  assert.match(o.handover(chat), /previous verified result/);
+});
 
 test("a successful CLI exit without a worker answer or artifact is not a completed consult", async () => {
   for (const [answer, files, expected] of [["  ", [], "error"], ["", ["diagram.png"], "done"], ["Analysis result", [], "done"]] as const) {
@@ -48,8 +68,9 @@ test("a successful CLI exit without a worker answer or artifact is not a complet
 });
 
 test("master and worker implementation cannot overlap while native change is in flight", async () => {
+  for (const name of ["파일 변경", "write_file", "edit_file", "run_command", "save_video"]) {
   const { chats, orchestrator: o } = engine();
-  chats.onDriverEvent(1, "orch", { type: "tool_call", id: "patch", name: "파일 변경", input: "a" });
+  chats.onDriverEvent(1, "orch", { type: "tool_call", id: "patch", name, input: JSON.stringify({ command: "Set-Content a.txt x" }) });
   let acquired = false;
   const waiting = o.acquireScope(1, 10, ["src/**"]).then(() => { acquired = true; });
   await new Promise((r) => setImmediate(r));
@@ -59,6 +80,7 @@ test("master and worker implementation cannot overlap while native change is in 
   assert.ok(chats.approvalGuard(1, write));
   o.releaseScope(1, 10);
   assert.equal(chats.approvalGuard(1, write), null);
+  }
 });
 
 test("worker remains reserved until native archive finishes before its next queued consultation", async () => {

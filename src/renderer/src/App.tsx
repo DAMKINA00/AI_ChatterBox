@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { CircleAlert, FolderPlus, Loader2, MessageSquarePlus, RotateCcw, Workflow, X } from "lucide-react";
+import { isAIStudioModel } from "../../shared/aistudio";
 import { AGENT_LABEL, GEMINI_WEB_MODEL } from "../../shared/types";
 import { useStore } from "./store";
 import { Sidebar } from "./components/Sidebar";
@@ -26,8 +27,11 @@ export function App() {
 
   const chat = selection ? chats.find((c) => c.id === selection.chatId) : undefined;
   const project = chat ? projects.find((p) => p.id === chat.projectId) : undefined;
-  const webGemini = (chat?.geminiModelOverride ?? project?.settings.geminiModel) === GEMINI_WEB_MODEL;
-  const missing = cli.filter((c) => !c.path && !(c.agent === "gemini" && webGemini));
+  const workerGemini = chat?.geminiModelOverride ?? project?.settings.geminiModel;
+  const orchestrator = chat?.orchestratorModelOverride ?? project?.settings.orchestratorModel;
+  const orchestratorGemini = orchestrator?.startsWith("gemini:") ? orchestrator.slice("gemini:".length) : "";
+  const managedGemini = [workerGemini, orchestratorGemini].some((model) => model === GEMINI_WEB_MODEL || isAIStudioModel(model));
+  const missing = cli.filter((c) => !c.path && !(c.agent === "gemini" && managedGemini));
 
   if (!ready)
     return (

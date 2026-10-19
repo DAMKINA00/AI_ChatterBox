@@ -9,6 +9,8 @@ import { ChatManager } from "./chats";
 import { AttachmentStore } from "./attachments";
 import { GrokDriver } from "./drivers/grok";
 import { GeminiDriver } from "./drivers/gemini";
+import { AIStudioDriver } from "./drivers/aistudio";
+import { AISTUDIO_MODEL } from "../shared/aistudio";
 import { publishGeneratedImages } from "./drivers/generated-images";
 import { DEFAULT_SETTINGS, GEMINI_WEB_MODEL, parseOrchestrator } from "../shared/types";
 
@@ -43,6 +45,9 @@ test("three-provider DB upgrade preserves workers, sessions and new Grok setting
     assert.equal(chats.roleConfig(store.chat(chat.id)!, p, grok.key).effort, "high");
     store.updateChat(chat.id, { orchestratorModelOverride: `gemini:${GEMINI_WEB_MODEL}` });
     await assert.rejects(chats.driver(chat.id, "orch"), /마스터는 Antigravity CLI/);
+    store.updateChat(chat.id, { orchestratorModelOverride: `gemini:${AISTUDIO_MODEL}`, geminiModelOverride: AISTUDIO_MODEL });
+    assert.ok(await chats.driver(chat.id, "orch") instanceof AIStudioDriver);
+    assert.ok(await chats.driver(chat.id, old.key, "") instanceof AIStudioDriver);
     await chats.dispose();
     store.close(); store = new Store(path);
     assert.equal(store.chat(chat.id)!.grokModelOverride, "grok-4.6");
@@ -53,12 +58,16 @@ test("three-provider DB upgrade preserves workers, sessions and new Grok setting
     assert.deepEqual(parseOrchestrator("gemini:gemini-pro"), { agent: "gemini", model: "gemini-pro" });
     assert.deepEqual(parseOrchestrator("grok:grok-4.6"), { agent: "grok", model: "grok-4.6" });
     store.setSetting(`teamMessages:${chat.id}:w1`, "100");
+    store.setSetting(`aistudio-context:${chat.id}:orch:${AISTUDIO_MODEL}`, "private history");
     store.deleteChat(chat.id);
+    assert.equal(store.getSetting(`aistudio-context:${chat.id}:orch:${AISTUDIO_MODEL}`), undefined);
     assert.equal(store.getSetting(`orchSession:${chat.id}:grok`), undefined);
     assert.equal(store.getSetting(`teamMessages:${chat.id}:w1`), undefined);
     const next = store.createChat(p.id, "new conversation");
     store.setSetting(`orchSession:${next.id}:gemini`, "new-native");
+    store.setSetting(`aistudio-context:${next.id}:orch:${AISTUDIO_MODEL}`, "private history");
     store.deleteProject(p.id);
+    assert.equal(store.getSetting(`aistudio-context:${next.id}:orch:${AISTUDIO_MODEL}`), undefined);
     assert.equal(store.getSetting(`orchSession:${next.id}:gemini`), undefined);
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });

@@ -50,6 +50,7 @@ import { completionIssue, dualInvestigationIssue } from "./dispatch";
 import { WORKER_EFFORTS } from "./effort";
 import { conversationAccount, webAccountId } from "./drivers/gemini-web-protocol";
 import { WEB_LOW_REMAINING } from "./drivers/gemini-web-accounts";
+import { isAIStudioModel } from "../shared/aistudio";
 
 const KINDS: ConsultKind[] = ["implement", "review", "opinion", "writing"];
 const MAX_DEPTH = 3;
@@ -1063,14 +1064,15 @@ export class Orchestrator {
     return null;
   }
 
-  /** The master moved to the other CLI (Claude ↔ GPT): hand its new session a summary of the chat so far. */
+  /** Hand a summary to a new provider/session, including Gemini CLI ↔ AI Studio. */
   private handover(chat: Chat): string {
     const project = this.chats.store.project(chat.projectId)!;
-    const { agent } = chatOrchestrator(chat, project);
+    const { agent, model } = chatOrchestrator(chat, project);
+    const session = agent === "gemini" && isAIStudioModel(model) ? `${agent}:${model}` : agent;
     const key = `orchAgent:${chat.id}`;
     const prev = this.chats.store.getSetting(key);
-    this.chats.store.setSetting(key, agent);
-    if (!prev || prev === agent) return "";
+    this.chats.store.setSetting(key, session);
+    if (!prev || prev === session) return "";
     const agents = this.agents(chat.id);
     const lines: string[] = [];
     for (const e of this.chats.store.events(chat.id)) {
@@ -1082,9 +1084,9 @@ export class Orchestrator {
     }
     const team = agents.filter((a) => a.status === "active").map((a) => `${a.nickname}(${a.job || "역할 미정"})`).join(", ");
     const recent = lines.slice(-16).join("\n").slice(-6000);
-    const name = (a: string) => AGENT_LABEL[a as AgentKind] ?? a;
-    this.chats.emit(chat.id, "orch", null, { type: "notice", text: `마스터가 ${name(agent)}로 바뀌어 지금까지의 요약을 넘깁니다` });
-    return `[AI_ChatterBox] 이 채팅의 마스터가 ${name(prev)}에서 ${name(agent)}로 바뀌었습니다.${team ? ` 지금 팀: ${team}.` : ""} 지금까지의 대화 요약:\n${recent}\n\n---\n`;
+    const name = (a: string) => a.startsWith("gemini:aistudio:") ? `제미나이 · AI Studio (${a.slice(16)})` : AGENT_LABEL[a as AgentKind] ?? a;
+    this.chats.emit(chat.id, "orch", null, { type: "notice", text: `마스터가 ${name(session)}로 바뀌어 지금까지의 요약을 넘깁니다` });
+    return `[AI_ChatterBox] 이 채팅의 마스터가 ${name(prev)}에서 ${name(session)}로 바뀌었습니다.${team ? ` 지금 팀: ${team}.` : ""} 지금까지의 대화 요약:\n${recent}\n\n---\n`;
   }
 
   private async instruct(chat: Chat, input: AgentInput) {

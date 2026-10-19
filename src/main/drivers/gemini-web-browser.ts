@@ -20,6 +20,7 @@ export class GeminiWebBrowser {
   private owner?: string;
   private disposed = false;
   private usageWindow?: BrowserWindow;
+  private studioWindow?: BrowserWindow;
   private usageReading?: Promise<GeminiWebUsage>;
   private verificationRequired = false;
   private lastUsageReadAt = 0;
@@ -54,6 +55,46 @@ export class GeminiWebBrowser {
   }
 
   status() { return this.last; }
+  /** Same isolated account partition as Gemini Web; authentication material stays in the main process. */
+  async studioState(show = true): Promise<{ email: string; cookies: Record<string, unknown>[]; origins: never[] }> {
+    if (this.disposed) throw new Error("웹 계정 연결이 종료되었습니다.");
+    if (!this.studioWindow || this.studioWindow.isDestroyed()) {
+      const ses = session.fromPath(join(this.dataDir, "web-accounts", this.accountId));
+      const win = new BrowserWindow({ width: 1100, height: 850, show: false, autoHideMenuBar: true,
+        title: `ChatterBox · AI Studio ${this.accountName}`, webPreferences: { session: ses, sandbox: true, nodeIntegration: false, contextIsolation: true } });
+      this.studioWindow = win;
+      const allowed = (raw: string) => { try { const u = new URL(raw); return u.protocol === "https:" && ["aistudio.google.com", "accounts.google.com", "myaccount.google.com", "consent.google.com"].includes(u.hostname); } catch { return false; } };
+      win.webContents.on("will-navigate", (e, url) => { if (!allowed(url)) e.preventDefault(); });
+      win.webContents.on("will-redirect", (e, url) => { if (!allowed(url)) e.preventDefault(); });
+      win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+      win.on("page-title-updated", e => e.preventDefault());
+      await win.loadURL("https://aistudio.google.com/?authuser=0");
+    }
+    const win = this.studioWindow;
+    if (show && !win.isVisible()) { win.show(); win.focus(); }
+    await delay(750);
+    if (win.isDestroyed() || !win.webContents.getURL().startsWith("https://aistudio.google.com/")) throw new Error("같은 Google 계정으로 AI Studio 로그인을 완료한 뒤 ‘AI Studio 동기화’를 다시 누르세요.");
+    const studioUrl = new URL(win.webContents.getURL());
+    const authUser = studioUrl.searchParams.get("authuser") ?? /\/u\/(\d+)(?:\/|$)/.exec(studioUrl.pathname)?.[1] ?? "0";
+    if (authUser !== "0") throw new Error("각 Web 계정 창의 첫 번째 Google 계정을 사용하세요. 다른 계정은 Web 관리에서 별도 계정 카드로 로그인하세요.");
+    const email: string = await win.webContents.executeJavaScript(`(() => {
+      const elements = document.querySelectorAll('a[href*="SignOutOptions"],a[href*="accounts.google.com"][aria-label],button[aria-label*="@"],button[data-email]');
+      for (const e of elements) {
+        const label = [e.getAttribute('aria-label'), e.getAttribute('title'), e.getAttribute('data-email')].filter(Boolean).join(' ');
+        const match = label.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i);
+        if (match) return match[0].toLowerCase();
+      }
+      return '';
+    })()`);
+    if (!email) throw new Error("AI Studio에서 로그인 계정을 확인하지 못했습니다. 계정 아이콘과 이용 동의를 확인한 뒤 다시 동기화하세요.");
+    const all = await win.webContents.session.cookies.get({});
+    const cookies = all.filter(c => /(^|\.)google\.com$/.test((c.domain ?? "").replace(/^\./, "")))
+      .map(c => ({ name: c.name, value: c.value, domain: c.domain, path: c.path, expires: c.expirationDate ?? -1, httpOnly: c.httpOnly, secure: c.secure,
+        sameSite: c.sameSite === "strict" ? "Strict" : c.sameSite === "lax" ? "Lax" : "None" }));
+    if (!["SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID"].every(name => cookies.some(c => c.name === name))) throw new Error("Google 인증 세션이 만료되었습니다. 제미나이 웹 계정 관리에서 다시 로그인하세요.");
+    if (!show) win.hide();
+    return { email, cookies, origins: [] };
+  }
   private setUsage(usage: GeminiWebUsage) {
     this.last = { ...this.last, usage };
     this.onUsage(usage);
@@ -378,6 +419,7 @@ export class GeminiWebBrowser {
     this.disposed = true; this.owner = undefined;
     for (const popup of this.authWindows) if (!popup.isDestroyed()) popup.destroy();
     if (this.usageWindow && !this.usageWindow.isDestroyed()) this.usageWindow.destroy();
+    if (this.studioWindow && !this.studioWindow.isDestroyed()) this.studioWindow.destroy();
     if (this.win && !this.win.isDestroyed()) {
       this.win.webContents.stop();
       this.win.webContents.session.flushStorageData();

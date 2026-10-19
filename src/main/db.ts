@@ -578,7 +578,7 @@ export class Store {
   }
 
   private clearChatSettings(id: number) {
-    for (const prefix of ["orchSession", "teamMessages", "gemini-web-context"])
+    for (const prefix of ["orchSession", "teamMessages", "gemini-web-context", "aistudio-context"])
       this.db.prepare("DELETE FROM settings WHERE key LIKE ?").run(`${prefix}:${id}:%`);
   }
 

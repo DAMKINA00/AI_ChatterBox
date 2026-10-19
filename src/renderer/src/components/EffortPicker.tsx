@@ -1,5 +1,6 @@
 import { useEffect, useMemo } from "react";
 import { ChevronDown, RotateCcw } from "lucide-react";
+import { isAIStudioModel } from "../../../shared/aistudio";
 import { GEMINI_WEB_MODEL, type AgentKind, type ModelOption } from "../../../shared/types";
 import { cn } from "../lib/utils";
 import { useStore } from "../store";
@@ -84,10 +85,11 @@ export function EffortPicker({
   const modelErrors = useStore((s) => s.modelErrors);
   const loadModels = useStore((s) => s.loadModels);
   const webModel = agent === "gemini" && model === GEMINI_WEB_MODEL;
+  const aiStudioModel = agent === "gemini" && isAIStudioModel(model);
 
   useEffect(() => {
-    if (!webModel) void loadModels(agent);
-  }, [agent, loadModels, webModel]);
+    if (!webModel && !aiStudioModel) void loadModels(agent);
+  }, [agent, aiStudioModel, loadModels, webModel]);
 
   const options = useMemo(() => effortOptions(models, agent, model, worker), [models, agent, model, worker]);
   const metadata = models[agent];
@@ -104,22 +106,23 @@ export function EffortPicker({
   }
   const statusTitle = status ? `${effortLabel(value)} · ${status}` : undefined;
 
-  if (webModel) {
+  if (webModel || aiStudioModel) {
+    const title = webModel ? WEB_EFFORT_TITLE : "현재 AI Studio 연결은 모델의 기본 추론 설정을 사용합니다.";
     return (
-      <Tooltip content={WEB_EFFORT_TITLE}>
-        <span className="inline-flex" title={WEB_EFFORT_TITLE}>
+      <Tooltip content={title}>
+        <span className="inline-flex" title={title}>
           <Button
             variant="outline"
             size={compact ? "xs" : "default"}
             disabled
             aria-label={ariaLabel}
-            title={WEB_EFFORT_TITLE}
+            title={title}
             data-testid="effort-picker"
             data-effort={value}
-            data-effort-status="web"
+            data-effort-status={webModel ? "web" : "aistudio"}
             className={cn("justify-between font-normal", compact && "max-w-28", !compact && "min-w-32", className)}
           >
-            <span className="truncate">웹 모델 설정</span>
+            <span className="truncate">{webModel ? "웹 모델 설정" : "AI Studio 모델 설정"}</span>
             <ChevronDown className="opacity-60" />
           </Button>
         </span>

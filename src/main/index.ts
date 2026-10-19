@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, protocol, shell, nativeTheme, screen } from "electron";
-import { mkdirSync, readFileSync, existsSync, statSync, copyFileSync } from "node:fs";
+import { mkdirSync, readFileSync, existsSync, statSync, copyFileSync, writeFileSync } from "node:fs";
 import { join, basename, resolve } from "node:path";
 import type { AgentKind, ApprovalDecision, ProjectSettings, Theme, GeminiWebAccountId } from "../shared/types";
 import { Store } from "./db";
@@ -10,6 +10,7 @@ import { AppTray } from "./tray";
 import { ensureOnlyInstance } from "./instance-guard";
 import { mayOpenDocument, resolveLink } from "./file-links";
 import { previewImage } from "./artifact-preview";
+import type { AIStudioAction, AIStudioInput } from "../shared/aistudio";
 
 // Data lives in %APPDATA%\AI_ChatterBox. Tests point AI_CHATTERBOX_DATA at scratch folders; the packaged
 // app only honours it with an explicit --test-data flag, so a stray variable can never hide real data.
@@ -187,6 +188,33 @@ function registerIpc() {
   // misc
   ipcMain.handle("cli:info", (_e, checkAuth?: boolean) => checkAuth ? chats.checkedCliInfo() : chats.cliInfo());
   ipcMain.handle("models:list", (_e, agent: AgentKind) => chats.models(agent));
+  ipcMain.handle("aistudio", async (_e, action: AIStudioAction, input: AIStudioInput = {}) => {
+    const studio = chats.aiStudio();
+    if (action === "save") studio.save(input);
+    else if (action === "launch") await studio.launch();
+    else if (action === "start") await studio.start();
+    else if (action === "stop") await studio.json("/api/control/stop", {});
+    else if (action === "refresh") await studio.account(action, input);
+    else if (action === "enable") {
+      const accounts = chats.geminiWebAccounts();
+      const ids = input.accountId ? studio.linkedWebAccounts(input.accountId) : [];
+      const previous = accounts.list().filter(a => ids.includes(a.accountId));
+      try {
+        for (const account of previous) accounts.update(account.accountId, { enabled: input.enabled });
+        await studio.account(action, input);
+      } catch (error) {
+        for (const account of previous) accounts.update(account.accountId, { enabled: account.enabled });
+        throw error;
+      }
+    }
+    else if (action === "sync-web") await chats.syncStudioWeb(input.accountId as GeminiWebAccountId);
+    else if (action === "open") await shell.openExternal(studio.settings().baseUrl);
+    else if (action === "export-antigravity") {
+      const target = await dialog.showSaveDialog({ title: "Antigravity Custom Model Enabler 설정 저장", defaultPath: "chatterbox-aistudio-argon.json", filters: [{ name: "JSON", extensions: ["json"] }] });
+      if (target.filePath) writeFileSync(target.filePath, JSON.stringify(studio.antigravityConfig(), null, 2), "utf8");
+    } else if (action !== "status") throw new Error("지원하지 않는 AI Studio 요청입니다.");
+    return studio.status();
+  });
   ipcMain.handle("gemini:web", (_e, action: string, accountId: GeminiWebAccountId = "gemini-1") => {
     const browser = chats.geminiWeb(accountId);
     if (action === "login") return browser.login();
@@ -195,11 +223,20 @@ function registerIpc() {
     if (action === "status") return browser.status();
     throw new Error("지원하지 않는 웹 연결 요청입니다.");
   });
-  ipcMain.handle("gemini:web-accounts", (_e, action: string, input?: { accountId?: GeminiWebAccountId; label?: string; enabled?: boolean }) => {
+  ipcMain.handle("gemini:web-accounts", async (_e, action: string, input?: { accountId?: GeminiWebAccountId; label?: string; enabled?: boolean }) => {
     const accounts = chats.geminiWebAccounts();
     if (action === "list") return accounts.list();
     if (action === "add") return accounts.add();
-    if (action === "update" && input?.accountId) return accounts.update(input.accountId, input);
+    if (action === "update" && input?.accountId) {
+      const previous = accounts.list().find(a => a.accountId === input.accountId);
+      const updated = accounts.update(input.accountId, input);
+      const linked = chats.aiStudio().linkedAccount(input.accountId);
+      if (linked && input.enabled !== undefined) {
+        try { await chats.aiStudio().account("enable", { accountId: linked, enabled: input.enabled }); }
+        catch (error) { if (previous) accounts.update(input.accountId, { enabled: previous.enabled }); throw error; }
+      }
+      return updated;
+    }
     throw new Error("지원하지 않는 웹 계정 관리 요청입니다.");
   });
   ipcMain.handle("theme:get", () => (store.getSetting("theme") as Theme) ?? "dark");

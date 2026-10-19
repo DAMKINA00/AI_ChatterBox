@@ -9,6 +9,10 @@ export function isReadCommand(command: string): boolean {
 }
 
 export function isMutatingTool(name: string, input: string, hasDiffs = false): boolean {
-  if (hasDiffs || ["Write", "Edit", "MultiEdit", "NotebookEdit", "파일 변경"].includes(name)) return true;
+  if (hasDiffs || ["Write", "Edit", "MultiEdit", "NotebookEdit", "파일 변경", "write_file", "edit_file", "save_video"].includes(name)) return true;
+  if (name === "run_command") {
+    try { const command = JSON.parse(input).command; return typeof command !== "string" || !isReadCommand(command); }
+    catch { return true; }
+  }
   return ["Bash", "PowerShell", "명령"].includes(name) && !isReadCommand(input);
 }

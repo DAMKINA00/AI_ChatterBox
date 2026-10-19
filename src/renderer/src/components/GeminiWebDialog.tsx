@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CircleAlert, ExternalLink, Loader2, Plus, RefreshCw, Sparkles } from "lucide-react";
+import type { AIStudioAccount, AIStudioCooldown, AIStudioStatus } from "../../../shared/aistudio";
 import type { GeminiWebAccountId, GeminiWebAccountStatus, GeminiWebStatus, GeminiWebUsage } from "../../../shared/types";
 import { api, errorMessage } from "../lib/utils";
 import { Button, Dialog, DialogContent, DialogFooter, Input, Tooltip } from "./ui";
@@ -95,6 +96,26 @@ function checkedText(ts: number | undefined): string {
   return `${date.toLocaleString("ko-KR")} 확인`;
 }
 
+type AIStudioWebLink = NonNullable<AIStudioStatus["webLinks"]>[string];
+
+function aiStudioLink(status: AIStudioStatus | undefined, accountId: GeminiWebAccountId): AIStudioWebLink | undefined {
+  return status?.webLinks?.[accountId];
+}
+
+function aiStudioAccount(status: AIStudioStatus | undefined, link: AIStudioWebLink | undefined): AIStudioAccount | undefined {
+  return link?.accountId ? status?.accounts.find(account => account.id === link.accountId) : undefined;
+}
+
+function aiStudioCooldowns(status: AIStudioStatus | undefined, account: AIStudioAccount | undefined): AIStudioCooldown[] {
+  if (!account || !status) return [];
+  return status.cooldowns.filter(cooldown => cooldown.account_id === account.id);
+}
+
+function cooldownResetText(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? value : date.toLocaleString("ko-KR");
+}
+
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -103,12 +124,15 @@ interface Props {
 
 type LoginFeedback = "pending" | "complete";
 
-function AccountCard({ account, pending, loginFeedback, update, query }: {
+function AccountCard({ account, pending, loginFeedback, update, query, aiStudioStatus, aiStudioPending, syncAIStudio }: {
   account: GeminiWebAccountStatus;
   pending: boolean;
   loginFeedback?: LoginFeedback;
   update: (id: GeminiWebAccountId, patch: { label?: string; enabled?: boolean }) => void;
   query: (id: GeminiWebAccountId, action: "login" | "open" | "refresh") => void;
+  aiStudioStatus?: AIStudioStatus;
+  aiStudioPending: boolean;
+  syncAIStudio: (id: GeminiWebAccountId) => void;
 }) {
   const [label, setLabel] = useState(account.label);
   useEffect(() => setLabel(account.label), [account.label]);
@@ -119,6 +143,13 @@ function AccountCard({ account, pending, loginFeedback, update, query }: {
   const showLoginFeedback = loginFeedback === "complete"
     ? account.state === "ready" || account.state === "busy"
     : loginFeedback === "pending" && (pending || (account.state !== "closed" && account.state !== "error"));
+  const studioLink = aiStudioLink(aiStudioStatus, account.accountId);
+  const studioAccount = aiStudioAccount(aiStudioStatus, studioLink);
+  const cooldowns = aiStudioCooldowns(aiStudioStatus, studioAccount);
+  const argonAvailable = studioAccount && aiStudioStatus
+    ? studioAccount.models.includes(aiStudioStatus.settings.model)
+    : undefined;
+  const studioStateText = studioLink?.state === "connected" ? "연결됨" : studioLink?.state === "error" ? "오류" : "연결되지 않음";
   return (
     <section className="grid gap-3 rounded-xl border bg-card p-4" data-testid="gemini-web-account" data-account-id={account.accountId}>
       <div className="flex items-center gap-2">
@@ -146,6 +177,45 @@ function AccountCard({ account, pending, loginFeedback, update, query }: {
           <span className="text-[11px] text-muted-foreground">{checkedText(account.usage.checkedAt)}</span>
         </div>
       </Tooltip>
+      <section className="grid gap-2 rounded-lg border border-primary/20 bg-primary/5 p-3" data-testid="aistudio-link">
+        <div className="flex items-center gap-2">
+          <Sparkles className="size-4 text-primary" />
+          <span className="text-[12px] font-medium">AI Studio · Argon</span>
+          <span className={studioLink?.state === "connected" ? "text-[11px] text-emerald-500" : studioLink?.state === "error" ? "text-[11px] text-destructive" : "text-[11px] text-muted-foreground"} data-testid="aistudio-sync-state">{studioStateText}</span>
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            className="ml-auto"
+            disabled={pending || aiStudioPending}
+            onClick={() => syncAIStudio(account.accountId)}
+            title="현재 Gemini Web 로그인 세션으로 연결합니다. 필요하면 AI Studio 동의 탭이 열립니다."
+            data-testid="aistudio-sync"
+          >
+            <Sparkles /> {studioLink?.state === "connected" ? "다시 동기화" : "연결"}
+          </Button>
+        </div>
+        <p className="text-[11.5px] text-muted-foreground" data-testid="aistudio-sync-message">
+          {studioLink?.message ?? "현재 웹 로그인 세션을 사용해 명시적으로 연결하세요. 필요하면 AI Studio 동의 탭이 열립니다."}
+          {studioLink?.checkedAt ? ` · ${checkedText(studioLink.checkedAt)}` : ""}
+        </p>
+        {studioAccount ? (
+          <div className="grid gap-1 text-[11.5px] text-muted-foreground" data-testid="aistudio-account-info">
+            <span>연결된 계정: {studioAccount.label || studioAccount.id} · 등급 {studioAccount.benefit_tier || "정보 없음"} · 상태 {studioAccount.state || "정보 없음"}</span>
+            <span className={argonAvailable === true ? "text-emerald-500" : argonAvailable === false ? "text-destructive" : "text-muted-foreground"}>Argon 사용 가능: {argonAvailable === undefined ? "알 수 없음" : argonAvailable ? "예" : "아니요"}</span>
+            <div className="grid gap-1" data-testid="aistudio-cooldowns">
+              {cooldowns.length ? cooldowns.map(cooldown => (
+                <span key={`${cooldown.model_id}:${cooldown.channel}:${cooldown.until}`}>
+                  쿨다운: {cooldown.model_id} · {cooldown.channel} · {cooldownResetText(cooldown.until)} 초기화{cooldown.reason ? ` · ${cooldown.reason}` : ""}
+                </span>
+              )) : <span>쿨다운 없음</span>}
+            </div>
+          </div>
+        ) : (
+          <span className="text-[11.5px] text-muted-foreground">연결 후 AI Studio 계정 등급·상태·Argon 가능 여부와 쿨다운을 표시합니다.</span>
+        )}
+        {aiStudioStatus?.error && <span className="text-[11.5px] text-destructive" data-testid="aistudio-status-error">AI Studio 상태: {aiStudioStatus.error}</span>}
+      </section>
       <p className="min-h-8 text-[12px] text-muted-foreground">{account.message}</p>
       {showLoginFeedback && (
         <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-[12px] text-muted-foreground" data-testid="gemini-web-login-feedback" role="status" aria-live="polite">
@@ -166,7 +236,11 @@ export function GeminiWebDialog({ open, onOpenChange, onUseModel }: Props) {
   const [pendingAccounts, setPendingAccounts] = useState<Set<GeminiWebAccountId>>(() => new Set());
   const [loginFeedback, setLoginFeedback] = useState<Partial<Record<GeminiWebAccountId, LoginFeedback>>>({});
   const [error, setError] = useState<string>();
+  const [aiStudioStatus, setAIStudioStatus] = useState<AIStudioStatus>();
+  const [aiStudioError, setAIStudioError] = useState<string>();
+  const [aiStudioPending, setAIStudioPending] = useState<Set<GeminiWebAccountId>>(() => new Set());
   const listRequestInFlight = useRef(false);
+  const aiStudioRequestInFlight = useRef(false);
   const reload = useCallback(async () => {
     if (listRequestInFlight.current) return;
     listRequestInFlight.current = true;
@@ -189,6 +263,30 @@ export function GeminiWebDialog({ open, onOpenChange, onUseModel }: Props) {
       window.clearInterval(timer);
     };
   }, [open, reload]);
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    const refresh = async () => {
+      if (!active || aiStudioRequestInFlight.current) return;
+      aiStudioRequestInFlight.current = true;
+      try {
+        const status = await api.aiStudio("status");
+        if (!active) return;
+        setAIStudioStatus(status);
+        setAIStudioError(undefined);
+      } catch (e) {
+        if (active) setAIStudioError(errorMessage(e));
+      } finally {
+        aiStudioRequestInFlight.current = false;
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 5000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [open]);
   useEffect(() => {
     if (!open) return;
     let active = true;
@@ -242,6 +340,27 @@ export function GeminiWebDialog({ open, onOpenChange, onUseModel }: Props) {
       });
     }
   };
+  const syncAIStudio = async (id: GeminiWebAccountId) => {
+    if (aiStudioRequestInFlight.current) return;
+    setAIStudioPending(current => new Set(current).add(id));
+    setAIStudioError(undefined);
+    aiStudioRequestInFlight.current = true;
+    try {
+      const status = await api.aiStudio("sync-web", { accountId: id });
+      setAIStudioStatus(status);
+      setAIStudioError(status.error);
+      await reload().catch(e => setError(errorMessage(e)));
+    } catch (e) {
+      setAIStudioError(errorMessage(e));
+    } finally {
+      aiStudioRequestInFlight.current = false;
+      setAIStudioPending(current => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
+    }
+  };
   const canUse = accounts.some(a => a.enabled && a.state !== "login_required" && a.state !== "error" && a.usage.status !== "limited" && a.remainingPercent !== 0
     && (a.state === "ready" || a.state === "busy" || (a.usage.status === "available" && (a.remainingPercent ?? 0) > 0)));
   return (
@@ -252,6 +371,7 @@ export function GeminiWebDialog({ open, onOpenChange, onUseModel }: Props) {
           <Button className="ml-auto" type="button" variant="outline" disabled={pending || accounts.length >= 10} onClick={() => void manage("add")} data-testid="gemini-web-add-account"><Plus /> 계정 추가</Button>
         </div>
         {error && <div role="alert" className="flex gap-2 rounded-lg border border-destructive/50 p-3 text-[12px] text-destructive"><CircleAlert className="size-4 shrink-0" />{error}</div>}
+        {(aiStudioError || aiStudioStatus?.error) && <div role="status" className="flex gap-2 rounded-lg border border-primary/30 bg-primary/5 p-3 text-[12px] text-muted-foreground" data-testid="aistudio-status-error"><Sparkles className="size-4 shrink-0 text-primary" />AI Studio 상태를 확인하지 못했습니다: {aiStudioError ?? aiStudioStatus?.error}</div>}
         <div className="grid max-h-[58vh] gap-3 overflow-y-auto pr-1 sm:grid-cols-2" data-testid="gemini-web-accounts">
           {accounts.map(account => <AccountCard
             key={account.accountId}
@@ -260,6 +380,9 @@ export function GeminiWebDialog({ open, onOpenChange, onUseModel }: Props) {
             loginFeedback={loginFeedback[account.accountId]}
             update={(id, patch) => void manage("update", { accountId: id, ...patch })}
             query={(id, action) => void query(id, action)}
+            aiStudioStatus={aiStudioStatus}
+            aiStudioPending={aiStudioPending.has(account.accountId)}
+            syncAIStudio={(id) => void syncAIStudio(id)}
           />)}
           {!accounts.length && <p className="text-[12px] text-muted-foreground">계정을 불러오는 중입니다.</p>}
         </div>
