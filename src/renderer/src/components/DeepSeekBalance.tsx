@@ -22,7 +22,7 @@ export function DeepSeekBalance({ compact = false, onOpen }: { compact?: boolean
       <button type="button" onClick={onOpen} data-testid="deepseek-balance" className="flex w-full items-center gap-2 rounded text-[11px] hover:bg-accent">
         <span className="w-[108px] shrink-0 whitespace-nowrap text-left text-muted-foreground">딥시크 {ready ? "잔고" : label}</span>
         <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">{gauge}</div>
-        <span className={cn("w-9 shrink-0 whitespace-nowrap text-right tabular-nums", (insufficient || balance?.state === "error") && "text-destructive")}>{amount}</span>
+        <span className={cn("w-9 shrink-0 whitespace-nowrap text-right text-muted-foreground tabular-nums", (insufficient || balance?.state === "error") && "text-destructive")}>{amount}</span>
       </button>
     </Tooltip>
   );
