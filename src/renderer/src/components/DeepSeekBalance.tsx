@@ -2,7 +2,7 @@ import { useStore } from "../store";
 import { cn } from "../lib/utils";
 import { Tooltip } from "./ui";
 
-export function DeepSeekBalance({ compact = false, onOpen }: { compact?: boolean; onOpen?: () => void }) {
+export function DeepSeekBalance({ compact = false }: { compact?: boolean }) {
   const balance = useStore(s => s.usage.deepseek);
   const ready = balance?.state === "ready";
   const label = balance?.state === "unconfigured" ? "키 미설정" : balance?.state === "error" ? "조회 실패" : "조회 중";
@@ -19,11 +19,11 @@ export function DeepSeekBalance({ compact = false, onOpen }: { compact?: boolean
   </div>;
   if (compact) return (
     <Tooltip content={[detail, usd ? `$10 기준 ${percent.toFixed(1)}%` : "", insufficient ? "API 사용 잔고 부족" : "", time].filter(Boolean).join(" · ")}>
-      <button type="button" onClick={onOpen} data-testid="deepseek-balance" className="flex w-full items-center gap-2 rounded text-[11px] hover:bg-accent">
+      <div data-testid="deepseek-balance" className="flex w-full items-center gap-2 text-[11px]">
         <span className="w-[108px] shrink-0 whitespace-nowrap text-left text-muted-foreground">딥시크 {ready ? "잔고" : label}</span>
         <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">{gauge}</div>
         <span className={cn("w-9 shrink-0 whitespace-nowrap text-right text-muted-foreground tabular-nums", (insufficient || balance?.state === "error") && "text-destructive")}>{amount}</span>
-      </button>
+      </div>
     </Tooltip>
   );
   return (

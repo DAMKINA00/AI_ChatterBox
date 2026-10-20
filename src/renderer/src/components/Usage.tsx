@@ -98,7 +98,7 @@ export function UsageBar() {
       <Bar name="지피티" d={pickUsage(usage.codex)} color="bg-gpt" />
       <Bar name="제미나이" d={pickUsage(usage.gemini)} color="bg-gemini" error={usage.gemini?.error} updatedAt={usage.gemini?.updatedAt} />
       <Bar name="그록" d={pickUsage(usage.grok)} color="bg-grok" error={usage.grok?.error} updatedAt={usage.grok?.updatedAt} />
-      <DeepSeekBalance compact onOpen={() => setDeepseekOpen(true)} />
+      <DeepSeekBalance compact />
       <GeminiWebDialog open={webOpen} onOpenChange={setWebOpen} />
       <AIStudioDialog open={aiStudioOpen} onOpenChange={setAiStudioOpen} />
       <DeepSeekDialog open={deepseekOpen} onOpenChange={setDeepseekOpen} />

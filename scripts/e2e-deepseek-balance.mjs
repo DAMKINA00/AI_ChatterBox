@@ -112,11 +112,14 @@ try {
   check("unconfigured balance is distinct from a zero balance", /미설정|조회 전/.test(initialSummary) && !initialSummary.includes("0.00"));
 
   await summary.click();
+  const balanceOpensDialog = await page.getByRole("dialog").count() > 0;
+  await page.getByTestId("connection-settings").click();
+  await page.getByTestId("deepseek-manage").click();
   const dialog = page.getByRole("dialog").filter({ hasText: "DeepSeek API" });
   await dialog.waitFor();
   const details = page.getByTestId("deepseek-balance-details");
   await details.waitFor();
-  check("balance summary opens DeepSeek settings and exposes the unconfigured state", await dialog.getByTestId("deepseek-status").innerText().then(text => /키 미설정|저장된 키 없음/.test(text)));
+  check("balance row is read-only and the settings menu exposes the unconfigured state", !balanceOpensDialog && await dialog.getByTestId("deepseek-status").innerText().then(text => /키 미설정|저장된 키 없음/.test(text)));
 
   await dialog.getByTestId("deepseek-api-key").fill("sk-test-balance-fixture");
   await dialog.getByTestId("deepseek-save").click();
@@ -223,10 +226,11 @@ try {
   await page.waitForTimeout(80);
   check("global usage refresh requests a completed usage snapshot", await app.evaluate(() => globalThis.__deepseekBalanceTest.usageRequests.includes(true)));
 
-  await summary.click();
+  await page.getByTestId("connection-settings").click();
+  await page.getByTestId("deepseek-manage").click();
   const reopenedDialog = page.getByRole("dialog").filter({ hasText: "DeepSeek API" });
   await reopenedDialog.waitFor();
-  check("opening the compact 6.4 dollar row reveals the exact 6.46 dollar total", (await details.innerText()).includes("USD 6.46"));
+  check("settings menu reveals the exact 6.46 dollar total behind the compact 6.4 dollar display", (await details.innerText()).includes("USD 6.46"));
   await reopenedDialog.getByTestId("deepseek-remove").click();
   await reopenedDialog.getByTestId("deepseek-status").getByText("키 미설정", { exact: true }).waitFor();
   await page.waitForTimeout(80);
