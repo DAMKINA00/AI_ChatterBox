@@ -3,6 +3,7 @@ import { CircleAlert, CircleCheck, KeyRound, RefreshCw, Trash2 } from "lucide-re
 import { DEEPSEEK_MODEL, type DeepSeekAction, type DeepSeekStatus } from "../../../shared/deepseek";
 import { api, errorMessage } from "../lib/utils";
 import { Badge, Button, Dialog, DialogContent, DialogFooter, Input, Label } from "./ui";
+import { DeepSeekBalance } from "./DeepSeekBalance";
 
 const STATE_LABEL: Record<DeepSeekStatus["state"], string> = {
   unconfigured: "키 미설정",
@@ -33,6 +34,7 @@ export function DeepSeekDialog({ open, onOpenChange, onUseModel }: Props) {
       if (seq !== requestSeq.current) return;
       setStatus(next);
       if (action !== "status") setApiKey("");
+      if (action === "save") await api.deepSeek("balance");
     } catch (e) {
       if (seq === requestSeq.current) setError(errorMessage(e));
     } finally {
@@ -48,7 +50,7 @@ export function DeepSeekDialog({ open, onOpenChange, onUseModel }: Props) {
       return;
     }
     setApiKey("");
-    void run("status");
+    void run("balance");
   }, [open, run]);
 
   const handleOpenChange = (nextOpen: boolean) => {
@@ -70,7 +72,7 @@ export function DeepSeekDialog({ open, onOpenChange, onUseModel }: Props) {
   const useModelLabel = preferredModel === DEEPSEEK_MODEL ? "Flash 모델 사용" : `${preferredModel} 사용`;
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent title="DeepSeek API" description="API 키를 로컬에 저장하고 모델 목록을 확인합니다." className="w-[min(620px,calc(100vw-32px))]" data-testid="deepseek-dialog">
+      <DialogContent title="DeepSeek API" description="API 키, 모델 연결과 남은 잔고를 관리합니다." className="w-[min(620px,calc(100vw-32px))]" data-testid="deepseek-dialog">
         <div className="grid gap-4">
           <div className="rounded-lg border border-warning/40 bg-warning/8 p-3 text-[12px] leading-relaxed text-muted-foreground">
             <div className="mb-1 flex items-center gap-2 font-medium text-foreground"><KeyRound className="size-4 text-warning" /> API 사용 안내</div>
@@ -111,6 +113,14 @@ export function DeepSeekDialog({ open, onOpenChange, onUseModel }: Props) {
               {(status.error || error) && <div className="text-destructive" data-testid="deepseek-error">{status.error ?? error}</div>}
             </div>
           )}
+          <div className="grid gap-2 rounded-lg border p-3">
+            <div className="flex items-center justify-between gap-2 text-[12px] font-medium">
+              <span>API 잔고</span>
+              <Button type="button" size="xs" variant="outline" onClick={() => void run("balance")} disabled={busy || !status?.apiKeySet} data-testid="deepseek-balance-refresh"><RefreshCw /> 잔고 새로고침</Button>
+            </div>
+            <DeepSeekBalance />
+            <p className="text-[11px] text-muted-foreground">총잔고는 충전·지급 잔고를 포함합니다. 통화별로 표시하며, 잔고 조회는 생성 요청을 보내지 않습니다.</p>
+          </div>
           {error && !status?.error && <div role="alert" className="flex items-center gap-2 text-[12px] text-destructive"><CircleAlert className="size-4" />{error}</div>}
           <div className="flex items-center justify-between gap-2 rounded-lg border border-destructive/20 p-3">
             <div>

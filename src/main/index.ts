@@ -190,9 +190,10 @@ function registerIpc() {
   ipcMain.handle("models:list", (_e, agent: AgentKind) => chats.models(agent));
   ipcMain.handle("deepseek", async (_e, action, input = {}) => {
     const service = chats.deepSeek();
-    if (action === "save") service.save(input);
-    else if (action === "remove") service.remove();
+    if (action === "save") { service.save(input); chats.resetDeepSeekBalance(); }
+    else if (action === "remove") { service.remove(); chats.resetDeepSeekBalance(); }
     else if (action === "check") return service.check();
+    else if (action === "balance") await chats.refreshDeepSeekBalance();
     else if (action !== "status") throw new Error("지원하지 않는 DeepSeek 설정 작업입니다.");
     return service.status();
   });

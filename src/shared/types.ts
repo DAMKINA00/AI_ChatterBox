@@ -1,7 +1,7 @@
 // Types shared by main, preload and renderer.
 import type { ProviderUsage } from "./usage";
 import type { AIStudioAction, AIStudioInput, AIStudioStatus, AIStudioUsageRange, AIStudioUsageReport } from "./aistudio";
-import type { DeepSeekAction, DeepSeekInput, DeepSeekStatus } from "./deepseek";
+import type { DeepSeekAction, DeepSeekBalance, DeepSeekInput, DeepSeekStatus } from "./deepseek";
 
 export type AgentKind = "claude" | "codex" | "gemini" | "grok" | "deepseek";
 export const GEMINI_WEB_MODEL = "gemini-web-argon";
@@ -404,13 +404,13 @@ export interface ModelOption {
 
 export type Theme = "dark" | "light";
 
-/** Rate-limit usage per provider (see shared/usage.ts for what is displayed). */
+/** Subscription limits and API balances are separate measures. */
 export interface UsageInfo {
   claude?: ProviderUsage;
   codex?: ProviderUsage;
   gemini?: ProviderUsage;
   grok?: ProviderUsage;
-  deepseek?: ProviderUsage;
+  deepseek?: DeepSeekBalance;
   geminiWeb?: GeminiWebUsage;
 }
 

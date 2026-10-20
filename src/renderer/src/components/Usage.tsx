@@ -8,6 +8,7 @@ import { GeminiWebDialog } from "./GeminiWebDialog";
 import { AIStudioDialog } from "./AIStudioDialog";
 import { AIStudioUsage } from "./AIStudioUsage";
 import { DeepSeekDialog } from "./DeepSeekDialog";
+import { DeepSeekBalance } from "./DeepSeekBalance";
 
 function resetText(ts?: number | null) {
   if (!ts) return "";
@@ -53,8 +54,8 @@ export function UsageBar() {
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between text-[11px] font-medium text-muted-foreground">
-        <span>남은 사용량</span>
-        <button type="button" disabled={refreshing} aria-label="CLI 사용량 새로고침" title="로그인한 CLI 계정의 사용량 다시 조회" data-testid="usage-refresh" className="rounded p-1 hover:bg-accent disabled:opacity-50" onClick={async () => {
+        <span>남은 사용량 · 잔고</span>
+        <button type="button" disabled={refreshing} aria-label="사용량·잔고 새로고침" title="연결된 계정의 사용량과 API 잔고 다시 조회" data-testid="usage-refresh" className="rounded p-1 hover:bg-accent disabled:opacity-50" onClick={async () => {
           setRefreshing(true);
           try { useStore.setState({ usage: await api.usage(true) }); }
           catch (error) { useStore.getState().toast(errorMessage(error)); }
@@ -65,7 +66,7 @@ export function UsageBar() {
       <Bar name="지피티" d={pickUsage(usage.codex)} color="bg-gpt" />
       <Bar name="제미나이" d={pickUsage(usage.gemini)} color="bg-gemini" error={usage.gemini?.error} updatedAt={usage.gemini?.updatedAt} />
       <Bar name="그록" d={pickUsage(usage.grok)} color="bg-grok" error={usage.grok?.error} updatedAt={usage.grok?.updatedAt} />
-      <Bar name="딥시크" d={pickUsage(usage.deepseek)} color="bg-deepseek" error={usage.deepseek?.error} updatedAt={usage.deepseek?.updatedAt} />
+      <DeepSeekBalance compact onOpen={() => setDeepseekOpen(true)} />
       <AIStudioUsage compact onOpen={() => setAiStudioOpen(true)} />
       <div className="grid gap-1">
         <Button type="button" size="sm" variant="ghost" className="h-7 min-w-0 justify-start text-[11px]" onClick={() => setWebOpen(true)} data-testid="gemini-web-manage"><Globe2 /> <span className="truncate">제미나이 웹 계정 관리</span></Button>

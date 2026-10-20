@@ -84,6 +84,7 @@ export class ChatManager {
   private usageState: UsageInfo = {};
   private geminiUsageRefresh?: Promise<void>;
   private grokUsageRefresh?: Promise<void>;
+  private deepseekBalanceRefresh?: { key: string | undefined; promise: Promise<void> };
   private webAccounts?: GeminiWebAccounts;
   private studio?: AIStudioService;
   private deepseek?: DeepSeekService;
@@ -105,6 +106,8 @@ export class ChatManager {
     } catch {
       this.usageState = {};
     }
+    // API balances must be refreshed with the currently configured credential.
+    delete this.usageState.deepseek;
     this.approvals = new ApprovalService({
       emit: (chatId, node, role, event) => this.emit(chatId, node, role, event),
       log: (chatId, role, action, risk, decision, scope, by, reason) =>
@@ -354,6 +357,7 @@ export class ChatManager {
     if (u.grok) this.usageState = { ...this.usageState, grok: u.grok };
     if (u.gemini) this.usageState = { ...this.usageState, gemini: u.gemini };
     if (u.geminiWeb) this.usageState = { ...this.usageState, geminiWeb: u.geminiWeb };
+    if (u.deepseek) this.usageState = { ...this.usageState, deepseek: u.deepseek };
     // Remember the last values so the sidebar isn't empty on the next launch.
     if (!this.disposing) this.store.setSetting("usage", JSON.stringify(this.usageState));
     this.sink.usage(this.usageState);
@@ -399,13 +403,28 @@ export class ChatManager {
     return this.grokUsageRefresh;
   }
 
-  /** Independent providers: a missing Codex installation must not skip Gemini/Grok refreshes. */
+  resetDeepSeekBalance() {
+    this.mergeUsage({ deepseek: { state: this.deepSeek().status().apiKeySet ? "loading" : "unconfigured", balances: [] } });
+  }
+
+  refreshDeepSeekBalance(): Promise<void> {
+    const key = this.store.getSetting("deepseekApiKey");
+    if (this.deepseekBalanceRefresh && this.deepseekBalanceRefresh.key === key) return this.deepseekBalanceRefresh.promise;
+    const promise = this.deepSeek().balance().then(balance => {
+      if (!this.disposing && this.store.getSetting("deepseekApiKey") === key) this.mergeUsage({ deepseek: balance });
+    }).finally(() => { if (this.deepseekBalanceRefresh?.promise === promise) this.deepseekBalanceRefresh = undefined; });
+    this.deepseekBalanceRefresh = { key, promise };
+    return promise;
+  }
+
+  /** Providers refresh independently, even when another CLI is missing. */
   async refreshUsage(): Promise<void> {
     await Promise.allSettled([
       Promise.resolve().then(() => this.codex().readUsage()),
       Promise.resolve().then(() => this.refreshClaudeUsage()),
       Promise.resolve().then(() => this.refreshGeminiUsage()),
       Promise.resolve().then(() => this.refreshGrokUsage()),
+      Promise.resolve().then(() => this.refreshDeepSeekBalance()),
     ]);
   }
 
