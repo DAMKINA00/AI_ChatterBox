@@ -129,11 +129,12 @@ try {
   await page.reload();
   await page.waitForSelector('[data-testid="sidebar"]');
   await page.locator(`[data-testid="chat-node"][data-chat-id="${chatId}"] [role="treeitem"]`).click();
+  await page.getByTestId("connection-settings").click();
   await page.getByTestId("deepseek-manage").click();
   const dialog = page.getByRole("dialog").filter({ hasText: "DeepSeek API" });
   await dialog.waitFor();
   await page.screenshot({ path: join(base, "deepseek-dialog.png") });
-  check("DeepSeek API settings are exposed from usage", await page.getByTestId("deepseek-manage").count() === 1 && await dialog.getByTestId("deepseek-api-key").getAttribute("type") === "password");
+  check("DeepSeek API settings open from the connection menu and dismiss it", await page.getByTestId("connection-settings-menu").count() === 0 && await dialog.getByTestId("deepseek-api-key").getAttribute("type") === "password");
   check("DeepSeek is not reported as a missing CLI", !(await page.getByTestId("cli-warning").count()) || !(await page.getByTestId("cli-warning").innerText()).includes("딥시크"));
   await dialog.getByTestId("deepseek-api-key").fill("sk-test-secret-never-rendered");
   check("entered key is not rendered as dialog text", !(await dialog.innerText()).includes("sk-test-secret-never-rendered"));

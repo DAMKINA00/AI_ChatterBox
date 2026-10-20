@@ -84,6 +84,7 @@ try {
   await page.reload();
   await page.waitForSelector('[data-testid="sidebar"]');
   await page.locator(`[data-testid="chat-node"][data-chat-id="${chatId}"] [role="treeitem"]`).click();
+  await page.getByTestId('connection-settings').click();
   await page.getByTestId('gemini-web-manage').click();
   const dialog = page.getByRole('dialog').filter({ hasText: '제미나이 웹 계정 관리' });
   const card = dialog.locator('[data-account-id="gemini-1"]');

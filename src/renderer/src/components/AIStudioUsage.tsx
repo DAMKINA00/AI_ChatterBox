@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, RotateCw } from "lucide-react";
+import { BarChart3, ChevronRight, Loader2, RotateCw } from "lucide-react";
 import type { AIStudioUsageRange, AIStudioUsageReport, AIStudioUsageStats } from "../../../shared/aistudio";
 import { api, cn, errorMessage } from "../lib/utils";
-import { Button } from "./ui";
+import { Button, DropdownMenuItem } from "./ui";
 
 const RANGE_OPTIONS: { value: AIStudioUsageRange; label: string }[] = [
   { value: "24h", label: "최근 24시간" },
@@ -112,10 +112,11 @@ export function AIStudioUsage({ compact = false, onOpen }: { compact?: boolean; 
 
   if (compact) {
     return (
-      <Button type="button" variant="ghost" size="sm" className="h-auto min-h-7 w-full justify-start py-1 text-left text-[11px]" onClick={onOpen} data-testid="aistudio-usage-summary" title={report ? `AI Studio 로컬 사용량 상세 보기 · 생성 ${timeText(report.generatedAt)}` : "AI Studio 로컬 사용량 상세 보기"}>
-        <span className="min-w-0 flex-1 leading-tight"><span className="block font-medium">AI Studio · 최근 24시간</span><span className="block whitespace-normal">{compactDetail}</span></span>
-        {loadState === "loading" && <Loader2 className="ml-auto size-3 shrink-0 animate-spin" />}
-      </Button>
+      <DropdownMenuItem className="group gap-3 rounded-lg px-3 py-2.5" onSelect={onOpen} data-testid="aistudio-usage-summary" title={report ? `AI Studio 로컬 사용량 상세 보기 · 생성 ${timeText(report.generatedAt)}` : "AI Studio 로컬 사용량 상세 보기"}>
+        <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted"><BarChart3 /></span>
+        <span className="min-w-0 flex-1"><span className="block text-[12px] font-medium">AI Studio · 최근 24시간</span><span className={cn("mt-0.5 block text-[11px] text-muted-foreground", loadState === "error" && "text-destructive")}>{compactDetail}</span></span>
+        {loadState === "loading" ? <Loader2 className="!size-3.5 shrink-0 animate-spin" /> : <ChevronRight className="!size-3.5 opacity-40 group-data-[highlighted]:opacity-100" />}
+      </DropdownMenuItem>
     );
   }
 

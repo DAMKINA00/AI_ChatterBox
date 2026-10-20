@@ -59,6 +59,7 @@ try {
   await page.reload(); await page.waitForSelector('[data-testid="sidebar"]');
   await page.locator(`[data-testid="chat-node"][data-chat-id="${chatId}"] [role="treeitem"]`).click();
   check('main sidebar has no separate Gemini web usage bar', await page.locator('[data-provider="gemini-web"]').count() === 0);
+  await page.getByTestId('connection-settings').click();
   await page.getByTestId('gemini-web-manage').click();
   let dialog = page.getByRole('dialog').filter({hasText:'제미나이 웹 계정 관리'});
   await dialog.getByTestId('gemini-web-account').waitFor();
@@ -118,6 +119,7 @@ try {
   await page.screenshot({path:join(screenshots,'accounts-dark.png'),fullPage:true});
   await dialog.getByText('닫기',{exact:true}).click();
   await page.getByLabel('테마 전환').click();
+  await page.getByTestId('connection-settings').click();
   await page.getByTestId('gemini-web-manage').click();
   dialog=page.getByRole('dialog').filter({hasText:'제미나이 웹 계정 관리'});
   await dialog.getByRole('textbox',{name:'계정 2 이름'}).waitFor();
