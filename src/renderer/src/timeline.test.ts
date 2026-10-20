@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AgentEvent, NodeId, Role, TimelineEvent } from "../../shared/types";
-import { apply, buildItems, createTimelineBuilder, currentExpression, latestExpression } from "./timeline.ts";
+import { apply, buildItems, createTimelineBuilder, currentExpression, latestExpression, normalizePlanStepTitle } from "./timeline.ts";
 
 let nextId = 1;
 function event(node: NodeId, role: Role | null, payload: AgentEvent): TimelineEvent {
@@ -15,6 +15,13 @@ function liveEvent(node: NodeId, role: Role | null, payload: AgentEvent, at: num
 }
 
 const emptyAttachments = [];
+
+test("plan step display normalizes only legacy Gemini worker prefixes", () => {
+  assert.equal(normalizePlanStepTitle("[Antigravity 1호] 멕시코 조사"), "[제미나이 1호] 멕시코 조사");
+  assert.equal(normalizePlanStepTitle("[Gemini 2호] 초안 작성"), "[제미나이 2호] 초안 작성");
+  assert.equal(normalizePlanStepTitle("[Antigravity 연구 담당] CLI 확인"), "[Antigravity 연구 담당] CLI 확인");
+  assert.equal(normalizePlanStepTitle("설정에서 Antigravity 1호 CLI 확인"), "설정에서 Antigravity 1호 CLI 확인");
+});
 
 test("direct collaboration messages appear in sender and recipient views", () => {
   const events = [event("consult:2", "w1", { type: "peer_message", from: "w1", to: "w2", text: "resultId contract" })];

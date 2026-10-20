@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
 import { FolderOpen } from "lucide-react";
-import { DEFAULT_SETTINGS, MAX_CONSULTS, MAX_REVIEWS, parseOrchestrator, type AgentKind, type Project, type ProjectSettings } from "../../../shared/types";
+import { APPROVAL_MODE_LABEL, DEFAULT_SETTINGS, MAX_CONSULTS, MAX_REVIEWS, parseOrchestrator, type AgentKind, type Project, type ProjectSettings } from "../../../shared/types";
 import { api, cn } from "../lib/utils";
 import { useStore } from "../store";
 import { defaultEffortForModel, EffortPicker } from "./EffortPicker";
 import { ModelPicker } from "./ModelPicker";
 import { Button, Dialog, DialogContent, DialogFooter, Input, Label, Switch } from "./ui";
+
+const APPROVAL_MODES = ["orchestrator-all", "orchestrator", "user"] as const;
+type ApprovalModeChoice = (typeof APPROVAL_MODES)[number];
 
 interface Props {
   open: boolean;
@@ -32,6 +35,12 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
   }, [open]);
 
   const set = <K extends keyof ProjectSettings>(k: K, v: ProjectSettings[K]) => setSettings((s) => ({ ...s, [k]: v }));
+
+  const selectedApprovalMode: ApprovalModeChoice = settings.approvalMode === "orchestrator" && settings.delegateHighRisk ? "orchestrator-all" : settings.approvalMode;
+  const setApprovalMode = (mode: ApprovalModeChoice) => {
+    set("approvalMode", mode);
+    set("delegateHighRisk", mode === "orchestrator-all");
+  };
 
   const setModel = (modelKey: keyof ProjectSettings, effortKey: keyof ProjectSettings, agent: AgentKind, worker: boolean, value: string) => {
     set(modelKey, value as ProjectSettings[typeof modelKey]);
@@ -109,7 +118,7 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
                     <EffortPicker
                       agent={orch.agent}
                       model={orch.model}
-                      value={settings.orchestratorEffort ?? "xhigh"}
+                      value={settings.orchestratorEffort ?? "auto"}
                       onChange={(v) => set("orchestratorEffort", v)}
                       ariaLabel="마스터 추론 수준"
                     />
@@ -300,30 +309,20 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
               <div>
                 <div className="text-[13px] font-medium">작업자 승인 요청</div>
                 <div className="text-[12px] text-muted-foreground">
-                  {settings.approvalMode === "orchestrator"
-                    ? "마스터가 판단해 자동으로 허용·거부하고, 애매하거나 고위험이면 물어봅니다"
-                    : "작업자가 파일을 고치거나 명령을 실행할 때마다 직접 승인합니다"}
+                  {selectedApprovalMode === "orchestrator-all"
+                    ? "고위험도 마스터에게 위임합니다. 명시적 거부, 작업 범위, 계획 모드 제한은 유지합니다."
+                    : selectedApprovalMode === "orchestrator"
+                      ? "마스터가 판단하고, 고위험하거나 불확실한 요청은 관리자에게 확인합니다."
+                      : "작업자가 파일을 고치거나 명령을 실행할 때마다 관리자가 직접 승인합니다."}
                 </div>
               </div>
               <Segmented
-                value={settings.approvalMode}
-                onChange={(v) => set("approvalMode", v)}
-                options={[
-                  { value: "orchestrator", label: "마스터 판단" },
-                  { value: "user", label: "직접 승인" },
-                ]}
+                value={selectedApprovalMode}
+                onChange={setApprovalMode}
+                options={APPROVAL_MODES.map((value) => ({ value, label: APPROVAL_MODE_LABEL[value] }))}
                 ariaLabel="승인 방식"
               />
             </div>
-            {settings.approvalMode === "orchestrator" && (
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <div className="text-[13px] font-medium">고위험 요청도 마스터에 맡기기</div>
-                  <div className="text-[12px] text-muted-foreground">작업 폴더 밖 쓰기, 재귀 삭제, git push, 비밀 파일, 시스템 변경, 업로드. 켜면 판단이 불확실하거나 실패해도 자동 허용합니다. 명시적 거부와 작업 범위·계획 모드 제한은 유지합니다.</div>
-                </div>
-                <Switch checked={settings.delegateHighRisk} onChange={(v) => set("delegateHighRisk", v)} label="고위험 요청도 맡기기" />
-              </div>
-            )}
           </div>
 
           <div className="grid gap-3 rounded-lg border p-3.5">

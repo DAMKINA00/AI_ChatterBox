@@ -18,6 +18,76 @@ function fixture() {
 }
 const tick = () => new Promise<void>((r) => setImmediate(r));
 
+test("approval mode presets control critical delegation without the legacy flag", async () => {
+  const critical: ApprovalInput = { ...write, writes: false, paths: [], command: "git push", detail: "git push" };
+  for (const [mode, delegates] of [["orchestrator-all", true], ["orchestrator", false], ["user", false]] as const) {
+    const f = fixture();
+    f.setMode(mode);
+    f.setHigh(false);
+    f.setJudge(async () => ({ decision: "allow", reason: "approved" }));
+    const pending = f.service.request(1, folder, critical);
+    if (delegates) {
+      assert.equal((await pending).verdict, "allow", mode);
+      assert.equal(f.service.pendingCount(1), 0, mode);
+    } else {
+      await tick();
+      const event = f.events.findLast((e) => e.type === "approval_request");
+      assert.ok(event?.type === "approval_request", mode);
+      if (event?.type === "approval_request") f.service.answer(1, event.request.id, "once");
+      assert.equal((await pending).verdict, "allow", mode);
+      assert.equal(f.service.pendingCount(1), 0, mode);
+    }
+    if (mode === "user") assert.equal(f.calls, 0, "direct approval does not call the judge");
+  }
+});
+
+test("full-risk delegation preserves explicit denial and runtime guards", async () => {
+  const f = fixture();
+  f.setMode("orchestrator-all");
+  f.setHigh(false);
+  f.setJudge(async () => ({ decision: "deny", reason: "범위를 벗어났습니다." }));
+  const critical: ApprovalInput = { ...write, writes: false, paths: [], command: "git push", detail: "git push" };
+  assert.equal((await f.service.request(1, folder, critical)).verdict, "deny");
+  assert.equal(f.service.pendingCount(1), 0);
+
+  f.setJudge(async () => ({ decision: "allow", reason: "허용" }));
+  f.setGuard("계획 모드에서는 실행할 수 없습니다.");
+  assert.equal((await f.service.request(1, folder, write)).verdict, "deny");
+  assert.equal(f.service.pendingCount(1), 0);
+});
+
+test("standard orchestrator high-risk judgment falls back to the user", async () => {
+  const f = fixture();
+  f.setJudge(async () => ({ decision: "ask_user", reason: "명령 범위가 불확실합니다." }));
+  const critical: ApprovalInput = { ...write, writes: false, paths: [], command: "git push", detail: "git push" };
+  const pending = f.service.request(1, folder, critical);
+  await tick();
+  const event = f.events.findLast((e) => e.type === "approval_request");
+  assert.ok(event?.type === "approval_request");
+  if (event?.type === "approval_request") {
+    assert.equal(event.request.risk, "high");
+    f.service.answer(1, event.request.id, "once");
+  }
+  assert.equal((await pending).verdict, "allow");
+});
+
+test("direct approval mode asks the user without consulting the judge", async () => {
+  const f = fixture();
+  f.setMode("user");
+  f.setJudge(async () => { throw new Error("direct mode must not call the judge"); });
+  const critical: ApprovalInput = { ...write, writes: false, paths: [], command: "git push", detail: "git push" };
+  const pending = f.service.request(1, folder, critical);
+  await tick();
+  const event = f.events.findLast((e) => e.type === "approval_request");
+  assert.ok(event?.type === "approval_request");
+  if (event?.type === "approval_request") {
+    assert.equal(event.request.risk, "high");
+    f.service.answer(1, event.request.id, "once");
+  }
+  assert.equal((await pending).verdict, "allow");
+  assert.equal(f.calls, 0);
+});
+
 test("master and worker requests both use separate auto judge", async () => {
   const f = fixture();
   assert.equal((await f.service.request(1, folder, write)).verdict, "allow");

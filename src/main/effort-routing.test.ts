@@ -27,10 +27,10 @@ function fixture() {
   return { store, project, chat, chats, engine, sent, async close() { await engine.judge.dispose(); await chats.dispose(); store.close(); rmSync(root, { recursive: true, force: true }); } };
 }
 
-test("master defaults to xhigh; parallel assignments keep separate effort and persist Gemini's supported fallback", async () => {
+test("master defaults to auto; parallel assignments keep separate effort and persist Gemini's supported fallback", async () => {
   const f = fixture();
   try {
-    assert.equal((await f.chats.assignmentEffort(f.chat.id, "orch")).effort, "xhigh");
+    assert.equal((await f.chats.assignmentEffort(f.chat.id, "orch")).effort, "");
     const claude = f.store.createAgent(f.chat.id, "claude", "analyze");
     const gemini = f.store.createAgent(f.chat.id, "gemini", "write dialogue");
     const response = await f.engine.call(f.chat.id, "orch", "ask_parallel", { tasks: [
@@ -44,7 +44,7 @@ test("master defaults to xhigh; parallel assignments keep separate effort and pe
   } finally { await f.close(); }
 });
 
-test("missing/out-of-range master effort dispatches nothing; chat override beats project and retains master's request", async () => {
+test("missing/out-of-range master effort dispatches nothing; project setting retains master's request", async () => {
   const f = fixture();
   try {
     const worker = f.store.createAgent(f.chat.id, "claude", "analyze");
@@ -54,8 +54,10 @@ test("missing/out-of-range master effort dispatches nothing; chat override beats
     assert.equal(f.sent.length, 0);
     assert.equal(f.store.listConsults(f.chat.id).length, 0);
     f.store.updateChat(f.chat.id, { claudeEffortOverride: "high" });
+    assert.equal((await f.chats.assignmentEffort(f.chat.id, worker.key, "medium")).effort, "medium");
+    f.store.updateProject(f.project.id, { settings: { ...f.project.settings, claudeEffort: "high" } });
     assert.deepEqual(await f.chats.assignmentEffort(f.chat.id, worker.key, "medium"), { requestedEffort: "medium", effort: "high" });
-    f.store.updateChat(f.chat.id, { claudeEffortOverride: null });
+    f.store.updateProject(f.project.id, { settings: { ...f.project.settings, claudeEffort: "auto" } });
     assert.equal((await f.chats.assignmentEffort(f.chat.id, worker.key, "medium")).effort, "medium");
   } finally { await f.close(); }
 });

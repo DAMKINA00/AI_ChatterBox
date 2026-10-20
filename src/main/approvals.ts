@@ -157,7 +157,9 @@ export class ApprovalService {
       });
       return { verdict: "deny", reason: blocked };
     }
-    const { mode, delegateHighRisk } = this.host.mode(chatId);
+    const policy = this.host.mode(chatId);
+    const mode = policy.mode === "orchestrator-all" ? "orchestrator" : policy.mode;
+    const delegateHighRisk = policy.mode === "orchestrator-all" || (mode === "orchestrator" && policy.delegateHighRisk);
     // A shell can touch paths not present in its request metadata. Reassess it for every task.
     const reusable = c.risk === "low" && (!input.command || isReadCommand(input.command));
     // Reads (Claude asks for reads outside its cwd, e.g. a user skill file).

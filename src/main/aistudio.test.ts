@@ -2,8 +2,16 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { AIStudioService, studioOrigin } from "./aistudio";
 
+const FAKE_STUDIO_SETTINGS = JSON.stringify({
+  baseUrl: "http://127.0.0.1:2048",
+  model: "gemini-4-argon",
+  executable: "C:\\synthetic\\aistudio2api.exe",
+  videoEnabled: false,
+  secret: "encrypted:synthetic-api-key",
+});
+
 function store() {
-  const values = new Map<string, string>();
+  const values = new Map<string, string>([["aiStudio", FAKE_STUDIO_SETTINGS]]);
   return {
     getSetting: (key: string) => values.get(key),
     setSetting: (key: string, value: string) => values.set(key, value),
@@ -350,4 +358,147 @@ test("syncWeb disables a replaced upstream identity before pairing the new one",
 
   assert.deepEqual(calls, ["disable-old", "pairing", "import"]);
   assert.equal(service.linkedAccount("gemini-1"), "new@example.test");
+});
+
+test("disconnectWeb with no link performs no HTTP request", async () => {
+  const saved = store();
+  let requests = 0;
+  const service = new AIStudioService(saved, secrets, async () => {
+    requests++;
+    return jsonResponse({});
+  });
+
+  await service.disconnectWeb("gemini-1");
+
+  assert.equal(requests, 0);
+  assert.equal(saved.values.get("aiStudioWebLinks"), "{}");
+});
+
+test("disconnectWeb deletes a ready linked runtime account and clears the Web link", async () => {
+  const saved = store();
+  const accountId = "linked@example.test";
+  saved.setSetting("aiStudioWebLinks", JSON.stringify({
+    "gemini-1": { accountId, state: "connected", message: "linked", checkedAt: 1 },
+  }));
+  const accountPath = `/api/accounts/${encodeURIComponent(accountId)}`;
+  const calls: string[] = [];
+  const service = new AIStudioService(saved, secrets, async (input, init) => {
+    const url = new URL(String(input));
+    const method = init?.method ?? "GET";
+    calls.push(`${method} ${url.pathname}`);
+    if (url.pathname === "/api/accounts" && method === "GET") return jsonResponse({ accounts: [{ id: accountId, state: "ready" }] });
+    if (url.pathname === accountPath && method === "DELETE") return jsonResponse({});
+    return jsonResponse({ error: { message: `unexpected ${method} ${url.pathname}` } }, 404, "Not Found");
+  });
+
+  await service.disconnectWeb("gemini-1");
+
+  assert.deepEqual(calls, [`GET /api/accounts`, `DELETE ${accountPath}`]);
+  assert.equal(service.linkedAccount("gemini-1"), undefined);
+  assert.deepEqual(JSON.parse(saved.values.get("aiStudioWebLinks") ?? "null"), {});
+});
+
+test("disconnectWeb refuses a busy linked runtime account and keeps the link", async () => {
+  const saved = store();
+  const accountId = "busy@example.test";
+  const links = { "gemini-1": { accountId, state: "connected", message: "linked", checkedAt: 1 } };
+  saved.setSetting("aiStudioWebLinks", JSON.stringify(links));
+  const accountPath = `/api/accounts/${encodeURIComponent(accountId)}`;
+  const calls: string[] = [];
+  const service = new AIStudioService(saved, secrets, async (input, init) => {
+    const url = new URL(String(input));
+    const method = init?.method ?? "GET";
+    calls.push(`${method} ${url.pathname}`);
+    if (url.pathname === "/api/accounts" && method === "GET") return jsonResponse({ accounts: [{ id: accountId, state: "busy" }] });
+    return jsonResponse({ error: { message: `unexpected ${method} ${url.pathname}` } }, 404, "Not Found");
+  });
+
+  await assert.rejects(service.disconnectWeb("gemini-1"), /AI Studio에서 사용 중인 계정/);
+
+  assert.deepEqual(calls, ["GET /api/accounts"]);
+  assert.equal(service.linkedAccount("gemini-1"), accountId);
+  assert.deepEqual(JSON.parse(saved.values.get("aiStudioWebLinks") ?? "null"), links);
+  assert.equal(calls.includes(`DELETE ${accountPath}`), false);
+});
+
+test("disconnectWeb keeps the link when runtime DELETE fails", async () => {
+  const saved = store();
+  const accountId = "delete-failure@example.test";
+  const links = { "gemini-1": { accountId, state: "connected", message: "linked", checkedAt: 1 } };
+  saved.setSetting("aiStudioWebLinks", JSON.stringify(links));
+  const accountPath = `/api/accounts/${encodeURIComponent(accountId)}`;
+  const calls: string[] = [];
+  const service = new AIStudioService(saved, secrets, async (input, init) => {
+    const url = new URL(String(input));
+    const method = init?.method ?? "GET";
+    calls.push(`${method} ${url.pathname}`);
+    if (url.pathname === "/api/accounts" && method === "GET") return jsonResponse({ accounts: [{ id: accountId, state: "ready" }] });
+    if (url.pathname === accountPath && method === "DELETE") return jsonResponse({ error: { message: "runtime refused delete" } }, 503, "Unavailable");
+    return jsonResponse({ error: { message: `unexpected ${method} ${url.pathname}` } }, 404, "Not Found");
+  });
+
+  await assert.rejects(service.disconnectWeb("gemini-1"), /503.*runtime refused delete/);
+
+  assert.deepEqual(calls, ["GET /api/accounts", `DELETE ${accountPath}`]);
+  assert.equal(service.linkedAccount("gemini-1"), accountId);
+  assert.deepEqual(JSON.parse(saved.values.get("aiStudioWebLinks") ?? "null"), links);
+});
+
+test("disconnectWeb protects a runtime account shared by another Web slot", async () => {
+  const saved = store();
+  const accountId = "shared@example.test";
+  const links = {
+    "gemini-1": { accountId, state: "connected", message: "linked", checkedAt: 1 },
+    "gemini-2": { accountId, state: "connected", message: "linked", checkedAt: 1 },
+  };
+  saved.setSetting("aiStudioWebLinks", JSON.stringify(links));
+  let requests = 0;
+  const service = new AIStudioService(saved, secrets, async () => {
+    requests++;
+    return jsonResponse({ accounts: [] });
+  });
+
+  await assert.rejects(service.disconnectWeb("gemini-1"), /다른 웹 슬롯/);
+
+  assert.equal(requests, 0);
+  assert.equal(service.linkedAccount("gemini-1"), accountId);
+  assert.equal(service.linkedAccount("gemini-2"), accountId);
+  assert.deepEqual(JSON.parse(saved.values.get("aiStudioWebLinks") ?? "null"), links);
+});
+
+test("disconnectWeb serializes with another account change", async () => {
+  const saved = store();
+  const accountId = "serialized@example.test";
+  saved.setSetting("aiStudioWebLinks", JSON.stringify({
+    "gemini-1": { accountId, state: "connected", message: "linked", checkedAt: 1 },
+  }));
+  const accountPath = `/api/accounts/${encodeURIComponent(accountId)}`;
+  const calls: string[] = [];
+  let active = 0;
+  let maximum = 0;
+  const service = new AIStudioService(saved, secrets, async (input, init) => {
+    const url = new URL(String(input));
+    const method = init?.method ?? "GET";
+    calls.push(`${method} ${url.pathname}`);
+    active++;
+    maximum = Math.max(maximum, active);
+    await new Promise(resolve => setTimeout(resolve, 1));
+    try {
+      if (url.pathname === "/api/accounts" && method === "GET") return jsonResponse({ accounts: [{ id: accountId, state: "ready" }] });
+      if (url.pathname === `${accountPath}/refresh` && method === "POST") return jsonResponse({});
+      if (url.pathname === accountPath && method === "DELETE") return jsonResponse({});
+      return jsonResponse({ error: { message: `unexpected ${method} ${url.pathname}` } }, 404, "Not Found");
+    } finally {
+      active--;
+    }
+  });
+
+  await Promise.all([
+    service.account("refresh", { accountId }),
+    service.disconnectWeb("gemini-1"),
+  ]);
+
+  assert.equal(maximum, 1);
+  assert.deepEqual(calls, ["GET /api/accounts", `POST ${accountPath}/refresh`, "GET /api/accounts", `DELETE ${accountPath}`]);
+  assert.equal(service.linkedAccount("gemini-1"), undefined);
 });

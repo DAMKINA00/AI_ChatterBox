@@ -22,7 +22,7 @@ const check = (name, ok) => { checks.push({ name, ok: !!ok }); console.log(ok ? 
 try {
   await chats.start();
   for (const provider of process.argv.slice(2).length ? process.argv.slice(2) : ["claude", "codex"]) {
-    const p = store.createProject(`Effort ${provider} master test`, cwd, { ...DEFAULT_SETTINGS, orchestratorModel: provider === "claude" ? "claude:sonnet" : "codex:gpt-6.1-sol", claudeModel: "sonnet", codexModel: "gpt-6.1-sol", reviewGate: false, approvalMode: "user" });
+    const p = store.createProject(`Effort ${provider} master test`, cwd, { ...DEFAULT_SETTINGS, orchestratorModel: provider === "claude" ? "claude:sonnet" : "codex:gpt-6.1-sol", orchestratorEffort: "xhigh", claudeModel: "sonnet", codexModel: "gpt-6.1-sol", reviewGate: false, approvalMode: "user" });
     const c = store.createChat(p.id, "Automatic effort delegation");
     const from = events.length;
     await chats.send(c.id, "추론 설정 통합 검사입니다. 이번 검사만 클로드·지피티·제미나이 각 한 명을 앱 브리지로 만들고 ask_parallel로 독립적인 의견 작업을 맡기세요. 각 작업자는 counts.txt의 두 수 alpha와 beta를 읽고 더해 총합을 보고하면 됩니다. 파일 확인을 위한 읽기 전용 셸 명령은 허용합니다. 이 작업에 적절한 추론 수준을 당신이 판단해 각 ask의 effort와 reason에 기록하세요. 이미지·파일 수정·추가 에이전트는 필요 없습니다. 세 작업자의 응답이 모두 돌아오면 담당별 결과와 총합을 아주 짧게 취합하고 모두 해제하세요.", []);

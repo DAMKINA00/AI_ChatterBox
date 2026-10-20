@@ -3,7 +3,7 @@ import { Check, ChevronDown, Circle, Flag, ListChecks, Loader2, Play, Pencil, X 
 import type { Chat } from "../../../shared/types";
 import { api, cn, errorMessage } from "../lib/utils";
 import { useStore } from "../store";
-import type { planOf } from "../timeline";
+import { normalizePlanStepTitle, type planOf } from "../timeline";
 import { Badge, Button } from "./ui";
 
 type Plan = NonNullable<ReturnType<typeof planOf>>;
@@ -42,7 +42,7 @@ export function PlanPanel({ chat, plan, onRevise }: { chat: Chat; plan: Plan; on
                 ) : (
                   <Circle className="mt-0.5 size-4 shrink-0 text-muted-foreground/60" />
                 )}
-                <span className={cn(s.status === "completed" && "text-muted-foreground line-through decoration-muted-foreground/40")}>{s.title}</span>
+                <span className={cn(s.status === "completed" && "text-muted-foreground line-through decoration-muted-foreground/40")}>{normalizePlanStepTitle(s.title)}</span>
               </li>
             ))}
           </ol>

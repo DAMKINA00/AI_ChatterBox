@@ -58,7 +58,7 @@ export class ApprovalJudge {
     const { agent, model } = chatOrchestrator(chat, project);
     const { effort } = await this.chats.assignmentEffort(chatId, "orch");
     if (generation !== this.generation || chatGeneration !== (this.chatGenerations.get(chatId) ?? 0)) throw new Error("승인 판단 초기화가 취소되었습니다.");
-    const key = `${agent}:${model}:${effort}:${project.folder}:${project.settings.delegateHighRisk}`;
+    const key = `${agent}:${model}:${effort}:${project.folder}:${chat.approvalModeOverride ?? project.settings.approvalMode}`;
     const cur = this.sessions.get(chatId);
     if (cur && cur.key === key) return cur;
     if (cur) void cur.driver.dispose();
@@ -118,7 +118,7 @@ export class ApprovalJudge {
     const prompt = [
       "[승인 요청]",
       `작업 폴더: ${project.folder}`,
-      `고위험 위임: ${project.settings.delegateHighRisk ? "켜짐 (사용자 지시 범위 안에서 판단)" : "꺼짐 (직접 사용자 확인)"}`,
+      `고위험 위임: ${(chat?.approvalModeOverride ?? project.settings.approvalMode) === "orchestrator-all" ? "켜짐 (사용자 지시 범위 안에서 판단)" : "꺼짐 (직접 사용자 확인)"}`,
       `요청한 역할: ${roleName(request.role, this.chats.store.listAgents(chatId))}`,
       ctx.instruction ? `사용자 지시: ${clip(ctx.instruction, 1500)}` : "사용자 지시: (알 수 없음)",
       ctx.consult

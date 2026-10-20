@@ -124,7 +124,15 @@ try {
   check("master model change remains functional", (await savedChat(page))?.orchestratorModelOverride === "grok:grok-worker");
 
   await approval.click();
-  await page.getByRole("menuitem", { name: "매번 직접 승인", exact: true }).click();
+  check("approval menu offers all three named modes", await page.getByRole("menuitem", { name: "전체 위험 승인", exact: true }).count() === 1
+    && await page.getByRole("menuitem", { name: "마스터 자동 승인", exact: true }).count() === 1
+    && await page.getByRole("menuitem", { name: "관리자 직접 승인", exact: true }).count() === 1);
+  await page.screenshot({ path: join(base, "approval-menu.png"), fullPage: true });
+  await page.getByRole("menuitem", { name: "전체 위험 승인", exact: true }).click();
+  await page.waitForFunction(async () => (await window.chatterbox.listChats()).find((chat) => chat.id === 1)?.approvalModeOverride === "orchestrator-all");
+  check("full-risk mode is saved for this chat", (await savedChat(page))?.approvalModeOverride === "orchestrator-all");
+  await approval.click();
+  await page.getByRole("menuitem", { name: "관리자 직접 승인", exact: true }).click();
   await page.waitForFunction(async () => (await window.chatterbox.listChats()).find((chat) => chat.id === 1)?.approvalModeOverride === "user");
   check("approval mode change remains functional", (await savedChat(page))?.approvalModeOverride === "user");
 

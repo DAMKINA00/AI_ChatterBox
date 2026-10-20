@@ -25,7 +25,7 @@ const settings = {
   claudeModel: "opus",
   codexModel: "gpt-6-astra",
   geminiModel: "",
-  orchestratorEffort: "xhigh",
+  orchestratorEffort: "auto",
   claudeEffort: "auto",
   codexEffort: "auto",
   geminiEffort: "auto",
@@ -163,19 +163,30 @@ try {
 
   // Project defaults and metadata-driven option filtering.
   let dialog = await openSettings(page);
-  await page.waitForFunction(() => document.querySelector('[aria-label="마스터 추론 수준"]')?.getAttribute("data-effort") === "xhigh");
-  check("project master defaults to xhigh", (await dialog.getByLabel("마스터 추론 수준").textContent())?.includes("xhigh"));
+  await page.waitForFunction(() => document.querySelector('[aria-label="마스터 추론 수준"]')?.getAttribute("data-effort") === "auto");
+  check("project master defaults to automatic/model default", (await dialog.getByLabel("마스터 추론 수준").textContent())?.includes("자동 배정"));
   check("project workers default to automatic assignment", (await dialog.getByLabel("클로드 작업자 추론 수준").textContent())?.includes("자동 배정") && (await dialog.getByLabel("지피티 작업자 추론 수준").textContent())?.includes("자동 배정"));
 
   const masterModelPicker = dialog.getByLabel("마스터 모델");
   await masterModelPicker.click();
   await page.getByRole("menuitem", { name: /Claude Limited/ }).click();
-  await page.waitForFunction(() => document.querySelector('[aria-label="마스터 추론 수준"]')?.getAttribute("data-effort") === "");
-  check("master model change falls back when xhigh is unsupported", (await dialog.getByLabel("마스터 추론 수준").textContent())?.includes("CLI 기본값"));
+  await page.waitForFunction(() => document.querySelector('[aria-label="마스터 추론 수준"]')?.getAttribute("data-effort") === "auto");
+  check("master model change keeps automatic/model default", (await dialog.getByLabel("마스터 추론 수준").textContent())?.includes("자동 배정"));
   await masterModelPicker.click();
   await page.getByRole("menuitem", { name: /Claude Opus/ }).click();
+  await page.waitForFunction(() => document.querySelector('[aria-label="마스터 추론 수준"]')?.getAttribute("data-effort") === "auto");
+  check("master model change keeps automatic/model default for supported models", (await dialog.getByLabel("마스터 추론 수준").textContent())?.includes("자동 배정"));
+
+  const masterEffort = dialog.getByLabel("마스터 추론 수준");
+  await masterEffort.click();
+  const masterMenuText = await page.getByRole("menu").textContent();
+  check("master menu keeps explicit effort levels", masterMenuText?.includes("자동 배정") && masterMenuText.includes("low") && masterMenuText.includes("medium") && masterMenuText.includes("high") && masterMenuText.includes("xhigh"), masterMenuText);
+  await page.getByRole("menuitem", { name: "xhigh", exact: true }).click();
   await page.waitForFunction(() => document.querySelector('[aria-label="마스터 추론 수준"]')?.getAttribute("data-effort") === "xhigh");
-  check("master model change restores xhigh when supported", (await dialog.getByLabel("마스터 추론 수준").textContent())?.includes("xhigh"));
+  check("master effort accepts an explicit selection", (await masterEffort.textContent())?.includes("xhigh"));
+  await masterEffort.click();
+  await page.getByRole("menuitem", { name: "자동 배정", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('[aria-label="마스터 추론 수준"]')?.getAttribute("data-effort") === "auto");
 
   const codexModelPicker = dialog.getByLabel("지피티 모델");
   await codexModelPicker.click();
@@ -213,38 +224,54 @@ try {
   await dialog.getByRole("button", { name: "취소", exact: true }).click();
   await page.waitForSelector('[role="dialog"]', { state: "detached" });
 
-  // Chat-level override and a distinct inheritance reset.
+  // The chat keeps master effort controls while worker effort stays project-owned.
   await page.locator('[data-testid="chat-node"][data-chat-id="1"] [role="treeitem"]').click();
   await page.waitForSelector('[data-testid="consult-card"]');
-  const chatClaudeEffort = page.getByLabel("이 채팅의 클로드 추론 수준");
-  check("chat header keeps the inherited worker effort visible", (await chatClaudeEffort.textContent())?.includes("자동 배정"));
-  await chatClaudeEffort.click();
-  await page.getByRole("menuitem", { name: "high", exact: true }).click();
-  await page.waitForFunction(async () => (await window.chatterbox.listChats()).find((chat) => chat.id === 1)?.claudeEffortOverride === "high");
-  check("chat effort override saves independently", (await page.evaluate(() => window.chatterbox.listChats())).find((chat) => chat.id === 1)?.claudeEffortOverride === "high");
-  await chatClaudeEffort.click();
-  const reset = page.getByRole("menuitem", { name: /프로젝트 값 사용/ });
-  check("chat effort reset is a separate action", (await reset.count()) === 1);
-  await reset.click();
-  await page.waitForFunction(async () => (await window.chatterbox.listChats()).find((chat) => chat.id === 1)?.claudeEffortOverride === null);
+  const chatMasterEffort = page.getByLabel("이 채팅의 마스터 추론 수준", { exact: true });
+  const workerEffortLabels = ["클로드", "지피티", "제미나이", "그록", "딥시크"].map((name) => `이 채팅의 ${name} 추론 수준`);
+  check("chat header keeps the master effort selector", (await chatMasterEffort.count()) === 1 && (await chatMasterEffort.getAttribute("data-effort")) === "auto");
+  await chatMasterEffort.click();
+  await page.getByRole("menuitem", { name: "xhigh", exact: true }).click();
+  await page.waitForFunction(async () => (await window.chatterbox.listChats()).find((chat) => chat.id === 1)?.orchestratorEffortOverride === "xhigh");
+  check("top chat toolbar accepts an explicit master effort", (await chatMasterEffort.getAttribute("data-effort")) === "xhigh");
+  await chatMasterEffort.click();
+  await page.getByRole("menuitem", { name: /프로젝트 값 사용/ }).click();
+  await page.waitForFunction(async () => (await window.chatterbox.listChats()).find((chat) => chat.id === 1)?.orchestratorEffortOverride === null);
+  const hiddenHeaderWorkerEfforts = await Promise.all(workerEffortLabels.map((label) => page.getByLabel(label, { exact: true }).count()));
+  check("chat header hides worker effort selectors", hiddenHeaderWorkerEfforts.every((count) => count === 0), JSON.stringify(hiddenHeaderWorkerEfforts));
 
+  // A stale worker effort may remain in old chat rows, but changing its model must not rewrite it.
   await page.evaluate(async () => {
-    await window.chatterbox.updateChat(1, { claudeModelOverride: "unknown-claude-model", claudeEffortOverride: "xhigh" });
+    await window.chatterbox.updateChat(1, { claudeModelOverride: null, claudeEffortOverride: "xhigh" });
   });
-  await page.waitForFunction(() => document.querySelector('[aria-label="이 채팅의 클로드 모델"]')?.textContent?.includes("unknown-claude-model"));
-  await page.waitForFunction(() => document.querySelector('[aria-label="이 채팅의 클로드 추론 수준"]')?.getAttribute("data-effort") === "xhigh");
-  check(
-    "unsupported saved effort remains visible while model metadata is unavailable",
-    (await chatClaudeEffort.textContent())?.includes("xhigh") && (await chatClaudeEffort.getAttribute("title"))?.includes("지원"),
-    await chatClaudeEffort.getAttribute("title"),
-  );
-  await chatClaudeEffort.click();
-  const unknownMenuText = await page.getByRole("menu").textContent();
-  check("unknown models expose no manual effort levels", unknownMenuText?.includes("자동 배정") && !/\b(?:low|medium|high|xhigh)\b/.test(unknownMenuText), unknownMenuText);
-  await page.keyboard.press("Escape");
+  await page.waitForFunction(async () => (await window.chatterbox.listChats()).find((chat) => chat.id === 1)?.claudeEffortOverride === "xhigh");
+  const chatClaudeModel = page.getByLabel("이 채팅의 클로드 모델", { exact: true });
+  await chatClaudeModel.click();
+  await page.getByRole("menuitem", { name: /Claude Limited/ }).click();
+  await page.waitForFunction(async () => (await window.chatterbox.listChats()).find((chat) => chat.id === 1)?.claudeModelOverride === "limited");
+  const changedChat = (await page.evaluate(() => window.chatterbox.listChats())).find((chat) => chat.id === 1);
+  check("worker model changes do not write a chat effort override", changedChat?.claudeModelOverride === "limited" && changedChat?.claudeEffortOverride === "xhigh", JSON.stringify(changedChat));
   await page.evaluate(async () => {
     await window.chatterbox.updateChat(1, { claudeModelOverride: null, claudeEffortOverride: null });
   });
+
+  // /model keeps the master selector and worker model selectors, while worker effort stays absent.
+  const composer = page.getByLabel("메시지 입력", { exact: true });
+  await composer.fill("/model");
+  await composer.press("Enter");
+  const statusDialog = page.getByRole("dialog").filter({ hasText: "채팅 상태" });
+  await statusDialog.waitFor({ state: "visible" });
+  const hiddenStatusWorkerEfforts = await Promise.all(workerEffortLabels.map((name) => page.getByLabel(`상태: ${name.replace("이 채팅의 ", "")}`, { exact: true }).count()));
+  const statusWorkerModels = ["클로드", "지피티", "제미나이", "그록", "딥시크"].map((name) => `상태: ${name} 모델`);
+  check(
+    "/model keeps master effort and worker model controls only",
+    (await statusDialog.getByLabel("상태: 마스터 추론 수준", { exact: true }).count()) === 1 &&
+      hiddenStatusWorkerEfforts.every((count) => count === 0) &&
+      (await Promise.all(statusWorkerModels.map((label) => statusDialog.getByLabel(label, { exact: true }).count()))).every((count) => count === 1),
+    JSON.stringify({ hiddenStatusWorkerEfforts, statusWorkerModels }),
+  );
+  await statusDialog.getByRole("button", { name: "닫기", exact: true }).click();
+  await statusDialog.waitFor({ state: "detached" });
 
   // Actual consult level is shown only when Consult.effort exists, with the request as a tooltip.
   const badge = page.locator('[data-testid="consult-effort"][data-effort="xhigh"]');
@@ -255,12 +282,12 @@ try {
   await page.locator('[data-testid="chat-node"][data-chat-id="2"] [role="treeitem"]').click();
   await page.waitForSelector('[data-testid="consult-card"]');
   check("old consult history has no fabricated effort badge", (await page.locator('[data-testid="consult-effort"]').count()) === 0);
-  check("old settings receive safe display defaults", (await page.getByLabel("이 채팅의 마스터 추론 수준").textContent())?.includes("xhigh"));
+  check("old settings receive safe master effort defaults", (await page.getByLabel("이 채팅의 마스터 추론 수준").textContent())?.includes("자동 배정"));
 
   // A narrow header must remain usable with the controls wrapping inside its bounds.
   await page.setViewportSize({ width: 760, height: 900 });
   const headerLayout = await page.locator("header").evaluate((el) => ({ clientWidth: el.clientWidth, scrollWidth: el.scrollWidth, controls: el.querySelectorAll('[data-testid="effort-picker"]').length }));
-  check("responsive header keeps all effort controls inside its width", headerLayout.controls === 5 && headerLayout.scrollWidth <= headerLayout.clientWidth + 1, JSON.stringify(headerLayout));
+  check("responsive header keeps the master effort control inside its width", headerLayout.controls === 1 && headerLayout.scrollWidth <= headerLayout.clientWidth + 1, JSON.stringify(headerLayout));
   await page.screenshot({ path: join(screenshots, "effort-ui.png"), fullPage: true });
   check("effort UI screenshot is kept in scratch", existsSync(join(screenshots, "effort-ui.png")));
 } catch (error) {

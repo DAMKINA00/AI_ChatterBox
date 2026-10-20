@@ -10,7 +10,6 @@ import {
   CONSULT_KIND_LABEL,
   type AgentExpression,
   type AgentKind,
-  type ApprovalMode,
   type AttachmentRef,
   type Chat,
   type ChatAgent,
@@ -133,17 +132,12 @@ function ChatHeader({ chat, project, nodeLabel, masterExpression }: { chat: Chat
   const label = useModelLabel();
   const orch = parseOrchestrator(chat.orchestratorModelOverride ?? project.settings.orchestratorModel);
   const projectOrch = parseOrchestrator(project.settings.orchestratorModel);
-  const orchEffort = chat.orchestratorEffortOverride ?? project.settings.orchestratorEffort ?? "xhigh";
+  const orchEffort = chat.orchestratorEffortOverride ?? project.settings.orchestratorEffort ?? "auto";
   const claudeModel = chat.claudeModelOverride ?? project.settings.claudeModel;
   const codexModel = chat.codexModelOverride ?? project.settings.codexModel;
   const grokModel = chat.grokModelOverride ?? project.settings.grokModel;
-  const grokEffort = chat.grokEffortOverride ?? project.settings.grokEffort;
   const deepseekModel = chat.deepseekModelOverride ?? project.settings.deepseekModel;
-  const deepseekEffort = chat.deepseekEffortOverride ?? project.settings.deepseekEffort;
   const geminiModel = chat.geminiModelOverride ?? project.settings.geminiModel;
-  const claudeEffort = chat.claudeEffortOverride ?? project.settings.claudeEffort ?? "auto";
-  const codexEffort = chat.codexEffortOverride ?? project.settings.codexEffort ?? "auto";
-  const geminiEffort = chat.geminiEffortOverride ?? project.settings.geminiEffort ?? "auto";
   return (
     <header className="flex w-full min-w-0 max-w-full flex-col gap-1.5 overflow-hidden border-b px-4 py-2">
       <div className="flex w-full min-w-0 max-w-full items-start gap-2" data-testid="chat-header-title-row">
@@ -188,7 +182,7 @@ function ChatHeader({ chat, project, nodeLabel, masterExpression }: { chat: Chat
             inherited={chat.orchestratorEffortOverride === null}
             onChange={(v) => void updateChat(chat.id, { orchestratorEffortOverride: v })}
             onReset={() => void updateChat(chat.id, { orchestratorEffortOverride: null })}
-            resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.orchestratorEffort ?? "xhigh")})`}
+            resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.orchestratorEffort ?? "auto")})`}
             ariaLabel="이 채팅의 마스터 추론 수준"
           />
         </ProviderControls>
@@ -204,21 +198,9 @@ function ChatHeader({ chat, project, nodeLabel, masterExpression }: { chat: Chat
             ariaLabel="이 채팅의 클로드 모델"
             value={claudeModel}
             inherited={chat.claudeModelOverride === null}
-            onChange={(v) => void updateChat(chat.id, { claudeModelOverride: v, claudeEffortOverride: defaultEffortForModel(models, "claude", v, true) })}
+            onChange={(v) => void updateChat(chat.id, { claudeModelOverride: v })}
             onReset={() => void updateChat(chat.id, { claudeModelOverride: null })}
             resetLabel={`프로젝트 값 사용 (${label("claude", project.settings.claudeModel)})`}
-          />
-          <EffortPicker
-            compact
-            agent="claude"
-            model={claudeModel}
-            worker
-            value={claudeEffort}
-            inherited={chat.claudeEffortOverride === null}
-            onChange={(v) => void updateChat(chat.id, { claudeEffortOverride: v })}
-            onReset={() => void updateChat(chat.id, { claudeEffortOverride: null })}
-            resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.claudeEffort ?? "auto")})`}
-            ariaLabel="이 채팅의 클로드 추론 수준"
           />
         </ProviderControls>
         <ProviderControls agent="codex">
@@ -230,21 +212,9 @@ function ChatHeader({ chat, project, nodeLabel, masterExpression }: { chat: Chat
             ariaLabel="이 채팅의 지피티 모델"
             value={codexModel}
             inherited={chat.codexModelOverride === null}
-            onChange={(v) => void updateChat(chat.id, { codexModelOverride: v, codexEffortOverride: defaultEffortForModel(models, "codex", v, true) })}
+            onChange={(v) => void updateChat(chat.id, { codexModelOverride: v })}
             onReset={() => void updateChat(chat.id, { codexModelOverride: null })}
             resetLabel={`프로젝트 값 사용 (${label("codex", project.settings.codexModel)})`}
-          />
-          <EffortPicker
-            compact
-            agent="codex"
-            model={codexModel}
-            worker
-            value={codexEffort}
-            inherited={chat.codexEffortOverride === null}
-            onChange={(v) => void updateChat(chat.id, { codexEffortOverride: v })}
-            onReset={() => void updateChat(chat.id, { codexEffortOverride: null })}
-            resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.codexEffort ?? "auto")})`}
-            ariaLabel="이 채팅의 지피티 추론 수준"
           />
         </ProviderControls>
         <ProviderControls agent="gemini" web={geminiModel === GEMINI_WEB_MODEL}>
@@ -256,21 +226,9 @@ function ChatHeader({ chat, project, nodeLabel, masterExpression }: { chat: Chat
             ariaLabel="이 채팅의 제미나이 모델"
             value={geminiModel}
             inherited={chat.geminiModelOverride === null}
-            onChange={(v) => void updateChat(chat.id, { geminiModelOverride: v, geminiEffortOverride: defaultEffortForModel(models, "gemini", v, true) })}
+            onChange={(v) => void updateChat(chat.id, { geminiModelOverride: v })}
             onReset={() => void updateChat(chat.id, { geminiModelOverride: null })}
             resetLabel={`프로젝트 값 사용 (${label("gemini", project.settings.geminiModel)})`}
-          />
-          <EffortPicker
-            compact
-            agent="gemini"
-            model={geminiModel}
-            worker
-            value={geminiEffort}
-            inherited={chat.geminiEffortOverride === null}
-            onChange={(v) => void updateChat(chat.id, { geminiEffortOverride: v })}
-            onReset={() => void updateChat(chat.id, { geminiEffortOverride: null })}
-            resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.geminiEffort ?? "auto")})`}
-            ariaLabel="이 채팅의 제미나이 추론 수준"
           />
         </ProviderControls>
         <ProviderControls agent="grok">
@@ -278,23 +236,17 @@ function ChatHeader({ chat, project, nodeLabel, masterExpression }: { chat: Chat
           <span className="text-[12px] text-muted-foreground">그록</span>
           <ModelPicker compact agents={["grok"]} ariaLabel="이 채팅의 그록 모델" value={grokModel}
             inherited={chat.grokModelOverride === null}
-            onChange={v => void updateChat(chat.id, { grokModelOverride: v, grokEffortOverride: defaultEffortForModel(models, "grok", v, true) })}
+            onChange={v => void updateChat(chat.id, { grokModelOverride: v })}
             onReset={() => void updateChat(chat.id, { grokModelOverride: null })} />
-          <EffortPicker compact agent="grok" model={grokModel} worker value={grokEffort} ariaLabel="이 채팅의 그록 추론 수준"
-            inherited={chat.grokEffortOverride === null} onChange={v => void updateChat(chat.id, { grokEffortOverride: v })}
-            onReset={() => void updateChat(chat.id, { grokEffortOverride: null })} />
         </ProviderControls>
         <ProviderControls agent="deepseek" apiProvider>
           <AgentAvatar kind="deepseek" size={24} alt="딥시크 캐릭터" />
           <span className="text-[12px] text-muted-foreground">딥시크</span>
           <ModelPicker compact agents={["deepseek"]} ariaLabel="이 채팅의 딥시크 모델" value={deepseekModel}
             inherited={chat.deepseekModelOverride === null}
-            onChange={v => void updateChat(chat.id, { deepseekModelOverride: v, deepseekEffortOverride: defaultEffortForModel(models, "deepseek", v, true) })}
+            onChange={v => void updateChat(chat.id, { deepseekModelOverride: v })}
             onReset={() => void updateChat(chat.id, { deepseekModelOverride: null })}
             resetLabel={`프로젝트 값 사용 (${label("deepseek", project.settings.deepseekModel)})`} />
-          <EffortPicker compact agent="deepseek" model={deepseekModel} worker value={deepseekEffort} ariaLabel="이 채팅의 딥시크 추론 수준"
-            inherited={chat.deepseekEffortOverride === null} onChange={v => void updateChat(chat.id, { deepseekEffortOverride: v })}
-            onReset={() => void updateChat(chat.id, { deepseekEffortOverride: null })} />
         </ProviderControls>
       </div>
     </header>
@@ -445,16 +397,33 @@ function WorkerChip({
   );
 }
 
+const APPROVAL_MODES = ["orchestrator-all", "orchestrator", "user"] as const;
+type ApprovalModeChoice = (typeof APPROVAL_MODES)[number];
+
+function approvalModeHelp(mode: ApprovalModeChoice): string {
+  if (mode === "orchestrator-all") return "고위험도 마스터에게 위임합니다. 명시적 거부, 작업 범위, 계획 모드 제한은 유지합니다.";
+  if (mode === "orchestrator") return "마스터가 판단하고, 고위험하거나 불확실한 요청은 관리자에게 확인합니다.";
+  return "작업자가 파일을 고치거나 명령을 실행할 때마다 관리자가 직접 승인합니다.";
+}
+
+function approvalModeLabel(mode: ApprovalModeChoice): string {
+  return APPROVAL_MODE_LABEL[mode];
+}
+
+function approvalModeForProject(project: Project): ApprovalModeChoice {
+  return project.settings.approvalMode === "orchestrator" && project.settings.delegateHighRisk ? "orchestrator-all" : project.settings.approvalMode;
+}
+
 function ApprovalModePicker({ chat, project }: { chat: Chat; project: Project }) {
   const updateChat = useStore((s) => s.updateChat);
-  const mode: ApprovalMode = chat.approvalModeOverride ?? project.settings.approvalMode;
+  const mode: ApprovalModeChoice = chat.approvalModeOverride ?? approvalModeForProject(project);
   const inherited = chat.approvalModeOverride === null;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="xs" aria-label="이 채팅의 승인 방식" className="font-normal">
+        <Button variant="outline" size="xs" aria-label="이 채팅의 승인 방식" title={approvalModeHelp(mode)} className="font-normal">
           <ShieldCheck className="text-muted-foreground" />
-          {mode === "orchestrator" ? "자동 승인" : "직접 승인"}
+          {approvalModeLabel(mode)}
           <ChevronDown className="opacity-60" />
         </Button>
       </DropdownMenuTrigger>
@@ -463,14 +432,14 @@ function ApprovalModePicker({ chat, project }: { chat: Chat; project: Project })
           <>
             <DropdownMenuItem onSelect={() => void updateChat(chat.id, { approvalModeOverride: null })}>
               <RotateCcw />
-              프로젝트 값 사용 ({APPROVAL_MODE_LABEL[project.settings.approvalMode]})
+              프로젝트 값 사용 ({approvalModeLabel(approvalModeForProject(project))})
             </DropdownMenuItem>
             <DropdownMenuSeparator />
           </>
         )}
-        {(["orchestrator", "user"] as const).map((m) => (
-          <DropdownMenuCheckItem key={m} checked={mode === m} onSelect={() => void updateChat(chat.id, { approvalModeOverride: m })}>
-            {APPROVAL_MODE_LABEL[m]}
+        {APPROVAL_MODES.map((m) => (
+          <DropdownMenuCheckItem key={m} checked={mode === m} title={approvalModeHelp(m)} onSelect={() => void updateChat(chat.id, { approvalModeOverride: m })}>
+            {approvalModeLabel(m)}
           </DropdownMenuCheckItem>
         ))}
       </DropdownMenuContent>

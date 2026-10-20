@@ -68,11 +68,11 @@ export function StatusDialog({ open, onOpenChange, chat, project }: { open: bool
               <EffortPicker
                 agent={orch.agent}
                 model={orch.model}
-                value={chat.orchestratorEffortOverride ?? project.settings.orchestratorEffort ?? "xhigh"}
+                value={chat.orchestratorEffortOverride ?? project.settings.orchestratorEffort ?? "auto"}
                 inherited={chat.orchestratorEffortOverride === null}
                 onChange={(v) => void updateChat(chat.id, { orchestratorEffortOverride: v })}
                 onReset={() => void updateChat(chat.id, { orchestratorEffortOverride: null })}
-                resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.orchestratorEffort ?? "xhigh")})`}
+                resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.orchestratorEffort ?? "auto")})`}
                 ariaLabel="상태: 마스터 추론 수준"
               />
             </div>,
@@ -85,19 +85,8 @@ export function StatusDialog({ open, onOpenChange, chat, project }: { open: bool
                 ariaLabel="상태: 클로드 모델"
                 value={claudeModel}
                 inherited={chat.claudeModelOverride === null}
-                onChange={(v) => void updateChat(chat.id, { claudeModelOverride: v, claudeEffortOverride: defaultEffortForModel(models, "claude", v, true) })}
+                onChange={(v) => void updateChat(chat.id, { claudeModelOverride: v })}
                 onReset={() => void updateChat(chat.id, { claudeModelOverride: null })}
-              />
-              <EffortPicker
-                agent="claude"
-                model={claudeModel}
-                worker
-                value={chat.claudeEffortOverride ?? project.settings.claudeEffort ?? "auto"}
-                inherited={chat.claudeEffortOverride === null}
-                onChange={(v) => void updateChat(chat.id, { claudeEffortOverride: v })}
-                onReset={() => void updateChat(chat.id, { claudeEffortOverride: null })}
-                resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.claudeEffort ?? "auto")})`}
-                ariaLabel="상태: 클로드 추론 수준"
               />
             </div>,
           )}
@@ -109,19 +98,8 @@ export function StatusDialog({ open, onOpenChange, chat, project }: { open: bool
                 ariaLabel="상태: 지피티 모델"
                 value={codexModel}
                 inherited={chat.codexModelOverride === null}
-                onChange={(v) => void updateChat(chat.id, { codexModelOverride: v, codexEffortOverride: defaultEffortForModel(models, "codex", v, true) })}
+                onChange={(v) => void updateChat(chat.id, { codexModelOverride: v })}
                 onReset={() => void updateChat(chat.id, { codexModelOverride: null })}
-              />
-              <EffortPicker
-                agent="codex"
-                model={codexModel}
-                worker
-                value={chat.codexEffortOverride ?? project.settings.codexEffort ?? "auto"}
-                inherited={chat.codexEffortOverride === null}
-                onChange={(v) => void updateChat(chat.id, { codexEffortOverride: v })}
-                onReset={() => void updateChat(chat.id, { codexEffortOverride: null })}
-                resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.codexEffort ?? "auto")})`}
-                ariaLabel="상태: 지피티 추론 수준"
               />
             </div>,
           )}
@@ -133,19 +111,8 @@ export function StatusDialog({ open, onOpenChange, chat, project }: { open: bool
                 ariaLabel="상태: 제미나이 모델"
                 value={geminiModel}
                 inherited={chat.geminiModelOverride === null}
-                onChange={(v) => void updateChat(chat.id, { geminiModelOverride: v, geminiEffortOverride: defaultEffortForModel(models, "gemini", v, true) })}
+                onChange={(v) => void updateChat(chat.id, { geminiModelOverride: v })}
                 onReset={() => void updateChat(chat.id, { geminiModelOverride: null })}
-              />
-              <EffortPicker
-                agent="gemini"
-                model={geminiModel}
-                worker
-                value={chat.geminiEffortOverride ?? project.settings.geminiEffort ?? "auto"}
-                inherited={chat.geminiEffortOverride === null}
-                onChange={(v) => void updateChat(chat.id, { geminiEffortOverride: v })}
-                onReset={() => void updateChat(chat.id, { geminiEffortOverride: null })}
-                resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.geminiEffort ?? "auto")})`}
-                ariaLabel="상태: 제미나이 추론 수준"
               />
             </div>,
           )}
@@ -157,19 +124,8 @@ export function StatusDialog({ open, onOpenChange, chat, project }: { open: bool
                 ariaLabel="상태: 그록 모델"
                 value={grokModel}
                 inherited={chat.grokModelOverride === null}
-                onChange={(v) => void updateChat(chat.id, { grokModelOverride: v, grokEffortOverride: defaultEffortForModel(models, "grok", v, true) })}
+                onChange={(v) => void updateChat(chat.id, { grokModelOverride: v })}
                 onReset={() => void updateChat(chat.id, { grokModelOverride: null })}
-              />
-              <EffortPicker
-                agent="grok"
-                model={grokModel}
-                worker
-                value={chat.grokEffortOverride ?? project.settings.grokEffort ?? "auto"}
-                inherited={chat.grokEffortOverride === null}
-                onChange={(v) => void updateChat(chat.id, { grokEffortOverride: v })}
-                onReset={() => void updateChat(chat.id, { grokEffortOverride: null })}
-                resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.grokEffort ?? "auto")})`}
-                ariaLabel="상태: 그록 추론 수준"
               />
             </div>,
           )}
@@ -181,19 +137,8 @@ export function StatusDialog({ open, onOpenChange, chat, project }: { open: bool
                 ariaLabel="상태: 딥시크 모델"
                 value={deepseekModel}
                 inherited={chat.deepseekModelOverride === null}
-                onChange={(v) => void updateChat(chat.id, { deepseekModelOverride: v, deepseekEffortOverride: defaultEffortForModel(models, "deepseek", v, true) })}
+                onChange={(v) => void updateChat(chat.id, { deepseekModelOverride: v })}
                 onReset={() => void updateChat(chat.id, { deepseekModelOverride: null })}
-              />
-              <EffortPicker
-                agent="deepseek"
-                model={deepseekModel}
-                worker
-                value={chat.deepseekEffortOverride ?? project.settings.deepseekEffort ?? "auto"}
-                inherited={chat.deepseekEffortOverride === null}
-                onChange={(v) => void updateChat(chat.id, { deepseekEffortOverride: v })}
-                onReset={() => void updateChat(chat.id, { deepseekEffortOverride: null })}
-                resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.deepseekEffort ?? "auto")})`}
-                ariaLabel="상태: 딥시크 추론 수준"
               />
             </div>,
           )}

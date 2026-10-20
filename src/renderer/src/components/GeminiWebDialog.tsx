@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CircleAlert, ExternalLink, Loader2, Plus, RefreshCw, Sparkles } from "lucide-react";
+import { CircleAlert, ExternalLink, Loader2, LogOut, Plus, RefreshCw, Sparkles, Trash2 } from "lucide-react";
 import type { AIStudioAccount, AIStudioCooldown, AIStudioStatus } from "../../../shared/aistudio";
 import type { GeminiWebAccountId, GeminiWebAccountStatus, GeminiWebStatus, GeminiWebUsage } from "../../../shared/types";
 import { api, errorMessage } from "../lib/utils";
@@ -123,8 +123,9 @@ interface Props {
 }
 
 type LoginFeedback = "pending" | "complete";
+type DisconnectAction = "logout" | "remove";
 
-function AccountCard({ account, pending, loginFeedback, update, query, aiStudioStatus, aiStudioPending, syncAIStudio }: {
+function AccountCard({ account, pending, loginFeedback, update, query, aiStudioStatus, aiStudioPending, syncAIStudio, disconnect }: {
   account: GeminiWebAccountStatus;
   pending: boolean;
   loginFeedback?: LoginFeedback;
@@ -133,8 +134,10 @@ function AccountCard({ account, pending, loginFeedback, update, query, aiStudioS
   aiStudioStatus?: AIStudioStatus;
   aiStudioPending: boolean;
   syncAIStudio: (id: GeminiWebAccountId) => void;
+  disconnect: (id: GeminiWebAccountId, action: DisconnectAction) => void;
 }) {
   const [label, setLabel] = useState(account.label);
+  const [confirmAction, setConfirmAction] = useState<DisconnectAction>();
   useEffect(() => setLabel(account.label), [account.label]);
   const tip = usageTooltip(account.usage);
   const windows = quotaWindows(account.usage);
@@ -149,6 +152,8 @@ function AccountCard({ account, pending, loginFeedback, update, query, aiStudioS
   const argonAvailable = studioAccount && aiStudioStatus
     ? studioAccount.models.includes(aiStudioStatus.settings.model)
     : undefined;
+  const studioBusy = !!studioAccount && /busy|running/i.test(studioAccount.state);
+  const disconnectDisabled = pending || aiStudioPending || busy || studioBusy;
   const studioStateText = studioLink?.state === "connected" ? "연결됨" : studioLink?.state === "error" ? "오류" : "연결되지 않음";
   return (
     <section className="grid gap-3 rounded-xl border bg-card p-4" data-testid="gemini-web-account" data-account-id={account.accountId}>
@@ -187,7 +192,7 @@ function AccountCard({ account, pending, loginFeedback, update, query, aiStudioS
             size="xs"
             variant="outline"
             className="ml-auto"
-            disabled={pending || aiStudioPending}
+            disabled={pending || aiStudioPending || studioBusy}
             onClick={() => syncAIStudio(account.accountId)}
             title="현재 Gemini Web 로그인 세션으로 연결합니다. 필요하면 AI Studio 동의 탭이 열립니다."
             data-testid="aistudio-sync"
@@ -222,9 +227,36 @@ function AccountCard({ account, pending, loginFeedback, update, query, aiStudioS
           {loginFeedback === "pending" ? "로그인 진행 중" : "로그인 완료"}
         </div>
       )}
+      {confirmAction && (
+        <div className="grid gap-2 rounded-lg border border-warning/40 bg-warning/5 px-3 py-2.5 text-[12px]" data-testid="gemini-web-disconnect-confirm" role="alert">
+          <p>{confirmAction === "logout"
+            ? "로그아웃하면 슬롯은 유지되고 Google 로그인과 연결된 AI Studio 세션이 해제됩니다."
+            : "슬롯을 삭제하면 이 슬롯이 목록에서 제거되어 새 계정을 추가할 수 있습니다."}</p>
+          <p className="text-muted-foreground">이 앱의 로그인 정보와 연결된 AI Studio 계정 등록을 정리합니다. Google 계정과 대화 기록은 삭제하지 않습니다.</p>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              size="xs"
+              variant={confirmAction === "remove" ? "destructive" : "default"}
+              disabled={disconnectDisabled}
+              onClick={() => {
+                const action = confirmAction;
+                setConfirmAction(undefined);
+                disconnect(account.accountId, action);
+              }}
+              data-testid={`gemini-web-confirm-${confirmAction}`}
+            >
+              {confirmAction === "logout" ? "로그아웃 확인" : "슬롯 삭제 확인"}
+            </Button>
+            <Button type="button" size="xs" variant="outline" onClick={() => setConfirmAction(undefined)} data-testid="gemini-web-disconnect-cancel">취소</Button>
+          </div>
+        </div>
+      )}
       <div className="flex flex-wrap gap-2">
         <Button type="button" size="sm" variant="outline" disabled={pending} onClick={() => query(account.accountId, browserAction)} data-testid="gemini-web-login"><ExternalLink /> 로그인 / 브라우저</Button>
         <Button type="button" size="sm" variant="outline" disabled={pending} onClick={() => query(account.accountId, "refresh")}><RefreshCw /> 사용량 확인</Button>
+        <Button type="button" size="sm" variant="outline" disabled={disconnectDisabled} onClick={() => setConfirmAction("logout")} data-testid="gemini-web-logout"><LogOut /> 로그아웃</Button>
+        <Button type="button" size="sm" variant="destructive" disabled={disconnectDisabled} onClick={() => setConfirmAction("remove")} data-testid="gemini-web-remove"><Trash2 /> 슬롯 삭제</Button>
       </div>
     </section>
   );
@@ -232,6 +264,7 @@ function AccountCard({ account, pending, loginFeedback, update, query, aiStudioS
 
 export function GeminiWebDialog({ open, onOpenChange, onUseModel }: Props) {
   const [accounts, setAccounts] = useState<GeminiWebAccountStatus[]>([]);
+  const [accountsLoaded, setAccountsLoaded] = useState(false);
   const [pending, setPending] = useState(false);
   const [pendingAccounts, setPendingAccounts] = useState<Set<GeminiWebAccountId>>(() => new Set());
   const [loginFeedback, setLoginFeedback] = useState<Partial<Record<GeminiWebAccountId, LoginFeedback>>>({});
@@ -239,15 +272,34 @@ export function GeminiWebDialog({ open, onOpenChange, onUseModel }: Props) {
   const [aiStudioStatus, setAIStudioStatus] = useState<AIStudioStatus>();
   const [aiStudioError, setAIStudioError] = useState<string>();
   const [aiStudioPending, setAIStudioPending] = useState<Set<GeminiWebAccountId>>(() => new Set());
-  const listRequestInFlight = useRef(false);
+  const listRequestInFlight = useRef<Promise<GeminiWebAccountStatus[]> | undefined>(undefined);
   const aiStudioRequestInFlight = useRef(false);
-  const reload = useCallback(async () => {
-    if (listRequestInFlight.current) return;
-    listRequestInFlight.current = true;
+  const reload = useCallback(async (force = false) => {
+    const current = listRequestInFlight.current;
+    if (current) {
+      const result = await current;
+      if (!force) return result;
+    }
+    const request = api.geminiWebAccounts("list");
+    listRequestInFlight.current = request;
     try {
-      setAccounts(await api.geminiWebAccounts("list"));
+      const next = await request;
+      setAccounts(next);
+      setAccountsLoaded(true);
+      return next;
     } finally {
-      listRequestInFlight.current = false;
+      if (listRequestInFlight.current === request) listRequestInFlight.current = undefined;
+    }
+  }, []);
+  const refreshAIStudioStatus = useCallback(async () => {
+    try {
+      const status = await api.aiStudio("status");
+      setAIStudioStatus(status);
+      setAIStudioError(status.error);
+      return status;
+    } catch (e) {
+      setAIStudioError(errorMessage(e));
+      throw e;
     }
   }, []);
   useEffect(() => {
@@ -270,12 +322,9 @@ export function GeminiWebDialog({ open, onOpenChange, onUseModel }: Props) {
       if (!active || aiStudioRequestInFlight.current) return;
       aiStudioRequestInFlight.current = true;
       try {
-        const status = await api.aiStudio("status");
-        if (!active) return;
-        setAIStudioStatus(status);
-        setAIStudioError(undefined);
-      } catch (e) {
-        if (active) setAIStudioError(errorMessage(e));
+        await refreshAIStudioStatus();
+      } catch {
+        // The status banner carries the current error.
       } finally {
         aiStudioRequestInFlight.current = false;
       }
@@ -286,7 +335,7 @@ export function GeminiWebDialog({ open, onOpenChange, onUseModel }: Props) {
       active = false;
       window.clearInterval(timer);
     };
-  }, [open]);
+  }, [open, refreshAIStudioStatus]);
   useEffect(() => {
     if (!open) return;
     let active = true;
@@ -308,11 +357,33 @@ export function GeminiWebDialog({ open, onOpenChange, onUseModel }: Props) {
       unsubscribe();
     };
   }, [open, reload]);
-  const manage = async (action: "add" | "update", input?: { accountId?: GeminiWebAccountId; label?: string; enabled?: boolean }) => {
+  const manage = async (action: "add" | "update" | "logout" | "remove", input?: { accountId?: GeminiWebAccountId; label?: string; enabled?: boolean }) => {
+    const accountId = input?.accountId;
+    if (accountId) setPendingAccounts(current => new Set(current).add(accountId));
     setPending(true); setError(undefined);
-    try { setAccounts(await api.geminiWebAccounts(action, input)); }
-    catch (e) { setError(errorMessage(e)); }
-    finally { setPending(false); }
+    try {
+      const next = await api.geminiWebAccounts(action, input);
+      setAccounts(next);
+      setAccountsLoaded(true);
+      if (action === "logout" || action === "remove") {
+        if (accountId) setLoginFeedback(current => {
+          const next = { ...current };
+          delete next[accountId];
+          return next;
+        });
+        await reload(true).catch(e => setError(errorMessage(e)));
+        await refreshAIStudioStatus().catch(() => undefined);
+      }
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setPending(false);
+      if (accountId) setPendingAccounts(current => {
+        const next = new Set(current);
+        next.delete(accountId);
+        return next;
+      });
+    }
   };
   const query = async (id: GeminiWebAccountId, action: "login" | "open" | "refresh") => {
     setPendingAccounts(current => new Set(current).add(id));
@@ -383,8 +454,10 @@ export function GeminiWebDialog({ open, onOpenChange, onUseModel }: Props) {
             aiStudioStatus={aiStudioStatus}
             aiStudioPending={aiStudioPending.has(account.accountId)}
             syncAIStudio={(id) => void syncAIStudio(id)}
+            disconnect={(id, action) => void manage(action, { accountId: id })}
           />)}
-          {!accounts.length && <p className="text-[12px] text-muted-foreground">계정을 불러오는 중입니다.</p>}
+          {!accountsLoaded && <p className="text-[12px] text-muted-foreground">계정을 불러오는 중입니다.</p>}
+          {accountsLoaded && !accounts.length && <p className="text-[12px] text-muted-foreground">등록된 계정이 없습니다. 계정 추가로 슬롯을 만드세요.</p>}
         </div>
         <DialogFooter>
           {pending && <Loader2 className="mr-auto size-4 animate-spin" aria-label="계정 처리 중" />}

@@ -182,6 +182,25 @@ export class AIStudioService {
   }
   linkedAccount(webId: string) { return this.links[webId]?.accountId; }
   linkedWebAccounts(accountId: string) { return Object.keys(this.links).filter(id => this.links[id]?.accountId?.toLowerCase() === accountId.toLowerCase()); }
+  async disconnectWeb(webId: string) {
+    if (!/^gemini-([1-9]|10)$/.test(webId)) throw new Error("등록되지 않은 웹 계정입니다.");
+    const run = this.accountChange.then(async () => {
+      const id = this.linkedAccount(webId);
+      if (id) {
+        if (this.linkedWebAccounts(id).some(other => other !== webId)) throw new Error("다른 웹 슬롯에도 연결된 AI Studio 계정입니다. 연결을 먼저 확인하세요.");
+        const accounts = (await this.json("/api/accounts")).accounts;
+        if (!Array.isArray(accounts)) throw new Error("AI Studio 계정 목록을 확인하지 못했습니다.");
+        const account = accounts.find((a: AIStudioAccount) => a.id.toLowerCase() === id.toLowerCase());
+        if (account?.state === "busy") throw new Error("AI Studio에서 사용 중인 계정입니다. 작업을 마친 뒤 다시 시도하세요.");
+        // The backend checks its scheduler lease atomically and removes its own saved login.
+        if (account) await this.json(`/api/accounts/${encodeURIComponent(account.id)}`, undefined, AbortSignal.timeout(15_000), "DELETE");
+      }
+      delete this.links[webId];
+      this.store.setSetting("aiStudioWebLinks", JSON.stringify(this.links));
+    });
+    this.accountChange = run.catch(() => undefined);
+    return run;
+  }
   async syncWeb(webId: string, enabled: boolean, getState: () => Promise<{ email: string; cookies: Record<string, unknown>[]; origins: never[] }>) {
     if (!/^gemini-([1-9]|10)$/.test(webId)) throw new Error("등록되지 않은 웹 계정입니다.");
     const run = this.accountChange.then(async () => {

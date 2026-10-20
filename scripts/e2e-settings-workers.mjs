@@ -184,7 +184,7 @@ try {
     settingsLayout.dialogWidth >= expectedDialogWidth - 2 && settingsLayout.dialogScrollWidth <= settingsLayout.dialogClientWidth + 1 && settingsLayout.workerGridScrollWidth <= (settingsLayout.workerGridClientWidth ?? 0) + 1,
     JSON.stringify(settingsLayout),
   );
-  check("settings textareas disable the native resize handle", settingsLayout.textareaResize.length === 8 && settingsLayout.textareaResize.every((resize) => resize === "none"), JSON.stringify(settingsLayout.textareaResize));
+  check("settings textareas disable the native resize handle", settingsLayout.textareaResize.length === 10 && settingsLayout.textareaResize.every((resize) => resize === "none"), JSON.stringify(settingsLayout.textareaResize));
   await page.screenshot({ path: join(screenshots, "settings-dark.png") });
   await dialog.getByRole("button", { name: "취소" }).click();
   await page.waitForSelector('[role="dialog"]', { state: "detached" });
@@ -198,17 +198,40 @@ try {
   await themeToggle.click();
   await page.waitForFunction(() => document.documentElement.classList.contains("dark"));
   check("dark and light settings screenshots were written", existsSync(join(screenshots, "settings-dark.png")) && existsSync(join(screenshots, "settings-light.png")));
+  // Approval has exactly three presets and repeated toggles stay local.
   dialog = await openSettings(page, "UI 상태 점검");
-  const highRisk = dialog.getByRole("switch", { name: "고위험 요청도 맡기기" });
   const reviewGate = dialog.getByRole("switch", { name: "교차 리뷰" });
+  const approvalGroup = dialog.getByRole("radiogroup", { name: "승인 방식" });
+  const fullApproval = approvalGroup.getByRole("radio", { name: "전체 위험 승인", exact: true });
+  const orchestratorApproval = approvalGroup.getByRole("radio", { name: "마스터 자동 승인", exact: true });
+  const userApproval = approvalGroup.getByRole("radio", { name: "관리자 직접 승인", exact: true });
+  const approvalHelp = {
+    "전체 위험 승인": "고위험도 마스터에게 위임합니다. 명시적 거부, 작업 범위, 계획 모드 제한은 유지합니다.",
+    "마스터 자동 승인": "마스터가 판단하고, 고위험하거나 불확실한 요청은 관리자에게 확인합니다.",
+    "관리자 직접 승인": "작업자가 파일을 고치거나 명령을 실행할 때마다 관리자가 직접 승인합니다.",
+  };
+  const approvalPresets = [
+    [fullApproval, "전체 위험 승인"],
+    [orchestratorApproval, "마스터 자동 승인"],
+    [userApproval, "관리자 직접 승인"],
+  ];
+  const oldHighRiskSwitchCount = await dialog.getByRole("switch", { name: "고위험 요청도 맡기기", exact: true }).count();
   const originalName = await dialog.locator("#proj-name").inputValue();
   const originalFolder = await dialog.locator("#proj-folder").inputValue();
-  const originalHighRisk = await highRisk.getAttribute("aria-checked");
+  const originalSettings = persistedProject().settings;
+  const originalApprovalMode = originalSettings.approvalMode;
+  const originalDelegateHighRisk = originalSettings.delegateHighRisk;
   const originalReviewGate = await reviewGate.getAttribute("aria-checked");
-  for (let i = 0; i < 3; i++) {
-    await highRisk.click();
+  check(
+    "approval exposes three presets without the old high-risk switch",
+    oldHighRiskSwitchCount === 0 && (await fullApproval.count()) === 1 && (await orchestratorApproval.count()) === 1 && (await userApproval.count()) === 1,
+    JSON.stringify({ oldHighRiskSwitchCount }),
+  );
+  for (const [preset, label] of approvalPresets) {
+    await preset.click();
+    check(`approval preset ${label} shows its help`, (await preset.getAttribute("aria-checked")) === "true" && (await dialog.getByText(approvalHelp[label], { exact: true }).count()) === 1);
     await reviewGate.click();
-    check(`repeated switch toggle ${i + 1} keeps settings dialog open`, await dialog.isVisible());
+    check(`approval preset ${label} keeps settings dialog open`, await dialog.isVisible());
   }
   const settingsViewport = await dialog.locator("#proj-name").evaluate((input) => {
     const dialogNode = input.closest('[role="dialog"]');
@@ -230,17 +253,28 @@ try {
   await dialog.getByRole("button", { name: "취소" }).click();
   await page.waitForSelector('[role="dialog"]', { state: "detached" });
   const afterCancel = persistedProject();
-  check("cancel leaves project values unchanged", afterCancel.name === originalName && afterCancel.folder === originalFolder && String(afterCancel.settings.delegateHighRisk) === originalHighRisk && String(afterCancel.settings.reviewGate) === originalReviewGate);
+  check(
+    "cancel leaves project values unchanged",
+    afterCancel.name === originalName &&
+      afterCancel.folder === originalFolder &&
+      afterCancel.settings.approvalMode === originalApprovalMode &&
+      afterCancel.settings.delegateHighRisk === originalDelegateHighRisk &&
+      String(afterCancel.settings.reviewGate) === originalReviewGate,
+  );
 
-  // Save both switch values and the project name, then verify the persisted record.
+  // Save the full-risk preset and review switch, then verify the persisted record.
   dialog = await openSettings(page, "UI 상태 점검");
   await fillProjectName(dialog, "UI 저장 완료");
-  await setSwitch(dialog.getByRole("switch", { name: "고위험 요청도 맡기기" }), true);
+  await dialog.getByRole("radiogroup", { name: "승인 방식" }).getByRole("radio", { name: "전체 위험 승인", exact: true }).click();
   await setSwitch(dialog.getByRole("switch", { name: "교차 리뷰" }), false);
   await dialog.getByRole("button", { name: "저장" }).click();
   await page.waitForSelector('[role="dialog"]', { state: "detached" });
   const saved = persistedProject();
-  check("settings save persists name and switch values", saved.name === "UI 저장 완료" && saved.settings.delegateHighRisk === true && saved.settings.reviewGate === false);
+  check(
+    "settings save persists approval preset and review switch",
+    saved.name === "UI 저장 완료" && saved.settings.approvalMode === "orchestrator-all" && saved.settings.delegateHighRisk === true && saved.settings.reviewGate === false,
+    JSON.stringify(saved.settings),
+  );
 
   // A bad folder must keep the dialog and all edited inputs open after the error.
   dialog = await openSettings(page, "UI 저장 완료");
@@ -288,7 +322,11 @@ try {
   await page.waitForFunction(() => document.querySelector('[data-testid="sidebar"]'));
   const restarted = await page.evaluate(() => window.chatterbox.listProjects());
   const restartedProject = restarted.find((p) => p.id === 1);
-  check("saved project settings survive restart", restartedProject?.name === "UI 저장 완료" && restartedProject.settings.delegateHighRisk === true && restartedProject.settings.reviewGate === false);
+  check(
+    "saved project settings survive restart",
+    restartedProject?.name === "UI 저장 완료" && restartedProject.settings.approvalMode === "orchestrator-all" && restartedProject.settings.delegateHighRisk === true && restartedProject.settings.reviewGate === false,
+    JSON.stringify(restartedProject?.settings),
+  );
   await page.locator('[data-testid="chat-node"][data-chat-id="1"] [role="treeitem"]').click();
   await page.waitForSelector('[data-testid="team-chips"]');
   check("worker team history is available after restart", (await page.locator('[data-testid="team-chip"]').count()) === 12);

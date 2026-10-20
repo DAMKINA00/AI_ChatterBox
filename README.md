@@ -6,6 +6,12 @@
 
 ## 주요 기능
 
+### 계정 정리와 실행 설정 (0.4.25)
+- 제미나이 웹 계정 카드에서 **로그아웃**하거나 **슬롯 삭제**할 수 있습니다. 로그아웃은 슬롯 이름과 설정을 유지하고, 삭제는 슬롯을 비웁니다. 두 작업 모두 해당 슬롯의 Google 로그인과 연결된 AI Studio 계정 등록을 정리하며 대화 기록은 보존합니다. 작업 중인 계정은 정리할 수 없습니다.
+- 작업자 추론은 기본 **자동 배정**이며 프로젝트 설정에서만 변경합니다. 채팅 상단과 `/model`에는 마스터 추론 선택만 표시합니다. 이전 채팅의 작업자 추론 선택보다 프로젝트 설정을 우선합니다.
+- 승인 방식은 **전체 위험 승인 / 마스터 자동 승인 / 관리자 직접 승인**으로 나눴습니다. 전체 위험 승인은 고위험 요청도 마스터에게 위임하며, 명시적 거부와 작업 범위·계획 모드 제한은 유지합니다.
+- 계획 목록에 남아 있는 기본 `[Antigravity N호]`와 `[Gemini N호]`를 `[제미나이 N호]`로 표시합니다. 사용자 지정 이름과 실제 CLI 명칭은 유지합니다.
+
 ### 사용량 화면 수정 (0.4.24)
 - AI Studio 사용량의 **기간**과 **세부 집계** 선택 목록이 앱의 밝은·어두운 테마에 맞는 배경과 글자색을 사용합니다.
 - 사이드바의 DeepSeek 잔고 행은 표시 전용입니다. DeepSeek 설정은 톱니바퀴 메뉴에서 엽니다.
@@ -57,9 +63,9 @@
 - 마스터·Claude·Codex·Antigravity·Grok·DeepSeek 모델을 프로젝트마다 정하고, 채팅 상단에서 채팅별로 바꿀 수 있습니다. Antigravity는 로그인한 Pro 계정에서 제공하는 모델만 표시합니다. Grok은 공식 CLI가 보고하는 모델과 추론 수준을 표시합니다.
 
 ### 승인 정책과 안전장치
-- 마스터와 작업자의 파일 수정과 명령 실행에 같은 프로젝트 승인 설정을 적용합니다. 자동 승인은 별도의 판단 세션이 맡고, 실패나 시간 초과, 추가 결정이 필요하면 사용자 카드로 돌아옵니다.
+- 마스터와 작업자의 파일 수정과 명령 실행에 같은 승인 설정을 적용합니다. 프로젝트 기본값을 정하고 채팅별로 바꿀 수 있습니다. **마스터 자동 승인**은 별도의 판단 세션이 맡고 고위험 요청·실패·시간 초과·추가 결정은 사용자 카드로 돌아옵니다.
 - 직접 승인에서는 **이번만 허용**, **이 채팅 동안 허용**, **거부** 중에서 고릅니다. 고위험 요청은 채팅 전체 허용을 기억하지 않습니다.
-- 고위험 위임 설정을 켜면 판단 세션이 사용자 지시 범위 안의 고위험 요청도 허용·거부할 수 있습니다. 설정을 바꾸면 이전 승인 기억은 초기화되며, `/plan`과 리뷰·의견의 수정 금지는 계속 적용됩니다.
+- **전체 위험 승인**은 판단 세션이 사용자 지시 범위 안의 고위험 요청도 허용·거부하며, 판단이 불확실하거나 응답하지 못한 경우도 자동 허용합니다. 명시적인 거부는 유지합니다. 설정을 바꾸면 이전 승인 기억은 초기화되며, `/plan`과 리뷰·의견의 수정 금지는 계속 적용됩니다.
 - `--dangerously-skip-permissions`나 Codex yolo 모드 같은 위험 우회 플래그는 쓰지 않습니다.
 - 권한 설정 참고: [Codex App Server](https://learn.chatgpt.com/docs/app-server), [Claude Code permissions](https://code.claude.com/docs/en/permissions), [Electron Windows 설정](https://www.electron.build/docs/api/app-builder-lib.interface.windowsconfiguration/), [Portable 설정](https://www.electron.build/docs/api/app-builder-lib.interface.portableoptions/).
 
@@ -124,6 +130,7 @@ npm run dev
 | `node scripts/e2e-delegation-ui.mjs` | 배정·이미지·사용량·파일 링크·설정 저장 UI 검사 (먼저 빌드, 모델 호출 없음) |
 | `node scripts/smoke-master-routing.mjs` | 실제 마스터의 직접 답변·분석·이미지·혼합·중요 오류 조사 배정과 취합 검사 (사용량 발생) |
 | `node scripts/e2e-effort-ui.mjs` | 추론 설정·저장·초기화·이전 기록·시간 제한 제거 UI 검사 (먼저 빌드, 모델 호출 없음) |
+| `node scripts/smoke-gemini-logout.mjs` | 격리 Electron 프로필의 로그아웃·슬롯 삭제·재사용과 다른 계정 보존 검사 (합성 로그인 정보, 외부 요청 없음) |
 | `node scripts/smoke-effort.mjs` | 실제 Claude/Codex 마스터의 xhigh와 세 계열 작업자 자동 추론 배정·응답·취합 검사 (사용량 발생) |
 | `node scripts/e2e-chat-layout.mjs` | Discord형 메시지·저장 시각·즉시/다음 단계 버튼·좁은 창 검사 |
 | `node scripts/e2e-chat-composer.mjs` | 즉시/다음 단계 단축키·버튼·IME·첨부 전송 및 관리자 표시 검사 (CLI 미호출) |

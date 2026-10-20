@@ -11,12 +11,23 @@ try {
   ({app, page} = await launch(data));
   await app.evaluate(({ipcMain, BrowserWindow}) => {
     const fresh = () => ({status:'unknown', detail:'로그인이 필요합니다.', checkedAt:Date.now()});
-    const account = n => ({accountId:`gemini-${n}`, label:`계정 ${n}`, enabled:true, state:'closed', message:'로그인을 확인하세요.', checkedAt:Date.now(), usage:fresh()});
+    const account = n => ({accountId:`gemini-${n}`, label:`계정 ${n}`, enabled:true, state:'closed', message:'로그인을 확인하세요.', checkedAt:Date.now(), usage:fresh(), linked:n === 2 || n === 3});
     const status = a => ({accountId:a.accountId, state:a.state, message:a.message, ...(a.model ? {model:a.model} : {}), checkedAt:Date.now(), usage:a.usage});
-    const state = globalThis.__webAccountsUi = {accounts:[account(1)], calls:[], holdLogin:[]};
+    const state = globalThis.__webAccountsUi = {accounts:[account(1)], calls:[], aiStudioCalls:[], holdLogin:[], studioBusy:true, failRemoveId:''};
+    const studioStatus = () => {
+      const linked = state.accounts.filter(a => a.linked);
+      return {
+        settings:{baseUrl:'http://127.0.0.1:2048', model:'gemini-4-argon', hasApiKey:false, executable:'', videoEnabled:false},
+        state:'RUNNING',
+        accounts:linked.map(a => ({id:`google-${a.accountId}`, label:a.label, enabled:a.enabled, state:a.accountId === 'gemini-3' && state.studioBusy ? 'busy' : 'ready', benefit_tier:'Pro', message:'mock', models:['gemini-4-argon']})),
+        cooldowns:[],
+        models:[{id:'gemini-4-argon',name:'Argon'}],
+        webLinks:Object.fromEntries(linked.map(a => [a.accountId, {accountId:`google-${a.accountId}`, state:'connected', message:'같은 Google 계정으로 AI Studio 연결됨', checkedAt:Date.now()}])),
+      };
+    };
     ipcMain.removeHandler('gemini:web-accounts');
     ipcMain.handle('gemini:web-accounts', (_e, action, input) => {
-      state.calls.push({action, input});
+      state.calls.push({action, input:input ? {...input} : undefined});
       if (action === 'add') {
         if(state.accounts.length >= 10) throw new Error('계정은 최대 10개입니다.');
         state.accounts.push(account(state.accounts.length + 1));
@@ -25,6 +36,14 @@ try {
         if(!a) throw new Error('등록되지 않은 계정');
         if(a.state === 'busy' && input.enabled === false) throw new Error('작업 중인 계정');
         Object.assign(a, input);
+      } else if(action === 'logout' || action === 'remove') {
+        const a = state.accounts.find(a => a.accountId === input?.accountId);
+        if(!a) throw new Error('등록되지 않은 계정');
+        if(action === 'remove' && state.failRemoveId === a.accountId) throw new Error('서버 오류: 슬롯을 정리하지 못했습니다.');
+        if(a.state === 'busy' || (a.accountId === 'gemini-3' && state.studioBusy)) throw new Error('사용 중인 계정');
+        a.state='login_required'; a.message='로그아웃되었습니다. 다시 로그인하세요.'; a.usage=fresh(); a.linked=false;
+        delete a.model; delete a.remainingPercent;
+        if(action === 'remove') state.accounts = state.accounts.filter(item => item.accountId !== a.accountId);
       } else if(action !== 'list') throw new Error('지원하지 않는 요청');
       return state.accounts;
     });
@@ -46,6 +65,16 @@ try {
         a.message='브라우저 열림';
       }
       return status(a);
+    });
+    ipcMain.removeHandler('aistudio');
+    ipcMain.handle('aistudio', (_e, action, input) => {
+      state.aiStudioCalls.push({action, input:input ? {...input} : undefined});
+      if (action === 'sync-web' && input?.accountId) {
+        const a = state.accounts.find(a => a.accountId === input.accountId);
+        if (a) a.linked = true;
+      }
+      if (action === 'status' || action === 'sync-web') return studioStatus();
+      throw new Error('지원하지 않는 AI Studio 요청');
     });
     ipcMain.removeHandler('models:list');
     ipcMain.handle('models:list', (_e, provider) => provider === 'gemini' ? [{id:'gemini-flash-test',label:'Gemini CLI 테스트'}, {id:'gemini-web-argon',label:'웹 · Gemini 4 Argon'}] : []);
@@ -75,6 +104,14 @@ try {
   check('account add is disabled at the limit', await dialog.getByTestId('gemini-web-add-account').isDisabled());
   const overflow = await page.evaluate(async()=>{try{await window.chatterbox.geminiWebAccounts('add');return '';}catch(e){return String(e);}});
   check('an eleventh account is rejected by the API', overflow.includes('10'));
+  const cancelCard = dialog.locator('[data-account-id="gemini-1"]');
+  const callsBeforeCancel = await app.evaluate(() => globalThis.__webAccountsUi.calls.length);
+  await cancelCard.getByTestId('gemini-web-logout').click();
+  await cancelCard.getByTestId('gemini-web-disconnect-confirm').waitFor();
+  await cancelCard.getByTestId('gemini-web-disconnect-cancel').click();
+  const cancelCallsAfter = await app.evaluate(() => globalThis.__webAccountsUi.calls.length);
+  const cancelConfirmCount = await cancelCard.getByTestId('gemini-web-disconnect-confirm').count();
+  check('cancelled disconnect leaves the confirmation closed and does not call the API', cancelConfirmCount === 0 && cancelCallsAfter === callsBeforeCancel, JSON.stringify({cancelConfirmCount, callsBeforeCancel, cancelCallsAfter}));
   const card = dialog.locator('[data-account-id="gemini-2"]');
   await card.getByRole('textbox',{name:'계정 2 이름'}).fill('문서 편집 계정');
   await card.getByRole('button',{name:'저장',exact:true}).click();
@@ -101,6 +138,19 @@ try {
   check('ready account keeps manual browser opening', await app.evaluate(()=>globalThis.__webAccountsUi.calls.some(c=>c.action==='open'&&c.id==='gemini-2')));
   await card.getByRole('button',{name:'사용량 확인',exact:true}).click();
   check('refresh is scoped to the selected profile', await app.evaluate(()=>globalThis.__webAccountsUi.calls.filter(c=>c.action==='refresh').every(c=>c.id==='gemini-2')));
+  const studioCallsBeforeLogout = await app.evaluate(() => globalThis.__webAccountsUi.aiStudioCalls.filter(c => c.action === 'status').length);
+  await card.getByTestId('gemini-web-logout').click();
+  await card.getByTestId('gemini-web-confirm-logout').click();
+  await card.getByText('로그아웃되었습니다. 다시 로그인하세요.',{exact:true}).waitFor();
+  const logoutState = await app.evaluate(() => {
+    const a = globalThis.__webAccountsUi.accounts.find(a => a.accountId === 'gemini-2');
+    return {count:globalThis.__webAccountsUi.accounts.length, label:a?.label, state:a?.state, usage:a?.usage, remaining:a?.remainingPercent, labelMatches:a?.label === '문서 편집 계정'};
+  });
+  const logoutFeedbackCount = await card.getByTestId('gemini-web-login-feedback').count();
+  const logoutUsageText = await card.getByTestId('gemini-web-account-usage').innerText();
+  check('confirmed logout keeps the slot, clears quota and login feedback', logoutState.count === 10 && logoutState.labelMatches && logoutState.state === 'login_required' && logoutState.usage.status === 'unknown' && !logoutState.remaining && logoutFeedbackCount === 0 && !logoutUsageText.includes('% 남음'), JSON.stringify({logoutState, logoutFeedbackCount, logoutUsageText}));
+  const studioCallsAfterLogout = await app.evaluate(() => globalThis.__webAccountsUi.aiStudioCalls.filter(c => c.action === 'status').length);
+  check('logout refreshes AI Studio status for the cleared link', studioCallsAfterLogout > studioCallsBeforeLogout, JSON.stringify({studioCallsBeforeLogout, studioCallsAfterLogout}));
   await app.evaluate(()=>{const state=globalThis.__webAccountsUi;state.holdLogin.push('gemini-4');const a=state.accounts.find(a=>a.accountId==='gemini-4');a.state='closed';a.message='로그인을 확인하세요.';});
   const cancelledCard = dialog.locator('[data-account-id="gemini-4"]');
   await cancelledCard.getByRole('button',{name:'로그인 / 브라우저',exact:true}).click();
@@ -112,10 +162,26 @@ try {
   await app.evaluate(()=>{globalThis.__webAccountsUi.holdLogin.push('gemini-2');const a=globalThis.__webAccountsUi.accounts.find(a=>a.accountId==='gemini-3');a.state='busy';a.message='다른 글쓰기 작업 중';});
   await page.waitForTimeout(3100);
   check('busy account cannot be excluded from under a running job', await dialog.getByRole('checkbox',{name:'계정 3 마스터 배정'}).isDisabled());
+  const busyCard = dialog.locator('[data-account-id="gemini-3"]');
+  check('busy Web or AI Studio accounts cannot be logged out or removed', await busyCard.getByTestId('gemini-web-logout').isDisabled() && await busyCard.getByTestId('gemini-web-remove').isDisabled());
   await app.evaluate(()=>{const a=globalThis.__webAccountsUi.accounts.find(a=>a.accountId==='gemini-4');a.usage={status:'error',detail:'로그인 확인 필요',checkedAt:Date.now(),current:{usedPercent:15}};a.remainingPercent=undefined;});
   await page.waitForTimeout(3100);
   const failedText=await dialog.locator('[data-account-id="gemini-4"] [data-testid="gemini-web-account-usage"]').innerText();
   check('failed quota query is shown without stale numeric values', failedText.includes('로그인 확인 필요')&&!failedText.includes('% 남음'));
+  const removable = dialog.locator('[data-account-id="gemini-10"]');
+  await removable.getByTestId('gemini-web-remove').click();
+  await removable.getByTestId('gemini-web-confirm-remove').click();
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="gemini-web-account"]').length === 9);
+  check('confirmed slot removal lowers the count and enables add', await app.evaluate(() => globalThis.__webAccountsUi.accounts.length === 9) && !(await dialog.getByTestId('gemini-web-add-account').isDisabled()));
+  await dialog.getByTestId('gemini-web-add-account').click();
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="gemini-web-account"]').length === 10);
+  const failedRemove = dialog.locator('[data-account-id="gemini-9"]');
+  await app.evaluate(() => { globalThis.__webAccountsUi.failRemoveId = 'gemini-9'; });
+  await failedRemove.getByTestId('gemini-web-remove').click();
+  await failedRemove.getByTestId('gemini-web-confirm-remove').click();
+  await page.getByRole('alert').filter({hasText:'서버 오류'}).waitFor();
+  check('server error leaves the removal card in place', await failedRemove.count() === 1 && await app.evaluate(() => globalThis.__webAccountsUi.accounts.some(a => a.accountId === 'gemini-9')));
+  await app.evaluate(() => { globalThis.__webAccountsUi.failRemoveId = ''; });
   await page.screenshot({path:join(screenshots,'accounts-dark.png'),fullPage:true});
   await dialog.getByText('닫기',{exact:true}).click();
   await page.getByLabel('테마 전환').click();

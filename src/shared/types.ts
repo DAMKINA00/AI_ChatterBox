@@ -141,7 +141,7 @@ export interface ProjectSettings {
   deepseekModel: string;
   deepseekStrengths: string;
   deepseekCautions: string;
-  /** Empty = CLI default; auto = master chooses medium/high/xhigh for each worker assignment. */
+  /** Empty/auto = model default for the master; auto = master chooses each worker assignment. */
   orchestratorEffort: string;
   claudeEffort: string;
   codexEffort: string;
@@ -166,10 +166,11 @@ export interface ProjectSettings {
   delegateHighRisk: boolean;
 }
 
-export type ApprovalMode = "orchestrator" | "user";
+export type ApprovalMode = "orchestrator-all" | "orchestrator" | "user";
 export const APPROVAL_MODE_LABEL: Record<ApprovalMode, string> = {
-  orchestrator: "마스터 자동 판단",
-  user: "매번 직접 승인",
+  "orchestrator-all": "전체 위험 승인",
+  orchestrator: "마스터 자동 승인",
+  user: "관리자 직접 승인",
 };
 
 export const MAX_CONSULTS = 999;
@@ -190,7 +191,7 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   deepseekModel: "deepseek-flash",
   deepseekStrengths: "사용자가 지정한 분석·코딩·테스트와 동료 협업.",
   deepseekCautions: "DeepSeek API 사용량은 별도 과금됩니다. 이미지·영상 생성은 지원하지 않습니다. 실제 도구 실행 결과만 보고합니다.",
-  orchestratorEffort: "xhigh",
+  orchestratorEffort: "auto",
   claudeEffort: "auto",
   codexEffort: "auto",
   geminiEffort: "auto",
@@ -474,7 +475,7 @@ export interface ChatterBoxApi {
   cliInfo(checkAuth?: boolean): Promise<CliInfo[]>;
   models(agent: AgentKind): Promise<ModelOption[]>;
   geminiWeb(action: "status" | "open" | "login" | "refresh", accountId?: GeminiWebAccountId): Promise<GeminiWebStatus>;
-  geminiWebAccounts(action: "list" | "add" | "update", input?: { accountId?: GeminiWebAccountId; label?: string; enabled?: boolean }): Promise<GeminiWebAccountStatus[]>;
+  geminiWebAccounts(action: "list" | "add" | "update" | "logout" | "remove", input?: { accountId?: GeminiWebAccountId; label?: string; enabled?: boolean }): Promise<GeminiWebAccountStatus[]>;
   getTheme(): Promise<Theme>;
   setTheme(theme: Theme): Promise<void>;
   usage(wait?: boolean): Promise<UsageInfo>;

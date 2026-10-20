@@ -401,6 +401,11 @@ export function apply(items: Item[], e: TimelineEvent, expression?: AgentExpress
   }
 }
 
+/** Normalize only legacy Gemini worker prefixes at the start of a plan step title. */
+export function normalizePlanStepTitle(title: string): string {
+  return title.replace(/^\[(?:Antigravity|Gemini) (\d+호)\](?=\s|$)/, "[제미나이 $1]");
+}
+
 /** Latest plan checklist and its /plan state, for the pinned plan panel. */
 export function planOf(events: TimelineEvent[]): { steps: PlanStep[]; explanation?: string; state: "proposed" | "running" | "done" | "cancelled" | "live" } | null {
   let steps: PlanStep[] | null = null;

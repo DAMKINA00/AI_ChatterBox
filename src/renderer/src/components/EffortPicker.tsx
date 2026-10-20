@@ -40,7 +40,7 @@ export function effortOptions(
     ...unique.filter((value) => !EFFORT_ORDER.includes(value)),
   ];
   const workerEfforts = agent === "deepseek" ? DEEPSEEK_WORKER_EFFORTS : WORKER_EFFORTS;
-  return worker ? ["auto", ...ordered.filter((value) => workerEfforts.has(value))] : ["", ...ordered];
+  return worker ? ["auto", ...ordered.filter((value) => workerEfforts.has(value))] : ["auto", ...ordered];
 }
 
 /** Choose the value to use immediately after a model changes. */
@@ -50,8 +50,7 @@ export function defaultEffortForModel(
   model: string,
   worker: boolean,
 ): string {
-  if (worker) return "auto";
-  return effortOptions(models, agent, model, false).includes("xhigh") ? "xhigh" : "";
+  return "auto";
 }
 
 interface Props {

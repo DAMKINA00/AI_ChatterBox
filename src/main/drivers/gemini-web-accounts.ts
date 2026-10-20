@@ -36,7 +36,7 @@ export class GeminiWebAccounts {
     this.accounts = Array.isArray(saved) ? saved.filter(a => a && webAccountId(a.accountId) && !seen.has(a.accountId) && seen.add(a.accountId))
       .map(a => ({ accountId: a.accountId, label: typeof a.label === "string" ? a.label.trim().slice(0, 60) : "", enabled: a.enabled !== false,
         usage: a.usage && ["available", "limited", "unknown", "error"].includes(a.usage.status) && typeof a.usage.detail === "string" && Number.isFinite(a.usage.checkedAt) ? a.usage : undefined })) : [];
-    if (!this.accounts.length) this.accounts = [{ accountId: "gemini-1", label: "계정 1", enabled: true }];
+    if (!this.accounts.length && (!Array.isArray(saved) || saved.length > 0)) this.accounts = [{ accountId: "gemini-1", label: "계정 1", enabled: true }];
   }
   browser(id: GeminiWebAccountId = "gemini-1") {
     if (this.disposed) throw new Error("웹 계정 연결이 종료되었습니다.");
@@ -78,6 +78,18 @@ export class GeminiWebAccounts {
     if (patch.enabled !== undefined) account.enabled = patch.enabled;
     this.save();
     if (patch.enabled !== undefined) this.changed();
+    return this.list();
+  }
+  async disconnect(id: GeminiWebAccountId, remove: boolean, unlink: () => Promise<void>) {
+    const browser = this.browser(id);
+    await browser.logout(unlink);
+    if (remove) {
+      await browser.dispose();
+      this.browsers.delete(id);
+      this.accounts = this.accounts.filter(a => a.accountId !== id);
+    }
+    this.save();
+    this.changed();
     return this.list();
   }
   private changed() {

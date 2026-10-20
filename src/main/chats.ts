@@ -118,7 +118,7 @@ export class ChatManager {
         const project = chat && this.store.project(chat.projectId);
         return {
           mode: chat?.approvalModeOverride ?? project?.settings.approvalMode ?? "orchestrator",
-          delegateHighRisk: !!project?.settings.delegateHighRisk,
+          delegateHighRisk: (chat?.approvalModeOverride ?? project?.settings.approvalMode) === "orchestrator-all",
         };
       },
       judge: (chatId, request, input) => this.judge?.(chatId, request, input) ?? Promise.resolve(null),
@@ -243,6 +243,25 @@ export class ChatManager {
   geminiWeb(accountId: GeminiWebAccountId = "gemini-1") {
     return this.geminiWebAccounts().browser(accountId);
   }
+  async disconnectWebAccount(accountId: GeminiWebAccountId, remove: boolean) {
+    const affected = () => this.store.listChats().flatMap(chat => this.store.listAgents(chat.id)
+      .filter(agent => agent.kind === "gemini" && (agent.webAccountId === accountId || conversationAccount(agent.sessionId) === accountId)));
+    const ensureIdle = () => {
+      const agents = affected();
+      if (agents.some(agent => this.liveDriver(agent.chatId, agent.key)?.running))
+        throw new Error("이 계정에 연결된 작업자가 실행 중입니다. 작업을 마친 뒤 다시 시도하세요.");
+      return agents;
+    };
+    ensureIdle();
+    return this.geminiWebAccounts().disconnect(accountId, remove, async () => {
+      ensureIdle();
+      await this.aiStudio().disconnectWeb(accountId);
+      const agents = ensureIdle();
+      this.store.disconnectWebAccount(accountId);
+      for (const agent of agents) await this.disposeRole(agent.chatId, agent.key);
+      for (const chatId of new Set(agents.map(agent => agent.chatId))) this.agentsChanged(chatId);
+    });
+  }
   usesGeminiWeb(chat: Chat) {
     return (chat.geminiModelOverride ?? this.store.project(chat.projectId)!.settings.geminiModel) === GEMINI_WEB_MODEL;
   }
@@ -268,7 +287,7 @@ export class ChatManager {
       if (role !== "orch") workerEffort("auto", requested); // Workers still record the master's assignment; this transport uses default thinking.
       return { requestedEffort: requested ?? "", effort: "" };
     }
-    const choice = role === "orch" ? cfg.effort : workerEffort(cfg.effort, requested);
+    const choice = role === "orch" ? cfg.effort === "auto" ? "" : cfg.effort : workerEffort(cfg.effort, requested);
     if (!choice) return { requestedEffort: requested ?? "", effort: "" };
     const models = await this.models(cfg.agent);
     const model = cfg.model ? models.find((m) => m.id === cfg.model) : models.find((m) => m.isDefault);
@@ -327,11 +346,11 @@ export class ChatManager {
       } catch { /* Unknown levels remain unavailable, never invent support. */ }
     }));
     return {
-      deepseek: { installed: this.deepSeek().status().apiKeySet, model: chat.deepseekModelOverride ?? project.settings.deepseekModel, reasoningEfforts: effortLevels.deepseek, effortSetting: chat.deepseekEffortOverride ?? project.settings.deepseekEffort, imageGeneration: false, videoGeneration: false, authentication: this.deepSeek().status(), localTools: true, fileWrites: true, enabled: project.settings.maxDeepseekWorkers > 0 },
-      claude: { installed: !!installed.find((c) => c.agent === "claude")?.path, model: chat.claudeModelOverride ?? project.settings.claudeModel, reasoningEfforts: effortLevels.claude, effortSetting: chat.claudeEffortOverride ?? project.settings.claudeEffort, imageGeneration: false, authentication: "실행 시 확인", usage: this.usageState.claude },
-      gpt: { installed: !!installed.find((c) => c.agent === "codex")?.path, model: gptModel, reasoningEfforts: effortLevels.codex, effortSetting: chat.codexEffortOverride ?? project.settings.codexEffort, imageGeneration, authenticated: codexAuthenticated, usage: this.usageState.codex },
-      grok: { installed: !!installed.find(c => c.agent === "grok")?.path, model: chat.grokModelOverride ?? project.settings.grokModel, reasoningEfforts: effortLevels.grok, effortSetting: chat.grokEffortOverride ?? project.settings.grokEffort, imageGeneration: null, authentication: "Grok 로그인과 도구는 실행 시 확인", usage: this.usageState.grok },
-      gemini: { installed: geminiStudio || geminiWeb || !!installed.find((c) => c.agent === "gemini")?.path, model: (chat.geminiModelOverride ?? project.settings.geminiModel) || "Pro 계정 제공 모델 자동 선택", reasoningEfforts: geminiWeb ? [] : effortLevels.gemini, effortSetting: geminiWeb ? "웹 모델 설정" : chat.geminiEffortOverride ?? project.settings.geminiEffort, imageGeneration: null, aiStudio: geminiStudio ? await this.aiStudio().status() : undefined, videoGeneration: geminiStudio && this.aiStudio().settings().videoEnabled, authentication: geminiStudio ? "AI Studio 연결·계정 한도는 aiStudio 상태에서 확인" : geminiWeb ? "계정별 로그인·잔여량은 webAccounts에서 확인하고 gemini_web_accounts로 갱신" : "Antigravity 로그인·모델 목록은 실행 시 확인", enabled: project.settings.maxGeminiWorkers > 0, usage: geminiWeb || geminiStudio ? undefined : this.usageState.gemini, webAccounts: geminiWeb ? this.webAccountInfo(chat.id) : undefined, webOnly: geminiWeb, localTools: !geminiWeb, fileWrites: !geminiWeb, supportedKinds: geminiWeb ? ["writing", "opinion", "review"] : ["implement", "writing", "opinion", "review"], role: "기본은 글쓰기, 사용자가 지정하면 해당 작업 우선" },
+      deepseek: { installed: this.deepSeek().status().apiKeySet, model: chat.deepseekModelOverride ?? project.settings.deepseekModel, reasoningEfforts: effortLevels.deepseek, effortSetting: project.settings.deepseekEffort, imageGeneration: false, videoGeneration: false, authentication: this.deepSeek().status(), localTools: true, fileWrites: true, enabled: project.settings.maxDeepseekWorkers > 0 },
+      claude: { installed: !!installed.find((c) => c.agent === "claude")?.path, model: chat.claudeModelOverride ?? project.settings.claudeModel, reasoningEfforts: effortLevels.claude, effortSetting: project.settings.claudeEffort, imageGeneration: false, authentication: "실행 시 확인", usage: this.usageState.claude },
+      gpt: { installed: !!installed.find((c) => c.agent === "codex")?.path, model: gptModel, reasoningEfforts: effortLevels.codex, effortSetting: project.settings.codexEffort, imageGeneration, authenticated: codexAuthenticated, usage: this.usageState.codex },
+      grok: { installed: !!installed.find(c => c.agent === "grok")?.path, model: chat.grokModelOverride ?? project.settings.grokModel, reasoningEfforts: effortLevels.grok, effortSetting: project.settings.grokEffort, imageGeneration: null, authentication: "Grok 로그인과 도구는 실행 시 확인", usage: this.usageState.grok },
+      gemini: { installed: geminiStudio || geminiWeb || !!installed.find((c) => c.agent === "gemini")?.path, model: (chat.geminiModelOverride ?? project.settings.geminiModel) || "Pro 계정 제공 모델 자동 선택", reasoningEfforts: geminiWeb ? [] : effortLevels.gemini, effortSetting: geminiWeb ? "웹 모델 설정" : project.settings.geminiEffort, imageGeneration: null, aiStudio: geminiStudio ? await this.aiStudio().status() : undefined, videoGeneration: geminiStudio && this.aiStudio().settings().videoEnabled, authentication: geminiStudio ? "AI Studio 연결·계정 한도는 aiStudio 상태에서 확인" : geminiWeb ? "계정별 로그인·잔여량은 webAccounts에서 확인하고 gemini_web_accounts로 갱신" : "Antigravity 로그인·모델 목록은 실행 시 확인", enabled: project.settings.maxGeminiWorkers > 0, usage: geminiWeb || geminiStudio ? undefined : this.usageState.gemini, webAccounts: geminiWeb ? this.webAccountInfo(chat.id) : undefined, webOnly: geminiWeb, localTools: !geminiWeb, fileWrites: !geminiWeb, supportedKinds: geminiWeb ? ["writing", "opinion", "review"] : ["implement", "writing", "opinion", "review"], role: "기본은 글쓰기, 사용자가 지정하면 해당 작업 우선" },
     };
   }
 
@@ -476,11 +495,11 @@ export class ChatManager {
   roleConfig(chat: Chat, project: Project, role: Role): RoleConfig {
     if (role === "orch") return { ...chatOrchestrator(chat, project), effort: chat.orchestratorEffortOverride ?? project.settings.orchestratorEffort };
     const worker = this.store.agentByKey(chat.id, role);
-    if (worker?.kind === "gpt") return { agent: "codex", model: chat.codexModelOverride ?? project.settings.codexModel, effort: chat.codexEffortOverride ?? project.settings.codexEffort };
-    if (worker?.kind === "grok") return { agent: "grok", model: chat.grokModelOverride ?? project.settings.grokModel, effort: chat.grokEffortOverride ?? project.settings.grokEffort };
-    if (worker?.kind === "deepseek") return { agent: "deepseek", model: chat.deepseekModelOverride ?? project.settings.deepseekModel, effort: chat.deepseekEffortOverride ?? project.settings.deepseekEffort };
-    if (worker?.kind === "gemini") return { agent: "gemini", model: chat.geminiModelOverride ?? project.settings.geminiModel, effort: chat.geminiEffortOverride ?? project.settings.geminiEffort };
-    return { agent: "claude", model: chat.claudeModelOverride ?? project.settings.claudeModel, effort: chat.claudeEffortOverride ?? project.settings.claudeEffort };
+    if (worker?.kind === "gpt") return { agent: "codex", model: chat.codexModelOverride ?? project.settings.codexModel, effort: project.settings.codexEffort };
+    if (worker?.kind === "grok") return { agent: "grok", model: chat.grokModelOverride ?? project.settings.grokModel, effort: project.settings.grokEffort };
+    if (worker?.kind === "deepseek") return { agent: "deepseek", model: chat.deepseekModelOverride ?? project.settings.deepseekModel, effort: project.settings.deepseekEffort };
+    if (worker?.kind === "gemini") return { agent: "gemini", model: chat.geminiModelOverride ?? project.settings.geminiModel, effort: project.settings.geminiEffort };
+    return { agent: "claude", model: chat.claudeModelOverride ?? project.settings.claudeModel, effort: project.settings.claudeEffort };
   }
 
   private nativeIdOf(chat: Chat, role: Role, agent: AgentKind): string | null {

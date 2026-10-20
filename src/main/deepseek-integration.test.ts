@@ -117,7 +117,7 @@ test("DeepSeek defaults merge, chat overrides persist, routing parses, and drive
     assert.deepEqual(parseOrchestrator("deepseek:deepseek-v4-pro"), { agent: "deepseek", model: "deepseek-v4-pro" });
     chats = new ChatManager(store, sink, root, "unused");
     assert.deepEqual(chats.roleConfig(currentChat, currentProject, "orch"), { agent: "deepseek", model: "deepseek-v4-pro", effort: "high" });
-    assert.deepEqual(chats.roleConfig(currentChat, currentProject, worker.key), { agent: "deepseek", model: "deepseek-v4-pro", effort: "max" });
+    assert.deepEqual(chats.roleConfig(currentChat, currentProject, worker.key), { agent: "deepseek", model: "deepseek-v4-pro", effort: currentProject.settings.deepseekEffort });
 
     const master = await chats.driver(chat.id, "orch");
     const assigned = await chats.driver(chat.id, worker.key, "medium");

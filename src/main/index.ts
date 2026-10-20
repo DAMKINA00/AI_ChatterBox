@@ -237,6 +237,8 @@ function registerIpc() {
     const accounts = chats.geminiWebAccounts();
     if (action === "list") return accounts.list();
     if (action === "add") return accounts.add();
+    if ((action === "logout" || action === "remove") && input?.accountId)
+      return chats.disconnectWebAccount(input.accountId, action === "remove");
     if (action === "update" && input?.accountId) {
       const previous = accounts.list().find(a => a.accountId === input.accountId);
       const updated = accounts.update(input.accountId, input);

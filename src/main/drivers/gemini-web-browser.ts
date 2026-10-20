@@ -19,6 +19,8 @@ export class GeminiWebBrowser {
   private opening?: Promise<BrowserWindow>;
   private owner?: string;
   private disposed = false;
+  private resetting = false;
+  private sessionRevision = 0;
   private usageWindow?: BrowserWindow;
   private studioWindow?: BrowserWindow;
   private usageReading?: Promise<GeminiWebUsage>;
@@ -31,7 +33,7 @@ export class GeminiWebBrowser {
     this.last = { ...this.last, accountId, message: `웹 ${this.accountName}에 로그인하세요.`, usage: usage ?? this.last.usage };
   }
   private get accountName() { return `계정 ${this.accountId.slice(7)}`; }
-  get busy() { return !!this.owner; }
+  get busy() { return !!this.owner || this.resetting; }
 
   async imageBytes(owner: string, url: string, signal: AbortSignal): Promise<string> {
     if (this.owner !== owner || !this.win || this.win.isDestroyed()) throw new Error("웹 이미지 소유 작업을 확인하지 못했습니다.");
@@ -57,7 +59,7 @@ export class GeminiWebBrowser {
   status() { return this.last; }
   /** Same isolated account partition as Gemini Web; authentication material stays in the main process. */
   async studioState(show = true): Promise<{ email: string; cookies: Record<string, unknown>[]; origins: never[] }> {
-    if (this.disposed) throw new Error("웹 계정 연결이 종료되었습니다.");
+    if (this.disposed || this.resetting) throw new Error("웹 계정 연결이 종료되었거나 로그아웃 중입니다.");
     if (!this.studioWindow || this.studioWindow.isDestroyed()) {
       const ses = session.fromPath(join(this.dataDir, "web-accounts", this.accountId));
       const win = new BrowserWindow({ width: 1100, height: 850, show: false, autoHideMenuBar: true,
@@ -113,14 +115,14 @@ export class GeminiWebBrowser {
     return this.last;
   }
   async open(show = true): Promise<GeminiWebStatus> {
-    if (this.disposed) throw new Error("웹 연결이 종료되었습니다.");
+    if (this.disposed || this.resetting) throw new Error("웹 연결이 종료되었거나 로그아웃 중입니다.");
     if (show) this.cancelLoginWatch();
     if (this.opening) await this.opening;
     else if (!this.win || this.win.isDestroyed()) {
       if (!this.opening) this.opening = this.createWindow(show).finally(() => { this.opening = undefined; });
       await this.opening;
     }
-    if (this.disposed || !this.win || this.win.isDestroyed()) throw new Error("웹 연결이 종료되었습니다.");
+    if (this.disposed || this.resetting || !this.win || this.win.isDestroyed()) throw new Error("웹 연결이 종료되었거나 로그아웃 중입니다.");
     if (show) {
       this.win.show(); this.win.focus();
       if (this.verificationRequired) {
@@ -286,8 +288,11 @@ export class GeminiWebBrowser {
     return this.win.webContents.executeJavaScript(SNAPSHOT_SCRIPT);
   }
   async refresh(readUsage = true): Promise<GeminiWebStatus> {
+    if (this.disposed || this.resetting) return this.last;
+    const revision = this.sessionRevision;
     try {
       const s = await this.snapshot();
+      if (this.disposed || this.resetting || revision !== this.sessionRevision) return this.last;
       if (this.verificationRequired && (!readUsage || !s || s.login)) return this.publish("login_required", `Google 보안 확인이 필요합니다. ${this.accountName} 브라우저에서 직접 확인한 뒤 새로 확인을 눌러 주세요.`);
       if (!this.win) {
         this.publish("closed", `브라우저를 열어 웹 ${this.accountName}의 상태를 확인하세요.`);
@@ -301,12 +306,15 @@ export class GeminiWebBrowser {
       this.publish(this.owner || manual ? "busy" : "ready", this.owner ? `웹 ${this.accountName} 작업 중` : manual ? `${this.accountName} 브라우저에서 직접 작성 중입니다.` : /argon/i.test(s.model) ? `${this.accountName} · Argon 연결 준비 완료` : "로그인됨 · 작업 시작 전에 Argon을 확인합니다.", s);
       if (readUsage) await this.refreshUsage(true);
       return this.last;
-    } catch { return this.publish("error", "웹 상태를 읽지 못했습니다. 브라우저에서 연결을 확인하세요."); }
+    } catch {
+      return this.disposed || this.resetting || revision !== this.sessionRevision ? this.last
+        : this.publish("error", "웹 상태를 읽지 못했습니다. 브라우저에서 연결을 확인하세요.");
+    }
   }
   /** A separate hidden page shares this account's session; never navigate the active chat. */
   refreshUsage(force = false): Promise<GeminiWebUsage> {
     if (this.usageReading) return this.usageReading;
-    if (this.disposed || this.verificationRequired) return Promise.resolve(this.last.usage);
+    if (this.disposed || this.resetting || this.verificationRequired) return Promise.resolve(this.last.usage);
     if (!force && Date.now() - this.lastUsageReadAt < 60000) return Promise.resolve(this.last.usage);
     this.lastUsageReadAt = Date.now();
     this.usageReading = this.readUsage().finally(() => { this.usageReading = undefined; });
@@ -341,6 +349,7 @@ export class GeminiWebBrowser {
   }
   async claim(owner: string, signal?: AbortSignal) {
     signal?.throwIfAborted();
+    if (this.disposed || this.resetting) throw new Error("웹 계정 연결이 종료되었거나 로그아웃 중입니다.");
     if (this.verificationRequired) throw new Error(`Google 보안 확인이 필요합니다. ${this.accountName} 브라우저를 열어 직접 확인한 뒤 새로 확인을 눌러 주세요.`);
     if (this.owner) throw new Error(`Gemini 웹 ${this.accountName}이 다른 작업을 처리 중입니다. 완료 후 다시 배정하세요.`);
     if (this.authWindows.size) throw new Error(`Gemini 웹 ${this.accountName} 로그인 창을 먼저 마무리해 주세요. 로그인 중에는 작업을 배정하지 않습니다.`);
@@ -414,6 +423,39 @@ export class GeminiWebBrowser {
     await this.win.webContents.executeJavaScript(buttonScript("응답 중지|답변 중지|생성 중지|stop response|stop generating")).catch(() => false);
   }
   nativeId(snapshot: WebSnapshot) { return webConversationId(snapshot.url, this.accountId); }
+  async logout(disconnect: () => Promise<void>, clearSession = async () => {
+    const ses = session.fromPath(join(this.dataDir, "web-accounts", this.accountId));
+    await ses.clearStorageData();
+    await ses.clearCache();
+    await ses.clearAuthCache();
+    await ses.closeAllConnections();
+    await ses.cookies.flushStore();
+  }) {
+    if (this.busy || this.last.state === "busy") throw new Error("작업 중인 계정은 로그아웃하거나 삭제할 수 없습니다.");
+    this.resetting = true;
+    this.sessionRevision++;
+    let clearing = false;
+    try {
+      const snapshot = await this.snapshot();
+      if (snapshot?.generating || snapshot?.draft.trim()) throw new Error("브라우저에서 작성 중인 내용을 마무리한 뒤 다시 시도하세요.");
+      await disconnect();
+      const latest = await this.snapshot();
+      if (latest?.generating || latest?.draft.trim()) throw new Error("브라우저에서 새로 작성 중인 내용을 확인했습니다. 내용을 마무리한 뒤 다시 시도하세요.");
+      clearing = true;
+      await this.dispose();
+      await this.opening?.catch(() => undefined);
+      await clearSession();
+      this.verificationRequired = false;
+      this.lastUsageReadAt = 0;
+      return this.publish("login_required", "로그아웃되었습니다. 로그인 / 브라우저에서 다시 로그인하세요.");
+    } catch (error) {
+      if (clearing) this.publish("error", "로그인 정보 정리를 완료하지 못했습니다. 로그아웃을 다시 시도하세요.");
+      throw error;
+    } finally {
+      this.disposed = false;
+      this.resetting = false;
+    }
+  }
   async dispose() {
     this.cancelLoginWatch();
     this.disposed = true; this.owner = undefined;

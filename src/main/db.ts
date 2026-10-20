@@ -192,6 +192,8 @@ function projectSettings(json: string): ProjectSettings {
   };
   for (const [key, values] of Object.entries(previous)) if (values.includes(saved[key])) delete saved[key];
   const settings = { ...DEFAULT_SETTINGS, ...saved };
+  if (settings.approvalMode === "orchestrator" && settings.delegateHighRisk) settings.approvalMode = "orchestrator-all";
+  settings.delegateHighRisk = settings.approvalMode === "orchestrator-all";
   const bounded = (value: number, min: number, max: number, fallback: number) => Number.isFinite(value) ? Math.min(max, Math.max(min, Math.floor(value))) : fallback;
   settings.maxConsults = bounded(settings.maxConsults, 1, MAX_CONSULTS, DEFAULT_SETTINGS.maxConsults);
   settings.maxReviews = bounded(settings.maxReviews, 0, MAX_REVIEWS, DEFAULT_SETTINGS.maxReviews);
@@ -584,6 +586,22 @@ export class Store {
   deleteChat(id: number) {
     this.clearChatSettings(id);
     this.db.prepare("DELETE FROM chats WHERE id = ?").run(id);
+  }
+  disconnectWebAccount(accountId: GeminiWebAccountId) {
+    if (!/^gemini-([1-9]|10)$/.test(accountId)) throw new Error("등록되지 않은 웹 계정입니다.");
+    const prefix = `web:${accountId}:/app/%`;
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare(`UPDATE agents SET
+        session_id = CASE WHEN session_id LIKE ? THEN NULL ELSE session_id END,
+        web_account_id = CASE WHEN web_account_id = ? THEN NULL ELSE web_account_id END
+        WHERE kind = 'gemini' AND (session_id LIKE ? OR web_account_id = ?)`).run(prefix, accountId, prefix, accountId);
+      this.db.prepare("DELETE FROM settings WHERE key LIKE 'orchSession:%:gemini' AND value LIKE ?").run(prefix);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   private clearChatSettings(id: number) {

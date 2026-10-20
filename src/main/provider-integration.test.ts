@@ -42,7 +42,7 @@ test("three-provider DB upgrade preserves workers, sessions and new Grok setting
     for (const agent of ["claude", "codex", "gemini", "grok"] as const) (chats as any).saveNativeId(chat.id, "orch", agent, `master-${agent}`);
     for (const agent of ["claude", "codex", "gemini", "grok"] as const) assert.equal((chats as any).nativeIdOf(store.chat(chat.id), "orch", agent), `master-${agent}`);
     assert.equal(chats.roleConfig(store.chat(chat.id)!, p, "orch").agent, "grok");
-    assert.equal(chats.roleConfig(store.chat(chat.id)!, p, grok.key).effort, "high");
+    assert.equal(chats.roleConfig(store.chat(chat.id)!, p, grok.key).effort, p.settings.grokEffort);
     store.updateChat(chat.id, { orchestratorModelOverride: `gemini:${GEMINI_WEB_MODEL}` });
     await assert.rejects(chats.driver(chat.id, "orch"), /마스터는 Antigravity CLI/);
     store.updateChat(chat.id, { orchestratorModelOverride: `gemini:${AISTUDIO_MODEL}`, geminiModelOverride: AISTUDIO_MODEL });

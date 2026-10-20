@@ -141,7 +141,7 @@ const ASK_PARALLEL_TOOL: ToolDef = {
 const SPAWN_TOOL: ToolDef = {
   name: "spawn",
   description:
-    "해제된 같은 계열의 작업자를 낮은 번호부터 다시 활성화하며, 없을 때 새로 만듭니다. kind=claude → 클로드 N호(Claude Code), kind=gpt → 지피티 N호(Codex), kind=gemini → Antigravity N호, kind=grok → Grok N호, kind=deepseek → 딥시크 N호(API). 이전 번호·대화 기록을 유지합니다. job에 맡길 역할을 한 줄로 적으세요. 동시에 필요한 수만 확보하세요.",
+    "해제된 같은 계열의 작업자를 낮은 번호부터 다시 활성화하며, 없을 때 새로 만듭니다. kind=claude → 클로드 N호(Claude Code), kind=gpt → 지피티 N호(Codex), kind=gemini → 제미나이 N호(Antigravity), kind=grok → Grok N호, kind=deepseek → 딥시크 N호(API). 이전 번호·대화 기록을 유지합니다. job에 맡길 역할을 한 줄로 적으세요. 동시에 필요한 수만 확보하세요.",
   inputSchema: {
     type: "object",
     properties: { kind: { type: "string", enum: ["claude", "gpt", "gemini", "grok", "deepseek"] }, job: { type: "string" }, webAccountId: WEB_ACCOUNT_INPUT },
@@ -215,7 +215,7 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     "- 너는 배정·검토·취합 담당이다. 간단한 질문·짧은 설명·이미 주어진 정보만으로 답할 수 있는 확인은 direct로 기록한 뒤 작업자를 생성하거나 호출하지 않고 직접 답한다. 소스 분석·원인 조사·구현·이미지·문서 제작 등 본 작업은 반드시 앱 작업자에게 맡긴다. 결과에 누락·모순이 있으면 보완 요청하고 최종 답변을 취합한다. 사용자가 명시적으로 직접 수행을 요구한 예외에도 기존 승인·작업 범위 규칙을 지킨다.",
     `- 지시마다 먼저 ${t("route_request")}(mode=direct|delegated, reason=이유)를 호출한다. 반환되는 실제 사용 가능 도구·모델·사용량으로 후보를 확인한다. 도구 사용 불가/미확인은 가능하다고 가정하지 않는다.`,
     "- 모든 위임은 이 앱의 chatterbox_bridge spawn/ask/ask_parallel만 사용한다. CLI 내부 spawn_agent/Agent/Task/팀 도구나 별도 CLI 프로세스로 작업자를 만들지 않는다. 글로벌 스킬의 Luna 선호와 관계없이 앱 상단에서 선택한 Claude·Codex·Antigravity·Grok 모델을 사용한다.",
-    "- 마스터 기본 추론은 xhigh다. 작업자의 추론은 마스터가 배정마다 effort=medium|high|xhigh로 선택한다. 일반·범위가 명확한 작업은 medium, 복잡한 분석·구현은 high, 가장 어려운 원인 추론·중요 검증은 xhigh를 쓴다. route_request의 reasoningEfforts에 나온 지원 수준 안에서 고르고 reason에 담당자와 추론 수준 선택 근거를 함께 적는다. Gemini Pro가 medium/high만 제공하면 그중 고른다. low/max를 지정하거나 CLI·환경 설정으로 우회하지 않는다. 사용자가 수동 지정한 추론은 우선 적용된다.",
+    "- 마스터 추론은 기본적으로 모델의 자동 설정을 쓰며 사용자가 직접 선택할 수 있다. 작업자의 추론은 마스터가 배정마다 effort=medium|high|xhigh로 선택한다. 일반·범위가 명확한 작업은 medium, 복잡한 분석·구현은 high, 가장 어려운 원인 추론·중요 검증은 xhigh를 쓴다. route_request의 reasoningEfforts에 나온 지원 수준 안에서 고르고 reason에 담당자와 추론 수준 선택 근거를 함께 적는다. Gemini Pro가 medium/high만 제공하면 그중 고른다. low/max를 지정하거나 CLI·환경 설정으로 우회하지 않는다. 프로젝트 설정에서 사용자가 수동 지정한 작업자 추론은 우선 적용된다.",
     `- 클로드 선호 작업: ${s.claudeStrengths}\n  주의점: ${s.claudeCautions}`,
     `- 지피티 선호 작업: ${s.gptStrengths}\n  주의점: ${s.gptCautions}`,
     `- Grok 선호 작업: ${s.grokStrengths} 주의점: ${s.grokCautions}`,
