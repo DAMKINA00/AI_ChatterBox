@@ -66,6 +66,10 @@ try {
       }
       return studioStatus();
     });
+    ipcMain.removeHandler('aistudio:usage');
+    ipcMain.handle('aistudio:usage', () => ({ from: new Date().toISOString(), to: new Date().toISOString(), generatedAt: new Date().toISOString(),
+      totals: { requests: 0, succeeded: 0, failed: 0, canceled: 0, rateLimited: 0, inputTokens: 0, cachedTokens: 0, reasoningTokens: 0, replyTokens: 0, totalTokens: 0 },
+      groups: { account: [], model: [], channel: [] } }));
     ipcMain.removeHandler('models:list');
     ipcMain.handle('models:list', (_event, provider) => provider === 'gemini' ? [{ id: 'gemini-web-argon', label: '웹 · Gemini 4 Argon' }] : []);
     ipcMain.removeHandler('cli:info');

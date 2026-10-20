@@ -4,6 +4,7 @@ import type { AIStudioAction, AIStudioAccount, AIStudioStatus } from "../../../s
 import { api, errorMessage } from "../lib/utils";
 import { Button, Dialog, DialogContent, DialogFooter, Input, Label } from "./ui";
 import { GeminiWebDialog } from "./GeminiWebDialog";
+import { AIStudioUsage } from "./AIStudioUsage";
 
 interface Props {
   open: boolean;
@@ -164,7 +165,7 @@ export function AIStudioDialog({ open, onOpenChange, onUseModel }: Props) {
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent title="AI Studio · Argon" description="AIStudio2API 연결과 계정 라우팅을 관리합니다." className="w-[min(900px,calc(100vw-32px))]" data-testid="aistudio-dialog">
+        <DialogContent title="AI Studio · Argon" description="AIStudio2API 연결, 계정 라우팅과 사용량을 확인합니다." className="w-[min(900px,calc(100vw-32px))]" data-testid="aistudio-dialog">
           <div className="grid gap-4">
             <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 p-3 text-[12px]" data-testid="aistudio-status">
               <span className="font-medium">상태: {status?.state ?? "확인 중"}</span>
@@ -175,6 +176,7 @@ export function AIStudioDialog({ open, onOpenChange, onUseModel }: Props) {
               </Button>
             </div>
             {error && <div role="alert" className="flex items-start gap-2 rounded-lg border border-destructive/50 p-3 text-[12px] text-destructive"><CircleAlert className="mt-0.5 size-4 shrink-0" />{error}</div>}
+            <AIStudioUsage />
 
             <div className="grid gap-3 rounded-lg border p-3.5">
               <div className="text-[12px] font-medium text-muted-foreground">연결 설정</div>
@@ -216,7 +218,7 @@ export function AIStudioDialog({ open, onOpenChange, onUseModel }: Props) {
               {status?.cooldowns.length ? status.cooldowns.map((cooldown) => (
                 <div key={`${cooldown.account_id}:${cooldown.model_id}:${cooldown.channel}`} className="grid gap-0.5 rounded-md bg-muted/30 px-2.5 py-2 text-[11.5px] sm:grid-cols-[1fr_auto]">
                   <span>{cooldown.account_label || cooldown.account_id} · {cooldown.model_id} · {cooldown.channel}</span>
-                  <span className="text-muted-foreground">{untilText(cooldown.until)} 초기화{cooldown.reason ? ` · ${cooldown.reason}` : ""}</span>
+                  <span className="text-muted-foreground">{untilText(cooldown.until)} 재시도 예정{cooldown.reason ? ` · ${cooldown.reason}` : ""}</span>
                 </div>
               )) : <p className="text-[12px] text-muted-foreground">현재 쿨다운이 없습니다.</p>}
             </div>

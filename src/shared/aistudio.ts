@@ -47,3 +47,25 @@ export interface AIStudioInput {
   accountId?: string;
   enabled?: boolean;
 }
+
+export type AIStudioUsageRange = "24h" | "7d" | "30d";
+/** Local AIStudio2API request statistics, never Gemini Web or a remaining quota estimate. */
+export interface AIStudioUsageStats {
+  requests: number;
+  succeeded: number;
+  failed: number;
+  canceled: number;
+  rateLimited: number;
+  inputTokens: number;
+  cachedTokens: number;
+  reasoningTokens: number;
+  replyTokens: number;
+  totalTokens: number;
+}
+export interface AIStudioUsageReport {
+  from: string;
+  to: string;
+  generatedAt: string;
+  totals: AIStudioUsageStats;
+  groups: Record<"account" | "model" | "channel", (AIStudioUsageStats & { key: string })[]>;
+}

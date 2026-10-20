@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync, realpathSync, writeFileSync, ren
 import { dirname, join, resolve, relative, isAbsolute } from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { AI_STUDIO_ACCOUNT_LIMIT, type AIStudioInput, type AIStudioSettings, type AIStudioStatus, type AIStudioAccount } from "../shared/aistudio";
+import { AI_STUDIO_ACCOUNT_LIMIT, type AIStudioInput, type AIStudioSettings, type AIStudioStatus, type AIStudioAccount, type AIStudioUsageRange, type AIStudioUsageReport, type AIStudioUsageStats } from "../shared/aistudio";
 
 interface Settings { getSetting(key: string): string | undefined; setSetting(key: string, value: string): void }
 export interface SecretStorage { encrypt(value: string): string; decrypt(value: string): string }
@@ -95,6 +95,39 @@ export class AIStudioService {
   async json(path: string, body?: unknown, signal?: AbortSignal, method?: string): Promise<any> {
     const response = await this.response(path, body, signal, method);
     return response.status === 204 ? {} : response.json();
+  }
+  async usage(range: AIStudioUsageRange = "24h"): Promise<AIStudioUsageReport> {
+    if (!["24h", "7d", "30d"].includes(range)) throw new Error("지원하지 않는 AI Studio 사용량 조회 기간입니다.");
+    const to = new Date(), days = range === "30d" ? 30 : range === "7d" ? 7 : 1;
+    const query = new URLSearchParams({ from: new Date(to.getTime() - days * 86400000).toISOString(), to: to.toISOString() });
+    const report = await this.json(`/api/usage?${query}`, undefined, AbortSignal.timeout(8000));
+    const invalid = () => new Error("AI Studio 사용량 응답 형식이 올바르지 않습니다.");
+    const timestamp = (value: unknown) => {
+      if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) throw invalid();
+      return new Date(value).toISOString();
+    };
+    const stats = (value: any): AIStudioUsageStats => {
+      const fields = { requests: "requests", succeeded: "succeeded", failed: "failed", canceled: "canceled", rateLimited: "rate_limited",
+        inputTokens: "input_tokens", cachedTokens: "cached_tokens", reasoningTokens: "reasoning_tokens", replyTokens: "reply_tokens", totalTokens: "total_tokens" } as const;
+      const result = {} as AIStudioUsageStats;
+      for (const [key, field] of Object.entries(fields)) {
+        const count = value?.[field];
+        if (!Number.isSafeInteger(count) || count < 0) throw invalid();
+        result[key as keyof AIStudioUsageStats] = count;
+      }
+      return result;
+    };
+    const groups = {} as AIStudioUsageReport["groups"];
+    for (const dimension of ["account", "model", "channel"] as const) {
+      const rows = report?.groups?.[dimension];
+      if (!Array.isArray(rows)) throw invalid();
+      groups[dimension] = rows.map(row => {
+        if (typeof row?.key !== "string" || row.key.length > 500) throw invalid();
+        return { key: row.key, ...stats(row) };
+      });
+    }
+    // Keep only aggregate counters: no request contents, API keys, or inferred remaining quota.
+    return { from: timestamp(report.from), to: timestamp(report.to), generatedAt: timestamp(report.generated_at), totals: stats(report.totals), groups };
   }
   async status(): Promise<AIStudioStatus> {
     const result: AIStudioStatus = { settings: this.settings(), state: "OFFLINE", accounts: [], cooldowns: [], models: [], webLinks: this.links };

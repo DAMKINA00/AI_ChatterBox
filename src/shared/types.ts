@@ -1,6 +1,6 @@
 // Types shared by main, preload and renderer.
 import type { ProviderUsage } from "./usage";
-import type { AIStudioAction, AIStudioInput, AIStudioStatus } from "./aistudio";
+import type { AIStudioAction, AIStudioInput, AIStudioStatus, AIStudioUsageRange, AIStudioUsageReport } from "./aistudio";
 
 export type AgentKind = "claude" | "codex" | "gemini" | "grok";
 export const GEMINI_WEB_MODEL = "gemini-web-argon";
@@ -402,6 +402,7 @@ export interface UsageInfo {
 
 export interface ChatterBoxApi {
   aiStudio(action: AIStudioAction, input?: AIStudioInput): Promise<AIStudioStatus>;
+  aiStudioUsage(range?: AIStudioUsageRange): Promise<AIStudioUsageReport>;
   // projects
   listProjects(): Promise<Project[]>;
   createProject(input: { name: string; folder: string; settings: ProjectSettings }): Promise<Project>;

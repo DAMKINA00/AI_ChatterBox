@@ -67,6 +67,64 @@ function statusPayload(path: string, accounts: unknown[]) {
   return undefined;
 }
 
+function usagePayload() {
+  const stats = { requests: 8, succeeded: 5, failed: 2, canceled: 1, rate_limited: 1,
+    input_tokens: 1000, cached_tokens: 400, reasoning_tokens: 50, reply_tokens: 150, total_tokens: 1200 };
+  return { from: "2026-10-19T00:00:00Z", to: "2026-10-20T00:00:00Z", generated_at: "2026-10-20T00:00:01Z",
+    totals: stats, groups: { account: [{ key: "studio@example.test", ...stats }], model: [{ key: "gemini-4-argon", ...stats }], channel: [{ key: "playground", ...stats }] },
+    api_key: "never-return-this", messages: ["private prompt"], remainingPercent: 80 };
+}
+
+test("AI Studio usage queries bounded rolling periods and exposes only independent aggregate counters", async () => {
+  const urls: URL[] = [];
+  const service = new AIStudioService(store(), secrets, async (input, init) => {
+    const url = new URL(String(input)); urls.push(url);
+    assert.equal(url.pathname, "/api/usage");
+    assert.equal(init?.method, "GET");
+    return jsonResponse(usagePayload());
+  });
+  for (const [range, days] of [[undefined, 1], ["7d", 7], ["30d", 30]] as const) {
+    const report = await service.usage(range);
+    const query = urls.at(-1)!.searchParams;
+    assert.equal(Date.parse(query.get("to")!) - Date.parse(query.get("from")!), days * 86400000);
+    assert.ok(Math.abs(Date.parse(query.get("to")!) - Date.now()) < 1000);
+    assert.equal(report.totals.requests, 8);
+    assert.equal(report.totals.failed, 2);
+    assert.equal(report.totals.rateLimited, 1);
+    assert.equal(report.totals.cachedTokens, 400);
+    assert.equal(report.totals.totalTokens, 1200, "cached tokens are already included in input, not added again");
+    assert.equal(report.groups.account[0].key, "studio@example.test");
+    assert.equal(report.groups.model[0].replyTokens, 150);
+    assert.equal(report.groups.channel[0].reasoningTokens, 50);
+    assert.equal(report.generatedAt, "2026-10-20T00:00:01.000Z");
+    assert.doesNotMatch(JSON.stringify(report), /never-return-this|private prompt|remainingPercent/);
+  }
+  await assert.rejects(service.usage("7d&account=other" as any), /조회 기간/);
+  assert.equal(urls.length, 3);
+});
+
+test("AI Studio usage distinguishes empty records from malformed or unavailable statistics", async () => {
+  const empty = usagePayload();
+  for (const field of Object.keys(empty.totals)) empty.totals[field as keyof typeof empty.totals] = 0;
+  empty.groups = { account: [], model: [], channel: [] };
+  const service = new AIStudioService(store(), secrets, async () => jsonResponse(empty));
+  assert.equal((await service.usage()).totals.requests, 0);
+  for (const corrupt of [
+    (report: any) => { delete report.totals.input_tokens; },
+    (report: any) => { report.totals.requests = -1; },
+    (report: any) => { report.totals.total_tokens = "1200"; },
+    (report: any) => { report.generated_at = "invalid"; },
+    (report: any) => { report.groups.account = null; },
+    (report: any) => { report.groups.model[0].key = {}; },
+  ]) {
+    const payload = usagePayload(); corrupt(payload);
+    const broken = new AIStudioService(store(), secrets, async () => jsonResponse(payload));
+    await assert.rejects(broken.usage(), /응답 형식/);
+  }
+  const unavailable = new AIStudioService(store(), secrets, async () => jsonResponse({ error: { message: "usage unavailable" } }, 503, "Unavailable"));
+  await assert.rejects(unavailable.usage(), /503.*usage unavailable/);
+});
+
 test("syncWeb sends one synthetic account's cookie state to loopback and records the web link", async () => {
   const saved = store();
   const email = "shared@example.test";

@@ -6,6 +6,7 @@ import { useStore } from "../store";
 import { Button, Tooltip } from "./ui";
 import { GeminiWebDialog } from "./GeminiWebDialog";
 import { AIStudioDialog } from "./AIStudioDialog";
+import { AIStudioUsage } from "./AIStudioUsage";
 
 function resetText(ts?: number | null) {
   if (!ts) return "";
@@ -62,6 +63,7 @@ export function UsageBar() {
       <Bar name="지피티" d={pickUsage(usage.codex)} color="bg-gpt" />
       <Bar name="제미나이" d={pickUsage(usage.gemini)} color="bg-gemini" error={usage.gemini?.error} updatedAt={usage.gemini?.updatedAt} />
       <Bar name="그록" d={pickUsage(usage.grok)} color="bg-grok" error={usage.grok?.error} updatedAt={usage.grok?.updatedAt} />
+      <AIStudioUsage compact onOpen={() => setAiStudioOpen(true)} />
       <div className="grid gap-1">
         <Button type="button" size="sm" variant="ghost" className="h-7 min-w-0 justify-start text-[11px]" onClick={() => setWebOpen(true)} data-testid="gemini-web-manage"><Globe2 /> <span className="truncate">제미나이 웹 계정 관리</span></Button>
         <Button type="button" size="sm" variant="ghost" className="h-7 min-w-0 justify-start text-[11px]" onClick={() => setAiStudioOpen(true)} data-testid="aistudio-manage"><Sparkles /> <span className="truncate">AI Studio · Argon</span></Button>

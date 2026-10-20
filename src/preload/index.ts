@@ -45,6 +45,7 @@ const api: ChatterBoxApi = {
   geminiWeb: (action, accountId) => ipcRenderer.invoke("gemini:web", action, accountId),
   geminiWebAccounts: (action, input) => ipcRenderer.invoke("gemini:web-accounts", action, input),
   aiStudio: (action, input) => ipcRenderer.invoke("aistudio", action, input),
+  aiStudioUsage: (range) => ipcRenderer.invoke("aistudio:usage", range),
   getTheme: () => ipcRenderer.invoke("theme:get"),
   setTheme: (theme) => ipcRenderer.invoke("theme:set", theme),
   usage: (wait?: boolean) => ipcRenderer.invoke("usage:get", wait),

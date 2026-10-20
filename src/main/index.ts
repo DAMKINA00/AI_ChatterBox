@@ -188,6 +188,7 @@ function registerIpc() {
   // misc
   ipcMain.handle("cli:info", (_e, checkAuth?: boolean) => checkAuth ? chats.checkedCliInfo() : chats.cliInfo());
   ipcMain.handle("models:list", (_e, agent: AgentKind) => chats.models(agent));
+  ipcMain.handle("aistudio:usage", (_e, range) => chats.aiStudio().usage(range));
   ipcMain.handle("aistudio", async (_e, action: AIStudioAction, input: AIStudioInput = {}) => {
     const studio = chats.aiStudio();
     if (action === "save") studio.save(input);
