@@ -476,7 +476,7 @@ function ChatNode({
               dim={a.status === "released"}
               icon={
                 busyWorkers.has(a.key) ? (
-                  <Loader2 className={cn("size-3 animate-spin", a.kind === "claude" ? "text-claude" : a.kind === "gpt" ? "text-gpt" : "text-gemini")} />
+                  <Loader2 className={cn("size-3 animate-spin", a.kind === "claude" ? "text-claude" : a.kind === "gpt" ? "text-gpt" : a.kind === "gemini" ? "text-gemini" : a.kind === "deepseek" ? "text-deepseek" : "text-grok")} />
                 ) : null
               }
             />

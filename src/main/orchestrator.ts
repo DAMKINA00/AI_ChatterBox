@@ -141,10 +141,10 @@ const ASK_PARALLEL_TOOL: ToolDef = {
 const SPAWN_TOOL: ToolDef = {
   name: "spawn",
   description:
-    "해제된 같은 계열의 작업자를 낮은 번호부터 다시 활성화하며, 없을 때 새로 만듭니다. kind=claude → 클로드 N호(Claude Code), kind=gpt → 지피티 N호(Codex), kind=gemini → Antigravity N호, kind=grok → Grok N호. 이전 번호·대화 기록을 유지합니다. job에 맡길 역할을 한 줄로 적으세요. 동시에 필요한 수만 확보하세요.",
+    "해제된 같은 계열의 작업자를 낮은 번호부터 다시 활성화하며, 없을 때 새로 만듭니다. kind=claude → 클로드 N호(Claude Code), kind=gpt → 지피티 N호(Codex), kind=gemini → Antigravity N호, kind=grok → Grok N호, kind=deepseek → 딥시크 N호(API). 이전 번호·대화 기록을 유지합니다. job에 맡길 역할을 한 줄로 적으세요. 동시에 필요한 수만 확보하세요.",
   inputSchema: {
     type: "object",
-    properties: { kind: { type: "string", enum: ["claude", "gpt", "gemini", "grok"] }, job: { type: "string" }, webAccountId: WEB_ACCOUNT_INPUT },
+    properties: { kind: { type: "string", enum: ["claude", "gpt", "gemini", "grok", "deepseek"] }, job: { type: "string" }, webAccountId: WEB_ACCOUNT_INPUT },
     required: ["kind", "job"],
   },
 };
@@ -219,6 +219,7 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     `- 클로드 선호 작업: ${s.claudeStrengths}\n  주의점: ${s.claudeCautions}`,
     `- 지피티 선호 작업: ${s.gptStrengths}\n  주의점: ${s.gptCautions}`,
     `- Grok 선호 작업: ${s.grokStrengths} 주의점: ${s.grokCautions}`,
+    `- DeepSeek 선호 작업: ${s.deepseekStrengths} 주의점: ${s.deepseekCautions}`,
     "- 사용자가 이름·봇·CLI를 명시한 작업은 그 담당에게 우선 배정한다. 글쓰기·코드·이미지의 기본 선호는 명시적 지정을 덮어쓰지 않는다. Gemini는 Antigravity 작업자를 뜻하며 웹 모델을 선택했을 때만 Gemini 웹으로 실행한다. 다른 봇으로 임의 변경하지 말고 실제 도구 오류와 한도를 보고한다.",
     `- 제미나이 선호 작업: ${s.geminiStrengths}\n  주의점: ${s.geminiCautions}` ,
     "- 글쓰기 본 작업은 제미나이에게 kind=writing으로 배정한다. 요청에 독자·목적·분량·말투와 확인된 사실, 캐릭터 대사에는 성격·관계·상황·말투 예시를 전달한다. 기술 문서는 클로드·지피티가 사실을 확인 → 제미나이가 본문을 작성·다듬기 → 클로드·지피티가 기술 내용과 파일 반영을 확인한다. 제미나이가 비활성·한도·실패 상태면 이유를 기록하고 글쓰기를 클로드·지피티에 재배정할 수 있다. 간단한 답변은 마스터가 직접 한다.",
@@ -230,7 +231,7 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     "- 시각 작업도 구분한다. 이미지 생성·편집은 지정이 없을 때 이미지 도구가 있는 Codex에게, 명시적으로 Antigravity/Grok 등 다른 작업자를 지정하면 그 작업자에게 requiresImage=true로 배정한다. 제공된 이미지 도구의 실제 결과만 완료로 인정한다. 그 밖의 모션그래픽·애니메이션의 코드·타임라인·연출 제작은 클로드에게 우선 배정한다. 모션그래픽에 새 이미지 소재가 필요하면 그 이미지 생성만 지피티에 맡기고 클로드가 결과를 통합한다.",
     `- 중요한 버그 수정·오류 분석이라고 판단하면 ${t("route_request")}(mode=delegated, dualInvestigation=true, reason=중요도 판단 근거)를 기록한다. 예: 데이터 손실·보안·설비 안전·서비스 중단에 영향이 크거나, 반복 장애의 원인이 불확실하고 잘못 고쳤을 때 피해가 큰 경우. 사용자에게 양쪽 조사를 명시적으로 요청받은 경우도 적용한다. 단순 문구·서식 수정이나 일반 질문에 모두 호출하지 않는다.`,
     `- 양쪽 조사: 클로드와 지피티에게 동일한 문제·증상·소스·로그·완료 기준을 주고 ${t("ask_parallel")}(각 kind=opinion)로 독립 조사시킨다. 다른 쪽 결론을 먼저 전달하거나 파일 수정을 맡기지 않는다. 각각 원인 후보·근거(파일/로그)·재현 방법·수정안·불확실성을 보고하게 한다. 두 결과가 오면 공통점과 차이를 대조하고, 충돌은 추가 증거로 확인해 마스터가 최종 원인·수정 방향을 취합한다. 이후 구현은 정한 담당자에게 맡기고 교차 리뷰 규칙을 유지한다. 한쪽을 실행할 수 없으면 양쪽 조사를 완료했다고 하지 말고 제한과 확인된 결과를 보고한다.`,
-    `- 팀: ${t("spawn")}(kind=claude|gpt|gemini|grok)로 작업자를 만든다 → 클로드 N호 / 지피티 N호 / 제미나이 N호. 작업자 수는 일의 양에 맞춘다: 작은 일은 한 명, 큰 일은 범위를 나눠 여러 명(동시에 클로드 최대 ${s.maxClaudeWorkers}명, 지피티 최대 ${s.maxGptWorkers}명, Antigravity 최대 ${s.maxGeminiWorkers}명, Grok 최대 ${s.maxGrokWorkers}명). 다 쓴 작업자는 ${t("release")}로 해제한다. ${t("agents")}로 팀을 확인한다.`,
+    `- 팀: ${t("spawn")}(kind=claude|gpt|gemini|grok|deepseek)로 작업자를 만든다. 작업자 수는 일의 양에 맞춘다: 작은 일은 한 명, 큰 일은 범위를 나눠 여러 명(동시에 클로드 최대 ${s.maxClaudeWorkers}명, 지피티 최대 ${s.maxGptWorkers}명, Antigravity 최대 ${s.maxGeminiWorkers}명, Grok 최대 ${s.maxGrokWorkers}명, 딥시크 최대 ${s.maxDeepseekWorkers}명). 다 쓴 작업자는 ${t("release")}로 해제한다. ${t("agents")}로 팀을 확인한다.`,
     "- 한 요청 안에서도 UI·로직·테스트·자료 조사처럼 독립 가능한 파트를 나누고 담당·파일 범위·입출력 계약·의존성을 체크리스트에 기록한다. 파트는 ask_parallel로 동시에 맡긴다. 각 파트 담당에게 동료 닉네임과 연결되는 부분을 명시하고 직접 협의하게 한다. 마스터가 모든 대화를 중계하지 않는다. 작업 중인 동료와는 send_message로 계약·진행·질문을 주고받고, 대기 동료의 결과가 필요하면 ask/ask_parallel을 사용한다. 결과는 read_messages와 agents로 확인한 뒤 통합·검증한다.",
     `- 일 맡기기: ${t("ask")}(to=닉네임, kind, message, scope). 서로 독립적인 일은 반드시 ${t("ask_parallel")}(tasks=[…])로 한 번에 맡겨 동시에 진행한다(하나씩 기다리지 말 것). 구현(implement)은 고칠 범위(scope)를 겹치지 않게 나눈다. 리뷰·의견은 언제든 동시에 가능하다.`,
     `- 관련 쟁점·서로 맞물린 설계·문장과 연출 등 직접 논의가 필요한 항목은 주제별 토의 그룹으로 묶는다. ${t("ask")}(to=클로드/지피티 진행자, kind=opinion|writing, discussion={topic:주제, peers:[참여 닉네임]}, message=목표·공통 자료·쟁점·완료 기준, reason, effort)로 맡긴다. 진행자가 참여자에게 직접 ask로 초안과 근거를 주고받아 합의·이견·남은 확인을 정리하고, 너는 그룹별 결과와 필요한 최종 결정만 취합한다. 사소한 확인까지 매번 중계하지 않는다.`,
@@ -487,7 +488,7 @@ export class Orchestrator {
           return textResult(this.agentsText(chatId, true));
         case "spawn":
           if (!master) break;
-          if (!["claude", "gpt", "gemini", "grok"].includes(args.kind)) return textResult("지원하지 않는 작업자 종류입니다.", true);
+          if (!["claude", "gpt", "gemini", "grok", "deepseek"].includes(args.kind)) return textResult("지원하지 않는 작업자 종류입니다.", true);
           return this.spawn(chatId, args.kind, String(args.job ?? ""), args.webAccountId);
         case "release":
           if (!master) break;
@@ -571,7 +572,7 @@ export class Orchestrator {
     const accountId = web ? this.selectedWebAccount(requestedAccount) : undefined;
     if (!web && !this.chats.cliInfo().find((c) => c.agent === WORKER_AGENT[kind])?.path)
       return textResult(`${WORKER_KIND_LABEL[kind]} CLI가 설치되지 않았습니다. 사용 가능한 작업자를 선택하거나 미완료 사유를 보고하세요.`, true);
-    const max = kind === "claude" ? project.settings.maxClaudeWorkers : kind === "gpt" ? project.settings.maxGptWorkers : kind === "grok" ? project.settings.maxGrokWorkers : project.settings.maxGeminiWorkers;
+    const max = kind === "claude" ? project.settings.maxClaudeWorkers : kind === "gpt" ? project.settings.maxGptWorkers : kind === "grok" ? project.settings.maxGrokWorkers : kind === "deepseek" ? project.settings.maxDeepseekWorkers : project.settings.maxGeminiWorkers;
     const active = this.agents(chatId).filter((a) => a.kind === kind && a.status === "active").length;
     if (active >= max)
       return textResult(`${WORKER_KIND_LABEL[kind]}는 동시에 ${max}명까지입니다. 기존 작업자에게 맡기거나 다 쓴 작업자를 release 하세요.`, true);

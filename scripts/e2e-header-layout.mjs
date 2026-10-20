@@ -48,10 +48,10 @@ function seedDatabase() {
 async function isolate(app) {
   await app.evaluate(({ ipcMain }) => {
     ipcMain.removeHandler("cli:info");
-    ipcMain.handle("cli:info", () => ["claude", "codex", "gemini", "grok"].map((agent) => ({ agent, path: "mock-cli.exe", authStatus: "authenticated" })));
+    ipcMain.handle("cli:info", () => ["claude", "codex", "gemini", "grok", "deepseek"].map((agent) => ({ agent, path: agent === "deepseek" ? "DeepSeek API" : "mock-cli.exe", authStatus: "authenticated" })));
     ipcMain.removeHandler("models:list");
     ipcMain.handle("models:list", (_event, agent) => [{
-      id: { claude: "claude-worker", codex: "codex-worker", gemini: "gemini-worker", grok: "grok-worker" }[agent],
+      id: { claude: "claude-worker", codex: "codex-worker", gemini: "gemini-worker", grok: "grok-worker", deepseek: "deepseek-flash" }[agent],
       label: `${agent} header model`,
       isDefault: true,
       reasoningEfforts: ["medium", "high", "xhigh"],
@@ -109,7 +109,7 @@ try {
   check("long chat title remains readable without ellipsis", titleState.text === title && titleState.textOverflow !== "ellipsis" && titleState.overflow !== "hidden" && titleState.whiteSpace !== "nowrap" && titleState.scrollWidth <= titleState.clientWidth, JSON.stringify(titleState));
 
   const providers = agentsRow.locator('[data-testid="provider-controls"]');
-  check("third row has Claude, Codex, Gemini and Grok in order", await providers.count() === 4 && JSON.stringify(await providers.evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-provider")))) === JSON.stringify(["claude", "codex", "gemini", "grok"]));
+  check("third row has all five providers in order", await providers.count() === 5 && JSON.stringify(await providers.evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-provider")))) === JSON.stringify(["claude", "codex", "gemini", "grok", "deepseek"]));
   const master = masterRow.getByTestId("orch-badge");
   const approval = masterRow.getByLabel("이 채팅의 승인 방식", { exact: true });
   const masterControlBox = await master.boundingBox();
@@ -133,7 +133,7 @@ try {
   const narrowMasterRow = page.getByTestId("chat-header-master-row");
   const narrowAgentsRow = page.getByTestId("chat-header-agents-row");
   check("narrow window keeps rows full-width and avoids document overflow", await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
-  check("narrow window keeps provider controls in one horizontally scrollable row", await narrowAgentsRow.evaluate((element) => element.scrollWidth > element.clientWidth && element.querySelectorAll('[data-testid="provider-controls"]').length === 4));
+  check("narrow window keeps provider controls in one horizontally scrollable row", await narrowAgentsRow.evaluate((element) => element.scrollWidth > element.clientWidth && element.querySelectorAll('[data-testid="provider-controls"]').length === 5));
   check("narrow window keeps master and approval in one row", await narrowMasterRow.evaluate((element) => element.scrollWidth >= element.clientWidth && !!element.querySelector('[data-testid="orch-badge"]') && !!element.querySelector('[aria-label="이 채팅의 승인 방식"]')));
   const narrowTitleState = await page.getByTestId("chat-title").evaluate((element) => ({ text: element.textContent, scrollWidth: element.scrollWidth, clientWidth: element.clientWidth, height: element.getBoundingClientRect().height }));
   check("narrow window still shows the complete wrapped title", narrowTitleState.text === title && narrowTitleState.scrollWidth <= narrowTitleState.clientWidth && narrowTitleState.height > 0, JSON.stringify(narrowTitleState));

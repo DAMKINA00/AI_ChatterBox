@@ -111,13 +111,13 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
   );
 }
 
-function ProviderControls({ agent, web = false, master = false, children }: { agent: AgentKind; web?: boolean; master?: boolean; children: ReactNode }) {
+function ProviderControls({ agent, web = false, apiProvider = agent === "deepseek", master = false, children }: { agent: AgentKind; web?: boolean; apiProvider?: boolean; master?: boolean; children: ReactNode }) {
   const cli = useStore(s => s.cli.find(c => c.agent === agent));
   const refresh = useStore(s => s.refreshCli);
   const [checking, setChecking] = useState(false);
-  const inactive = !web && cli?.authStatus !== "authenticated";
+  const inactive = !web && !apiProvider && cli?.authStatus !== "authenticated";
   const status = !cli?.path ? "CLI 미설치" : cli.authStatus === "required" ? "로그인 필요" : "로그인 확인 필요";
-  return <div className="flex shrink-0 flex-nowrap items-center gap-1.5" data-testid={master ? "orch-badge" : "provider-controls"} data-provider={agent} data-state={web ? "web" : inactive ? "inactive" : "ready"}>
+  return <div className="flex shrink-0 flex-nowrap items-center gap-1.5" data-testid={master ? "orch-badge" : "provider-controls"} data-provider={agent} data-state={web ? "web" : apiProvider ? "api" : inactive ? "inactive" : "ready"}>
     <div className={cn("flex min-w-0 items-center gap-1.5", inactive && "opacity-45 grayscale")}>{children}</div>
     {inactive && <button type="button" disabled={checking} className="rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground" aria-label={`${master ? "마스터 " : ""}${AGENT_LABEL[agent]} 로그인 상태 다시 확인`} title="로그인이 확인되지 않았습니다. 로그인 후 눌러서 다시 확인하세요. 모델 설정은 변경할 수 있습니다." onClick={async () => {
       setChecking(true);
@@ -138,6 +138,8 @@ function ChatHeader({ chat, project, nodeLabel, masterExpression }: { chat: Chat
   const codexModel = chat.codexModelOverride ?? project.settings.codexModel;
   const grokModel = chat.grokModelOverride ?? project.settings.grokModel;
   const grokEffort = chat.grokEffortOverride ?? project.settings.grokEffort;
+  const deepseekModel = chat.deepseekModelOverride ?? project.settings.deepseekModel;
+  const deepseekEffort = chat.deepseekEffortOverride ?? project.settings.deepseekEffort;
   const geminiModel = chat.geminiModelOverride ?? project.settings.geminiModel;
   const claudeEffort = chat.claudeEffortOverride ?? project.settings.claudeEffort ?? "auto";
   const codexEffort = chat.codexEffortOverride ?? project.settings.codexEffort ?? "auto";
@@ -164,7 +166,7 @@ function ChatHeader({ chat, project, nodeLabel, masterExpression }: { chat: Chat
           <span className="text-[12px] text-muted-foreground">마스터</span>
           <ModelPicker
             compact
-            agents={["claude", "codex", "gemini", "grok"]}
+            agents={["claude", "codex", "gemini", "grok", "deepseek"]}
             ariaLabel="이 채팅의 마스터 모델"
             value={chat.orchestratorModelOverride ?? project.settings.orchestratorModel}
             inherited={chat.orchestratorModelOverride === null}
@@ -281,6 +283,18 @@ function ChatHeader({ chat, project, nodeLabel, masterExpression }: { chat: Chat
           <EffortPicker compact agent="grok" model={grokModel} worker value={grokEffort} ariaLabel="이 채팅의 그록 추론 수준"
             inherited={chat.grokEffortOverride === null} onChange={v => void updateChat(chat.id, { grokEffortOverride: v })}
             onReset={() => void updateChat(chat.id, { grokEffortOverride: null })} />
+        </ProviderControls>
+        <ProviderControls agent="deepseek" apiProvider>
+          <AgentAvatar kind="deepseek" size={24} alt="딥시크 캐릭터" />
+          <span className="text-[12px] text-muted-foreground">딥시크</span>
+          <ModelPicker compact agents={["deepseek"]} ariaLabel="이 채팅의 딥시크 모델" value={deepseekModel}
+            inherited={chat.deepseekModelOverride === null}
+            onChange={v => void updateChat(chat.id, { deepseekModelOverride: v, deepseekEffortOverride: defaultEffortForModel(models, "deepseek", v, true) })}
+            onReset={() => void updateChat(chat.id, { deepseekModelOverride: null })}
+            resetLabel={`프로젝트 값 사용 (${label("deepseek", project.settings.deepseekModel)})`} />
+          <EffortPicker compact agent="deepseek" model={deepseekModel} worker value={deepseekEffort} ariaLabel="이 채팅의 딥시크 추론 수준"
+            inherited={chat.deepseekEffortOverride === null} onChange={v => void updateChat(chat.id, { deepseekEffortOverride: v })}
+            onReset={() => void updateChat(chat.id, { deepseekEffortOverride: null })} />
         </ProviderControls>
       </div>
     </header>
@@ -587,7 +601,7 @@ function EmptyChat() {
       </div>
       <div className="text-[15px] font-semibold">무엇을 할까요?</div>
       <div className="max-w-md text-[13px] leading-relaxed text-muted-foreground">
-        지시를 보내면 마스터가 계획을 세우고, 일의 양에 맞춰 클로드·지피티·제미나이·그록 작업자를 꾸려 구현과 리뷰를 나눠 맡깁니다. 이미지는 붙여넣기(Ctrl+V)나 끌어다 놓기로 첨부할 수 있어요.
+        지시를 보내면 마스터가 계획을 세우고, 일의 양에 맞춰 클로드·지피티·제미나이·그록·딥시크 작업자를 꾸려 구현과 리뷰를 나눠 맡깁니다. 이미지는 붙여넣기(Ctrl+V)나 끌어다 놓기로 첨부할 수 있어요.
       </div>
     </div>
   );

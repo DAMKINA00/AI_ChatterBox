@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { ChevronDown, Globe2, Loader2, PencilLine, RotateCcw, Sparkles } from "lucide-react";
+import { ChevronDown, Globe2, KeyRound, Loader2, PencilLine, RotateCcw, Sparkles } from "lucide-react";
+import { DEEPSEEK_MODEL } from "../../../shared/deepseek";
 import { isAIStudioModel } from "../../../shared/aistudio";
 import { AGENT_LABEL, GEMINI_WEB_MODEL, type AgentKind } from "../../../shared/types";
 import { cn } from "../lib/utils";
@@ -7,6 +8,7 @@ import { latestModels } from "../../../shared/models";
 import { useStore } from "../store";
 import { GeminiWebDialog } from "./GeminiWebDialog";
 import { AIStudioDialog } from "./AIStudioDialog";
+import { DeepSeekDialog } from "./DeepSeekDialog";
 import {
   Button,
   Dialog,
@@ -27,6 +29,7 @@ const MODEL_GROUP_LABEL: Record<AgentKind, string> = {
   codex: "지피티 모델",
   gemini: "제미나이 모델",
   grok: "그록 모델",
+  deepseek: "DeepSeek 모델 (API)",
 };
 
 const GEMINI_WEB_LABEL = "제미나이 웹 · Argon";
@@ -35,7 +38,7 @@ const GEMINI_WEB_LABEL = "제미나이 웹 · Argon";
 export function useModelLabel() {
   const models = useStore((s) => s.models);
   return (agent: AgentKind, id: string) =>
-    models[agent]?.find((m) => m.id === id)?.label ?? (agent === "gemini" && isAIStudioModel(id) ? "AI Studio · Argon" : agent === "gemini" && id === GEMINI_WEB_MODEL ? GEMINI_WEB_LABEL : id || (agent === "gemini" ? "Pro 자동 선택" : "기본값"));
+    models[agent]?.find((m) => m.id === id)?.label ?? (agent === "gemini" && isAIStudioModel(id) ? "AI Studio · Argon" : agent === "gemini" && id === GEMINI_WEB_MODEL ? GEMINI_WEB_LABEL : id || (agent === "gemini" ? "Pro 자동 선택" : agent === "deepseek" ? DEEPSEEK_MODEL : "기본값"));
 }
 
 interface Props {
@@ -61,6 +64,7 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
   const [customText, setCustomText] = useState("");
   const [geminiWebOpen, setGeminiWebOpen] = useState(false);
   const [aiStudioOpen, setAiStudioOpen] = useState(false);
+  const [deepseekOpen, setDeepseekOpen] = useState(false);
   const encoded = agents.length > 1;
   const encodedAgent = agents.find((a) => value.startsWith(`${a}:`)) ?? agents[0];
   const current = encoded
@@ -109,7 +113,7 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
             <div key={a}>
               {i > 0 && <DropdownMenuSeparator />}
               <DropdownMenuLabel>{MODEL_GROUP_LABEL[a]}</DropdownMenuLabel>
-              {(a === "gemini" || a === "grok") && (
+              {(a === "gemini" || a === "grok" || a === "deepseek") && (
                 <>
                   {a === "gemini" && !encoded && <DropdownMenuItem onSelect={() => setGeminiWebOpen(true)} data-testid="gemini-web-connect">
                     <Globe2 />
@@ -119,9 +123,13 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
                     <Sparkles />
                     AI Studio · Argon 설정…
                   </DropdownMenuItem>}
+                  {a === "deepseek" && <DropdownMenuItem onSelect={() => setDeepseekOpen(true)} data-testid="deepseek-connect">
+                    <KeyRound />
+                    DeepSeek API 설정…
+                  </DropdownMenuItem>}
                   <DropdownMenuSeparator />
                   <DropdownMenuCheckItem checked={current.agent === a && current.id === ""} onSelect={() => onChange(make(a, ""))}>
-                    <span className="flex-1 truncate">{a === "gemini" ? "Pro 자동 선택" : "CLI 기본 모델"}</span>
+                    <span className="flex-1 truncate">{a === "gemini" ? "Pro 자동 선택" : a === "deepseek" ? "API 기본 모델" : "CLI 기본 모델"}</span>
                   </DropdownMenuCheckItem>
                 </>
               )}
@@ -169,7 +177,7 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
               ? "Codex가 받는 모델 id (예: gpt-6-astra)"
               : custom === "gemini"
                 ? "Antigravity가 받는 Gemini 모델 id"
-                : custom === "grok" ? "Grok CLI 모델 id" : "Claude Code --model 값 (별칭 또는 전체 id)"
+              : custom === "grok" ? "Grok CLI 모델 id" : custom === "deepseek" ? "DeepSeek API 모델 id" : "Claude Code --model 값 (별칭 또는 전체 id)"
           }
           className="w-[420px]"
         >
@@ -202,6 +210,11 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
         open={aiStudioOpen}
         onOpenChange={setAiStudioOpen}
         onUseModel={(id) => onChange(make("gemini", id))}
+      />
+      <DeepSeekDialog
+        open={deepseekOpen}
+        onOpenChange={setDeepseekOpen}
+        onUseModel={(id) => onChange(make("deepseek", id))}
       />
     </>
   );

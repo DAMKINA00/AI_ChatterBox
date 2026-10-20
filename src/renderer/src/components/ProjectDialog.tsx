@@ -97,7 +97,7 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
             <ModelRow label="마스터" hint="지시를 받아 팀을 꾸리고 일을 나눕니다 (승인 설정에 따라 파일 수정·명령 실행)">
               <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
                 <ModelPicker
-                  agents={["claude", "codex", "gemini", "grok"]}
+                  agents={["claude", "codex", "gemini", "grok", "deepseek"]}
                   value={settings.orchestratorModel}
                   onChange={(v) => setModel("orchestratorModel", "orchestratorEffort", parseOrchestrator(v).agent, false, v)}
                   ariaLabel="마스터 모델"
@@ -157,6 +157,12 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
               <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
                 <ModelPicker agents={["grok"]} value={settings.grokModel} onChange={v => setModel("grokModel", "grokEffort", "grok", true, v)} ariaLabel="그록 모델" />
                 <EffortPicker agent="grok" model={settings.grokModel} worker value={settings.grokEffort} onChange={v => set("grokEffort", v)} ariaLabel="그록 작업자 추론 수준" />
+              </div>
+            </ModelRow>
+            <ModelRow label="딥시크 작업자" hint="DeepSeek API">
+              <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                <ModelPicker agents={["deepseek"]} value={settings.deepseekModel} onChange={v => setModel("deepseekModel", "deepseekEffort", "deepseek", true, v)} ariaLabel="딥시크 모델" />
+                <EffortPicker agent="deepseek" model={settings.deepseekModel} worker value={settings.deepseekEffort} onChange={v => set("deepseekEffort", v)} ariaLabel="딥시크 작업자 추론 수준" />
               </div>
             </ModelRow>
           </div>
@@ -261,6 +267,30 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
                   />
                 </label>
               </div>
+              <div className="grid content-start gap-2 rounded-md border p-2.5">
+                <div className="text-[13px] font-medium">딥시크 작업자</div>
+                <div className="text-[11.5px] leading-snug text-muted-foreground">DeepSeek API를 사용합니다. API 사용량에 따라 과금될 수 있으며, 잔여 한도는 표시하지 않습니다.</div>
+                <label className="grid gap-1.5">
+                  <span className="text-[11.5px] text-muted-foreground">잘 맡는 작업</span>
+                  <textarea
+                    rows={4}
+                    value={settings.deepseekStrengths}
+                    onChange={(e) => set("deepseekStrengths", e.target.value)}
+                    aria-label="딥시크가 잘 맡는 작업"
+                    className="min-h-24 w-full resize-none rounded-md border border-input bg-transparent px-2.5 py-2 text-[12px] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+                  />
+                </label>
+                <label className="grid gap-1.5">
+                  <span className="text-[11.5px] text-muted-foreground">주의할 점</span>
+                  <textarea
+                    rows={4}
+                    value={settings.deepseekCautions}
+                    onChange={(e) => set("deepseekCautions", e.target.value)}
+                    aria-label="딥시크 작업자 주의점"
+                    className="min-h-24 w-full resize-none rounded-md border border-input bg-transparent px-2.5 py-2 text-[12px] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+                  />
+                </label>
+              </div>
             </div>
           </div>
 
@@ -310,6 +340,7 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
               <NumberField label="동시 지피티 작업자" suffix="명" value={settings.maxGptWorkers} onChange={(v) => set("maxGptWorkers", v)} min={1} max={6} />
               <NumberField label="동시 제미나이 작업자 (0=사용 안 함)" suffix="명" value={settings.maxGeminiWorkers} onChange={(v) => set("maxGeminiWorkers", v)} min={0} max={6} />
               <NumberField label="동시 그록 작업자 (0=사용 안 함)" suffix="명" value={settings.maxGrokWorkers} onChange={(v) => set("maxGrokWorkers", v)} min={0} max={6} />
+              <NumberField label="동시 딥시크 작업자 (0=사용 안 함)" suffix="명" value={settings.maxDeepseekWorkers} onChange={(v) => set("maxDeepseekWorkers", v)} min={0} max={6} />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <NumberField label="지시당 배정 한도" suffix="회" value={settings.maxConsults} onChange={(v) => set("maxConsults", v)} min={1} max={MAX_CONSULTS} />

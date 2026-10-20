@@ -188,6 +188,14 @@ function registerIpc() {
   // misc
   ipcMain.handle("cli:info", (_e, checkAuth?: boolean) => checkAuth ? chats.checkedCliInfo() : chats.cliInfo());
   ipcMain.handle("models:list", (_e, agent: AgentKind) => chats.models(agent));
+  ipcMain.handle("deepseek", async (_e, action, input = {}) => {
+    const service = chats.deepSeek();
+    if (action === "save") service.save(input);
+    else if (action === "remove") service.remove();
+    else if (action === "check") return service.check();
+    else if (action !== "status") throw new Error("지원하지 않는 DeepSeek 설정 작업입니다.");
+    return service.status();
+  });
   ipcMain.handle("aistudio:usage", (_e, range) => chats.aiStudio().usage(range));
   ipcMain.handle("aistudio", async (_e, action: AIStudioAction, input: AIStudioInput = {}) => {
     const studio = chats.aiStudio();

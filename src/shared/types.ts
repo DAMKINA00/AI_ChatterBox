@@ -1,8 +1,9 @@
 // Types shared by main, preload and renderer.
 import type { ProviderUsage } from "./usage";
 import type { AIStudioAction, AIStudioInput, AIStudioStatus, AIStudioUsageRange, AIStudioUsageReport } from "./aistudio";
+import type { DeepSeekAction, DeepSeekInput, DeepSeekStatus } from "./deepseek";
 
-export type AgentKind = "claude" | "codex" | "gemini" | "grok";
+export type AgentKind = "claude" | "codex" | "gemini" | "grok" | "deepseek";
 export const GEMINI_WEB_MODEL = "gemini-web-argon";
 export type GeminiWebAccountId = `gemini-${1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10}`;
 export const GEMINI_WRITING_INSTRUCTIONS = "기본 글쓰기 담당은 Antigravity/Gemini다. 사용자가 다른 작업을 명시적으로 지정하면 해당 요청을 수행한다. 사용 가능한 도구만 사용하고, 없는 기능이나 실행하지 않은 결과를 꾸며내지 않는다.";
@@ -57,7 +58,7 @@ export function isAgentExpression(value: unknown): value is AgentExpression {
   return typeof value === "string" && (AGENT_EXPRESSIONS as readonly string[]).includes(value);
 }
 
-export const AGENT_LABEL: Record<AgentKind, string> = { claude: "클로드", codex: "지피티", gemini: "제미나이", grok: "그록" };
+export const AGENT_LABEL: Record<AgentKind, string> = { claude: "클로드", codex: "지피티", gemini: "제미나이", grok: "그록", deepseek: "딥시크" };
 
 /**
  * Who said / did something in a chat: "orch" = the master (마스터), or "w<agent id>" = a worker
@@ -67,9 +68,9 @@ export type Role = "orch" | `w${number}`;
 
 export const MASTER_LABEL = "마스터";
 
-export type WorkerKind = "claude" | "gpt" | "gemini" | "grok";
-export const WORKER_KIND_LABEL: Record<WorkerKind, string> = { claude: "클로드", gpt: "지피티", gemini: "제미나이", grok: "그록" };
-export const WORKER_AGENT: Record<WorkerKind, AgentKind> = { claude: "claude", gpt: "codex", gemini: "gemini", grok: "grok" };
+export type WorkerKind = "claude" | "gpt" | "gemini" | "grok" | "deepseek";
+export const WORKER_KIND_LABEL: Record<WorkerKind, string> = { claude: "클로드", gpt: "지피티", gemini: "제미나이", grok: "그록", deepseek: "딥시크" };
+export const WORKER_AGENT: Record<WorkerKind, AgentKind> = { claude: "claude", gpt: "codex", gemini: "gemini", grok: "grok", deepseek: "deepseek" };
 
 export interface ChatAgent {
   id: number;
@@ -116,7 +117,7 @@ export function chatOrchestrator(chat: { orchestratorModelOverride: string | nul
 export function parseOrchestrator(m: string): { agent: AgentKind; model: string } {
   const i = m.indexOf(":");
   const prefix = m.slice(0, i);
-  const agent: AgentKind = ["claude", "codex", "gemini", "grok"].includes(prefix) ? prefix as AgentKind : "claude";
+  const agent: AgentKind = ["claude", "codex", "gemini", "grok", "deepseek"].includes(prefix) ? prefix as AgentKind : "claude";
   return { agent, model: m.slice(i + 1) };
 }
 
@@ -137,12 +138,16 @@ export interface ProjectSettings {
   grokModel: string;
   grokStrengths: string;
   grokCautions: string;
+  deepseekModel: string;
+  deepseekStrengths: string;
+  deepseekCautions: string;
   /** Empty = CLI default; auto = master chooses medium/high/xhigh for each worker assignment. */
   orchestratorEffort: string;
   claudeEffort: string;
   codexEffort: string;
   geminiEffort: string;
   grokEffort: string;
+  deepseekEffort: string;
   /** Lead must get a Codex/Claude review before finishing code changes. */
   reviewGate: boolean;
   /** Max consults per user instruction. */
@@ -154,6 +159,7 @@ export interface ProjectSettings {
   maxGptWorkers: number;
   maxGeminiWorkers: number;
   maxGrokWorkers: number;
+  maxDeepseekWorkers: number;
   /** Who answers workers' approval requests. */
   approvalMode: ApprovalMode;
   /** Let the orchestrator also allow high-risk requests (otherwise they go to the user). */
@@ -181,11 +187,15 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   grokModel: "",
   grokStrengths: "사용자가 지정한 작업, 조사·구현·이미지 생성과 동료 협업.",
   grokCautions: "실제 CLI·모델·도구 제공 여부를 확인하고 불가능한 기능은 실행한 것처럼 보고하지 않습니다.",
+  deepseekModel: "deepseek-flash",
+  deepseekStrengths: "사용자가 지정한 분석·코딩·테스트와 동료 협업.",
+  deepseekCautions: "DeepSeek API 사용량은 별도 과금됩니다. 이미지·영상 생성은 지원하지 않습니다. 실제 도구 실행 결과만 보고합니다.",
   orchestratorEffort: "xhigh",
   claudeEffort: "auto",
   codexEffort: "auto",
   geminiEffort: "auto",
   grokEffort: "auto",
+  deepseekEffort: "auto",
   geminiStrengths: "문장 다듬기, 대사·시나리오, 문서 작성·요약·번역을 우선 배정하며 명시적으로 지정한 다른 작업도 수행합니다.",
   geminiCautions: "CLI는 승인과 작업 범위 안에서 코드·이미지 도구를 사용합니다. Gemini 웹은 로컬 파일·명령·MCP를 실행할 수 없습니다. 실제 계정에서 제공되는 모델과 도구만 사용합니다.",
   reviewGate: true,
@@ -195,6 +205,7 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   maxGptWorkers: 3,
   maxGeminiWorkers: 1,
   maxGrokWorkers: 3,
+  maxDeepseekWorkers: 3,
   approvalMode: "orchestrator",
   delegateHighRisk: false,
 };
@@ -227,11 +238,13 @@ export interface Chat {
   codexModelOverride: string | null;
   geminiModelOverride: string | null;
   grokModelOverride: string | null;
+  deepseekModelOverride: string | null;
   orchestratorEffortOverride: string | null;
   claudeEffortOverride: string | null;
   codexEffortOverride: string | null;
   geminiEffortOverride: string | null;
   grokEffortOverride: string | null;
+  deepseekEffortOverride: string | null;
   /** Per-chat approval mode; null = follow the project. */
   approvalModeOverride: ApprovalMode | null;
   goal: ChatGoal | null;
@@ -397,10 +410,12 @@ export interface UsageInfo {
   codex?: ProviderUsage;
   gemini?: ProviderUsage;
   grok?: ProviderUsage;
+  deepseek?: ProviderUsage;
   geminiWeb?: GeminiWebUsage;
 }
 
 export interface ChatterBoxApi {
+  deepSeek(action: DeepSeekAction, input?: DeepSeekInput): Promise<DeepSeekStatus>;
   aiStudio(action: AIStudioAction, input?: AIStudioInput): Promise<AIStudioStatus>;
   aiStudioUsage(range?: AIStudioUsageRange): Promise<AIStudioUsageReport>;
   // projects
@@ -422,11 +437,13 @@ export interface ChatterBoxApi {
       codexModelOverride?: string | null;
       geminiModelOverride?: string | null;
       grokModelOverride?: string | null;
+      deepseekModelOverride?: string | null;
       orchestratorEffortOverride?: string | null;
       claudeEffortOverride?: string | null;
       codexEffortOverride?: string | null;
       geminiEffortOverride?: string | null;
       grokEffortOverride?: string | null;
+      deepseekEffortOverride?: string | null;
       approvalModeOverride?: ApprovalMode | null;
     },
   ): Promise<Chat>;

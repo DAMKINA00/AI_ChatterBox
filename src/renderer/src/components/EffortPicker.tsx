@@ -7,6 +7,7 @@ import { useStore } from "../store";
 import { Button, DropdownMenu, DropdownMenuCheckItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger, Tooltip } from "./ui";
 
 const WORKER_EFFORTS = new Set(["medium", "high", "xhigh"]);
+const DEEPSEEK_WORKER_EFFORTS = new Set(["medium", "high", "xhigh", "max"]);
 const EFFORT_ORDER = ["low", "medium", "high", "xhigh"];
 const WEB_EFFORT_TITLE = "제미나이 웹은 medium/high/xhigh 추론 수준을 제공하지 않습니다. 웹 서비스가 모델 설정을 관리합니다.";
 
@@ -23,7 +24,7 @@ export function modelOption(
   model: string,
 ): ModelOption | undefined {
   const list = models[agent] ?? [];
-  return list.find((m) => m.id === model) ?? (agent === "gemini" && !model ? list.find((m) => m.isDefault) : undefined);
+  return list.find((m) => m.id === model) ?? ((agent === "gemini" || agent === "deepseek") && !model ? list.find((m) => m.isDefault) : undefined);
 }
 
 export function effortOptions(
@@ -38,7 +39,8 @@ export function effortOptions(
     ...EFFORT_ORDER.filter((value) => unique.includes(value)),
     ...unique.filter((value) => !EFFORT_ORDER.includes(value)),
   ];
-  return worker ? ["auto", ...ordered.filter((value) => WORKER_EFFORTS.has(value))] : ["", ...ordered];
+  const workerEfforts = agent === "deepseek" ? DEEPSEEK_WORKER_EFFORTS : WORKER_EFFORTS;
+  return worker ? ["auto", ...ordered.filter((value) => workerEfforts.has(value))] : ["", ...ordered];
 }
 
 /** Choose the value to use immediately after a model changes. */

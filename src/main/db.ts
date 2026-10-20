@@ -103,7 +103,7 @@ CREATE TABLE IF NOT EXISTS approvals (
 CREATE TABLE IF NOT EXISTS agents (
   id INTEGER PRIMARY KEY,
   chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
-  kind TEXT NOT NULL CHECK (kind IN ('claude','gpt','gemini','grok')),
+  kind TEXT NOT NULL CHECK (kind IN ('claude','gpt','gemini','grok','deepseek')),
   number INTEGER NOT NULL,
   nickname TEXT NOT NULL,
   job TEXT NOT NULL DEFAULT '',
@@ -161,11 +161,13 @@ export type ChatPatch = Partial<
     | "codexModelOverride"
     | "geminiModelOverride"
     | "grokModelOverride"
+    | "deepseekModelOverride"
     | "orchestratorEffortOverride"
     | "claudeEffortOverride"
     | "codexEffortOverride"
     | "geminiEffortOverride"
     | "grokEffortOverride"
+    | "deepseekEffortOverride"
     | "approvalModeOverride"
     | "orchestratorModelOverride"
     | "goal"
@@ -216,11 +218,13 @@ const toChat = (r: Row): Chat => ({
   codexModelOverride: r.codex_model_override,
   geminiModelOverride: r.gemini_model_override ?? null,
   grokModelOverride: r.grok_model_override ?? null,
+  deepseekModelOverride: r.deepseek_model_override ?? null,
   orchestratorEffortOverride: r.orchestrator_effort_override ?? null,
   claudeEffortOverride: r.claude_effort_override ?? null,
   codexEffortOverride: r.codex_effort_override ?? null,
   geminiEffortOverride: r.gemini_effort_override ?? null,
   grokEffortOverride: r.grok_effort_override ?? null,
+  deepseekEffortOverride: r.deepseek_effort_override ?? null,
   approvalModeOverride: r.approval_mode_override ?? null,
   orchestratorModelOverride: r.orchestrator_model_override ?? null,
   goal: r.goal_json ? JSON.parse(r.goal_json) : null,
@@ -347,16 +351,17 @@ export class Store {
   // ---- agents (pooled workers)
   private migrateGeminiAgents() {
     const schema = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='agents'").get() as Row;
-    if (schema.sql.includes("'grok'")) return;
+    if (schema.sql.includes("'deepseek'")) return;
+    const hasWebAccount = (this.db.prepare("PRAGMA table_info(agents)").all() as Row[]).some(c => c.name === "web_account_id");
     // SQLite cannot extend a CHECK constraint. Preserve every identity and session atomically.
     this.db.exec("BEGIN");
     try {
       this.db.exec(`CREATE TABLE agents_next (
         id INTEGER PRIMARY KEY, chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
-        kind TEXT NOT NULL CHECK (kind IN ('claude','gpt','gemini','grok')), number INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('claude','gpt','gemini','grok','deepseek')), number INTEGER NOT NULL,
         nickname TEXT NOT NULL, job TEXT NOT NULL DEFAULT '', session_id TEXT,
-        status TEXT NOT NULL DEFAULT 'active', created_at INTEGER NOT NULL);
-        INSERT INTO agents_next SELECT * FROM agents;
+        status TEXT NOT NULL DEFAULT 'active', created_at INTEGER NOT NULL, web_account_id TEXT);
+        INSERT INTO agents_next SELECT id, chat_id, kind, number, nickname, job, session_id, status, created_at, ${hasWebAccount ? "web_account_id" : "NULL"} FROM agents;
         DROP TABLE agents;
         ALTER TABLE agents_next RENAME TO agents;
         CREATE INDEX agents_chat ON agents(chat_id, id); COMMIT;`);
@@ -408,11 +413,13 @@ export class Store {
     add("chats", "goal_json", "goal_json TEXT");
     add("chats", "gemini_model_override", "gemini_model_override TEXT");
     add("chats", "grok_model_override", "grok_model_override TEXT");
+    add("chats", "deepseek_model_override", "deepseek_model_override TEXT");
     add("chats", "orchestrator_effort_override", "orchestrator_effort_override TEXT");
     add("chats", "claude_effort_override", "claude_effort_override TEXT");
     add("chats", "codex_effort_override", "codex_effort_override TEXT");
     add("chats", "gemini_effort_override", "gemini_effort_override TEXT");
     add("chats", "grok_effort_override", "grok_effort_override TEXT");
+    add("chats", "deepseek_effort_override", "deepseek_effort_override TEXT");
     add("consults", "scope_json", "scope_json TEXT");
     add("consults", "instruction_id", "instruction_id INTEGER");
     add("consults", "reason", "reason TEXT");
@@ -541,7 +548,7 @@ export class Store {
     this.db
       .prepare(
         `UPDATE chats SET title = ?, orch_claude_session_id = ?, orch_codex_thread_id = ?, claude_session_id = ?, codex_thread_id = ?,
-         claude_model_override = ?, codex_model_override = ?, gemini_model_override = ?, grok_model_override = ?, orchestrator_effort_override = ?, claude_effort_override = ?, codex_effort_override = ?, gemini_effort_override = ?, grok_effort_override = ?, approval_mode_override = ?, orchestrator_model_override = ?, goal_json = ?, status = ?, unread = ?, archived = ?, last_active_at = ? WHERE id = ?`,
+         claude_model_override = ?, codex_model_override = ?, gemini_model_override = ?, grok_model_override = ?, deepseek_model_override = ?, orchestrator_effort_override = ?, claude_effort_override = ?, codex_effort_override = ?, gemini_effort_override = ?, grok_effort_override = ?, deepseek_effort_override = ?, approval_mode_override = ?, orchestrator_model_override = ?, goal_json = ?, status = ?, unread = ?, archived = ?, last_active_at = ? WHERE id = ?`,
       )
       .run(
         pick("title"),
@@ -553,11 +560,13 @@ export class Store {
         pick("codexModelOverride"),
         pick("geminiModelOverride"),
         pick("grokModelOverride"),
+        pick("deepseekModelOverride"),
         pick("orchestratorEffortOverride"),
         pick("claudeEffortOverride"),
         pick("codexEffortOverride"),
         pick("geminiEffortOverride"),
         pick("grokEffortOverride"),
+        pick("deepseekEffortOverride"),
         pick("approvalModeOverride"),
         pick("orchestratorModelOverride"),
         (() => {
@@ -578,7 +587,7 @@ export class Store {
   }
 
   private clearChatSettings(id: number) {
-    for (const prefix of ["orchSession", "teamMessages", "gemini-web-context", "aistudio-context"])
+    for (const prefix of ["orchSession", "teamMessages", "gemini-web-context", "aistudio-context", "deepseek-context"])
       this.db.prepare("DELETE FROM settings WHERE key LIKE ?").run(`${prefix}:${id}:%`);
   }
 

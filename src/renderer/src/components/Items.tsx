@@ -29,8 +29,8 @@ import { AgentAvatar, type AvatarSize } from "./AgentAvatar";
 import { effortLabel } from "./EffortPicker";
 import { Badge, Button, Input } from "./ui";
 
-export type Tone = "orch" | "claude" | "gpt" | "gemini" | "grok";
-const TONE_TEXT: Record<Tone, string> = { orch: "text-orch", claude: "text-claude", gpt: "text-gpt", gemini: "text-gemini", grok: "text-grok" };
+export type Tone = "orch" | "claude" | "gpt" | "gemini" | "grok" | "deepseek";
+const TONE_TEXT: Record<Tone, string> = { orch: "text-orch", claude: "text-claude", gpt: "text-gpt", gemini: "text-gemini", grok: "text-grok", deepseek: "text-deepseek" };
 
 /** Name + color of a role in a chat: 마스터, 클로드 2호, 지피티 1호 … */
 export function useRole(chatId: number, role: Role | null | undefined) {

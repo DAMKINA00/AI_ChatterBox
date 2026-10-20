@@ -35,6 +35,7 @@ export function StatusDialog({ open, onOpenChange, chat, project }: { open: bool
   const codexModel = chat.codexModelOverride ?? project.settings.codexModel;
   const geminiModel = chat.geminiModelOverride ?? project.settings.geminiModel;
   const grokModel = chat.grokModelOverride ?? project.settings.grokModel;
+  const deepseekModel = chat.deepseekModelOverride ?? project.settings.deepseekModel;
   const row = (label: React.ReactNode, value: React.ReactNode) => (
     <div className="grid grid-cols-[120px_1fr] items-center gap-3 text-[13px]">
       <div className="text-muted-foreground">{label}</div>
@@ -51,7 +52,7 @@ export function StatusDialog({ open, onOpenChange, chat, project }: { open: bool
             <span>{MASTER_LABEL}</span>,
             <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
               <ModelPicker
-                agents={["claude", "codex", "gemini", "grok"]}
+                agents={["claude", "codex", "gemini", "grok", "deepseek"]}
                 ariaLabel="상태: 마스터 모델"
                 value={chat.orchestratorModelOverride ?? project.settings.orchestratorModel}
                 inherited={chat.orchestratorModelOverride === null}
@@ -172,13 +173,37 @@ export function StatusDialog({ open, onOpenChange, chat, project }: { open: bool
               />
             </div>,
           )}
+          {row(
+            <span>딥시크 작업자</span>,
+            <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+              <ModelPicker
+                agents={["deepseek"]}
+                ariaLabel="상태: 딥시크 모델"
+                value={deepseekModel}
+                inherited={chat.deepseekModelOverride === null}
+                onChange={(v) => void updateChat(chat.id, { deepseekModelOverride: v, deepseekEffortOverride: defaultEffortForModel(models, "deepseek", v, true) })}
+                onReset={() => void updateChat(chat.id, { deepseekModelOverride: null })}
+              />
+              <EffortPicker
+                agent="deepseek"
+                model={deepseekModel}
+                worker
+                value={chat.deepseekEffortOverride ?? project.settings.deepseekEffort ?? "auto"}
+                inherited={chat.deepseekEffortOverride === null}
+                onChange={(v) => void updateChat(chat.id, { deepseekEffortOverride: v })}
+                onReset={() => void updateChat(chat.id, { deepseekEffortOverride: null })}
+                resetLabel={`프로젝트 값 사용 (${effortLabel(project.settings.deepseekEffort ?? "auto")})`}
+                ariaLabel="상태: 딥시크 추론 수준"
+              />
+            </div>,
+          )}
           <div className="mt-1 text-[12px] font-medium text-muted-foreground">대화</div>
-          {row(MASTER_LABEL, orch.agent === "claude" ? id(chat.orchClaudeSessionId) : orch.agent === "codex" ? id(chat.orchCodexThreadId) : `${AGENT_LABEL[orch.agent]} 세션은 CLI별로 독립 보관됩니다.`)}
+          {row(MASTER_LABEL, orch.agent === "claude" ? id(chat.orchClaudeSessionId) : orch.agent === "codex" ? id(chat.orchCodexThreadId) : `${AGENT_LABEL[orch.agent]} 대화는 연결 방식별로 독립 보관됩니다.`)}
           {(agents ?? []).map((a) => row(a.nickname + (a.status === "released" ? " (해제)" : ""), id(a.sessionId)))}
           <div className="mt-1 text-[12px] font-medium text-muted-foreground">기타</div>
           {row("승인 방식", APPROVAL_MODE_LABEL[chat.approvalModeOverride ?? project.settings.approvalMode])}
           {row("목표", chat.goal ? `${chat.goal.objective} (${chat.goal.status})` : "없음")}
-          {row("남은 사용량", (["claude", "codex", "gemini", "grok"] as const).map(a => { const d = pickUsage(usage[a]); return `${AGENT_LABEL[a]} ${d ? `${d.window} ${Math.round(d.remaining)}%` : "정보 없음"}`; }).join(" · "))}
+          {row("남은 사용량", (["claude", "codex", "gemini", "grok", "deepseek"] as const).map(a => { const d = pickUsage(usage[a]); return `${AGENT_LABEL[a]} ${d ? `${d.window} ${Math.round(d.remaining)}%` : "정보 없음"}`; }).join(" · "))}
           {row("작업 폴더", <span className="font-mono text-[12px] break-all">{project.folder}</span>)}
         </div>
       </DialogContent>

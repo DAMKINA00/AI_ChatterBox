@@ -12,11 +12,17 @@ import { fileNote, type AgentDriver, type AgentInput, type DriverHost, type Driv
 export interface StudioMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string | null;
+  reasoning_content?: string;
   tool_calls?: { id: string; type: "function"; function: { name: string; arguments: string }; extra_content?: { google: { thought_signature: string } } }[];
   tool_call_id?: string;
 }
 export interface StudioContext { load(): StudioMessage[]; save(messages: StudioMessage[]): void }
-interface StudioEnv { service: AIStudioService; context?: StudioContext; bridgeUrl?: () => string | undefined }
+interface StudioEnv {
+  service: Pick<AIStudioService, "response" | "json"> & { settings(): { model: string; videoEnabled: boolean } };
+  provider?: "gemini" | "deepseek";
+  context?: StudioContext;
+  bridgeUrl?: () => string | undefined;
+}
 const schema = (properties: Record<string, unknown>, required: string[]) => ({ type: "object", properties, required, additionalProperties: false });
 const str = { type: "string" };
 export const STUDIO_TOOLS: ToolDef[] = [
@@ -33,11 +39,11 @@ const VIDEO_TOOLS: ToolDef[] = [
 ];
 
 /** Parse OpenAI SSE without treating a dropped stream or partial tool call as success. */
-export async function studioCompletion(response: Response, signal: AbortSignal, delta: (text: string) => void) {
-  if (!response.headers.get("content-type")?.includes("text/event-stream")) throw new Error("AI Studio가 스트리밍 응답을 반환하지 않았습니다.");
+export async function studioCompletion(response: Response, signal: AbortSignal, delta: (text: string) => void, label = "AI Studio") {
+  if (!response.headers.get("content-type")?.includes("text/event-stream")) throw new Error(`${label}가 스트리밍 응답을 반환하지 않았습니다.`);
   const reader = response.body?.getReader();
-  if (!reader) throw new Error("AI Studio 응답이 비어 있습니다.");
-  const decoder = new TextDecoder(); let pending = "", content = "", finish = "", done = false;
+  if (!reader) throw new Error(`${label} 응답이 비어 있습니다.`);
+  const decoder = new TextDecoder(); let pending = "", content = "", reasoning = "", finish = "", done = false;
   let usage: any;
   const calls = new Map<number, NonNullable<StudioMessage["tool_calls"]>[number]>();
   const accept = (event: string) => {
@@ -45,12 +51,13 @@ export async function studioCompletion(response: Response, signal: AbortSignal, 
     if (!data) return;
     if (data === "[DONE]") { done = true; return; }
     const value = JSON.parse(data);
-    if (value.error) throw new Error(String(value.error.message ?? "AI Studio 스트림 오류"));
+    if (value.error) throw new Error(`${label} 스트림 오류가 발생했습니다.`);
     if (value.usage) usage = value.usage;
     const choice = value.choices?.[0];
     if (!choice) return;
     if (choice.finish_reason) finish = choice.finish_reason;
     if (typeof choice.delta?.content === "string") { content += choice.delta.content; delta(choice.delta.content); }
+    if (typeof choice.delta?.reasoning_content === "string") reasoning += choice.delta.reasoning_content;
     for (const piece of choice.delta?.tool_calls ?? []) {
       if (!Number.isInteger(piece.index) || piece.index < 0 || piece.index > 100) throw new Error("AI Studio 도구 호출 순서가 잘못되었습니다.");
       const call: NonNullable<StudioMessage["tool_calls"]>[number] = calls.get(piece.index) ?? { id: "", type: "function", function: { name: "", arguments: "" } };
@@ -68,7 +75,7 @@ export async function studioCompletion(response: Response, signal: AbortSignal, 
       const chunk = await reader.read();
       if (chunk.done) break;
       pending += decoder.decode(chunk.value, { stream: true });
-      if (pending.length > 4_000_000 || content.length > 8_000_000) throw new Error("AI Studio 응답이 너무 큽니다.");
+      if (pending.length > 4_000_000 || content.length + reasoning.length > 8_000_000) throw new Error(`${label} 응답이 너무 큽니다.`);
       let boundary: RegExpExecArray | null;
       while ((boundary = /\r?\n\r?\n/.exec(pending))) { accept(pending.slice(0, boundary.index).replace(/\r\n/g, "\n")); pending = pending.slice(boundary.index + boundary[0].length); }
     }
@@ -76,14 +83,15 @@ export async function studioCompletion(response: Response, signal: AbortSignal, 
     if (pending.trim()) accept(pending);
   } finally { await reader.cancel().catch(() => undefined); }
   signal.throwIfAborted();
-  if (!done || !["stop", "tool_calls"].includes(finish)) throw new Error(`AI Studio 응답이 완료되지 않았습니다 (${finish || "연결 종료"}).`);
+  if (!done || !["stop", "tool_calls"].includes(finish)) throw new Error(`${label} 응답이 완료되지 않았습니다 (${finish || "연결 종료"}).`);
   const tool_calls = [...calls.entries()].sort((a, b) => a[0] - b[0]).map(([, c]) => c);
   if (tool_calls.some(c => !c.id || !c.function.name) || (finish === "tool_calls") !== (tool_calls.length > 0)) throw new Error("AI Studio 도구 호출을 완전히 받지 못했습니다.");
-  return { message: { role: "assistant", content: content || null, ...(tool_calls.length ? { tool_calls } : {}) } as StudioMessage, usage };
+  return { message: { role: "assistant", content: content || null, ...(reasoning ? { reasoning_content: reasoning } : {}), ...(tool_calls.length ? { tool_calls } : {}) } as StudioMessage, usage };
 }
 
-export class AIStudioDriver implements AgentDriver {
-  readonly agent = "gemini" as const;
+export class ChatCompletionDriver implements AgentDriver {
+  get agent() { return this.env.provider ?? "gemini"; }
+  private get label() { return this.agent === "deepseek" ? "DeepSeek" : "AI Studio"; }
   private controller?: AbortController;
   private task?: Promise<void>;
   private disposed = false;
@@ -93,7 +101,7 @@ export class AIStudioDriver implements AgentDriver {
   }
   get running() { return !!this.controller; }
   async send(input: AgentInput) {
-    if (this.disposed || this.running) throw new Error("AI Studio 작업이 진행 중이거나 종료되었습니다.");
+    if (this.disposed || this.running) throw new Error(`${this.label} 작업이 진행 중이거나 종료되었습니다.`);
     const controller = new AbortController(); this.controller = controller;
     this.task = this.run(input, controller).finally(() => { if (this.controller === controller) this.controller = undefined; });
   }
@@ -105,25 +113,27 @@ export class AIStudioDriver implements AgentDriver {
     const historyStart = this.history.length;
     try {
       const catalog = await this.env.service.json("/v1/models", undefined, signal);
-      if (!catalog.data?.some((m: any) => m.id === model)) throw new Error(`AI Studio 계정에서 ${model} 모델을 사용할 수 없습니다. 계정 연결과 모델 목록을 확인하세요.`);
+      if (!catalog.data?.some((m: any) => m.id === model)) throw new Error(`${this.label} 계정에서 ${model} 모델을 사용할 수 없습니다. 연결과 모델 목록을 확인하세요.`);
       this.history.push({ role: "user", content: input.text + fileNote(input.attachments) });
       const bridgeUrl = this.opts.readOnly ? undefined : this.env.bridgeUrl?.();
       const bridgeTools: ToolDef[] = bridgeUrl ? (await (await fetch(bridgeUrl + "/tools", { signal, redirect: "error" })).json()).tools : [];
-      const video = this.env.service.settings().videoEnabled && this.opts.allowImages !== false && !this.opts.readOnly && !input.noWrites;
+      const video = this.agent === "gemini" && this.env.service.settings().videoEnabled && this.opts.allowImages !== false && !this.opts.readOnly && !input.noWrites;
       const tools = this.opts.readOnly ? [] : [...STUDIO_TOOLS, ...(video ? VIDEO_TOOLS : []), ...bridgeTools.map(t => ({ ...t, name: `chatterbox_${t.name}` }))];
-      const instructions = `${this.opts.instructions ?? ""}\n실제 작업 폴더: ${this.opts.cwd}\n연결: AI Studio (${model}). 제공된 도구의 실제 결과만 보고한다. 파일 경로는 작업 폴더 기준이다. 영상은 사용자가 명시적으로 요청하고 영상 도구가 활성화된 경우에만 생성한다. 요청하지 않은 영상 생성이나 영상 검증 생성은 금지한다. ${input.noWrites ? "읽기 전용 작업: 파일 수정과 변경 명령 금지." : ""}`;
+      const instructions = `${this.opts.instructions ?? ""}\n실제 작업 폴더: ${this.opts.cwd}\n연결: ${this.label} (${model}). 제공된 도구의 실제 결과만 보고한다. 파일 경로는 작업 폴더 기준이다. ${this.agent === "deepseek" ? "이미지·영상 생성 도구는 제공하지 않는다." : "영상은 사용자가 명시적으로 요청하고 영상 도구가 활성화된 경우에만 생성한다. 요청하지 않은 영상 생성이나 영상 검증 생성은 금지한다."} ${input.noWrites ? "읽기 전용 작업: 파일 수정과 변경 명령 금지." : ""}`;
       for (let round = 0; round < 80; round++) {
         signal.throwIfAborted();
         const response = await this.env.service.response("/v1/chat/completions", {
           model, stream: true, stream_options: { include_usage: true }, messages: [{ role: "system", content: instructions }, ...this.history],
+          ...(this.agent === "deepseek" ? this.opts.effort === "none" ? { thinking: { type: "disabled" } } : { thinking: { type: "enabled" }, reasoning_effort: this.opts.effort || "high" } : {}),
           ...(tools.length ? { tools: tools.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema } })), parallel_tool_calls: false } : {}),
         }, signal);
-        const { message, usage } = await studioCompletion(response, signal, text => this.host.emit({ type: "text_delta", text }));
+        const { message, usage } = await studioCompletion(response, signal, text => this.host.emit({ type: "text_delta", text }), this.label);
+        if (this.agent === "deepseek") message.reasoning_content ??= "";
         this.history.push(message);
         if (message.content) this.host.emit({ type: "text", text: message.content });
         if (usage) {
-          inputTokens += usage.prompt_tokens ?? 0; outputTokens += usage.completion_tokens ?? 0; cachedInputTokens += usage.prompt_tokens_details?.cached_tokens ?? 0;
-          this.host.emit({ type: "agent_usage", metrics: { turnId, model, elapsedMs: Date.now() - started, inputTokens, outputTokens, cachedInputTokens, cacheWriteInputTokens: 0 } });
+          inputTokens += usage.prompt_tokens ?? 0; outputTokens += usage.completion_tokens ?? 0; cachedInputTokens += usage.prompt_tokens_details?.cached_tokens ?? usage.prompt_cache_hit_tokens ?? 0;
+          this.host.emit({ type: "agent_usage", metrics: { turnId, model, reasoningEffort: this.opts.effort, elapsedMs: Date.now() - started, inputTokens, outputTokens, cachedInputTokens, cacheWriteInputTokens: 0 } });
         }
         if (!message.tool_calls?.length) { ok = true; this.persist(); break; }
         const seen = new Set<string>();
@@ -147,9 +157,9 @@ export class AIStudioDriver implements AgentDriver {
         }
         this.persist();
       }
-      if (!ok) throw new Error("AI Studio 도구 반복 한도에 도달했습니다. 확인된 결과를 유지했으니 이어서 지시하세요.");
+      if (!ok) throw new Error(`${this.label} 도구 반복 한도에 도달했습니다. 확인된 결과를 유지했으니 이어서 지시하세요.`);
     } catch (e) {
-      error = signal.aborted ? "AI Studio 작업이 중지되었습니다." : e instanceof Error ? e.message : String(e);
+      error = signal.aborted ? `${this.label} 작업이 중지되었습니다.` : e instanceof Error ? e.message : String(e);
       // Close unfinished tool calls without replaying their side effects on resume.
       const answered = new Set(this.history.filter(m => m.role === "tool").map(m => m.tool_call_id));
       const last = this.history.findLast(m => m.tool_calls?.length);
@@ -268,3 +278,4 @@ export class AIStudioDriver implements AgentDriver {
   async stop() { this.controller?.abort(); await this.task; }
   async dispose() { this.disposed = true; await this.stop(); }
 }
+export { ChatCompletionDriver as AIStudioDriver };

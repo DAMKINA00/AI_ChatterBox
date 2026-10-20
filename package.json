@@ -1,9 +1,9 @@
 {
   "name": "ai-chatterbox",
   "productName": "AI_ChatterBox",
-  "version": "0.4.17",
+  "version": "0.4.18",
   "private": true,
-  "description": "Desktop agent team for Claude Code, Codex, Antigravity, Grok and Gemini web",
+  "description": "Desktop agent team for Claude Code, Codex, Antigravity, Grok, DeepSeek API and Gemini web",
   "main": "out/main/index.js",
   "type": "module",
   "scripts": {

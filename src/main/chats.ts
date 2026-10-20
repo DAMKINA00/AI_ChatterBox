@@ -43,7 +43,8 @@ import { CodexDriver, CodexServer } from "./drivers/codex";
 import { AttachmentStore } from "./attachments";
 import type { AgentDriver, AgentInput, DriverHost } from "./drivers/types";
 import { AIStudioService } from "./aistudio";
-import { AIStudioDriver, type StudioMessage } from "./drivers/aistudio";
+import { ChatCompletionDriver, type StudioMessage } from "./drivers/aistudio";
+import { DeepSeekService } from "./deepseek";
 import { AISTUDIO_MODEL, isAIStudioModel } from "../shared/aistudio";
 
 export interface Sink {
@@ -85,6 +86,7 @@ export class ChatManager {
   private grokUsageRefresh?: Promise<void>;
   private webAccounts?: GeminiWebAccounts;
   private studio?: AIStudioService;
+  private deepseek?: DeepSeekService;
   private attachments: AttachmentStore;
   /** Where a role's events currently go (its own node, or a consult it is serving). */
   private routes = new Map<number, Partial<Record<Role, NodeId>>>();
@@ -147,12 +149,17 @@ export class ChatManager {
       { agent: "codex", path: codex, error: codex ? undefined : "codex.exe를 찾지 못했습니다. Codex 앱 또는 Codex CLI를 설치하세요." },
       { agent: "grok", path: grok, error: grok ? undefined : "Grok CLI를 찾지 못했습니다. npm install -g @xai-official/grok 설치 후 grok login을 실행하세요." },
       { agent: "gemini", path: gemini, error: gemini ? undefined : "Antigravity CLI(agy.exe)를 찾지 못했습니다. 설치 경로를 확인한 뒤 ‘목록 다시 확인’을 눌러 주세요." },
+      { agent: "deepseek", path: this.deepSeek().status().apiKeySet ? "DeepSeek API" : null, error: this.deepSeek().status().apiKeySet ? undefined : "DeepSeek API 설정에서 API 키를 저장하세요." },
     ];
   }
 
   async checkedCliInfo(): Promise<CliInfo[]> {
     return Promise.all(this.cliInfo().map(async info => {
       if (!info.path) return info;
+      if (info.agent === "deepseek") {
+        const status = await this.deepSeek().check();
+        return { ...info, authStatus: status.state === "ready" ? "authenticated" as const : "unknown" as const, error: status.error };
+      }
       const key = `${info.agent}:${info.path}`;
       let cached = this.authChecks.get(key);
       if (!cached || cached.expires <= Date.now()) {
@@ -209,6 +216,16 @@ export class ChatManager {
     });
   }
 
+  deepSeek() {
+    return this.deepseek ??= new DeepSeekService(this.store, {
+      encrypt: value => {
+        if (!safeStorage.isEncryptionAvailable()) throw new Error("Windows 보안 저장소를 사용할 수 없습니다.");
+        return safeStorage.encryptString(value).toString("base64");
+      },
+      decrypt: value => safeStorage.decryptString(Buffer.from(value, "base64")),
+    });
+  }
+
   geminiWebAccounts() {
     return this.webAccounts ??= new GeminiWebAccounts(this.dataDir, this.store, undefined, status => {
       this.sink.webLogin?.(status);
@@ -228,6 +245,7 @@ export class ChatManager {
   }
 
   async models(agent: AgentKind): Promise<ModelOption[]> {
+    if (agent === "deepseek") return this.deepSeek().models();
     const cached = this.modelLists.get(agent);
     if (cached && cached.expires > Date.now()) return cached.promise;
     const promise = agent === "grok" ? listGrokModels(this.grokExe(), this.tmpDir) : agent === "codex" ? this.codex().models() : agent === "gemini" ? Promise.resolve().then(() => this.geminiModels()).catch(() => []).then((models) => [...models, { id: GEMINI_WEB_MODEL, label: "웹 · Gemini 4 Argon", reasoningEfforts: [] }, { id: AISTUDIO_MODEL, label: "AI Studio · Argon", reasoningEfforts: [] }])
@@ -300,12 +318,13 @@ export class ChatManager {
     await Promise.all(installed.filter((c) => c.path).map(async ({ agent }) => {
       try {
         const models = await this.models(agent);
-        const id = agent === "claude" ? chat.claudeModelOverride ?? project.settings.claudeModel : agent === "codex" ? gptModel : agent === "grok" ? chat.grokModelOverride ?? project.settings.grokModel : chat.geminiModelOverride ?? project.settings.geminiModel;
+        const id = agent === "claude" ? chat.claudeModelOverride ?? project.settings.claudeModel : agent === "codex" ? gptModel : agent === "grok" ? chat.grokModelOverride ?? project.settings.grokModel : agent === "deepseek" ? chat.deepseekModelOverride ?? project.settings.deepseekModel : chat.geminiModelOverride ?? project.settings.geminiModel;
         const model = id ? models.find((m) => m.id === id) : models.find((m) => m.isDefault);
         effortLevels[agent] = WORKER_EFFORTS.filter((level) => model?.reasoningEfforts?.includes(level));
       } catch { /* Unknown levels remain unavailable, never invent support. */ }
     }));
     return {
+      deepseek: { installed: this.deepSeek().status().apiKeySet, model: chat.deepseekModelOverride ?? project.settings.deepseekModel, reasoningEfforts: effortLevels.deepseek, effortSetting: chat.deepseekEffortOverride ?? project.settings.deepseekEffort, imageGeneration: false, videoGeneration: false, authentication: this.deepSeek().status(), localTools: true, fileWrites: true, enabled: project.settings.maxDeepseekWorkers > 0 },
       claude: { installed: !!installed.find((c) => c.agent === "claude")?.path, model: chat.claudeModelOverride ?? project.settings.claudeModel, reasoningEfforts: effortLevels.claude, effortSetting: chat.claudeEffortOverride ?? project.settings.claudeEffort, imageGeneration: false, authentication: "실행 시 확인", usage: this.usageState.claude },
       gpt: { installed: !!installed.find((c) => c.agent === "codex")?.path, model: gptModel, reasoningEfforts: effortLevels.codex, effortSetting: chat.codexEffortOverride ?? project.settings.codexEffort, imageGeneration, authenticated: codexAuthenticated, usage: this.usageState.codex },
       grok: { installed: !!installed.find(c => c.agent === "grok")?.path, model: chat.grokModelOverride ?? project.settings.grokModel, reasoningEfforts: effortLevels.grok, effortSetting: chat.grokEffortOverride ?? project.settings.grokEffort, imageGeneration: null, authentication: "Grok 로그인과 도구는 실행 시 확인", usage: this.usageState.grok },
@@ -440,6 +459,7 @@ export class ChatManager {
     const worker = this.store.agentByKey(chat.id, role);
     if (worker?.kind === "gpt") return { agent: "codex", model: chat.codexModelOverride ?? project.settings.codexModel, effort: chat.codexEffortOverride ?? project.settings.codexEffort };
     if (worker?.kind === "grok") return { agent: "grok", model: chat.grokModelOverride ?? project.settings.grokModel, effort: chat.grokEffortOverride ?? project.settings.grokEffort };
+    if (worker?.kind === "deepseek") return { agent: "deepseek", model: chat.deepseekModelOverride ?? project.settings.deepseekModel, effort: chat.deepseekEffortOverride ?? project.settings.deepseekEffort };
     if (worker?.kind === "gemini") return { agent: "gemini", model: chat.geminiModelOverride ?? project.settings.geminiModel, effort: chat.geminiEffortOverride ?? project.settings.geminiEffort };
     return { agent: "claude", model: chat.claudeModelOverride ?? project.settings.claudeModel, effort: chat.claudeEffortOverride ?? project.settings.claudeEffort };
   }
@@ -451,7 +471,7 @@ export class ChatManager {
 
   private saveNativeId(chatId: number, role: Role, agent: AgentKind, id: string) {
     if (role === "orch") {
-      if (agent === "gemini" || agent === "grok") this.store.setSetting(`orchSession:${chatId}:${agent}`, id);
+      if (agent === "gemini" || agent === "grok" || agent === "deepseek") this.store.setSetting(`orchSession:${chatId}:${agent}`, id);
       else this.updateChat(chatId, agent === "claude" ? { orchClaudeSessionId: id } : { orchCodexThreadId: id });
       return;
     }
@@ -585,11 +605,12 @@ export class ChatManager {
         },
         save: context => this.store.setSetting(contextKey, JSON.stringify(context)),
       });
-    } else if (cfg.agent === "gemini" && isAIStudioModel(cfg.model)) {
-      const key = `aistudio-context:${chatId}:${role}:${cfg.model}`;
-      driver = new AIStudioDriver(driverOpts, {
-        service: this.aiStudio(),
-        bridgeUrl: () => this.toolsFor?.(this.store.chat(chatId)!, role, "gemini")?.chatterbox_bridge?.env?.CHATTERBOX_URL,
+    } else if (cfg.agent === "deepseek" || (cfg.agent === "gemini" && isAIStudioModel(cfg.model))) {
+      const key = `${cfg.agent === "deepseek" ? "deepseek" : "aistudio"}-context:${chatId}:${role}:${cfg.model}`;
+      driver = new ChatCompletionDriver(driverOpts, {
+        provider: cfg.agent,
+        service: cfg.agent === "deepseek" ? this.deepSeek() : this.aiStudio(),
+        bridgeUrl: () => this.toolsFor?.(this.store.chat(chatId)!, role, cfg.agent)?.chatterbox_bridge?.env?.CHATTERBOX_URL,
         context: {
           load: (): StudioMessage[] => {
             try { const value = JSON.parse(this.store.getSetting(key) ?? "[]"); return Array.isArray(value) ? value : []; }
