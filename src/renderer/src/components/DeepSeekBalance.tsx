@@ -7,22 +7,22 @@ export function DeepSeekBalance({ compact = false, onOpen }: { compact?: boolean
   const ready = balance?.state === "ready";
   const label = balance?.state === "unconfigured" ? "키 미설정" : balance?.state === "error" ? "조회 실패" : "조회 중";
   const time = balance?.updatedAt ? `${new Date(balance.updatedAt).toLocaleString("ko-KR")} 조회` : "";
-  const amounts = ready ? balance.balances.map(b => `${b.currency} ${b.total}`).join(" · ") : label;
   const insufficient = ready && balance.isAvailable === false;
-  const detail = balance?.error ?? (ready ? balance.balances.map(b => `${b.currency} 충전 ${b.toppedUp} · 지급 ${b.granted}`).join(" / ") : label);
+  const detail = balance?.error ?? (ready ? balance.balances.map(b => `${b.currency} 총 ${b.total} · 충전 ${b.toppedUp} · 지급 ${b.granted}`).join(" / ") : label);
   const usd = ready ? balance.balances.find(b => b.currency === "USD") : undefined;
+  const shown = usd ?? (ready ? balance.balances[0] : undefined);
+  const [whole, fraction = ""] = shown?.total.split(".") ?? [];
+  const amount = shown ? `${whole}.${fraction[0] ?? "0"}${shown.currency === "USD" ? "$" : "¥"}` : "–";
   const percent = usd ? Math.min(100, Math.max(0, Number(usd.total) * 10)) : 0;
   const gauge = usd && <div role="progressbar" aria-label="딥시크 잔고 $10 기준" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Number(percent.toFixed(1))} aria-valuetext={`USD ${usd.total} / USD 10`} className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
     <div className={cn("h-full rounded-full", insufficient ? "bg-destructive" : "bg-deepseek")} style={{ width: `${percent}%` }} />
   </div>;
   if (compact) return (
     <Tooltip content={[detail, usd ? `$10 기준 ${percent.toFixed(1)}%` : "", insufficient ? "API 사용 잔고 부족" : "", time].filter(Boolean).join(" · ")}>
-      <button type="button" onClick={onOpen} data-testid="deepseek-balance" className="grid w-full gap-1 rounded py-1 text-[11px] hover:bg-accent">
-        <div className="flex items-start justify-between gap-2">
-          <span className="shrink-0 text-muted-foreground">딥시크 잔고</span>
-          <span className={cn("text-right tabular-nums", (insufficient || balance?.state === "error") && "text-destructive")}>{amounts}</span>
-        </div>
-        {gauge}
+      <button type="button" onClick={onOpen} data-testid="deepseek-balance" className="flex w-full items-center gap-2 rounded text-[11px] hover:bg-accent">
+        <span className="w-[108px] shrink-0 whitespace-nowrap text-left text-muted-foreground">딥시크 {ready ? "잔고" : label}</span>
+        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">{gauge}</div>
+        <span className={cn("w-9 shrink-0 whitespace-nowrap text-right tabular-nums", (insufficient || balance?.state === "error") && "text-destructive")}>{amount}</span>
       </button>
     </Tooltip>
   );

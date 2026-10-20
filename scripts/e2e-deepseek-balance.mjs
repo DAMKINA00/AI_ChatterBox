@@ -137,19 +137,19 @@ try {
     return s.calls.some(c => c.action === "balance") && s.calls.every(c => c.action !== "completion") && s.paidCalls === 0;
   }) && /연결 확인됨|키 저장됨/.test(await dialog.getByTestId("deepseek-status").innerText()));
   check("USD keeps its exact total and separates topped-up and granted amounts", readyDetails.includes("총 사용 가능") && readyDetails.includes("USD 1.46") && readyDetails.includes("충전") && readyDetails.includes("USD 1.00") && readyDetails.includes("지급") && readyDetails.includes("USD 0.46"));
-  check("USD and CNY stay separate and USD 1.46 fills 14.6 percent of the ten-dollar gauge", readySummary.includes("USD 1.46") && readySummary.includes("CNY 8.20") && await summary.locator('[role="progressbar"]').getAttribute("aria-valuenow") === "14.6" && await details.getByRole("progressbar").count() === 1 && readyDetails.includes("$10 기준"));
+  check("sidebar truncates USD to one decimal while details keep both currencies and the exact gauge", readySummary.includes("1.4$") && !readySummary.includes("¥") && readyDetails.includes("CNY 8.20") && await summary.locator('[role="progressbar"]').getAttribute("aria-valuenow") === "14.6" && await details.getByRole("progressbar").count() === 1 && readyDetails.includes("$10 기준"));
   check("the rendered gauge width uses the USD balance", await summary.locator('[role="progressbar"] > div').evaluate(el => Math.abs(parseFloat(el.style.width) - 14.6) < 0.001));
   check("balance details include the query time", /조회|확인/.test(readyDetails));
   await page.screenshot({ path: join(base, "deepseek-balance.png") });
 
-  for (const [amount, expected] of [["10.00", "100"], ["12.50", "100"], ["-0.20", "0"]]) {
+  for (const [amount, formatted, expected] of [["10.00", "10.0$", "100"], ["12.50", "12.5$", "100"], ["-0.20", "-0.2$", "0"], ["6", "6.0$", "60"]]) {
     await app.evaluate((_electron, value) => {
       const s = globalThis.__deepseekBalanceTest;
       s.usage = { deepseek: { state: "ready", isAvailable: true, updatedAt: Date.now(), balances: [{ currency: "USD", total: value, granted: "0.00", toppedUp: value }] } };
       s.sendUsage(s.usage);
     }, amount);
     await page.waitForFunction(value => document.querySelector('[data-testid="deepseek-balance-details"]')?.textContent?.includes(`USD ${value}`), amount);
-    check(`USD ${amount} keeps its exact amount and clamps the gauge to ${expected}`, (await summary.innerText()).includes(`USD ${amount}`) && await summary.locator('[role="progressbar"]').getAttribute("aria-valuenow") === expected);
+    check(`USD ${amount} displays ${formatted}, preserves detail precision and uses ${expected} percent`, (await summary.innerText()).includes(formatted) && (await details.innerText()).includes(`USD ${amount}`) && await summary.locator('[role="progressbar"]').getAttribute("aria-valuenow") === expected);
   }
 
   await app.evaluate(() => {
@@ -158,7 +158,7 @@ try {
     s.sendUsage(s.usage);
   });
   await page.waitForFunction(() => !document.querySelector('[data-testid="deepseek-balance"] [role="progressbar"]'));
-  check("CNY alone is displayed without assuming a dollar conversion", (await summary.innerText()).includes("CNY 8.20") && await details.getByRole("progressbar").count() === 0);
+  check("CNY alone is displayed without assuming a dollar conversion", (await summary.innerText()).includes("8.2¥") && (await details.innerText()).includes("CNY 8.20") && await details.getByRole("progressbar").count() === 0);
 
   await app.evaluate(() => {
     const s = globalThis.__deepseekBalanceTest;
@@ -169,7 +169,7 @@ try {
   await page.waitForFunction(() => document.querySelector('[data-testid="deepseek-balance-details"]')?.textContent?.includes("USD 0.00"));
   const zeroDetails = await details.innerText();
   const zeroSummary = await summary.innerText();
-  check("a reported zero balance has an empty gauge rather than being treated as not queried", zeroSummary.includes("USD 0.00") && zeroDetails.includes("USD 0.00") && !/미조회|조회 중|키 미설정/.test(zeroDetails) && await summary.locator('[role="progressbar"]').getAttribute("aria-valuenow") === "0");
+  check("a reported zero balance has an empty gauge rather than being treated as not queried", zeroSummary.includes("0.0$") && zeroDetails.includes("USD 0.00") && !/미조회|조회 중|키 미설정/.test(zeroDetails) && await summary.locator('[role="progressbar"]').getAttribute("aria-valuenow") === "0");
 
   await app.evaluate(() => {
     const s = globalThis.__deepseekBalanceTest;
@@ -193,6 +193,32 @@ try {
   check("isAvailable=false shows a shortage independently of model connection status", /잔고 부족|잔액 부족|사용 불가/.test(shortageDetails) && /연결 확인됨|키 저장됨/.test(await dialog.getByTestId("deepseek-status").innerText()));
 
   await dialog.getByText("닫기", { exact: true }).click();
+  await app.evaluate(() => {
+    const s = globalThis.__deepseekBalanceTest;
+    s.nextUsage = { deepseek: { state: "ready", isAvailable: true, updatedAt: Date.now(), balances: [{ currency: "USD", total: "6.46", granted: "0.00", toppedUp: "6.46" }] } };
+    s.usage = s.nextUsage;
+    s.sendUsage(s.usage);
+  });
+  await page.waitForFunction(() => document.querySelector('[data-testid="deepseek-balance"]')?.textContent?.includes("6.4$"));
+  check("USD 6.46 displays 6.4 dollars without rounding the 64.6 percent gauge", await summary.getByRole("progressbar").getAttribute("aria-valuenow") === "64.6");
+  check("DeepSeek name, gauge and amount align with the other provider columns on one row", await page.evaluate(() => {
+    const reference = document.querySelector('[data-testid="usage-bar"]');
+    const row = document.querySelector('[data-testid="deepseek-balance"]');
+    if (!reference || !row || reference.children.length !== 3 || row.children.length !== 3) return false;
+    const bounds = row.getBoundingClientRect();
+    return Math.abs(bounds.height - reference.getBoundingClientRect().height) < 1 && Array.from(row.children).every((child, i) => {
+      const actual = child.getBoundingClientRect();
+      const expected = reference.children[i].getBoundingClientRect();
+      return Math.abs(actual.x - expected.x) < 1 && Math.abs(actual.width - expected.width) < 1 && Math.abs(actual.y + actual.height / 2 - bounds.y - bounds.height / 2) < 1;
+    });
+  }));
+  await summary.hover();
+  await page.getByRole("tooltip").filter({ hasText: "USD 총 6.46" }).waitFor();
+  check("sidebar tooltip preserves the full USD balance", (await page.getByRole("tooltip").innerText()).includes("USD 총 6.46"));
+  await page.keyboard.press("Escape");
+  await page.mouse.move(600, 100);
+  await page.getByRole("tooltip").waitFor({ state: "hidden" });
+  await page.screenshot({ path: join(base, "deepseek-inline-balance.png") });
   await page.getByTestId("usage-refresh").click();
   await page.waitForTimeout(80);
   check("global usage refresh requests a completed usage snapshot", await app.evaluate(() => globalThis.__deepseekBalanceTest.usageRequests.includes(true)));
@@ -200,6 +226,7 @@ try {
   await summary.click();
   const reopenedDialog = page.getByRole("dialog").filter({ hasText: "DeepSeek API" });
   await reopenedDialog.waitFor();
+  check("opening the compact 6.4 dollar row reveals the exact 6.46 dollar total", (await details.innerText()).includes("USD 6.46"));
   await reopenedDialog.getByTestId("deepseek-remove").click();
   await reopenedDialog.getByTestId("deepseek-status").getByText("키 미설정", { exact: true }).waitFor();
   await page.waitForTimeout(80);
