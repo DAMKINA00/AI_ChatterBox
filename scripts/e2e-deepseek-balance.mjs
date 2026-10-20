@@ -137,9 +137,28 @@ try {
     return s.calls.some(c => c.action === "balance") && s.calls.every(c => c.action !== "completion") && s.paidCalls === 0;
   }) && /연결 확인됨|키 저장됨/.test(await dialog.getByTestId("deepseek-status").innerText()));
   check("USD keeps its exact total and separates topped-up and granted amounts", readyDetails.includes("총 사용 가능") && readyDetails.includes("USD 1.46") && readyDetails.includes("충전") && readyDetails.includes("USD 1.00") && readyDetails.includes("지급") && readyDetails.includes("USD 0.46"));
-  check("USD and CNY remain separate and the sidebar has no percentage gauge", readySummary.includes("USD 1.46") && readySummary.includes("CNY 8.20") && !readySummary.includes("%") && await summary.locator('[style*="width"]').count() === 0);
+  check("USD and CNY stay separate and USD 1.46 fills 14.6 percent of the ten-dollar gauge", readySummary.includes("USD 1.46") && readySummary.includes("CNY 8.20") && await summary.locator('[role="progressbar"]').getAttribute("aria-valuenow") === "14.6" && await details.getByRole("progressbar").count() === 1 && readyDetails.includes("$10 기준"));
+  check("the rendered gauge width uses the USD balance", await summary.locator('[role="progressbar"] > div').evaluate(el => Math.abs(parseFloat(el.style.width) - 14.6) < 0.001));
   check("balance details include the query time", /조회|확인/.test(readyDetails));
   await page.screenshot({ path: join(base, "deepseek-balance.png") });
+
+  for (const [amount, expected] of [["10.00", "100"], ["12.50", "100"], ["-0.20", "0"]]) {
+    await app.evaluate((_electron, value) => {
+      const s = globalThis.__deepseekBalanceTest;
+      s.usage = { deepseek: { state: "ready", isAvailable: true, updatedAt: Date.now(), balances: [{ currency: "USD", total: value, granted: "0.00", toppedUp: value }] } };
+      s.sendUsage(s.usage);
+    }, amount);
+    await page.waitForFunction(value => document.querySelector('[data-testid="deepseek-balance-details"]')?.textContent?.includes(`USD ${value}`), amount);
+    check(`USD ${amount} keeps its exact amount and clamps the gauge to ${expected}`, (await summary.innerText()).includes(`USD ${amount}`) && await summary.locator('[role="progressbar"]').getAttribute("aria-valuenow") === expected);
+  }
+
+  await app.evaluate(() => {
+    const s = globalThis.__deepseekBalanceTest;
+    s.usage = { deepseek: { state: "ready", isAvailable: true, updatedAt: Date.now(), balances: [{ currency: "CNY", total: "8.20", granted: "3.20", toppedUp: "5.00" }] } };
+    s.sendUsage(s.usage);
+  });
+  await page.waitForFunction(() => !document.querySelector('[data-testid="deepseek-balance"] [role="progressbar"]'));
+  check("CNY alone is displayed without assuming a dollar conversion", (await summary.innerText()).includes("CNY 8.20") && await details.getByRole("progressbar").count() === 0);
 
   await app.evaluate(() => {
     const s = globalThis.__deepseekBalanceTest;
@@ -150,7 +169,7 @@ try {
   await page.waitForFunction(() => document.querySelector('[data-testid="deepseek-balance-details"]')?.textContent?.includes("USD 0.00"));
   const zeroDetails = await details.innerText();
   const zeroSummary = await summary.innerText();
-  check("a reported zero balance is shown rather than treated as not queried", zeroSummary.includes("USD 0.00") && zeroDetails.includes("USD 0.00") && !/미조회|조회 중|키 미설정/.test(zeroDetails));
+  check("a reported zero balance has an empty gauge rather than being treated as not queried", zeroSummary.includes("USD 0.00") && zeroDetails.includes("USD 0.00") && !/미조회|조회 중|키 미설정/.test(zeroDetails) && await summary.locator('[role="progressbar"]').getAttribute("aria-valuenow") === "0");
 
   await app.evaluate(() => {
     const s = globalThis.__deepseekBalanceTest;
@@ -161,7 +180,7 @@ try {
   await page.waitForFunction(() => document.querySelector('[data-testid="deepseek-balance-details"]')?.textContent?.includes("잔고 조회 실패"));
   const errorDetails = await details.innerText();
   const errorSummary = await summary.innerText();
-  check("balance failure hides stale monetary values", /실패|오류/.test(errorDetails) && !/[0-9]+\.[0-9]{2}/.test(errorDetails) && !/[0-9]+\.[0-9]{2}/.test(errorSummary));
+  check("balance failure hides stale monetary values and the gauge", /실패|오류/.test(errorDetails) && !/[0-9]+\.[0-9]{2}/.test(errorDetails) && !/[0-9]+\.[0-9]{2}/.test(errorSummary) && await summary.locator('[role="progressbar"]').count() === 0);
 
   await app.evaluate(() => {
     const s = globalThis.__deepseekBalanceTest;
