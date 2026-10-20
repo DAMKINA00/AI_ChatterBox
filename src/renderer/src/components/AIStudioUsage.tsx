@@ -136,7 +136,7 @@ export function AIStudioUsage({ compact = false, onOpen }: { compact?: boolean; 
       </div>
       <label className="flex items-center gap-2 text-[12px] text-muted-foreground">
         <span>기간</span>
-        <select value={range} onChange={(event) => setRange(event.target.value as AIStudioUsageRange)} aria-label="AI Studio 사용량 기간" data-testid="aistudio-usage-range" className="h-7 rounded-md border border-input bg-transparent px-2 text-[12px]">
+        <select value={range} onChange={(event) => setRange(event.target.value as AIStudioUsageRange)} aria-label="AI Studio 사용량 기간" data-testid="aistudio-usage-range" className="h-7 rounded-md border border-input bg-background px-2 text-[12px] text-foreground [color-scheme:light] dark:[color-scheme:dark] [&>option]:bg-background [&>option]:text-foreground">
           {RANGE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
       </label>
@@ -155,7 +155,7 @@ export function AIStudioUsage({ compact = false, onOpen }: { compact?: boolean; 
             <div className="grid gap-2">
               <div className="flex items-center gap-2">
                 <span className="text-[12px] font-medium text-muted-foreground">세부 집계</span>
-                <select value={group} onChange={(event) => setGroup(event.target.value as typeof group)} aria-label="AI Studio 세부 집계 기준" data-testid="aistudio-usage-group" className="h-7 rounded-md border border-input bg-transparent px-2 text-[12px]">
+                <select value={group} onChange={(event) => setGroup(event.target.value as typeof group)} aria-label="AI Studio 세부 집계 기준" data-testid="aistudio-usage-group" className="h-7 rounded-md border border-input bg-background px-2 text-[12px] text-foreground [color-scheme:light] dark:[color-scheme:dark] [&>option]:bg-background [&>option]:text-foreground">
                   <option value="account">계정</option>
                   <option value="model">모델</option>
                   <option value="channel">채널</option>
