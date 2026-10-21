@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
 import { GeminiDriver } from "./gemini";
-import { geminiTokens, tokenDelta, parseGeminiModels, geminiBridgeTool } from "./gemini-protocol";
+import { geminiTokens, tokenDelta, parseGeminiModels, geminiBridgeTool, normalizeGeminiTool } from "./gemini-protocol";
 
 function fixture() {
   const events: any[] = [], approvals: any[] = [];
@@ -49,6 +50,76 @@ test("Gemini writing rejects writes and compound shell but permits reading refer
   assert.equal((await f.call("run_command", { CommandLine: "Get-Content a; Set-Content a changed" })).decision, "deny");
   assert.equal((await f.call("run_command", { CommandLine: "git status" })).decision, "auto_approve");
   assert.equal(f.approvals.length, 1);
+});
+
+test("Gemini normalizes read, write and command aliases before approval", async () => {
+  const f = fixture();
+  const cwd = process.cwd();
+
+  assert.equal((await f.call("read_file", { path: "docs/reference.md" })).decision, "auto_approve");
+  const read = f.approvals[0];
+  assert.equal(read.key, "view_file");
+  assert.deepEqual(read.paths, [resolve(cwd, "docs/reference.md")]);
+  assert.equal(read.readOnly, true);
+  assert.equal(read.writes, false);
+  assert.equal(JSON.parse(read.detail).AbsolutePath, "docs/reference.md");
+
+  (f.driver as any).noWrites = false;
+  assert.equal((await f.call("write_file", { path: "empty.txt", content: "" })).decision, "auto_approve");
+  const write = f.approvals[1];
+  assert.equal(write.key, "write_to_file");
+  assert.deepEqual(write.paths, [resolve(cwd, "empty.txt")]);
+  assert.equal(write.writes, true);
+  assert.equal(write.readOnly, false);
+  assert.deepEqual(JSON.parse(write.detail), { path: "empty.txt", content: "", TargetFile: "empty.txt", CodeContent: "" });
+
+  assert.equal((await f.call("run_command", { command: "git status", cwd: "src" })).decision, "auto_approve");
+  const command = f.approvals[2];
+  assert.equal(command.key, "run_command");
+  assert.equal(command.command, "git status");
+  assert.deepEqual(command.paths, [resolve(cwd, "src")]);
+  assert.equal(command.detail, "git status");
+  assert.deepEqual(normalizeGeminiTool("run_command", { command: "git status", cwd: "src" }), {
+    name: "run_command",
+    args: { command: "git status", cwd: "src", CommandLine: "git status", Cwd: "src" },
+  });
+});
+
+test("Gemini denies normalized write aliases in no-writes mode before approval", async () => {
+  const f = fixture();
+  assert.equal((await f.call("write_file", { path: "a.txt", content: "" })).decision, "deny");
+  assert.equal(f.approvals.length, 0);
+});
+
+test("Gemini rejects conflicting aliases and invalid alias types before approval", async () => {
+  const f = fixture();
+  const invalid = [
+    ["read_file", { path: "a.txt", file_path: "b.txt" }],
+    ["write_file", { path: "a.txt", absolute_path: "b.txt", content: "x" }],
+    ["run_command", { command: "git status", cwd: "src", working_directory: "other" }],
+    ["read_file", { path: 42 }],
+    ["write_file", { path: "a.txt", content: 42 }],
+    ["run_command", { command: 42 }],
+  ] as const;
+  for (const [name, args] of invalid) assert.equal((await f.call(name, args)).decision, "deny", `${name} should be denied`);
+  assert.equal(f.approvals.length, 0);
+});
+
+test("Gemini remains denied while stopping, including normalized aliases", async () => {
+  const f = fixture();
+  (f.driver as any).stopping = true;
+  assert.equal((await f.call("read_file", { path: "a.txt" })).decision, "deny");
+  assert.equal((await f.call("run_command", { command: "git status" })).decision, "deny");
+  assert.equal(f.approvals.length, 0);
+});
+
+test("project_graph is accepted only through the ChatterBox bridge", async () => {
+  const f = fixture();
+  assert.equal((await f.call("project_graph", {})).decision, "deny");
+  assert.equal(f.approvals.length, 0);
+  assert.equal((await f.call("mcp__chatterbox_bridge__project_graph", {})).decision, "auto_approve");
+  assert.equal((await f.call("call_mcp_tool", { ServerName: "chatterbox_bridge", ToolName: "project_graph", Arguments: {} })).decision, "auto_approve");
+  assert.equal(f.approvals.length, 0);
 });
 
 test("Antigravity allows explicitly assigned writes only after app approval", async () => {

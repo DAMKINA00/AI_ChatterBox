@@ -28,6 +28,7 @@ import { DiffList, Stats } from "./DiffView";
 import { AgentAvatar, type AvatarSize } from "./AgentAvatar";
 import { effortLabel } from "./EffortPicker";
 import { Badge, Button, Input } from "./ui";
+import { WorkingIndicator } from "./WorkingIndicator";
 
 export type Tone = "orch" | "claude" | "gpt" | "gemini" | "grok" | "deepseek";
 const TONE_TEXT: Record<Tone, string> = { orch: "text-orch", claude: "text-claude", gpt: "text-gpt", gemini: "text-gemini", grok: "text-grok", deepseek: "text-deepseek" };
@@ -137,7 +138,7 @@ export const ItemList = memo(function ItemList({ items, chatId, nested = false }
     <div className={cn("flex flex-col", nested ? "gap-0.5" : "gap-1")}>
       {entries.map((entry) =>
         entry.kind === "tool-group" ? (
-          <ToolGroup key={entry.items[0].key} items={entry.items} nested={nested} />
+          <ToolGroup key={entry.items[0].key} items={entry.items} chatId={chatId} nested={nested} />
         ) : (
           <ItemView key={entry.item.key} item={entry.item} chatId={chatId} nested={nested} />
         )
@@ -146,7 +147,7 @@ export const ItemList = memo(function ItemList({ items, chatId, nested = false }
   );
 });
 
-function ToolGroup({ items, nested }: { items: ToolItem[]; nested: boolean }) {
+function ToolGroup({ items, chatId, nested }: { items: ToolItem[]; chatId: number; nested: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const runningCount = items.filter((item) => !item.result).length;
   const errorCount = items.filter((item) => item.result && !item.result.ok).length;
@@ -167,7 +168,7 @@ function ToolGroup({ items, nested }: { items: ToolItem[]; nested: boolean }) {
         <span className="min-w-0 flex-1" />
         {runningCount > 0 && (
           <span className="flex shrink-0 items-center gap-1 text-[12px] text-primary">
-            <Loader2 className="size-3.5 animate-spin" />
+            <WorkingIndicator chatId={chatId} role={items[0].role} className="size-3.5" />
             {runningCount}개 진행 중
           </span>
         )}
@@ -181,7 +182,7 @@ function ToolGroup({ items, nested }: { items: ToolItem[]; nested: boolean }) {
       {expanded && (
         <div className="space-y-1.5 border-t p-2">
           {items.map((item) => (
-            <ToolCard key={item.key} item={item} nested />
+            <ToolCard key={item.key} item={item} chatId={chatId} nested />
           ))}
         </div>
       )}
@@ -236,7 +237,7 @@ const ItemView = memo(function ItemView({ item, chatId, nested }: { item: Item; 
         </div>
       );
     case "tool":
-      return <ToolCard item={item} nested={nested} />;
+      return <ToolCard item={item} chatId={chatId} nested={nested} />;
     case "files":
       return (
         <div className={cn("space-y-1.5", !nested && "pl-3.5")}>
@@ -309,7 +310,7 @@ function ImageCard({ item, chatId }: { item: Extract<Item, { kind: "image" }>; c
         <RoleName chatId={chatId} role={item.role} size={24} />
         <span className="font-medium">이미지 생성</span>
         <span className={cn("ml-auto flex items-center gap-1 text-[12px]", item.status === "done" ? "text-success" : item.status === "error" ? "text-destructive" : "text-primary")}>
-          {item.status === "running" ? <Loader2 className="size-3.5 animate-spin" /> : item.status === "done" ? <Check className="size-3.5" /> : <AlertTriangle className="size-3.5" />}
+          {item.status === "running" ? <WorkingIndicator chatId={chatId} role={item.role} className="size-3.5" /> : item.status === "done" ? <Check className="size-3.5" /> : <AlertTriangle className="size-3.5" />}
           {item.status === "running" ? "생성 중" : item.status === "done" ? "완료" : "오류"}
         </span>
       </div>
@@ -320,7 +321,7 @@ function ImageCard({ item, chatId }: { item: Extract<Item, { kind: "image" }>; c
   );
 }
 
-const ToolCard = memo(function ToolCard({ item, nested }: { item: Extract<Item, { kind: "tool" }>; nested: boolean }) {
+const ToolCard = memo(function ToolCard({ item, chatId, nested }: { item: Extract<Item, { kind: "tool" }>; chatId: number; nested: boolean }) {
   const [open, setOpen] = useState(false);
   const state = !item.result ? "running" : item.result.ok ? "ok" : "fail";
   const shell = item.name === "Bash" || item.name === "PowerShell" || item.name === "명령";
@@ -333,7 +334,7 @@ const ToolCard = memo(function ToolCard({ item, nested }: { item: Extract<Item, 
         <span className="shrink-0 text-[12.5px] font-medium">{item.name}</span>
         <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-muted-foreground">{brief.trim()}</span>
         {item.diffs?.[0] && <Stats diff={item.diffs.map((d) => d.diff).join("\n")} />}
-        {state === "running" && <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />}
+        {state === "running" && <WorkingIndicator chatId={chatId} role={item.role} className="size-3.5" />}
         {state === "ok" && <Check className="size-3.5 shrink-0 text-success" />}
         {state === "fail" && <X className="size-3.5 shrink-0 text-destructive" />}
       </button>
@@ -547,7 +548,7 @@ function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }
         </button>
         {item.files && item.files.length > 0 && <Badge>파일 {item.files.length}개</Badge>}
         <span className={cn("flex items-center gap-1 text-[12px]", item.status === "done" ? "text-success" : item.status === "running" ? "text-primary" : "text-muted-foreground")}>
-          {item.status === "running" ? <Loader2 className="size-3.5 animate-spin" /> : item.status === "done" ? <Check className="size-3.5" /> : <AlertTriangle className="size-3.5" />}
+          {item.status === "running" ? <WorkingIndicator chatId={chatId} role={item.to} /> : item.status === "done" ? <Check className="size-3.5" /> : <AlertTriangle className="size-3.5" />}
           {STATUS_LABEL[item.status]}
         </span>
         <Button variant="ghost" size="xs" onClick={() => select({ chatId, node: `consult:${item.consultId}` })}>
@@ -589,7 +590,7 @@ function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }
       ) : (
         item.status === "running" && (
           <div className="flex items-center gap-2 border-t p-3 text-[12px] text-muted-foreground" data-testid="consult-progress">
-            <Loader2 className="size-3.5 animate-spin" /> <ConsultTargetName chatId={chatId} role={item.to} /> 작업 시작 중…
+            <WorkingIndicator chatId={chatId} role={item.to} /> <ConsultTargetName chatId={chatId} role={item.to} /> 작업 시작 중…
           </div>
         )
       )}

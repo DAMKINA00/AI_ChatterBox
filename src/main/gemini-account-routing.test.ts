@@ -55,7 +55,7 @@ test("master sees all seven accounts and actual account 4 instead of stale accou
   try {
     const old = f.store.createAgent(f.chat.id, "gemini", "existing");
     f.store.updateAgent(old.id, { sessionId: "web:gemini-4:/app/old" });
-    const route = JSON.parse(body(await f.call("route_request", { mode: "delegated", reason: "잔여량 조회" })));
+    const route = JSON.parse(body(await f.call("route_request", { mode: "delegated", reason: "잔여량 조회", codeWork: false })));
     assert.equal(route.capabilities.gemini.webAccounts.length, 7);
     assert.equal(route.capabilities.gemini.usage, undefined);
     assert.match(route.team, /최근 대화 계정=gemini-4/);

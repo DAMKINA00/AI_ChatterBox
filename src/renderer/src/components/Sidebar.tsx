@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { version } from "../../../../package.json";
+import { GraphifyDialog } from "./GraphifyDialog";
+import { WorkingIndicator } from "./WorkingIndicator";
 import {
   Archive,
   ArchiveRestore,
@@ -15,6 +17,7 @@ import {
   MessageSquare,
   Moon,
   MoreHorizontal,
+  Network,
   Pause,
   Pencil,
   Plus,
@@ -49,10 +52,10 @@ import {
   Tooltip,
 } from "./ui";
 
-export function StatusIcon({ status, unread }: { status: ChatStatus; unread?: boolean }) {
+export function StatusIcon({ status, unread, chatId }: { status: ChatStatus; unread?: boolean; chatId?: number }) {
   switch (status) {
     case "working":
-      return <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" aria-label="작업 중" />;
+      return <WorkingIndicator chatId={chatId} />;
     case "approval":
       return <Hand className="size-3.5 shrink-0 animate-pulse-dot text-warning" aria-label="승인 필요" />;
     case "pausing":
@@ -133,6 +136,7 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
   const setTheme = useStore((s) => s.setTheme);
   const [showArchived, setShowArchived] = useState(false);
   const [editProject, setEditProject] = useState<Project | undefined>();
+  const [graphProject, setGraphProject] = useState<Project>();
   const [rename, setRename] = useState<{ kind: "chat" | "project"; id: number; title: string } | null>(null);
   const [confirm, setConfirm] = useState<{ title: string; body: string; run: () => Promise<void> } | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -208,6 +212,7 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
             hits={contentHits}
             now={now}
             onEdit={() => setEditProject(p)}
+            onGraph={() => setGraphProject(p)}
             onRename={(kind, id, title) => setRename({ kind, id, title })}
             onConfirm={setConfirm}
           />
@@ -230,7 +235,7 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
                 )}
                 onClick={() => void select({ chatId: c.id })}
               >
-                <StatusIcon status={c.status} />
+                <StatusIcon status={c.status} chatId={c.id} />
                 <span className="min-w-0 flex-1 truncate">{c.title}</span>
                 <span className="ml-auto shrink-0 text-muted-foreground">{c.status === "approval" ? "승인 대기" : "작업 중"}</span>
               </button>
@@ -246,6 +251,7 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
       </div>
 
       <ProjectDialog open={!!editProject} onOpenChange={(o) => !o && setEditProject(undefined)} project={editProject} />
+      {graphProject && <GraphifyDialog project={graphProject} open onOpenChange={(open) => !open && setGraphProject(undefined)} />}
       <RenameDialog value={rename} onClose={() => setRename(null)} />
       <Dialog open={!!confirm} onOpenChange={(o) => !o && setConfirm(null)}>
         {confirm && (
@@ -278,6 +284,7 @@ function ProjectNode({
   hits,
   now,
   onEdit,
+  onGraph,
   onRename,
   onConfirm,
 }: {
@@ -287,6 +294,7 @@ function ProjectNode({
   hits: Set<number>;
   now: number;
   onEdit: () => void;
+  onGraph: () => void;
   onRename: (kind: "chat" | "project", id: number, title: string) => void;
   onConfirm: (c: { title: string; body: string; run: () => Promise<void> }) => void;
 }) {
@@ -304,6 +312,7 @@ function ProjectNode({
   const actions: MenuAction[] = [
     { label: "새 채팅", icon: Plus, onSelect: () => void createChat(project.id) },
     { label: "프로젝트 설정", icon: Settings2, onSelect: onEdit },
+    { label: "프로젝트 그래프", icon: Network, onSelect: onGraph },
     { label: "이름 변경", icon: Pencil, onSelect: () => onRename("project", project.id, project.name) },
     { label: "폴더 열기", icon: FolderOpen, onSelect: () => void api.openPath(project.folder) },
     {
@@ -451,7 +460,7 @@ function ChatNode({
           >
             <ChevronRight className={cn("size-3 transition-transform", expanded && "rotate-90")} />
           </button>
-          <StatusIcon status={chat.status} unread={chat.unread} />
+          <StatusIcon status={chat.status} unread={chat.unread} chatId={chat.id} />
           <span className={cn("min-w-0 flex-1 truncate", chat.unread && "font-semibold")}>{chat.title}</span>
           <span className="shrink-0 rounded border px-1 text-[9.5px] text-muted-foreground">전체 대화</span>
           <span className="relative shrink-0">
@@ -466,7 +475,7 @@ function ChatNode({
       </ItemMenus>
       {expanded && (
         <div className="ml-4 border-l py-0.5 pl-1.5">
-          <NodeRow chatId={chat.id} node="orch" label={`${MASTER_LABEL} 대화`} icon={null} />
+          <NodeRow chatId={chat.id} node="orch" label={`${MASTER_LABEL} 대화`} icon={chat.status === "working" ? <WorkingIndicator chatId={chat.id} className="size-3" /> : null} />
           {agents?.map((a) => (
             <NodeRow
               key={a.id}
@@ -475,8 +484,8 @@ function ChatNode({
               label={a.nickname}
               dim={a.status === "released"}
               icon={
-                busyWorkers.has(a.key) ? (
-                  <Loader2 className={cn("size-3 animate-spin", a.kind === "claude" ? "text-claude" : a.kind === "gpt" ? "text-gpt" : a.kind === "gemini" ? "text-gemini" : a.kind === "deepseek" ? "text-deepseek" : "text-grok")} />
+                a.status === "active" && busyWorkers.has(a.key) ? (
+                  <WorkingIndicator kind={a.kind} className="size-3" />
                 ) : null
               }
             />
@@ -489,7 +498,7 @@ function ChatNode({
               label={`협의 ${consult.seq} · ${roleName(consult.fromRole, agents)} → ${roleName(consult.toRole, agents)} · ${CONSULT_KIND_LABEL[consult.kind]}`}
               icon={
                 consult.status === "running" ? (
-                  <Loader2 className="size-3 animate-spin text-primary" />
+                  <WorkingIndicator chatId={chat.id} role={consult.toRole} className="size-3" />
                 ) : consult.status === "done" ? (
                   <Check className="size-3 text-success" />
                 ) : (

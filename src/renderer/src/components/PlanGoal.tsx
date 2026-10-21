@@ -1,10 +1,11 @@
 import { useState } from "react";
-import { Check, ChevronDown, Circle, Flag, ListChecks, Loader2, Play, Pencil, X } from "lucide-react";
+import { Check, ChevronDown, Circle, Flag, ListChecks, Play, Pencil, X } from "lucide-react";
 import type { Chat } from "../../../shared/types";
 import { api, cn, errorMessage } from "../lib/utils";
 import { useStore } from "../store";
 import { normalizePlanStepTitle, type planOf } from "../timeline";
 import { Badge, Button } from "./ui";
+import { WorkingIndicator } from "./WorkingIndicator";
 
 type Plan = NonNullable<ReturnType<typeof planOf>>;
 
@@ -12,6 +13,7 @@ type Plan = NonNullable<ReturnType<typeof planOf>>;
 export function PlanPanel({ chat, plan, onRevise }: { chat: Chat; plan: Plan; onRevise: () => void }) {
   const [open, setOpen] = useState(true);
   const toast = useStore((s) => s.toast);
+  const agents = useStore(s => s.agents[chat.id]);
   const done = plan.steps.filter((s) => s.status === "completed").length;
   const total = plan.steps.length;
   const run = (name: string) => api.command(chat.id, name, "").catch((e) => toast(errorMessage(e)));
@@ -38,7 +40,7 @@ export function PlanPanel({ chat, plan, onRevise }: { chat: Chat; plan: Plan; on
                 {s.status === "completed" ? (
                   <Check className="mt-0.5 size-4 shrink-0 text-success" />
                 ) : s.status === "inProgress" ? (
-                  <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin text-primary" />
+                  <WorkingIndicator chatId={chat.id} role={agents?.find(a => normalizePlanStepTitle(s.title).startsWith(`[${a.nickname}]`))?.key} className="mt-0.5 size-4" />
                 ) : (
                   <Circle className="mt-0.5 size-4 shrink-0 text-muted-foreground/60" />
                 )}
@@ -86,7 +88,7 @@ export function GoalBar({ chat }: { chat: Chat }) {
         <div className="flex items-center gap-2 text-[13px]">
           <span className="font-semibold">목표</span>
           <Badge>{GOAL_LABEL[g.status]}</Badge>
-          {g.status === "active" && <Loader2 className="size-3.5 animate-spin text-primary" />}
+          {g.status === "active" && <WorkingIndicator chatId={chat.id} />}
           <span className="text-[11.5px] text-muted-foreground">{g.turns}번째 진행</span>
         </div>
         <div className="mt-0.5 text-[13px] select-text">{g.objective}</div>

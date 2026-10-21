@@ -63,7 +63,32 @@ export async function listGeminiModels(exe: string, cwd: string): Promise<ModelO
 
 export const GEMINI_READ_TOOLS = new Set(["view_file", "list_dir", "find_by_name", "grep_search", "view_file_outline", "view_code_item", "search_web", "read_url_content", "view_content_chunk", "list_permissions"]);
 export const GEMINI_WRITE_TOOLS = new Set(["write_to_file", "replace_file_content", "multi_replace_file_content"]);
-export const GEMINI_BRIDGE_TOOLS = new Set(["route_request", "gemini_web_accounts", "spawn", "ask", "ask_parallel", "send_message", "read_messages", "release", "agents", "checklist", "update_goal", "ask_user", "set_expression"]);
+export const GEMINI_BRIDGE_TOOLS = new Set(["route_request", "gemini_web_accounts", "spawn", "ask", "ask_parallel", "send_message", "read_messages", "release", "agents", "checklist", "update_goal", "ask_user", "set_expression", "project_graph"]);
+
+/** CLI versions use different names for the same native file/command tools. */
+export function normalizeGeminiTool(name: string, input: Record<string, unknown>) {
+  const field = (...keys: string[]) => {
+    const values = keys.flatMap(key => input[key] === undefined ? [] : [input[key]]);
+    if (values.some(v => typeof v !== "string") || new Set(values).size > 1) throw new Error("도구 인수의 형식이 잘못되었거나 서로 다른 경로·내용이 중복 지정되었습니다.");
+    return values[0] as string | undefined;
+  };
+  const args = { ...input };
+  if (name === "read_file" || name === "write_file") {
+    const path = field("path", "file_path", "absolute_path", "AbsolutePath", "TargetFile");
+    if (!path?.trim()) throw new Error("파일 경로가 필요합니다.");
+    if (name === "read_file") return { name: "view_file", args: { ...args, AbsolutePath: path } };
+    const content = field("content", "contents", "CodeContent");
+    if (content === undefined) throw new Error("쓸 파일 내용이 필요합니다.");
+    return { name: "write_to_file", args: { ...args, TargetFile: path, CodeContent: content } };
+  }
+  if (name === "run_command") {
+    const command = field("CommandLine", "command", "command_line");
+    if (!command?.trim()) throw new Error("실행할 명령이 필요합니다.");
+    const cwd = field("Cwd", "cwd", "working_directory");
+    return { name, args: { ...args, CommandLine: command, ...(cwd === undefined ? {} : { Cwd: cwd }) } };
+  }
+  return { name, args };
+}
 
 export function geminiBridgeTool(name: string, args?: Record<string, unknown>): boolean {
   if (name === "call_mcp_tool") return args?.ServerName === "chatterbox_bridge" && typeof args.ToolName === "string" && GEMINI_BRIDGE_TOOLS.has(args.ToolName);

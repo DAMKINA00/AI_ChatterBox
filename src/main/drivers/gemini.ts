@@ -10,7 +10,7 @@ import { fileNote, type AgentDriver, type AgentInput, type DriverHost, type Driv
 import { imageFileSnapshot, publishGeneratedImages } from "./generated-images";
 import type { FileDiff, TokenCounts } from "../../shared/types";
 
-import { GEMINI_READ_TOOLS, GEMINI_WRITE_TOOLS, geminiBridgeTool, geminiDiffs, geminiPaths, geminiTokens, listGeminiModels, tokenDelta, geminiEffortModel } from "./gemini-protocol";
+import { GEMINI_READ_TOOLS, GEMINI_WRITE_TOOLS, geminiBridgeTool, geminiDiffs, geminiPaths, geminiTokens, listGeminiModels, tokenDelta, geminiEffortModel, normalizeGeminiTool } from "./gemini-protocol";
 
 export interface GeminiEnv {
   bridge: LocalBridge;
@@ -56,8 +56,8 @@ export class GeminiDriver implements AgentDriver {
       return { injectSteps: [{ ephemeralMessage: `${this.opts.instructions ?? ""}\n실제 작업 폴더: ${this.opts.cwd}\n제어용 폴더(${this.sessionDir})는 수정하지 않는다. 네이티브 하위 작업자는 사용하지 않는다. 협업은 앱 chatterbox_bridge 도구를 사용한다. 이미지 작업은 제공된 도구로 수행하고 결과 파일 경로를 보고한다.` }] };
     }
     const tool = payload?.toolCall;
-    const name = tool?.name;
-    const args = tool?.args;
+    let name = tool?.name;
+    let args = tool?.args;
     const id = `gemini:${payload?.conversationId ?? this.nativeId}:${payload?.stepIdx}`;
     if (phase === "post") {
       const generated = this.imageCalls.get(id);
@@ -78,6 +78,8 @@ export class GeminiDriver implements AgentDriver {
     };
     if (phase !== "pre" || !this._running || this.stopping) return { decision: "deny", reason: "진행 중인 ChatterBox 작업이 없습니다." };
     if (typeof name !== "string" || !args || typeof args !== "object" || Array.isArray(args)) return deny("잘못된 도구 요청입니다.");
+    try { ({ name, args } = normalizeGeminiTool(name, args)); }
+    catch (error) { return deny(error instanceof Error ? error.message : String(error)); }
     if (!this.hooksReady) return deny("Antigravity 승인 연결을 초기화하지 못했습니다.");
     if (this.opts.readOnly) return deny("승인 판단 세션은 도구를 사용하지 않습니다.");
     const bridge = geminiBridgeTool(name, args);

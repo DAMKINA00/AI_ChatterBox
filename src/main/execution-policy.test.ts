@@ -151,7 +151,7 @@ test("critical routing persists on resume, cannot be downgraded, and gates write
   const reports: any[] = [];
   chats.store.listConsults = () => reports;
   o.instructions.set(1, { id: 17 });
-  const route = (args: any) => o.call(1, "orch", "route_request", { mode: "delegated", reason: "safety fault", ...args });
+  const route = (args: any) => o.call(1, "orch", "route_request", { mode: "delegated", reason: "safety fault", codeWork: false, ...args });
   assert.equal((await route({ dualInvestigation: "true" })).isError, true);
   assert.equal((await route({ dualInvestigation: true, mode: "direct" })).isError, true);
   assert.ok(!(await route({ dualInvestigation: true })).isError);

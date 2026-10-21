@@ -43,6 +43,7 @@ import {
   Tooltip,
 } from "./ui";
 import { StatusIcon } from "./Sidebar";
+import { WorkingIndicator } from "./WorkingIndicator";
 
 export function ChatView({ chat, project, node }: { chat: Chat; project: Project; node?: NodeId }) {
   const events = useStore((s) => s.events[chat.id]);
@@ -64,6 +65,7 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
     }
     return node === "orch" ? `${MASTER_LABEL} 대화` : roleName(node as "orch", agents);
   }, [node, consults, agents]);
+  const streamRole: Role | undefined = node?.startsWith("consult:") ? consults?.find(c => c.id === Number(node.slice(8)))?.toRole : node as Role | undefined;
 
   return (
     <div
@@ -87,7 +89,7 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
       <TeamChips chat={chat} />
       {!node && <GoalBar chat={chat} />}
       {!node && plan && <PlanPanel chat={chat} plan={plan} onRevise={() => composer.current?.setText("/plan 수정: ")} />}
-      <Timeline items={items} chatId={chat.id} busy={busy} instructionAt={instructionAt} empty={!events?.length} loading={!events} masterView={!node || node === "orch"} />
+      <Timeline items={items} chatId={chat.id} role={streamRole} busy={busy} instructionAt={instructionAt} empty={!events?.length} loading={!events} masterView={!node || node === "orch"} />
       {chat.status === "interrupted" && <InterruptedBanner chat={chat} />}
       {node && node !== "orch" ? (
         <div className="border-t px-6 py-2.5 text-center text-[12px] text-muted-foreground">
@@ -141,7 +143,7 @@ function ChatHeader({ chat, project, nodeLabel, masterExpression }: { chat: Chat
   return (
     <header className="flex w-full min-w-0 max-w-full flex-col gap-1.5 overflow-hidden border-b px-4 py-2">
       <div className="flex w-full min-w-0 max-w-full items-start gap-2" data-testid="chat-header-title-row">
-        <StatusIcon status={chat.status} unread={false} />
+        <StatusIcon status={chat.status} unread={false} chatId={chat.id} />
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 text-[14px] font-semibold">
             <span className="min-w-0 break-words" data-testid="chat-title">
@@ -388,7 +390,7 @@ function WorkerChip({
       <AgentAvatar kind={agent.kind} expression={expression} size={32} alt={`${agent.nickname} 캐릭터`} className={released ? "grayscale" : undefined} />
       <span>{agent.nickname}</span>
       <Badge className={cn("h-5 px-1.5 text-[10px] font-normal", status === "working" && "border-primary/30 text-primary", status === "approval" && "border-warning/40 text-warning", status === "error" && "border-destructive/40 text-destructive")}>
-        {status === "working" && <Loader2 className="size-3 animate-spin" />}
+        {status === "working" && <WorkingIndicator kind={agent.kind} className="size-3" />}
         {status === "approval" && <ShieldCheck className="size-3" />}
         {status === "error" && <CircleAlert className="size-3" />}
         {WORKER_STATUS_LABEL[status]}
@@ -482,7 +484,7 @@ function InterruptedBanner({ chat }: { chat: Chat }) {
   );
 }
 
-function Timeline({ items, chatId, busy, instructionAt, empty, loading, masterView }: { items: ReturnType<typeof buildItems>; chatId: number; busy: boolean; instructionAt: number; empty: boolean; loading: boolean; masterView: boolean }) {
+function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, masterView }: { items: ReturnType<typeof buildItems>; chatId: number; role?: Role; busy: boolean; instructionAt: number; empty: boolean; loading: boolean; masterView: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
   const stick = useRef(true);
@@ -534,7 +536,7 @@ function Timeline({ items, chatId, busy, instructionAt, empty, loading, masterVi
           )}
           {busy && (
             <div className="mt-4 flex items-center gap-2 text-[12px] text-muted-foreground" data-testid="working">
-              <Loader2 className="size-3.5 animate-spin" /> 작업 중… · {formatElapsed(now - instructionAt)}
+              <WorkingIndicator chatId={chatId} role={role} className="size-3.5" /> 작업 중… · {formatElapsed(now - instructionAt)}
             </div>
           )}
           {pending.length > 0 && (

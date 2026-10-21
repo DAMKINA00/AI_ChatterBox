@@ -43,6 +43,7 @@ import { CodexDriver, CodexServer } from "./drivers/codex";
 import { AttachmentStore } from "./attachments";
 import type { AgentDriver, AgentInput, DriverHost } from "./drivers/types";
 import { AIStudioService } from "./aistudio";
+import { GraphifyService } from "./graphify";
 import { ChatCompletionDriver, type StudioMessage } from "./drivers/aistudio";
 import { DeepSeekService } from "./deepseek";
 import { AISTUDIO_MODEL, isAIStudioModel } from "../shared/aistudio";
@@ -74,6 +75,7 @@ export interface RoleConfig {
 }
 
 export class ChatManager {
+  readonly graphify: GraphifyService;
   readonly bridge = new LocalBridge();
   readonly approvals: ApprovalService;
   private live = new Map<number, Partial<Record<Role, Live>>>();
@@ -98,6 +100,7 @@ export class ChatManager {
     readonly dataDir: string,
     readonly bridgeScript: string,
   ) {
+    this.graphify = new GraphifyService(dataDir);
     this.attachments = new AttachmentStore(join(dataDir, "attachments"), store);
     this.tmpDir = join(dataDir, "tmp");
     mkdirSync(this.tmpDir, { recursive: true });
@@ -800,6 +803,7 @@ export class ChatManager {
 
   async dispose() {
     this.disposing = true;
+    await this.graphify.dispose();
     const all = [...this.live.values()].flatMap((s) => Object.values(s));
     this.live.clear();
     await Promise.all(all.map((l) => l?.driver.dispose().catch(() => undefined)));

@@ -109,7 +109,7 @@ test("immediate direct question does not downgrade delegated work or its indepen
   const f = fixture();
   try {
     (f.inst as any).dualInvestigation = true;
-    const args = { mode: "direct", reason: "이미 알고 있는 설정의 적용 범위 질문" };
+    const args = { mode: "direct", reason: "이미 알고 있는 설정의 적용 범위 질문", codeWork: false };
     assert.equal((await f.engine.call(f.chat.id, "orch", "route_request", args)).isError, true);
     f.chats.liveDriver = () => ({ running: true, steer: async () => true } as any);
     await f.chats.send(f.chat.id, "750k는 클로드에만 적용하지?", [], "now");

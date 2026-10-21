@@ -164,6 +164,13 @@ export const useStore = create<State>((set, get) => ({
     );
     api.onGeminiWebLogin((status) => get().toast(`제미나이 웹 계정 ${status.accountId.slice(7)} · ${status.message}`, "info"));
     api.onAgentsUpdated((chatId, list) => set((s) => ({ agents: { ...s.agents, [chatId]: list } })));
+    // Sidebar activity colors also need workers from chats that have not been opened.
+    for (const chat of chats.filter(c => c.status === "working")) {
+      void Promise.all([api.listAgents(chat.id), api.listConsults(chat.id)]).then(([agents, consults]) => set(s => ({
+        agents: { ...s.agents, [chat.id]: s.agents[chat.id] ?? agents },
+        consults: { ...s.consults, [chat.id]: [...new Map([...consults, ...(s.consults[chat.id] ?? [])].map(c => [c.id, c])).values()] },
+      }))).catch(() => undefined);
+    }
     api.onSelectChat((chatId) => void get().select({ chatId }));
     window.addEventListener("focus", () => {
       const sel = get().selection;
