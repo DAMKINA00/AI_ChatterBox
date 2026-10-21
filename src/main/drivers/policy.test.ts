@@ -15,7 +15,7 @@ function codex(readOnly = false) {
   return { driver, calls, replies, events, inputs, get approvals() { return approvals; } };
 }
 
-test("Codex every execution role can request approval; plan restriction resets on next ordinary turn", async () => {
+test("Codex every execution role can request approval; explicit read-only restriction resets on next ordinary turn", async () => {
   const f = codex();
   await f.driver.send({ text: "plan", attachments: [], noWrites: true });
   assert.equal(f.calls[0].params.approvalPolicy, "on-request");
@@ -47,7 +47,7 @@ test("Codex token snapshots use turn deltas, preserve cache and do not count dup
   assert.equal(f.events.at(-1).metrics.inputTokens, 40);
 });
 
-test("Codex judge disables executable tools and cannot escalate", async () => {
+test("explicit read-only Codex driver disables executable tools and cannot escalate", async () => {
   const f = codex(true);
   await f.driver.send({ text: "judge", attachments: [] });
   const start = f.calls.find((c) => c.method === "thread/start")!.params;

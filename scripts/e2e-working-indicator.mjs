@@ -1,12 +1,12 @@
 // Native Electron UI regression for the orbiting/pulsing work indicators.
 // The fixture is injected through renderer event channels; no model generation is requested.
-import { existsSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULTS, launch, root, scratchDir } from "./e2e-lib.mjs";
 
 const base = scratchDir("working-indicator");
 const data = join(base, "data");
-const workspace = join(root, ".scratch", "graphify-service", "workspace");
+const workspace = join(base, "workspace");
 const results = [];
 const errors = [];
 let app;
@@ -23,7 +23,7 @@ function fixtureEvent(id, chatId, node, role, event, at) {
   return { id, chatId, node, role, event, at };
 }
 
-if (!existsSync(workspace)) throw new Error(`fixture workspace is missing: ${workspace}`);
+mkdirSync(workspace, { recursive: true });
 
 try {
   ({ app, page } = await launch(data));
@@ -42,6 +42,15 @@ try {
   // before injecting events. This makes the event listener's existing events array writable.
   await page.reload();
   await page.waitForSelector('[data-testid="sidebar"]');
+  check("analysis API removed from preload", await page.evaluate(() => !("graphify" in window.chatterbox)));
+  for (const menu of ["context", "more"]) {
+    if (menu === "context") await page.getByRole("button", { name: `${project.name} 폴더`, exact: true }).click({ button: "right" });
+    else await page.getByRole("button", { name: `${project.name} 메뉴`, exact: true }).click();
+    await page.getByRole("menuitem", { name: "프로젝트 설정", exact: true }).waitFor();
+    check(`${menu} menu has no analysis entry`, await page.getByRole("menuitem", { name: "프로젝트 그래프", exact: true }).count() === 0);
+    check(`${menu} menu retains project actions`, await page.getByRole("menuitem", { name: "새 채팅", exact: true }).count() === 1);
+    await page.keyboard.press("Escape");
+  }
   await page.locator(`[data-testid="chat-node"][data-chat-id="${chat.id}"] [role="treeitem"]`).click();
   await page.waitForSelector('[data-testid="chat-title"]');
   await page.waitForSelector('[data-testid="timeline"]');

@@ -148,7 +148,7 @@ test("discussion dispatches a read-only coordinator, records nested worker roles
     assert.match(textOf(result), /최종 병합/);
     assert.deepEqual(nestedResults.map((item) => item.isError), [false, false]);
     assert.equal(f.sent.length, 3);
-    assert.ok(f.sent.every((item) => item.input.noWrites === true));
+    assert.ok(f.sent.every((item) => item.input.noWrites === false));
     assert.ok(f.sent.every((item) => item.effort === "high"));
 
     const records = f.store.listConsults(f.chat.id);
@@ -198,7 +198,7 @@ test("invalid discussion groups dispatch no worker and never create a consult", 
   }
 });
 
-test("a coordinator cannot expand the group or write, and missing peer participation fails the outer consult", async () => {
+test("a coordinator may request writes but cannot expand its group or skip required peers", async () => {
   const f = fixture();
   try {
     const leader = f.store.createAgent(f.chat.id, "claude", "leader");
@@ -245,7 +245,7 @@ test("a coordinator cannot expand the group or write, and missing peer participa
     assert.equal(result.isError, true);
     assert.match(textOf(result), /토의 미완료/);
     assert.match(textOf(result), new RegExp(missing.nickname));
-    assert.match(f.writeGuardError ?? "", /(파일을 고치지 않습니다|구현을 맡은 동안)/);
+    assert.equal(f.writeGuardError, null);
     assert.equal(expansion.isError, true);
     assert.match(textOf(expansion), /토의 그룹 구성은 마스터가 지정/);
     assert.equal(implementation.isError, true);
@@ -257,7 +257,7 @@ test("a coordinator cannot expand the group or write, and missing peer participa
       ["orch", leader.key, "opinion", "error"],
       [leader.key, peer.key, "opinion", "done"],
     ]);
-    assert.ok(f.sent.every((item) => item.input.noWrites === true));
+    assert.ok(f.sent.every((item) => item.input.noWrites === false));
     assert.equal(f.sent.some((item) => item.role === missing.key || item.role === outsider.key), false);
   } finally {
     await f.close();
@@ -288,7 +288,7 @@ test("Antigravity participates in writing and technical discussions", async () =
     assert.equal(writing.isError, false);
     assert.match(textOf(writing), /문장 취합/);
     assert.equal(f.sent.length, 2);
-    assert.ok(f.sent.every((item) => item.input.noWrites === true));
+    assert.ok(f.sent.every((item) => item.input.noWrites === false));
     assert.ok(f.sent.every((item) => item.effort === "high"));
     assert.ok(f.store.listConsults(f.chat.id).every((item) => item.status === "done"));
 

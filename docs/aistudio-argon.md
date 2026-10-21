@@ -1,10 +1,14 @@
 # AI Studio · Argon
 
-AI Studio · Argon은 ChatterBox의 Gemini 계열에서 Gemini Web과 나란히 선택하는 모델 경로입니다. Argon을 선택해도 기존 Gemini Web 계정 관리, 로그인 창, 웹 대화, 웹 사용량 표시는 그대로 유지됩니다. 프로젝트 또는 채팅의 모델 메뉴에서 **AI Studio · Argon 설정…**을 열고, 상태가 `RUNNING`이며 활성 계정의 모델 목록에 설정한 모델이 확인될 때 **Argon 모델 사용**을 선택합니다. 현재 선택 ID는 `aistudio:<model-id>`입니다.
+AI Studio · Argon은 ChatterBox의 Gemini 계열에서 Gemini Web과 나란히 선택하는 모델 경로입니다. Argon을 선택해도 기존 Gemini Web 계정 관리, 로그인 창, 웹 대화, 웹 사용량 표시는 그대로 유지됩니다. 프로젝트 또는 채팅의 모델 메뉴에서 **AI Studio · Argon 설정… → Argon 모델 사용**으로 선택합니다. 설치 전에도 모델을 지정할 수 있으며 실제 호출 직전에 설치·서비스·모델 자격을 확인합니다. 현재 선택 ID는 `aistudio:<model-id>`입니다.
 
 ## 설치
 
-저장소 루트에서 다음 스크립트를 실행합니다.
+0.4.30부터 마스터 또는 작업자가 이 모델을 호출하면 기본 주소(`http://127.0.0.1:2048`)의 매니저를 확인합니다. 미설치 상태이면 앱에 포함된 설치 스크립트로 공식 배포본의 SHA-256을 검증한 뒤 설치하고 실행 파일 경로를 저장합니다. 여러 작업자가 동시에 호출해도 설치와 서비스 시작은 한 번만 진행하며, 설치 실패 후 다음 호출에서 재시도할 수 있습니다. 실행 중인 서버와 기존 설치는 재사용하고, 사용자가 지정한 다른 주소를 기본 서버로 바꾸지 않습니다. 조회·새로고침만으로는 설치하지 않습니다.
+
+연결된 활성 Google 계정이 있으면 생성 서비스도 시작합니다. 계정이 없으면 설치를 완료한 뒤 **Gemini 웹 계정 관리 → AI Studio · Argon → 연결** 안내를 반환합니다. 모델 호출 전 사용 가능한 모델 목록도 확인합니다. 취소된 작업은 응답 생성을 진행하지 않으며, 다른 작업자와 공유하는 설치는 계속 완료합니다. **매니저 설치 / 실행**, **매니저 열기**, 웹 계정의 **연결**에서도 필요한 매니저를 준비합니다.
+
+수동 설치는 저장소 루트에서 다음 스크립트를 실행합니다.
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-aistudio.ps1
@@ -31,7 +35,7 @@ API 키 값은 콘솔에 출력하지 않습니다. 기존 `.env`는 보존합�
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-aistudio.ps1 -Start
 ```
 
-설치 후 **AI Studio · Argon 설정…**에서 백엔드 주소 `http://127.0.0.1:2048`, 설치된 `aistudio2api.exe`, 실제 모델 ID를 확인합니다. **서비스 시작**은 관리 화면에서 별도로 실행합니다. 첫 계정 로그인과 AI Studio 동의가 필요한 경우 사용자가 브라우저에서 직접 완료해야 합니다.
+설치 후 **AI Studio · Argon 설정…**에서 백엔드 주소 `http://127.0.0.1:2048`, 설치된 `aistudio2api.exe`, 실제 모델 ID를 확인합니다. **서비스 시작**으로 직접 시작하거나 다음 제미나이 호출 때 자동 시작할 수 있습니다. 첫 계정 로그인과 AI Studio 동의가 필요한 경우 사용자가 브라우저에서 직접 완료해야 합니다.
 
 ## Gemini Web 계정 연결
 

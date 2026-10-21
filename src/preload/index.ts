@@ -10,7 +10,6 @@ function on<T extends unknown[]>(channel: string, cb: (...args: T) => void): () 
 }
 
 const api: ChatterBoxApi = {
-  graphify: (request) => ipcRenderer.invoke("graphify", request),
   listProjects: () => ipcRenderer.invoke("projects:list"),
   createProject: (input) => ipcRenderer.invoke("projects:create", input),
   updateProject: (id, patch) => ipcRenderer.invoke("projects:update", id, patch),

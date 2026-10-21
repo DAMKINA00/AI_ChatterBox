@@ -74,6 +74,35 @@ test("studioCompletion handles CRLF boundaries split across packets", async () =
   assert.equal(result.message.tool_calls, undefined);
 });
 
+test("Gemini prepares AI Studio before querying models and forwards progress notices", async () => {
+  const fixture = driverFixture(process.cwd());
+  const order: string[] = [];
+  fixture.service.ensureReady = async (_signal: AbortSignal, report: (text: string) => void) => {
+    order.push("ready"); report("자동 설치 중");
+  };
+  fixture.service.json = async () => { order.push("models"); return { data: [{ id: "gemini-4-argon" }] }; };
+  fixture.service.response = async () => { order.push("completion"); return sseResponse([contentFrame("ok", "stop")]); };
+  try {
+    await fixture.driver.send({ text: "hello", attachments: [] });
+    await (fixture.driver as any).task;
+    assert.deepEqual(order, ["ready", "models", "completion"]);
+    assert.ok(fixture.events.some(event => event.type === "notice" && event.text === "자동 설치 중"));
+  } finally { await fixture.driver.dispose(); }
+});
+
+test("an AI Studio setup failure ends the turn before any model request", async () => {
+  const fixture = driverFixture(process.cwd());
+  let requests = 0;
+  fixture.service.ensureReady = async () => { throw new Error("계정 연결 필요"); };
+  fixture.service.json = async () => { requests++; return {}; };
+  try {
+    await fixture.driver.send({ text: "hello", attachments: [] });
+    await (fixture.driver as any).task;
+    assert.equal(requests, 0);
+    assert.ok(fixture.events.some(event => event.type === "turn_end" && !event.ok && event.error === "계정 연결 필요"));
+  } finally { await fixture.driver.dispose(); }
+});
+
 test("studioCompletion rejects a dropped stream without a DONE marker", async () => {
   await assert.rejects(
     studioCompletion(
@@ -272,6 +301,9 @@ test("429 and other HTTP failures emit one error and perform no duplicate action
     let chatRequests = 0;
     const service = new AIStudioService(serviceStore(), serviceSecrets(), async input => {
       const path = new URL(String(input)).pathname;
+      if (path === "/api/status") return Response.json({ state: "RUNNING" });
+      if (path === "/api/accounts") return Response.json({ accounts: [{ enabled: true }] });
+      if (path === "/api/cooldowns" || path === "/api/models") return Response.json({});
       if (path === "/v1/models") return new Response(JSON.stringify({ data: [{ id: "gemini-4-argon" }] }), { headers: { "content-type": "application/json" } });
       if (path === "/v1/chat/completions") {
         chatRequests++;

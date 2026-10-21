@@ -11,7 +11,6 @@ import { ensureOnlyInstance } from "./instance-guard";
 import { mayOpenDocument, resolveLink } from "./file-links";
 import { previewImage } from "./artifact-preview";
 import type { AIStudioAction, AIStudioInput } from "../shared/aistudio";
-import type { GraphifyRequest } from "../shared/graphify";
 
 // Data lives in %APPDATA%\AI_ChatterBox. Tests point AI_CHATTERBOX_DATA at scratch folders; the packaged
 // app only honours it with an explicit --test-data flag, so a stray variable can never hide real data.
@@ -119,11 +118,6 @@ function send(channel: string, ...args: unknown[]) {
 }
 
 function registerIpc() {
-  ipcMain.handle("graphify", (_e, request: GraphifyRequest) => {
-    const project = request && Number.isSafeInteger(request.projectId) && store.project(request.projectId);
-    if (!project) throw new Error("프로젝트를 찾을 수 없습니다.");
-    return chats.graphify.request(project, request);
-  });
   // projects
   ipcMain.handle("projects:list", () => store.listProjects());
   ipcMain.handle("projects:create", (_e, input: { name: string; folder: string; settings: ProjectSettings }) => {
@@ -224,7 +218,7 @@ function registerIpc() {
       }
     }
     else if (action === "sync-web") await chats.syncStudioWeb(input.accountId as GeminiWebAccountId);
-    else if (action === "open") await shell.openExternal(studio.settings().baseUrl);
+    else if (action === "open") { await studio.launch(); await shell.openExternal(studio.settings().baseUrl); }
     else if (action === "export-antigravity") {
       const target = await dialog.showSaveDialog({ title: "Antigravity Custom Model Enabler 설정 저장", defaultPath: "chatterbox-aistudio-argon.json", filters: [{ name: "JSON", extensions: ["json"] }] });
       if (target.filePath) writeFileSync(target.filePath, JSON.stringify(studio.antigravityConfig(), null, 2), "utf8");

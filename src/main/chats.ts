@@ -43,7 +43,6 @@ import { CodexDriver, CodexServer } from "./drivers/codex";
 import { AttachmentStore } from "./attachments";
 import type { AgentDriver, AgentInput, DriverHost } from "./drivers/types";
 import { AIStudioService } from "./aistudio";
-import { GraphifyService } from "./graphify";
 import { ChatCompletionDriver, type StudioMessage } from "./drivers/aistudio";
 import { DeepSeekService } from "./deepseek";
 import { AISTUDIO_MODEL, isAIStudioModel } from "../shared/aistudio";
@@ -75,7 +74,6 @@ export interface RoleConfig {
 }
 
 export class ChatManager {
-  readonly graphify: GraphifyService;
   readonly bridge = new LocalBridge();
   readonly approvals: ApprovalService;
   private live = new Map<number, Partial<Record<Role, Live>>>();
@@ -100,7 +98,6 @@ export class ChatManager {
     readonly dataDir: string,
     readonly bridgeScript: string,
   ) {
-    this.graphify = new GraphifyService(dataDir);
     this.attachments = new AttachmentStore(join(dataDir, "attachments"), store);
     this.tmpDir = join(dataDir, "tmp");
     mkdirSync(this.tmpDir, { recursive: true });
@@ -241,6 +238,7 @@ export class ChatManager {
   async syncStudioWeb(accountId: GeminiWebAccountId, show = true) {
     const account = this.geminiWebAccounts().list().find(a => a.accountId === accountId);
     if (!account) throw new Error("등록되지 않은 웹 계정입니다.");
+    if (show) await this.aiStudio().launch();
     await this.aiStudio().syncWeb(accountId, account.enabled, () => this.geminiWeb(accountId).studioState(show));
   }
   geminiWeb(accountId: GeminiWebAccountId = "gemini-1") {
@@ -353,7 +351,7 @@ export class ChatManager {
       claude: { installed: !!installed.find((c) => c.agent === "claude")?.path, model: chat.claudeModelOverride ?? project.settings.claudeModel, reasoningEfforts: effortLevels.claude, effortSetting: project.settings.claudeEffort, imageGeneration: false, authentication: "실행 시 확인", usage: this.usageState.claude },
       gpt: { installed: !!installed.find((c) => c.agent === "codex")?.path, model: gptModel, reasoningEfforts: effortLevels.codex, effortSetting: project.settings.codexEffort, imageGeneration, authenticated: codexAuthenticated, usage: this.usageState.codex },
       grok: { installed: !!installed.find(c => c.agent === "grok")?.path, model: chat.grokModelOverride ?? project.settings.grokModel, reasoningEfforts: effortLevels.grok, effortSetting: project.settings.grokEffort, imageGeneration: null, authentication: "Grok 로그인과 도구는 실행 시 확인", usage: this.usageState.grok },
-      gemini: { installed: geminiStudio || geminiWeb || !!installed.find((c) => c.agent === "gemini")?.path, model: (chat.geminiModelOverride ?? project.settings.geminiModel) || "Pro 계정 제공 모델 자동 선택", reasoningEfforts: geminiWeb ? [] : effortLevels.gemini, effortSetting: geminiWeb ? "웹 모델 설정" : project.settings.geminiEffort, imageGeneration: null, aiStudio: geminiStudio ? await this.aiStudio().status() : undefined, videoGeneration: geminiStudio && this.aiStudio().settings().videoEnabled, authentication: geminiStudio ? "AI Studio 연결·계정 한도는 aiStudio 상태에서 확인" : geminiWeb ? "계정별 로그인·잔여량은 webAccounts에서 확인하고 gemini_web_accounts로 갱신" : "Antigravity 로그인·모델 목록은 실행 시 확인", enabled: project.settings.maxGeminiWorkers > 0, usage: geminiWeb || geminiStudio ? undefined : this.usageState.gemini, webAccounts: geminiWeb ? this.webAccountInfo(chat.id) : undefined, webOnly: geminiWeb, localTools: !geminiWeb, fileWrites: !geminiWeb, supportedKinds: geminiWeb ? ["writing", "opinion", "review"] : ["implement", "writing", "opinion", "review"], role: "기본은 글쓰기, 사용자가 지정하면 해당 작업 우선" },
+      gemini: { installed: geminiStudio || geminiWeb || !!installed.find((c) => c.agent === "gemini")?.path, model: (chat.geminiModelOverride ?? project.settings.geminiModel) || "Pro 계정 제공 모델 자동 선택", reasoningEfforts: geminiWeb ? [] : effortLevels.gemini, effortSetting: geminiWeb ? "웹 모델 설정" : project.settings.geminiEffort, imageGeneration: null, aiStudio: geminiStudio ? await this.aiStudio().status() : undefined, videoGeneration: geminiStudio && this.aiStudio().settings().videoEnabled, authentication: geminiStudio ? "호출 시 AIStudio2API를 자동 설치·실행하고 연결된 계정으로 서비스를 시작한다. OFFLINE만으로 배정을 거부하지 않는다. 계정이 없으면 Gemini 웹 계정 관리의 AI Studio 연결을 안내한다." : geminiWeb ? "계정별 로그인·잔여량은 webAccounts에서 확인하고 gemini_web_accounts로 갱신" : "Antigravity 로그인·모델 목록은 실행 시 확인", enabled: project.settings.maxGeminiWorkers > 0, usage: geminiWeb || geminiStudio ? undefined : this.usageState.gemini, webAccounts: geminiWeb ? this.webAccountInfo(chat.id) : undefined, webOnly: geminiWeb, localTools: !geminiWeb, fileWrites: !geminiWeb, supportedKinds: geminiWeb ? ["writing", "opinion", "review"] : ["implement", "writing", "opinion", "review"], role: "기본은 글쓰기, 사용자가 지정하면 해당 작업 우선" },
     };
   }
 
@@ -537,6 +535,10 @@ export class ChatManager {
     this.routes.set(chatId, r);
   }
 
+  generatedImage(chatId: number, image: { id: string; path?: string; base64?: string }) {
+    return this.attachments.generatedImage(chatId, image);
+  }
+
   /** Hooks for the orchestrator. */
   onDriverEvent?: (chatId: number, role: Role, event: AgentEvent) => void;
   beforeMasterEnd?: (chatId: number, event: Extract<AgentEvent, { type: "turn_end" }>) => Extract<AgentEvent, { type: "turn_end" }> | null;
@@ -591,7 +593,7 @@ export class ChatManager {
       nativeId: (id) => this.saveNativeId(chatId, role, cfg.agent, id),
       approve: (input) => this.approvals.request(chatId, project.folder, { ...input, role, node: this.route(chatId, role) }),
       usage: (u) => this.mergeUsage(u),
-      image: (image) => this.attachments.generatedImage(chatId, image),
+      image: (image) => this.generatedImage(chatId, image),
     };
     const opts = {
       cwd: project.folder,
@@ -803,7 +805,6 @@ export class ChatManager {
 
   async dispose() {
     this.disposing = true;
-    await this.graphify.dispose();
     const all = [...this.live.values()].flatMap((s) => Object.values(s));
     this.live.clear();
     await Promise.all(all.map((l) => l?.driver.dispose().catch(() => undefined)));

@@ -2,7 +2,6 @@
 import type { ProviderUsage } from "./usage";
 import type { AIStudioAction, AIStudioInput, AIStudioStatus, AIStudioUsageRange, AIStudioUsageReport } from "./aistudio";
 import type { DeepSeekAction, DeepSeekBalance, DeepSeekInput, DeepSeekStatus } from "./deepseek";
-import type { GraphifyRequest, GraphifyResponse } from "./graphify";
 
 export type AgentKind = "claude" | "codex" | "gemini" | "grok" | "deepseek";
 export const GEMINI_WEB_MODEL = "gemini-web-argon";
@@ -331,7 +330,7 @@ export type AgentEvent =
   | { type: "peer_message"; from: Role; to: Role; text: string }
   | { type: "artifacts"; paths: string[] }
   | { type: "agent_usage"; metrics: AgentMetrics }
-  | { type: "dispatch"; instructionId: number; mode: "direct" | "delegated"; reason: string; dualInvestigation?: boolean; codeWork?: boolean }
+  | { type: "dispatch"; instructionId: number; mode: "direct" | "delegated"; reason: string; dualInvestigation?: boolean }
   | { type: "image_generation"; id: string; status: "running" | "done" | "error"; prompt?: string; attachment?: AttachmentRef; error?: string }
   | { type: "expression"; expression: AgentExpression }
   | { type: "user"; text: string; attachments: AttachmentRef[]; queued?: boolean; delivery?: "now" | "next" }
@@ -417,7 +416,6 @@ export interface UsageInfo {
 }
 
 export interface ChatterBoxApi {
-  graphify(request: GraphifyRequest): Promise<GraphifyResponse>;
   deepSeek(action: DeepSeekAction, input?: DeepSeekInput): Promise<DeepSeekStatus>;
   aiStudio(action: AIStudioAction, input?: AIStudioInput): Promise<AIStudioStatus>;
   aiStudioUsage(range?: AIStudioUsageRange): Promise<AIStudioUsageReport>;

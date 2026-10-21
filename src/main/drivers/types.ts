@@ -4,7 +4,7 @@ import type { ApprovalInput, VerdictResult } from "../approvals";
 export interface AgentInput {
   text: string;
   attachments: AttachmentRef[];
-  /** Enforced planning/review turn: never grant mutations or shell escalation. */
+  /** Explicit read-only request or provider capability limit. */
   noWrites?: boolean;
   /** Require an actual image result, including web workers. */
   requiresImage?: boolean;
@@ -53,7 +53,7 @@ export interface DriverOptions {
   effort?: string;
   /** Extra system instructions (Claude --append-system-prompt / Codex developerInstructions). */
   instructions?: string;
-  /** Tool-less approval judge: no edits or shell escalation. */
+  /** Explicit read-only driver; independent of the session role. */
   readOnly?: boolean;
   /** Codex thread config overrides (e.g. mcp_servers for the orchestrator's tools). */
   codexConfig?: Record<string, unknown>;

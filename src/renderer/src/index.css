@@ -3,20 +3,12 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
-.graphify-map { background: color-mix(in oklch, var(--card) 97%, var(--gemini) 3%); }
-.graphify-label { font-family: var(--font-mono); paint-order: stroke; stroke: var(--card); stroke-width: 3px; stroke-linejoin: round; pointer-events: none; }
-.graphify-edge, .graphify-node-core { transition: r 220ms ease, fill-opacity 220ms ease, stroke-opacity 220ms ease, stroke-width 220ms ease; }
-.graphify-selection-ring { transform-box: fill-box; transform-origin: center; animation: graphify-ring 1.6s ease-out 2; }
-.graphify-path { animation: graphify-path 1.8s ease-in-out 2; }
-@keyframes graphify-ring { from { transform: scale(0.9); opacity: 0.95; } to { transform: scale(1.65); opacity: 0; } }
-@keyframes graphify-path { 50% { stroke-opacity: 0.5; } }
 .working-orbit { transform-origin: 12px 12px; animation: working-orbit 2.4s linear infinite; }
 .working-dot { transform-box: fill-box; transform-origin: center; animation: working-dot 1.2s ease-in-out infinite; }
 @keyframes working-orbit { to { transform: rotate(360deg); } }
 @keyframes working-dot { 0%, 100% { opacity: 0.55; transform: scale(0.78); } 50% { opacity: 1; transform: scale(1.15); } }
 @media (prefers-reduced-motion: reduce) {
-  .working-orbit, .working-dot, .graphify-selection-ring, .graphify-path { animation: none; }
-  .graphify-edge, .graphify-node-core { transition: none; }
+  .working-orbit, .working-dot { animation: none; }
 }
 
 /* Design tokens (shadcn/ui naming). Light first, dark overrides. */

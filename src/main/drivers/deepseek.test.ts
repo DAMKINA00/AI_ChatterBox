@@ -61,7 +61,7 @@ test("DeepSeek coding loop preserves reasoning and tool output through resume, r
   } finally { await driver.dispose(); rmSync(cwd, { recursive: true, force: true }); }
 });
 
-test("DeepSeek approval judge is tool-less and thinking can be disabled", async () => {
+test("explicit read-only DeepSeek driver is tool-less and thinking can be disabled", async () => {
   let sent: any;
   const service: any = { settings: () => ({ model: "deepseek-flash", videoEnabled: false }), json: async () => ({ data: [{ id: "deepseek-flash" }] }), response: async (_: string, body: any) => { sent = body; return completion("", '{"decision":"deny"}'); } };
   const events: any[] = [];

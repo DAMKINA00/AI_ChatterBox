@@ -94,7 +94,7 @@ function fixture(options: { geminiModel?: string; geminiStrengths?: string } = {
 }
 
 const call = (engine: any, chatId: number, caller: Role, kind: string, to: string) =>
-  engine.call(chatId, caller, "ask", { to, kind, message: `${kind} 요청`, reason: "writing routing regression", effort: "medium" });
+  engine.call(chatId, caller, "ask", { to, kind, scope: ["delegated/**"], message: `${kind} 요청`, reason: "writing routing regression", effort: "medium" });
 
 test("Antigravity accepts explicit code, review and writing; web retains local-tool limits", async () => {
   for (const geminiModel of [GEMINI_WEB_MODEL, "gemini-test-medium"]) {
@@ -106,7 +106,10 @@ test("Antigravity accepts explicit code, review and writing; web retains local-t
         const result = await call(f.engine, f.chat.id, "orch", kind, worker.nickname);
         const blocked = geminiModel === GEMINI_WEB_MODEL && kind === "implement";
         assert.equal(result.isError, blocked, `${geminiModel} ${kind}`);
-        if (!blocked) assert.equal(f.sent.at(-1)!.input.noWrites, kind !== "implement");
+        if (!blocked) {
+          assert.equal(f.sent.at(-1)!.input.noWrites, geminiModel === GEMINI_WEB_MODEL);
+          assert.match(f.sent.at(-1)!.input.text, /고칠 수 있는 범위: delegated\/\*\*/);
+        }
         else assert.match(result.content[0].text, /로컬 파일/);
       }
       assert.ok(f.store.listConsults(f.chat.id).every(c => c.status === "done"));
@@ -114,7 +117,7 @@ test("Antigravity accepts explicit code, review and writing; web retains local-t
   }
 });
 
-test("technical questions can cross Antigravity peers without granting implementation from review", async () => {
+test("Antigravity peers can request implementation as well as review", async () => {
   const f = fixture({ geminiModel: "gemini-test-medium" });
   try {
     const gemini = f.store.createAgent(f.chat.id, "gemini", "technical peer");
@@ -123,9 +126,9 @@ test("technical questions can cross Antigravity peers without granting implement
       for (const kind of ["review", "opinion"]) {
         assert.equal((await call(f.engine, f.chat.id, from.key, kind, to.nickname)).isError, false);
       }
-      assert.equal((await call(f.engine, f.chat.id, from.key, "implement", to.nickname)).isError, true);
+      assert.equal((await call(f.engine, f.chat.id, from.key, "implement", to.nickname)).isError, false);
     }
-    assert.ok(f.sent.every(s => s.input.noWrites));
+    assert.ok(f.sent.every(s => !s.input.noWrites));
   } finally { await f.close(); }
 });
 

@@ -151,7 +151,7 @@ export class GrokDriver implements AgentDriver {
     if (p.hookCallbackId !== "chatterbox-approval" || p.toolInputTruncated) return deny("도구 입력을 확인하지 못했습니다.");
     const name = p.toolName, args = p.toolInput;
     if (typeof name !== "string" || !args || typeof args !== "object") return deny("잘못된 도구 요청입니다.");
-    if (this.opts.readOnly) return deny("승인 판단 세션은 도구를 사용하지 않습니다.");
+    if (this.opts.readOnly) return deny("읽기 전용 세션에서는 이 도구를 사용할 수 없습니다.");
     if (/^(?:spawn_agent|spawn_subagent|subagent|agent|task|delegate_task)$/i.test(name)) return deny("작업자 협업은 ChatterBox 도구를 사용하세요.");
     if (/^(?:mcp__)?chatterbox_bridge(?:__|\/)/.test(name)) { this.approved.add(p.toolUseId); return { decision: "continue" }; }
     const command = typeof args.command === "string" && /terminal|shell|bash|command/i.test(name) ? args.command : undefined;
@@ -159,7 +159,7 @@ export class GrokDriver implements AgentDriver {
     const writing = /^(?:write_file|create_file|edit_file|search_replace|replace_in_file|apply_patch|delete_file|Write|Edit|MultiEdit)$/i.test(name);
     const image = /^(?:image_gen|image_edit|imagegen|generate_image|edit_image)$/i.test(name);
     const readOnly = /^(?:read_file|read_files|list_files|list_dir|list_directory|search|grep|glob|web_search|web_fetch|Read|Grep|Glob)$/i.test(name);
-    if (this.noWrites && !readOnly && !(command && isReadCommand(command))) return deny("계획·리뷰·의견 중에는 변경 도구를 실행할 수 없습니다.");
+    if (this.noWrites && !readOnly && !(command && isReadCommand(command))) return deny("명시적인 읽기 전용 요청에서는 변경 도구를 실행할 수 없습니다.");
     if (image && this.opts.allowImages === false) return deny("이미지 생성은 지정한 앱 작업자에게 배정하세요.");
     const diffs = writing && args.file_path ? claudeToolDiffs(/edit|replace/i.test(name) ? "Edit" : "Write", args, this.opts.cwd) : undefined;
     const id = String(p.toolUseId);

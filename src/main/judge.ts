@@ -1,4 +1,4 @@
-// Approval judge: a long-lived, tool-less conversation per chat on the orchestrator's CLI and model.
+// Approval judge: a separate conversation per chat on the orchestrator's CLI and model.
 // The orchestrator's own session is blocked inside a consult tool call while workers ask for
 // approvals, so judging happens in this side conversation. It keeps context across requests
 // (decisions so far), answers strict JSON, and anything malformed/slow falls back to the user.
@@ -12,16 +12,16 @@ import { isAIStudioModel } from "../shared/aistudio";
 import { GrokDriver } from "./drivers/grok";
 import { ClaudeDriver } from "./drivers/claude";
 import { CodexDriver } from "./drivers/codex";
-import type { AgentDriver } from "./drivers/types";
+import type { AgentDriver, DriverHost } from "./drivers/types";
 import { diffStatsText } from "./diffs";
 
 const JUDGE_INSTRUCTIONS = [
   "# 역할: AI_ChatterBox 승인 판단",
-  "너는 별도의 승인 판단 세션으로 마스터와 작업자(클로드 N호, 지피티 N호)의 요청을 판단한다. 도구는 쓰지 않는다.",
+  "너는 별도의 승인 판단 세션으로 마스터와 작업자의 요청을 판단한다. 필요한 도구를 사용할 수 있으며, 파일 수정과 변경 명령은 앱의 사용자 승인으로 확인한다. 판단 대상 작업을 대신 실행하거나 중복 실행하지 말고, 확인에 필요한 작업만 수행한다.",
   '답은 JSON 한 줄만 쓴다: {"decision":"allow"|"deny"|"ask_user","reason":"한국어 한 문장"}',
   "기준:",
   "- allow: 지금 맡긴 일에 필요하고, 작업 폴더 안에서 되돌릴 수 있는 작업. 예: 파일 생성·수정, 빌드·테스트·린트·타입 검사 실행, 프로젝트 스크립트 실행, 파일 읽기와 검색.",
-  "- deny: 맡긴 일과 무관하거나 해로운 작업. 예: 작업 폴더 전체나 홈 폴더 삭제, 비밀·자격 증명 읽기나 외부 전송, 리뷰·의견 요청인데 파일을 고치려는 작업.",
+  "- deny: 맡긴 일과 무관하거나 해로운 작업. 예: 작업 폴더 전체나 홈 폴더 삭제, 비밀·자격 증명 읽기나 외부 전송, 사용자가 명시적으로 금지한 수정. 계획·리뷰·의견이라는 작업 종류만으로 수정·명령을 거부하지 않는다.",
   "- 고위험 위임이 켜졌으면: 사용자가 명시한 작업을 수행하는 데 필요하고 범위가 분명한 작업 폴더 밖 쓰기, git push, 환경·시스템 변경 등도 allow 가능하다. 위임은 무조건 허용이 아니다. 사용자 지시와 무관한 작업은 deny, 대상·결과가 불명확하면 ask_user.",
   "- 고위험 위임이 꺼졌으면: 작업 폴더 밖 쓰기, git push나 기록 변경, 전역 설치·시스템 변경은 ask_user. 판단이 애매하거나 사용자 선택이 필요하면 항상 ask_user.",
   "이유는 짧고 구체적으로 쓴다 (예: '테스트 실행, 작업 폴더 안').",
@@ -33,6 +33,7 @@ interface Session {
   text: string;
   done?: (ok: boolean) => void;
   queue: Promise<unknown>;
+  active?: { request: ApprovalRequest; controller: AbortController; tools: Set<string>; pause(): void; resume(): void };
 }
 
 export interface JudgeContext {
@@ -61,24 +62,46 @@ export class ApprovalJudge {
     const key = `${agent}:${model}:${effort}:${project.folder}:${chat.approvalModeOverride ?? project.settings.approvalMode}`;
     const cur = this.sessions.get(chatId);
     if (cur && cur.key === key) return cur;
-    if (cur) void cur.driver.dispose();
+    if (cur) {
+      cur.active?.controller.abort();
+      cur.done?.(false);
+      void cur.driver.dispose();
+    }
 
     const s: Session = { driver: undefined as unknown as AgentDriver, key, text: "", queue: Promise.resolve() };
-    const host = {
+    const host: DriverHost = {
       emit: (e: AgentEvent) => {
         if (e.type === "text") s.text = e.text;
-        else if (e.type === "tool_call") {
-          // A judge must answer from the supplied action, never investigate with tools.
-          s.done?.(false);
-          void s.driver.stop();
-        }
         else if (e.type === "turn_end") s.done?.(!!e.ok);
+        else if (s.active && !s.active.controller.signal.aborted && ["tool_call", "tool_result", "file_change", "image_generation"].includes(e.type)) {
+          if (e.type === "tool_call" || e.type === "tool_result" || e.type === "file_change") {
+            e = { ...e, id: `judge:${e.id}` };
+            if (e.type === "tool_call" && !s.active.tools.has(e.id)) {
+              s.active.tools.add(e.id);
+              s.active.pause();
+            } else if (e.type !== "tool_call" && s.active.tools.delete(e.id)) s.active.resume();
+          }
+          const { role } = s.active.request;
+          this.chats.emit(chatId, this.chats.route(chatId, role), role, e);
+          this.chats.onDriverEvent?.(chatId, role, e);
+        }
       },
       nativeId: () => undefined,
-      approve: async () => ({ verdict: "deny" as const, reason: "판단 세션은 도구를 쓰지 않습니다." }),
+      approve: async (input) => {
+        const active = s.active;
+        if (!active) return { verdict: "deny", reason: "승인 판단이 종료되었습니다." };
+        active.pause();
+        try {
+          const { role } = active.request;
+          return await this.chats.approvals.request(chatId, project.folder, {
+            ...input, role, node: this.chats.route(chatId, role), title: `승인 판정기 · ${input.title}`, key: `judge:${input.key}`,
+          }, active.controller.signal);
+        } finally { if (s.active === active) active.resume(); }
+      },
+      image: (image) => this.chats.generatedImage(chatId, image),
       usage: (u: UsageInfo) => this.chats.mergeUsage(u),
     };
-    const opts = { cwd: project.folder, nativeId: null, exePath: "", model: model || undefined, effort, instructions: JUDGE_INSTRUCTIONS, readOnly: true, ephemeral: true };
+    const opts = { cwd: project.folder, nativeId: null, exePath: "", model: model || undefined, effort, instructions: JUDGE_INSTRUCTIONS, ephemeral: true };
     s.driver =
       agent === "claude"
         ? new ClaudeDriver(
@@ -87,7 +110,6 @@ export class ApprovalJudge {
               bridge: this.chats.bridge,
               bridgeScript: this.chats.bridgeScript,
               tmpDir: this.chats.tmpDir,
-              tools: [],
               strictMcp: true,
               extraArgs: ["--no-session-persistence"],
             },
@@ -138,12 +160,23 @@ export class ApprovalJudge {
     s.text = "";
     const ended = new Promise<boolean>((resolve) => (s.done = resolve));
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const controller = new AbortController();
+    let waiting = 0;
+    let arm!: () => void;
     const timeout = new Promise<false>((resolve) => {
-      timer = setTimeout(() => {
-        void s.driver.stop();
-        resolve(false);
-      }, 120_000);
+      arm = () => {
+        timer = setTimeout(() => {
+          controller.abort();
+          void s.driver.stop();
+          resolve(false);
+        }, 120_000);
+      };
     });
+    s.active = { request, controller, tools: new Set(),
+      pause: () => { waiting++; clearTimeout(timer); },
+      resume: () => { if (--waiting === 0 && !controller.signal.aborted) arm(); },
+    };
+    arm();
     let completed = false;
     try {
       const ok = await Promise.race([s.driver.send({ text: prompt, attachments: [] }).then(() => ended), timeout]);
@@ -153,6 +186,13 @@ export class ApprovalJudge {
       return null;
     } finally {
       clearTimeout(timer);
+      controller.abort();
+      for (const id of s.active.tools) {
+        const event: AgentEvent = { type: "tool_result", id, ok: false, output: "승인 판단이 종료되었습니다." };
+        this.chats.emit(chatId, this.chats.route(chatId, request.role), request.role, event);
+        this.chats.onDriverEvent?.(chatId, request.role, event);
+      }
+      s.active = undefined;
       s.done = undefined;
       if (!completed) {
         if (this.sessions.get(chatId) === s) this.sessions.delete(chatId);
@@ -170,6 +210,7 @@ export class ApprovalJudge {
     this.chatGenerations.set(chatId, (this.chatGenerations.get(chatId) ?? 0) + 1);
     const s = this.sessions.get(chatId);
     this.sessions.delete(chatId);
+    s?.active?.controller.abort();
     s?.done?.(false);
     await s?.driver.stop().catch(() => undefined);
     await s?.driver.dispose().catch(() => undefined);
@@ -179,7 +220,11 @@ export class ApprovalJudge {
     this.generation++;
     const all = [...this.sessions.values()];
     this.sessions.clear();
-    await Promise.all(all.map((s) => s.driver.dispose().catch(() => undefined)));
+    await Promise.all(all.map((s) => {
+      s.active?.controller.abort();
+      s.done?.(false);
+      return s.driver.dispose().catch(() => undefined);
+    }));
   }
 }
 

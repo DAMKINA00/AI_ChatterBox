@@ -39,10 +39,6 @@ function formFrom(status: AIStudioStatus): FormState {
   };
 }
 
-function isRunning(status: AIStudioStatus | null): boolean {
-  return status?.state.toUpperCase() === "RUNNING";
-}
-
 function untilText(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.valueOf()) ? value : date.toLocaleString("ko-KR");
@@ -134,7 +130,7 @@ export function AIStudioDialog({ open, onOpenChange, onUseModel }: Props) {
       if (action === "save") {
         formDirty.current = false;
         setForm(formFrom(next));
-      } else if (action === "status" && !formDirty.current) setForm(formFrom(next));
+      } else if (!formDirty.current) setForm(formFrom(next));
       setError(next.error);
     } catch (e) {
       setError(errorMessage(e));
@@ -154,13 +150,7 @@ export function AIStudioDialog({ open, onOpenChange, onUseModel }: Props) {
     formDirty.current = true;
     setForm((current) => ({ ...current, [key]: value }));
   };
-  const canUseModel = !!onUseModel
-    && isRunning(status)
-    && !!status?.settings.model
-    && !!status.models.some((model) => model.id === status.settings.model)
-    && !!status?.accounts.some((account) => account.enabled
-      && account.models.includes(status.settings.model)
-      && !["disabled", "auth_required", "unavailable"].includes(account.state.trim().toLowerCase()));
+  const canUseModel = !!onUseModel && !!status?.settings.model && !formDirty.current;
 
   return (
     <>
@@ -192,12 +182,13 @@ export function AIStudioDialog({ open, onOpenChange, onUseModel }: Props) {
               </label>
               <div className="flex flex-wrap gap-2">
                 <Button type="button" onClick={save} disabled={!!pending}><Save /> 저장</Button>
-                <Button type="button" variant="outline" onClick={() => void run("launch")} disabled={!!pending}><Zap /> 매니저 실행</Button>
+                <Button type="button" variant="outline" onClick={() => void run("launch")} disabled={!!pending}><Zap /> 매니저 설치 / 실행</Button>
                 <Button type="button" variant="outline" onClick={() => void run("start")} disabled={!!pending}><Zap /> 서비스 시작</Button>
                 <Button type="button" variant="outline" onClick={() => void run("stop")} disabled={!!pending}><Square /> 서비스 중지</Button>
                 <Button type="button" variant="outline" onClick={() => void run("open")} disabled={!!pending}><ExternalLink /> 매니저 열기</Button>
                 <Button type="button" variant="outline" onClick={() => void run("export-antigravity")} disabled={!!pending}><Settings2 /> Antigravity 설정 내보내기</Button>
               </div>
+              <p className="text-[11.5px] text-muted-foreground">제미나이에서 이 모델을 호출하면 필요한 매니저를 자동 설치·실행하고 연결된 계정으로 서비스를 시작합니다. Google 로그인과 계정 연결은 먼저 완료해야 합니다.</p>
             </div>
 
             <div className="grid gap-3 rounded-lg border p-3.5">

@@ -112,18 +112,27 @@ test("worker remains reserved until native archive finishes before its next queu
   assert.equal(o.running.get(1).has("w1"), false);
 });
 
-test("plan, master review, worker review and idle workers cannot mutate", () => {
+test("planning and review can mutate; idle, stopped and overlapping work remains blocked", () => {
   const { chats, orchestrator: o } = engine();
   o.planning.add(1);
-  assert.ok(chats.approvalGuard(1, write));
+  assert.equal(chats.approvalGuard(1, write), null);
   o.planning.clear(); o.reviewing.add(1);
-  assert.ok(chats.approvalGuard(1, { ...write, writes: false, command: "npm run build" }));
+  assert.equal(chats.approvalGuard(1, { ...write, writes: false, command: "npm run build" }), null);
   o.reviewing.clear();
   assert.ok(chats.approvalGuard(1, { ...write, role: "w1" }));
-  o.running.set(1, new Map([["w1", { kind: "review" }]]));
-  assert.ok(chats.approvalGuard(1, { ...write, role: "w1" }));
-  o.running.set(1, new Map([["w1", { kind: "implement", scope: ["src/**"] }]]));
-  assert.equal(chats.approvalGuard(1, { ...write, role: "w1" }), null);
+  for (const kind of ["review", "opinion", "writing", "implement"]) {
+    o.running.set(1, new Map([["w1", { consultId: 10, kind, scope: ["src/**"] }]]));
+    assert.equal(chats.approvalGuard(1, { ...write, role: "w1" }), null);
+    assert.deepEqual(chats.writeScope(1, "w1").globs, ["src/**"]);
+    assert.ok(chats.approvalGuard(1, write));
+    o.running.get(1).set("w2", { consultId: 11, kind: "review", scope: ["src/a.ts"] });
+    assert.ok(chats.approvalGuard(1, { ...write, role: "w2" }));
+    o.running.get(1).get("w2").scope = ["docs/**"];
+    assert.equal(chats.approvalGuard(1, { ...write, role: "w2" }), null);
+    o.releaseScope(1, 10); o.releaseScope(1, 11);
+  }
+  o.stopped.add(1);
+  assert.ok(chats.approvalGuard(1, write));
 });
 
 test("expression tool is bound to its calling role and rejects unknown expressions", async () => {
@@ -151,7 +160,7 @@ test("critical routing persists on resume, cannot be downgraded, and gates write
   const reports: any[] = [];
   chats.store.listConsults = () => reports;
   o.instructions.set(1, { id: 17 });
-  const route = (args: any) => o.call(1, "orch", "route_request", { mode: "delegated", reason: "safety fault", codeWork: false, ...args });
+  const route = (args: any) => o.call(1, "orch", "route_request", { mode: "delegated", reason: "safety fault", ...args });
   assert.equal((await route({ dualInvestigation: "true" })).isError, true);
   assert.equal((await route({ dualInvestigation: true, mode: "direct" })).isError, true);
   assert.ok(!(await route({ dualInvestigation: true })).isError);
@@ -212,7 +221,7 @@ test("failed master startup ends the review restriction and permits a later ordi
   assert.equal(chats.approvalGuard(1, write), null);
 });
 
-test("resuming an interrupted plan or review after restart preserves the no-write restriction", async () => {
+test("resuming an interrupted plan or review after restart allows normal mutation approvals", async () => {
   for (const command of ["/plan change a file", "/review"]) {
     const { chats, orchestrator: o } = engine();
     chats.store.chat = () => ({ id: 1, status: "interrupted" });
@@ -222,7 +231,7 @@ test("resuming an interrupted plan or review after restart preserves the no-writ
     let input: any;
     chats.driver = async () => ({ send: async (value: any) => { input = value; } });
     await o.resume(1);
-    assert.equal(input.noWrites, true, command);
-    assert.ok(chats.approvalGuard(1, write), command);
+    assert.equal(input.noWrites, false, command);
+    assert.equal(chats.approvalGuard(1, write), null, command);
   }
 });

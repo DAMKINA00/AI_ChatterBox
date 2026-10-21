@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync, realpathSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import { dirname, join, resolve, relative, isAbsolute } from "node:path";
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { AI_STUDIO_ACCOUNT_LIMIT, type AIStudioInput, type AIStudioSettings, type AIStudioStatus, type AIStudioAccount, type AIStudioUsageRange, type AIStudioUsageReport, type AIStudioUsageStats } from "../shared/aistudio";
 
 interface Settings { getSetting(key: string): string | undefined; setSetting(key: string, value: string): void }
@@ -24,22 +24,48 @@ function installedRuntime() {
   } catch { return ""; }
 }
 
+const localRuntime = {
+  find: installedRuntime,
+  async install() {
+    if (process.platform !== "win32") throw new Error("AIStudio2API 자동 설치는 Windows에서 지원합니다.");
+    const bundled = join(process.resourcesPath ?? "", "scripts", "install-aistudio.ps1");
+    const script = existsSync(bundled) ? bundled : resolve(__dirname, "../../scripts/install-aistudio.ps1");
+    if (!existsSync(script)) throw new Error("AIStudio2API 설치 스크립트가 없습니다. ChatterBox를 다시 설치하세요.");
+    await new Promise<void>((resolve, reject) => {
+      execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script],
+        { windowsHide: true, timeout: 600_000, maxBuffer: 1_048_576 }, (error, _stdout, stderr) => {
+          if (error) reject(new Error(`AIStudio2API 자동 설치 실패: ${(stderr.trim() || error.message).slice(0, 600)}`));
+          else resolve();
+        });
+    });
+  },
+  async launch(exe: string) {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(exe, ["-open-ui=false"], { cwd: dirname(exe), windowsHide: true, detached: true, stdio: "ignore" });
+      child.once("error", reject); child.once("spawn", () => { child.unref(); resolve(); });
+    });
+  },
+};
+
 /** AIStudio2API owns generation sessions and quota failover; explicit Web sync stays in the main process. */
 export class AIStudioService {
   private saved: Saved;
   private accountChange: Promise<unknown> = Promise.resolve();
+  private launching?: Promise<void>;
+  private preparing?: Promise<void>;
   private links: NonNullable<AIStudioStatus["webLinks"]> = {};
-  constructor(private store: Settings, private secrets: SecretStorage, private request: typeof fetch = fetch) {
+  constructor(private store: Settings, private secrets: SecretStorage, private request: typeof fetch = fetch, private runtime = localRuntime) {
     let stored: Partial<Saved> = {};
     try { stored = JSON.parse(store.getSetting(KEY) ?? "{}"); } catch { /* Use fresh defaults. */ }
-    this.saved = { baseUrl: "http://127.0.0.1:2048", model: "gemini-4-argon", executable: installedRuntime(), videoEnabled: false, ...stored };
+    this.saved = { baseUrl: "http://127.0.0.1:2048", model: "gemini-4-argon", executable: "", videoEnabled: false, ...stored };
     this.saved.baseUrl = studioOrigin(this.saved.baseUrl);
+    if (!this.saved.executable && this.saved.baseUrl === "http://127.0.0.1:2048") this.saved.executable = this.runtime.find();
     try { this.links = JSON.parse(store.getSetting("aiStudioWebLinks") ?? "{}"); } catch { /* No account association yet. */ }
   }
   private apiKey() {
     if (this.saved.secret) return this.secrets.decrypt(this.saved.secret);
     // The managed local runtime already persists its own key in .env; never return it to the renderer.
-    if (this.saved.baseUrl === "http://127.0.0.1:2048" && this.saved.executable === installedRuntime()) {
+    if (this.saved.baseUrl === "http://127.0.0.1:2048" && this.saved.executable === this.runtime.find()) {
       try { return /^PROXY_API_KEY=(.+)$/m.exec(readFileSync(join(dirname(this.saved.executable), ".env"), "utf8"))?.[1].trim().split(",")[0] ?? ""; } catch { /* User can configure another key. */ }
     }
     return "";
@@ -144,22 +170,72 @@ export class AIStudioService {
     } catch (e) { result.error = e instanceof Error ? e.message : "AIStudio2API에 연결하지 못했습니다."; }
     return result;
   }
-  async launch() {
+  launch(report: (text: string) => void = () => undefined) {
+    return this.launching ??= this.launchRuntime(report).finally(() => { this.launching = undefined; });
+  }
+  private async launchRuntime(report: (text: string) => void) {
+    if (!this.saved.executable && this.saved.baseUrl === "http://127.0.0.1:2048") {
+      const found = this.runtime.find();
+      if (found) this.save({ executable: found });
+    }
     if (!(await this.status()).error) return;
-    const exe = this.saved.executable;
-    if (!exe || !existsSync(exe) || !/aistudio2api\.exe$/i.test(exe)) throw new Error("AIStudio2API 실행 파일을 설치하고 경로를 지정하세요.");
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn(exe, ["-open-ui=false"], { cwd: dirname(exe), windowsHide: true, detached: true, stdio: "ignore" });
-      child.once("error", reject); child.once("spawn", () => { child.unref(); resolve(); });
-    });
+    let exe = this.saved.executable;
+    if (!exe || !existsSync(exe)) {
+      if (this.saved.baseUrl !== "http://127.0.0.1:2048") throw new Error("설정한 AIStudio2API 서버에 연결하지 못했습니다. 주소와 실행 파일 경로를 확인하세요.");
+      exe = this.runtime.find();
+      if (!exe) {
+        report("AIStudio2API가 설치되어 있지 않아 공식 배포본을 내려받고 SHA-256을 확인해 설치합니다.");
+        await this.runtime.install();
+        exe = this.runtime.find();
+      }
+      if (!exe) throw new Error("AIStudio2API 설치 후 실행 파일을 찾지 못했습니다. 설치 경로를 확인하세요.");
+      this.save({ executable: exe });
+    }
+    if (!/aistudio2api\.exe$/i.test(exe)) throw new Error("AIStudio2API 실행 파일 경로가 잘못되었습니다.");
+    report("AIStudio2API 매니저를 실행합니다.");
+    await this.runtime.launch(exe);
     for (let n = 0; n < 20; n++) {
       await new Promise(r => setTimeout(r, 500));
       if (!(await this.status()).error) return;
     }
     throw new Error("AIStudio2API 시작을 확인하지 못했습니다. 관리 로그를 확인하세요.");
   }
+  async ensureReady(signal: AbortSignal, report: (text: string) => void) {
+    signal.throwIfAborted();
+    if (this.preparing) report("AIStudio2API 설치·실행 준비를 기다립니다.");
+    const pending = this.preparing ??= (async () => {
+      await this.launch(report);
+      let status = await this.status();
+      if (status.error) throw new Error(status.error);
+      if (!status.accounts.some(account => account.enabled))
+        throw new Error("AIStudio2API 매니저는 실행 중입니다. Gemini 웹 계정 관리에서 로그인한 계정의 ‘AI Studio · Argon → 연결’을 완료하고 다시 지시하세요.");
+      if (status.state === "STOPPED") {
+        report("연결된 계정으로 AI Studio 서비스를 시작합니다.");
+        await this.start();
+      }
+      for (let n = 0; n < 120; n++) {
+        status = await this.status();
+        if (status.error) throw new Error(status.error);
+        if (status.state === "RUNNING") return;
+        if (status.state !== "STARTING") break;
+        await new Promise(r => setTimeout(r, 500));
+      }
+      throw new Error(`AI Studio 서비스 준비를 확인하지 못했습니다 (${status.state}). 계정 로그인과 관리 로그를 확인하세요.`);
+    })().finally(() => { this.preparing = undefined; });
+    let aborted: () => void;
+    try {
+      // One canceled worker must not cancel an installation shared by other workers.
+      await Promise.race([pending, new Promise<never>((_, reject) => {
+        aborted = () => reject(signal.reason);
+        signal.addEventListener("abort", aborted, { once: true });
+      })]);
+    } finally { signal.removeEventListener("abort", aborted!); }
+    signal.throwIfAborted();
+  }
   async start() {
+    await this.launch();
     const accounts = (await this.json("/api/accounts")).accounts ?? [];
+    if (!accounts.some((a: any) => a.enabled)) throw new Error("AI Studio에 활성 계정이 없습니다. Gemini 웹 계정 관리에서 로그인한 계정의 ‘AI Studio · Argon → 연결’을 완료하세요.");
     if (accounts.filter((a: any) => a.enabled).length > AI_STUDIO_ACCOUNT_LIMIT) throw new Error("활성 AI Studio 계정을 10개 이하로 설정하세요.");
     const config = await this.json("/api/config");
     await this.json("/api/config", { ...config, max_active_workers: 10, per_account_concurrency: 1, routing_strategy: "fill-first", request_body_log: false }, undefined, "PUT");

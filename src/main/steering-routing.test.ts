@@ -21,6 +21,50 @@ function fixture() {
   return { store, chat, chats, engine, inst, async close() { await engine.judge.dispose(); await chats.dispose(); store.close(); rmSync(root, { recursive: true, force: true }); } };
 }
 
+test("routing and bridge tools work without a project analysis service", async () => {
+  const f = fixture();
+  try {
+    assert.equal("graphify" in f.chats, false);
+    f.chats.teamCapabilities = async () => ({ gpt: { installed: true } }) as any;
+    await f.chats.bridge.start();
+    const worker = f.store.createAgent(f.chat.id, "gpt", "implementation");
+    for (const role of ["orch", worker.key]) {
+      f.engine.bridgeFor(f.chat.id, role);
+      const reg = (f.chats.bridge as any).regs.get(`br-${f.chat.id}-${role}`);
+      assert.ok(reg.tools.some((tool: any) => tool.name === "ask"));
+      assert.equal(reg.tools.some((tool: any) => tool.name === "project_graph"), false);
+      assert.equal((await reg.call("project_graph", { action: "build" })).isError, true);
+      const instructions = f.chats.instructionsFor!(f.chat, f.store.project(f.chat.projectId)!, role, "codex")!;
+      assert.doesNotMatch(instructions, /Graphify|project_graph|codeWork/);
+    }
+    const result = await f.engine.call(f.chat.id, "orch", "route_request", { mode: "delegated", reason: "inspect source and assign work" });
+    assert.equal(result.isError, false);
+    const body = JSON.parse(result.content[0].text);
+    assert.equal(body.capabilities.gpt.installed, true);
+    assert.equal(body.graphContext, undefined);
+    assert.equal(f.chats.approvalGuard!(f.chat.id, { role: "orch", node: "orch", title: "Write", detail: "a.ts", key: "Write", writes: true }), null);
+    let calls = 0;
+    f.engine.consult = async () => { calls++; return { content: [{ type: "text", text: "done" }], isError: false }; };
+    assert.equal((await f.engine.call(f.chat.id, "orch", "ask", { to: worker.nickname, kind: "implement", message: "fix a.ts", scope: ["a.ts"], reason: "source work", effort: "medium" })).isError, false);
+    assert.equal(calls, 1);
+  } finally { await f.close(); }
+});
+
+test("routing cannot return actionable capabilities after stop or instruction replacement", async () => {
+  for (const cancel of ["stop", "replace"]) {
+    const f = fixture();
+    try {
+      let release!: (value: any) => void;
+      f.chats.teamCapabilities = async () => new Promise(resolve => { release = resolve; });
+      const pending = f.engine.call(f.chat.id, "orch", "route_request", { mode: "delegated", reason: "check team" });
+      if (cancel === "stop") f.engine.stopped.add(f.chat.id);
+      else f.engine.instructions.set(f.chat.id, { ...f.inst, id: 2 });
+      release({});
+      assert.equal((await pending).isError, true);
+    } finally { await f.close(); }
+  }
+});
+
 test("default input immediately steers the same master, preserves workers, and records delivery and time", async () => {
   const f = fixture();
   try {
@@ -109,7 +153,7 @@ test("immediate direct question does not downgrade delegated work or its indepen
   const f = fixture();
   try {
     (f.inst as any).dualInvestigation = true;
-    const args = { mode: "direct", reason: "이미 알고 있는 설정의 적용 범위 질문", codeWork: false };
+    const args = { mode: "direct", reason: "이미 알고 있는 설정의 적용 범위 질문" };
     assert.equal((await f.engine.call(f.chat.id, "orch", "route_request", args)).isError, true);
     f.chats.liveDriver = () => ({ running: true, steer: async () => true } as any);
     await f.chats.send(f.chat.id, "750k는 클로드에만 적용하지?", [], "now");

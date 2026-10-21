@@ -18,7 +18,7 @@ export interface StudioMessage {
 }
 export interface StudioContext { load(): StudioMessage[]; save(messages: StudioMessage[]): void }
 interface StudioEnv {
-  service: Pick<AIStudioService, "response" | "json"> & { settings(): { model: string; videoEnabled: boolean } };
+  service: Pick<AIStudioService, "response" | "json"> & Partial<Pick<AIStudioService, "ensureReady">> & { settings(): { model: string; videoEnabled: boolean } };
   provider?: "gemini" | "deepseek";
   context?: StudioContext;
   bridgeUrl?: () => string | undefined;
@@ -112,6 +112,10 @@ export class ChatCompletionDriver implements AgentDriver {
     const model = this.opts.model?.replace(/^aistudio:/, "") || this.env.service.settings().model;
     const historyStart = this.history.length;
     try {
+      if (this.agent === "gemini") await this.env.service.ensureReady?.(signal, text => {
+        if (!signal.aborted) this.host.emit({ type: "notice", text });
+      });
+      signal.throwIfAborted();
       const catalog = await this.env.service.json("/v1/models", undefined, signal);
       if (!catalog.data?.some((m: any) => m.id === model)) throw new Error(`${this.label} 계정에서 ${model} 모델을 사용할 수 없습니다. 연결과 모델 목록을 확인하세요.`);
       this.history.push({ role: "user", content: input.text + fileNote(input.attachments) });

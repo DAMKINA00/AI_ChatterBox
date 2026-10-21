@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { AIStudioService, studioOrigin } from "./aistudio";
 
 const FAKE_STUDIO_SETTINGS = JSON.stringify({
@@ -23,6 +26,114 @@ const secrets = {
   encrypt: (value: string) => `encrypted:${value}`,
   decrypt: (value: string) => value.replace(/^encrypted:/, ""),
 };
+
+function lifecycleFixture(t: TestContext) {
+  const root = mkdtempSync(join(tmpdir(), "chatterbox-studio-lifecycle-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const exe = join(root, "aistudio2api.exe");
+  writeFileSync(exe, "synthetic");
+  writeFileSync(join(root, ".env"), "PROXY_API_KEY=local-test-key\n");
+  const saved = store();
+  saved.setSetting("aiStudio", JSON.stringify({ executable: "" }));
+  const state = { installed: false, online: false, state: "STOPPED", enabled: true, installs: 0, launches: 0, starts: 0, auth: "" };
+  const runtime = {
+    find: () => state.installed ? exe : "",
+    install: async () => { state.installs++; state.installed = true; },
+    launch: async () => { state.launches++; state.online = true; },
+  };
+  const service = new AIStudioService(saved, secrets, async (input, init) => {
+    if (!state.online) throw new Error("offline");
+    state.auth = new Headers(init?.headers).get("Authorization") ?? "";
+    const path = new URL(String(input)).pathname;
+    if (path === "/api/status") return jsonResponse({ state: state.state });
+    if (path === "/api/accounts") return jsonResponse({ accounts: state.enabled ? [{ id: "test@example.test", enabled: true }] : [] });
+    if (path === "/api/control/start") { state.starts++; state.state = "RUNNING"; }
+    return jsonResponse({});
+  }, runtime);
+  return { service, saved, state, runtime, exe };
+}
+
+test("first Gemini calls share one verified install, launch and service start", async t => {
+  const { service, saved, state, exe } = lifecycleFixture(t);
+  const notices: string[] = [];
+  await Promise.all(Array.from({ length: 3 }, () => service.ensureReady(new AbortController().signal, text => notices.push(text))));
+  assert.equal(state.installs, 1);
+  assert.equal(state.launches, 1);
+  assert.equal(state.starts, 1);
+  assert.equal(state.auth, "Bearer local-test-key");
+  assert.equal(JSON.parse(saved.getSetting("aiStudio")!).executable, exe);
+  assert.ok(notices.some(text => text.includes("SHA-256")));
+  await service.ensureReady(new AbortController().signal, () => undefined);
+  assert.equal(state.installs, 1);
+  assert.equal(state.starts, 1);
+});
+
+test("an existing managed runtime is rediscovered despite an empty saved executable", async t => {
+  const { service, state, exe } = lifecycleFixture(t);
+  state.installed = true;
+  await service.ensureReady(new AbortController().signal, () => undefined);
+  assert.equal(state.installs, 0);
+  assert.equal(state.launches, 1);
+  assert.equal(service.settings().executable, exe);
+  assert.equal(service.settings().hasApiKey, true);
+});
+
+test("a healthy configured server is reused without installing or launching", async t => {
+  const { service, state } = lifecycleFixture(t);
+  service.save({ baseUrl: "http://127.0.0.1:9048" });
+  state.online = true; state.state = "RUNNING";
+  await service.ensureReady(new AbortController().signal, () => undefined);
+  assert.equal(state.installs + state.launches + state.starts, 0);
+});
+
+test("an unavailable custom address is not replaced by a default installation", async t => {
+  const { service, state } = lifecycleFixture(t);
+  service.save({ baseUrl: "http://127.0.0.1:9048" });
+  await assert.rejects(service.ensureReady(new AbortController().signal, () => undefined), /주소와 실행 파일/);
+  assert.equal(state.installs + state.launches + state.starts, 0);
+});
+
+test("installation failure can be retried without starting an unverified runtime", async t => {
+  const { service, state, runtime } = lifecycleFixture(t);
+  const install = runtime.install;
+  runtime.install = async () => { throw new Error("SHA-256 mismatch"); };
+  await assert.rejects(service.ensureReady(new AbortController().signal, () => undefined), /SHA-256 mismatch/);
+  assert.equal(state.launches + state.starts, 0);
+  runtime.install = install;
+  await service.ensureReady(new AbortController().signal, () => undefined);
+  assert.equal(state.installs, 1);
+});
+
+test("missing Google account reports the next step after installing the manager", async t => {
+  const { service, state } = lifecycleFixture(t);
+  state.enabled = false;
+  await assert.rejects(service.ensureReady(new AbortController().signal, () => undefined), /계정.*연결/);
+  assert.equal(state.installs, 1);
+  assert.equal(state.launches, 1);
+  assert.equal(state.starts, 0);
+});
+
+test("canceling one caller stops its wait without canceling another caller's install", async t => {
+  const { service, state, runtime } = lifecycleFixture(t);
+  let finish!: () => void;
+  let began!: () => void;
+  const begun = new Promise<void>(resolve => { began = resolve; });
+  runtime.install = async () => {
+    state.installs++; began();
+    await new Promise<void>(resolve => { finish = resolve; });
+    state.installed = true;
+  };
+  const controller = new AbortController();
+  const canceled = service.ensureReady(controller.signal, () => undefined);
+  const survivor = service.ensureReady(new AbortController().signal, () => undefined);
+  await begun;
+  controller.abort();
+  await assert.rejects(canceled, { name: "AbortError" });
+  finish();
+  await survivor;
+  assert.equal(state.installs, 1);
+  assert.equal(state.starts, 1);
+});
 
 function jsonResponse(value: unknown, status = 200, statusText = "OK") {
   return new Response(JSON.stringify(value), {

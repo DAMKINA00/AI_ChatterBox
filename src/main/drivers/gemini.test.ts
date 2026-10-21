@@ -113,12 +113,12 @@ test("Gemini remains denied while stopping, including normalized aliases", async
   assert.equal(f.approvals.length, 0);
 });
 
-test("project_graph is accepted only through the ChatterBox bridge", async () => {
+test("removed graph tools are rejected through every Antigravity entry point", async () => {
   const f = fixture();
   assert.equal((await f.call("project_graph", {})).decision, "deny");
   assert.equal(f.approvals.length, 0);
-  assert.equal((await f.call("mcp__chatterbox_bridge__project_graph", {})).decision, "auto_approve");
-  assert.equal((await f.call("call_mcp_tool", { ServerName: "chatterbox_bridge", ToolName: "project_graph", Arguments: {} })).decision, "auto_approve");
+  assert.equal((await f.call("mcp__chatterbox_bridge__project_graph", {})).decision, "deny");
+  assert.equal((await f.call("call_mcp_tool", { ServerName: "chatterbox_bridge", ToolName: "project_graph", Arguments: {} })).decision, "deny");
   assert.equal(f.approvals.length, 0);
 });
 

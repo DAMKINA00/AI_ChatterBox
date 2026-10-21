@@ -175,7 +175,7 @@ test("pause is per chat, waits for stops and queues, preserves the snapshot, and
     f.instruction.pinned.push("preserved partial note");
     f.instruction.queued.push({ text: "queued before pause", attachments: [] });
 
-    const routed = await f.engine.call(f.chat.id, "orch", "route_request", { mode: "delegated", reason: "pause lifecycle test", codeWork: false });
+    const routed = await f.engine.call(f.chat.id, "orch", "route_request", { mode: "delegated", reason: "pause lifecycle test" });
     assert.equal(routed.isError, false);
     await f.engine.call(f.chat.id, "orch", "spawn", { kind: "claude", job: "implementation" });
     await f.engine.call(f.chat.id, "orch", "spawn", { kind: "gpt", job: "independent check" });
@@ -348,7 +348,7 @@ test("planning survives pause, keeps the write guard, and sends the resumed mast
     assert.match(denied ?? "", /작업이 중지되었습니다/);
     await f.engine.resume(f.chat.id);
     await waitFor(() => master.sendCalls.length === 1);
-    assert.equal(master.sendCalls[0].noWrites, true);
+    assert.equal(master.sendCalls[0].noWrites, false);
     await f.engine.stop(f.chat.id);
   } finally {
     await f.close();

@@ -1,7 +1,7 @@
 {
   "name": "ai-chatterbox",
   "productName": "AI_ChatterBox",
-  "version": "0.4.26",
+  "version": "0.4.30",
   "private": true,
   "description": "Desktop agent team for Claude Code, Codex, Antigravity, Grok, DeepSeek API and Gemini web",
   "main": "out/main/index.js",
@@ -32,6 +32,10 @@
       {
         "from": "build/icon.png",
         "to": "icon.png"
+      },
+      {
+        "from": "scripts/install-aistudio.ps1",
+        "to": "scripts/install-aistudio.ps1"
       }
     ],
     "asarUnpack": [

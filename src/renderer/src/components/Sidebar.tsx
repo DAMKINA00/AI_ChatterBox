@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import { version } from "../../../../package.json";
-import { GraphifyDialog } from "./GraphifyDialog";
 import { WorkingIndicator } from "./WorkingIndicator";
 import {
   Archive,
@@ -17,7 +16,6 @@ import {
   MessageSquare,
   Moon,
   MoreHorizontal,
-  Network,
   Pause,
   Pencil,
   Plus,
@@ -136,7 +134,6 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
   const setTheme = useStore((s) => s.setTheme);
   const [showArchived, setShowArchived] = useState(false);
   const [editProject, setEditProject] = useState<Project | undefined>();
-  const [graphProject, setGraphProject] = useState<Project>();
   const [rename, setRename] = useState<{ kind: "chat" | "project"; id: number; title: string } | null>(null);
   const [confirm, setConfirm] = useState<{ title: string; body: string; run: () => Promise<void> } | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -212,7 +209,6 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
             hits={contentHits}
             now={now}
             onEdit={() => setEditProject(p)}
-            onGraph={() => setGraphProject(p)}
             onRename={(kind, id, title) => setRename({ kind, id, title })}
             onConfirm={setConfirm}
           />
@@ -251,7 +247,6 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
       </div>
 
       <ProjectDialog open={!!editProject} onOpenChange={(o) => !o && setEditProject(undefined)} project={editProject} />
-      {graphProject && <GraphifyDialog project={graphProject} open onOpenChange={(open) => !open && setGraphProject(undefined)} />}
       <RenameDialog value={rename} onClose={() => setRename(null)} />
       <Dialog open={!!confirm} onOpenChange={(o) => !o && setConfirm(null)}>
         {confirm && (
@@ -284,7 +279,6 @@ function ProjectNode({
   hits,
   now,
   onEdit,
-  onGraph,
   onRename,
   onConfirm,
 }: {
@@ -294,7 +288,6 @@ function ProjectNode({
   hits: Set<number>;
   now: number;
   onEdit: () => void;
-  onGraph: () => void;
   onRename: (kind: "chat" | "project", id: number, title: string) => void;
   onConfirm: (c: { title: string; body: string; run: () => Promise<void> }) => void;
 }) {
@@ -312,7 +305,6 @@ function ProjectNode({
   const actions: MenuAction[] = [
     { label: "새 채팅", icon: Plus, onSelect: () => void createChat(project.id) },
     { label: "프로젝트 설정", icon: Settings2, onSelect: onEdit },
-    { label: "프로젝트 그래프", icon: Network, onSelect: onGraph },
     { label: "이름 변경", icon: Pencil, onSelect: () => onRename("project", project.id, project.name) },
     { label: "폴더 열기", icon: FolderOpen, onSelect: () => void api.openPath(project.folder) },
     {

@@ -255,7 +255,7 @@ export class ClaudeDriver implements AgentDriver {
     const input: any = req.input ?? {};
     const command = SHELL_TOOLS.has(req.tool_name) && typeof input.command === "string" ? input.command : undefined;
     if ((this.noWrites || this.opts.readOnly) && (WRITE_TOOLS.has(req.tool_name) || (command && !isReadCommand(command))))
-      return { behavior: "deny", message: "계획·리뷰·판단 세션에서는 파일 수정이나 변경 명령을 실행할 수 없습니다." };
+      return { behavior: "deny", message: "명시적인 읽기 전용 요청에서는 파일 수정이나 변경 명령을 실행할 수 없습니다." };
     const { verdict, reason } = await this.host.approve({
       title: req.tool_name,
       detail: command ?? formatInput(req.tool_name, input),

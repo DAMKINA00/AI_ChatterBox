@@ -81,7 +81,7 @@ export class GeminiDriver implements AgentDriver {
     try { ({ name, args } = normalizeGeminiTool(name, args)); }
     catch (error) { return deny(error instanceof Error ? error.message : String(error)); }
     if (!this.hooksReady) return deny("Antigravity 승인 연결을 초기화하지 못했습니다.");
-    if (this.opts.readOnly) return deny("승인 판단 세션은 도구를 사용하지 않습니다.");
+    if (this.opts.readOnly) return deny("읽기 전용 세션에서는 이 도구를 사용할 수 없습니다.");
     const bridge = geminiBridgeTool(name, args);
     const imageTool = name === "generate_image";
     const writes = GEMINI_WRITE_TOOLS.has(name);
@@ -92,7 +92,7 @@ export class GeminiDriver implements AgentDriver {
     const display = bridge && name === "call_mcp_tool" ? `mcp__chatterbox_bridge__${args.ToolName}` : command ? "PowerShell" : name;
     this.host.emit({ type: "tool_call", id, name: display, input: command ?? JSON.stringify(bridge && name === "call_mcp_tool" ? args.Arguments ?? {} : args), diffs: files });
     if (!bridge && !writes && !readOnly && !command && !imageTool) return deny(`이 작업자는 ${name} 도구를 지원하지 않습니다. 앱 마스터에게 필요한 작업을 보고하세요.`);
-    if (this.noWrites && (imageTool || writes || (command && !isReadCommand(command)))) return deny("계획·리뷰·의견 작업에서는 수정이나 변경 명령을 실행할 수 없습니다.");
+    if (this.noWrites && (imageTool || writes || (command && !isReadCommand(command)))) return deny("명시적인 읽기 전용 요청에서는 수정이나 변경 명령을 실행할 수 없습니다.");
     const paths = geminiPaths(args).map((p) => resolve(this.opts.cwd, p));
     if (paths.some((p) => p === this.sessionDir || p.startsWith(this.sessionDir + "/") || p.startsWith(this.sessionDir + "\\"))) return deny("ChatterBox 제어 설정에는 접근할 수 없습니다.");
     if (bridge) return { decision: "auto_approve" };

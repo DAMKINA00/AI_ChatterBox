@@ -30,12 +30,13 @@ try {
       calls: [],
       linked: false,
       studioEligible: true,
+      studioState: 'RUNNING',
       studioInFlight: 0,
       studioMaxInFlight: 0,
     };
     const studioStatus = () => ({
       settings: { baseUrl: 'http://127.0.0.1:2048', model: 'gemini-4-argon', hasApiKey: false, executable: '', videoEnabled: false },
-      state: 'RUNNING',
+      state: state.studioState,
       version: 'test',
       accounts: state.linked ? [{ id: 'google@example.com', label: 'google@example.com', enabled: state.studioEligible, state: state.studioEligible ? 'ready' : 'disabled', benefit_tier: 'Pro', message: state.studioEligible ? '사용 가능' : '비활성 계정', models: ['gemini-4-argon'] }] : [],
       cooldowns: state.linked ? [{ account_id: 'google@example.com', account_label: 'google@example.com', model_id: 'gemini-4-argon', channel: 'standard', until: '2030-01-02T03:04:05Z', reason: '테스트 쿨다운' }] : [],
@@ -105,13 +106,14 @@ try {
   const studioDialog = page.getByRole('dialog').filter({ hasText: 'AI Studio · Argon' });
   const useArgon = studioDialog.getByTestId('aistudio-use-model');
   await useArgon.waitFor();
-  check('missing eligible AI Studio account disables Argon use', await useArgon.isDisabled());
-  await app.evaluate(() => { globalThis.__aistudioUi.studioEligible = true; });
-  await page.waitForFunction(() => {
-    const button = document.querySelector('[data-testid="aistudio-use-model"]');
-    return !!button && !(button instanceof HTMLButtonElement && button.disabled);
-  }, null, { timeout: 7000 });
-  check('restoring an enabled eligible account enables Argon use', !(await useArgon.isDisabled()));
+  check('model selection is allowed before setup and explains required account linking', !(await useArgon.isDisabled()) && (await studioDialog.innerText()).includes('Google 로그인과 계정 연결'));
+  await app.evaluate(() => { globalThis.__aistudioUi.studioState = 'OFFLINE'; });
+  await page.waitForFunction(() => document.querySelector('[data-testid="aistudio-status"]')?.textContent?.includes('OFFLINE'), null, { timeout: 7000 });
+  check('offline manager does not block selecting a model for automatic setup', !(await useArgon.isDisabled()));
+  await studioDialog.getByRole('button', { name: '매니저 설치 / 실행', exact: true }).click();
+  check('manager install control uses the existing launch action', await app.evaluate(() => globalThis.__aistudioUi.calls.some(c => c.action === 'launch')));
+  await useArgon.click();
+  check('offline model selection is saved for the next Gemini call', (await page.getByLabel('이 채팅의 제미나이 모델').innerText()).includes('AI Studio'));
 } catch (error) {
   console.error(error);
   check('AI Studio account-linking UI completed', false, error.stack ?? error.message);

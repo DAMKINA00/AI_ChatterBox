@@ -48,9 +48,9 @@ export interface ApprovalHost {
   pendingChanged(chatId: number, pending: number): void;
   /** Effective approval mode + high-risk delegation for the chat. */
   mode(chatId: number): { mode: ApprovalMode; delegateHighRisk: boolean };
-  /** Runtime restrictions (planning, review, or a concurrent implementation). */
+  /** Runtime restrictions (stop, assignment and concurrent mutations). */
   guard?(chatId: number, input: ApprovalInput): string | null;
-  /** A worker's current write scope (implement globs, or [] = no writes during review/opinion). */
+  /** A worker's current write scope, regardless of assignment kind. */
   writeScope?(chatId: number, role: Role): { globs: string[] | null; why: string; folder: string } | null;
   /** Ask the chat's judge; null when it can't answer (no judge, timeout, malformed). */
   judge?(chatId: number, request: ApprovalRequest, input: ApprovalInput): Promise<JudgeAnswer | null>;
@@ -142,7 +142,8 @@ export class ApprovalService {
     return bad === undefined ? null : `${sc.why}: ${bad}`;
   }
 
-  async request(chatId: number, folder: string, input: ApprovalInput): Promise<VerdictResult> {
+  async request(chatId: number, folder: string, input: ApprovalInput, judgeSignal?: AbortSignal): Promise<VerdictResult> {
+    if (judgeSignal?.aborted) return { verdict: "deny", reason: "승인 판단이 종료되었습니다." };
     const version = this.versions.get(chatId) ?? 0;
     const c = classify(input, folder);
     const log = (decision: string, scope: string, by: string, reason?: string) =>
@@ -158,7 +159,8 @@ export class ApprovalService {
       return { verdict: "deny", reason: blocked };
     }
     const policy = this.host.mode(chatId);
-    const mode = policy.mode === "orchestrator-all" ? "orchestrator" : policy.mode;
+    // The judge's own tools must never ask that same judge to approve them.
+    const mode = judgeSignal ? "user" : policy.mode === "orchestrator-all" ? "orchestrator" : policy.mode;
     const delegateHighRisk = policy.mode === "orchestrator-all" || (mode === "orchestrator" && policy.delegateHighRisk);
     // A shell can touch paths not present in its request metadata. Reassess it for every task.
     const reusable = c.risk === "low" && (!input.command || isReadCommand(input.command));
@@ -194,7 +196,7 @@ export class ApprovalService {
       return { verdict: "allow" };
     }
 
-    // A separate, tool-less judge handles both the master and the workers.
+    // A separate judge handles both the master and the workers.
     let judgeReason: string | undefined;
     if (mode === "orchestrator" && this.host.judge) {
       const id = `ap:${randomUUID()}`;
@@ -234,7 +236,18 @@ export class ApprovalService {
     const id = `ap:${randomUUID()}`;
     const request: ApprovalRequest = { ...base, id, judgeReason };
     return new Promise((resolvePromise) => {
-      this.pending.set(id, { chatId, node: input.node, role: input.role, input, risk: c.risk, resolve: resolvePromise });
+      const cancel = () => {
+        if (!this.pending.delete(id)) return;
+        this.host.emit(chatId, input.node, input.role, { type: "approval_resolved", id, decision: "expired" });
+        this.host.pendingChanged(chatId, this.pendingCount(chatId));
+        resolve({ verdict: "deny", reason: "승인 판단이 종료되었습니다." });
+      };
+      const resolve = (result: VerdictResult) => {
+        judgeSignal?.removeEventListener("abort", cancel);
+        resolvePromise(result);
+      };
+      this.pending.set(id, { chatId, node: input.node, role: input.role, input, risk: c.risk, resolve });
+      judgeSignal?.addEventListener("abort", cancel, { once: true });
       this.host.emit(chatId, input.node, input.role, { type: "approval_request", request });
       this.host.pendingChanged(chatId, this.pendingCount(chatId));
     });
