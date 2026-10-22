@@ -1,4 +1,4 @@
-import { createContext, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { createContext, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { ChevronDown, ChevronUp, Search, X } from "lucide-react";
 import { findTextMatches } from "../lib/chat-search";
 import { Button, Input } from "./ui";
@@ -22,6 +22,7 @@ function blockAncestor(node: Text, root: HTMLElement): Element {
 
 function matchingRanges(root: HTMLElement, query: string): Range[] {
   const ranges: Range[] = [];
+  if (!query.trim()) return ranges;
   for (const body of root.querySelectorAll<HTMLElement>("[data-chat-search-text]")) {
     const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
     const nodes: { node: Text; start: number; end: number }[] = [];
@@ -87,7 +88,16 @@ export function ChatSearch({ root, revision, query, onQuery, onClose }: {
   const ranges = useRef<Range[]>([]);
   const active = useRef(0);
   const lastQuery = useRef("");
+  const [draft, setDraft] = useState(query);
+  const [composing, setComposing] = useState(false);
   const [result, setResult] = useState({ active: 0, count: 0 });
+  const pending = draft !== query;
+
+  useEffect(() => {
+    if (!pending || composing) return;
+    const timer = setTimeout(() => onQuery(draft), 500);
+    return () => clearTimeout(timer);
+  }, [draft, query, pending, composing, onQuery]);
 
   const show = (index: number, scroll: boolean) => {
     active.current = index;
@@ -111,11 +121,14 @@ export function ChatSearch({ root, revision, query, onQuery, onClose }: {
     if (!root.current) return;
     const changed = lastQuery.current !== query;
     lastQuery.current = query;
-    ranges.current = matchingRanges(root.current, query);
+    const previous = ranges.current[active.current];
+    ranges.current = matchingRanges(root.current, query).reverse();
+    const retained = !changed && previous ? ranges.current.findIndex(range =>
+      range.startContainer === previous.startContainer && range.startOffset === previous.startOffset) : -1;
     const highlight = new Highlight();
     for (const range of ranges.current) highlight.add(range);
     CSS.highlights.set("chat-search", highlight);
-    show(changed ? 0 : Math.max(0, Math.min(active.current, ranges.current.length - 1)), changed);
+    show(changed ? 0 : retained >= 0 ? retained : Math.max(0, Math.min(active.current, ranges.current.length - 1)), changed);
   }, [root, query, revision]);
   useLayoutEffect(() => () => {
     CSS.highlights.delete("chat-search");
@@ -124,16 +137,20 @@ export function ChatSearch({ root, revision, query, onQuery, onClose }: {
 
   return <div className="flex shrink-0 items-center gap-2 border-b bg-card px-4 py-2" role="search" aria-label="대화 내용 검색" data-testid="chat-search">
     <Search className="size-4 shrink-0 text-muted-foreground" />
-    <Input ref={input} value={query} onChange={e => onQuery(e.target.value)} className="h-8 max-w-md" aria-label="대화에서 찾을 내용" placeholder="현재 대화에서 검색…" onKeyDown={e => {
-      if (e.nativeEvent.isComposing) return;
+    <Input ref={input} value={draft} onChange={e => setDraft(e.target.value)} onCompositionStart={() => setComposing(true)} onCompositionEnd={() => setComposing(false)} className="h-8 max-w-md" aria-label="대화에서 찾을 내용" placeholder="검색어 입력 · Enter 또는 0.5초 뒤 검색" onKeyDown={e => {
+      if (composing || e.nativeEvent.isComposing) return;
       if (e.key === "Escape") { e.preventDefault(); onClose(); }
-      if (e.key === "Enter") { e.preventDefault(); move(e.shiftKey ? -1 : 1); }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        if (pending) onQuery(draft);
+        else move(e.shiftKey ? -1 : 1);
+      }
     }} />
     <span className="min-w-20 text-[12px] tabular-nums text-muted-foreground" role="status" data-testid="chat-search-count">
-      {query.trim() ? result.count ? `${result.active} / ${result.count}` : "결과 없음" : "내용 입력"}
+      {pending ? "검색 대기…" : query.trim() ? result.count ? `${result.active} / ${result.count}` : "결과 없음" : "내용 입력"}
     </span>
-    <Button variant="ghost" size="icon-sm" disabled={!result.count} onClick={() => move(-1)} aria-label="이전 검색 결과" title="Shift+Enter"><ChevronUp /></Button>
-    <Button variant="ghost" size="icon-sm" disabled={!result.count} onClick={() => move(1)} aria-label="다음 검색 결과" title="Enter"><ChevronDown /></Button>
+    <Button variant="ghost" size="icon-sm" disabled={pending || !result.count} onClick={() => move(1)} aria-label="다음 검색 결과" title="위쪽 결과 · Enter"><ChevronUp /></Button>
+    <Button variant="ghost" size="icon-sm" disabled={pending || !result.count} onClick={() => move(-1)} aria-label="이전 검색 결과" title="아래쪽 결과 · Shift+Enter"><ChevronDown /></Button>
     <Button variant="ghost" size="icon-sm" onClick={onClose} aria-label="대화 검색 닫기" title="Esc"><X /></Button>
   </div>;
 }
