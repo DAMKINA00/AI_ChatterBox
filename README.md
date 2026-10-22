@@ -6,6 +6,12 @@
 
 ## 주요 기능
 
+### 파일 드롭·대화 검색·실행 권한 분리 (0.4.31)
+- 채팅 화면은 일반 권한으로 실행하여 탐색기에서 이미지·문서·코드 파일을 여러 개 끌어다 놓아 첨부할 수 있습니다. 파일은 대화별 저장소로 복사하며 원본은 바꾸지 않습니다.
+- 마스터·작업자·승인 판단·데이터 처리는 별도 관리자 코어에서 실행합니다. 시작할 때 코어의 UAC 승인을 요청하며, 화면과 코어는 실행마다 인증하는 전용 로컬 파이프로 통신합니다. 앱의 도구 승인 정책은 그대로 적용합니다.
+- 대화 상단 검색 버튼 또는 `Ctrl+F`로 현재 대화 내용을 찾습니다. 검색어 강조, 결과 수, `Enter`/`Shift+Enter` 이동과 `Esc` 닫기를 지원하며, 검색 중에는 접힌 요청·도구 출력·파일 변경 내용을 펼칩니다. 왼쪽 검색창은 전체 채팅을 찾는 용도로 유지합니다.
+- [0.4.31 검증 기록](docs/validation-0.4.31.md)
+
 ### AI Studio 자동 설치 (0.4.30)
 - 마스터 또는 작업자가 AI Studio 모델을 호출하면 미설치된 AIStudio2API를 공식 배포본으로 설치하고 실행합니다. SHA-256 검증과 기존 설치 재사용, 동시 호출의 설치 중복 방지를 포함합니다.
 - 연결된 계정이 있으면 생성 서비스를 자동 시작합니다. 계정이 없으면 제미나이 웹 계정 관리의 **AI Studio · Argon → 연결** 안내를 표시합니다. 모델은 설치 전에도 선택할 수 있습니다.
@@ -118,7 +124,7 @@
 저장소를 받은 뒤 `npm install`, `npm run dist`로 `dist\AI_ChatterBox-<버전>-portable.exe`를 만들고 더블클릭해 실행합니다. 설치는 필요 없습니다. 기존 작업이 끝난 뒤 앱을 종료하고 새 파일로 실행하세요.
 
 - 실행할 때마다 임시 폴더에 압축을 풀기 때문에 처음 창이 뜰 때까지 10초쯤 걸립니다.
-- 실행기와 내부 앱 모두 Windows 관리자 권한을 요청합니다. UAC를 취소하면 실행되지 않습니다. CLI의 쓰기·명령 승인은 Windows 권한과 별도로 적용됩니다.
+- 실행기와 채팅 화면은 일반 권한으로 실행합니다. 마스터·에이전트 코어를 시작할 때만 UAC 승인을 요청합니다. 취소하면 다시 시도하거나 종료할 수 있습니다. 파일 드롭을 사용하려면 바로가기를 **관리자 권한으로 실행**하지 마세요. CLI의 쓰기·명령 승인은 Windows 권한과 별도로 적용됩니다.
 - 서명하지 않은 exe라서 처음 실행할 때 SmartScreen이 막으면 **추가 정보 → 실행**을 누르세요.
 - 데이터는 `%APPDATA%\AI_ChatterBox`에 저장됩니다.
   - `chatterbox.db`: 프로젝트, 채팅, 협의, 이벤트
@@ -128,7 +134,7 @@
 
 ## 개발
 
-관리자 PowerShell에서 개발 실행합니다. 일반 권한에서 실행한 개발 앱과 자식 CLI는 관리자 작업을 수행할 수 없습니다.
+일반 권한 PowerShell에서 개발 실행합니다. 채팅 화면은 일반 권한을 유지하고, 별도 마스터·에이전트 코어를 시작할 때 Windows 관리자 승인을 요청합니다.
 
 ```powershell
 npm install
@@ -157,8 +163,9 @@ npm run dev
 | `node scripts/smoke-cli-permissions.mjs` | 실제 Claude/Codex 마스터·작업자의 수정·명령·승인·표정 검사 (사용량 발생) |
 | `node scripts/smoke-cli-restrictions.mjs` | 실제 CLI의 명시적 읽기 전용 지시, 별도 판단 세션의 고위험 위임 분기 검사 (사용량 발생) |
 | `node scripts/verify-character-assets.mjs` | 49개 PNG의 크기·투명도 검사와 표정 갤러리 캡처 |
-| `pwsh -File scripts/verify-admin-manifest.ps1 -Paths dist/AI_ChatterBox-<버전>-portable.exe` | 배포 실행기의 requireAdministrator 매니페스트 검사 |
-| `node scripts/smoke-admin.mjs` | 격리 데이터로 UAC 실행·자식 CLI 관리자 토큰·관리자 조회 명령 검사 (직접 UAC 확인 필요, 사용량 발생) |
+| `pwsh -File scripts/verify-admin-manifest.ps1 -Paths dist/AI_ChatterBox-<버전>-portable.exe` | UI 실행기의 asInvoker 매니페스트 검사. 이전 버전은 -ExpectedLevel requireAdministrator 지정 |
+| `node scripts/e2e-chat-search-drop.mjs` | 격리 데이터로 대화 검색·파일 드롭·첨부 보관 검사 (모델 호출 없음) |
+| `node scripts/e2e-core-lifecycle.mjs --elevated` | 일반 UI/관리자 코어 토큰·파이프·정상 종료·화면 강제 종료 후 코어 정리 검사 (UAC 확인 필요, 모델 호출 없음) |
 | `npm run dist` | `dist\AI_ChatterBox-<버전>-portable.exe` 만들기 |
 | `npm run codex:schema` | 설치된 codex 버전으로 `src/main/codex-schema` 다시 만들기 |
 | `node scripts/e2e-v1.mjs` | 화면·구조 검사: 트리, 첨부 3가지, 이미지 이해, 마크다운, 모델 상속, 재실행 |
@@ -173,6 +180,10 @@ e2e는 진짜 CLI를 쓰므로 사용량이 듭니다. 데이터는 `.scratch\`�
 
 ```
 src/main/
+  index.ts            일반 권한 UI, 트레이, 파일 대화상자
+  core.ts             관리자 코어: 마스터·에이전트·승인·데이터 처리
+  core-launch.ts      UAC 코어 실행과 연결
+  core-rpc.ts         실행별 인증 로컬 파이프, 요청·이벤트·연결 종료
   index.ts            창, IPC, cbx:// 첨부 미리보기, 종료 시 CLI 정리
   chats.ts            채팅별 마스터·작업자 드라이버, 상태, 이벤트 저장·전달
   orchestrator.ts     협업 엔진: 마스터 + 작업자 풀 (spawn/ask/ask_parallel/release/agents/checklist/update_goal/ask_user/set_expression), 병렬·범위 잠금, 한도, 추가 지시, 중지, 슬래시 명령

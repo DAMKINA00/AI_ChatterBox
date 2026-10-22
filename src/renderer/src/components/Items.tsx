@@ -1,4 +1,4 @@
-import { memo, useState, type ReactNode } from "react";
+import { memo, useContext, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
   ArrowRight,
@@ -29,6 +29,7 @@ import { AgentAvatar, type AvatarSize } from "./AgentAvatar";
 import { effortLabel } from "./EffortPicker";
 import { Badge, Button, Input } from "./ui";
 import { WorkingIndicator } from "./WorkingIndicator";
+import { ChatSearchQuery } from "./ChatSearch";
 
 export type Tone = "orch" | "claude" | "gpt" | "gemini" | "grok" | "deepseek";
 const TONE_TEXT: Record<Tone, string> = { orch: "text-orch", claude: "text-claude", gpt: "text-gpt", gemini: "text-gemini", grok: "text-grok", deepseek: "text-deepseek" };
@@ -81,19 +82,20 @@ export function AttachmentChip({ a, onRemove }: { a: AttachmentRef; onRemove?: (
             <img src={`cbx://attachment/${a.id}`} alt={a.name} className="size-16 object-cover" draggable={false} />
           </button>
           <div className="min-w-0 py-2 pr-3">
-            <FileLink href={a.path}>{a.name}</FileLink>
+            <span data-chat-search-text><FileLink href={a.path}>{a.name}</FileLink></span>
             <div className="text-[11px] text-muted-foreground">{formatBytes(a.size)}</div>
           </div>
         </div>
       ) : (
         <div className="flex items-center gap-2 py-2 pr-3 pl-2.5 text-left">
           <FileText className="size-4 text-muted-foreground" />
-          <span className="max-w-40 truncate"><FileLink href={a.path}>{a.name}</FileLink></span>
+          <span className="max-w-40 truncate"><span data-chat-search-text><FileLink href={a.path}>{a.name}</FileLink></span></span>
           <span className="text-muted-foreground">{formatBytes(a.size)}</span>
         </div>
       )}
       {onRemove && (
         <button
+          data-chat-search-ignore
           onClick={onRemove}
           aria-label={`${a.name} 첨부 삭제`}
           className="absolute top-1 right-1 rounded-full bg-black/60 p-0.5 text-white opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100"
@@ -149,6 +151,8 @@ export const ItemList = memo(function ItemList({ items, chatId, nested = false }
 
 function ToolGroup({ items, chatId, nested }: { items: ToolItem[]; chatId: number; nested: boolean }) {
   const [expanded, setExpanded] = useState(false);
+  const searching = !!useContext(ChatSearchQuery).trim();
+  const showExpanded = expanded || searching;
   const runningCount = items.filter((item) => !item.result).length;
   const errorCount = items.filter((item) => item.result && !item.result.ok).length;
   return (
@@ -157,11 +161,12 @@ function ToolGroup({ items, chatId, nested }: { items: ToolItem[]; chatId: numbe
         type="button"
         className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-accent/60"
         data-testid="task-list-toggle"
-        aria-expanded={expanded}
+        aria-expanded={showExpanded}
         aria-label={`작업 목록 ${items.length}개`}
+        disabled={searching}
         onClick={() => setExpanded(!expanded)}
       >
-        <ChevronRight className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", expanded && "rotate-90")} />
+        <ChevronRight className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", showExpanded && "rotate-90")} />
         <Terminal className="size-3.5 shrink-0 text-muted-foreground" />
         <span className="shrink-0 text-[12.5px] font-medium">작업 목록</span>
         <span className="text-[12px] text-muted-foreground">({items.length})</span>
@@ -179,7 +184,7 @@ function ToolGroup({ items, chatId, nested }: { items: ToolItem[]; chatId: numbe
           </span>
         )}
       </button>
-      {expanded && (
+      {showExpanded && (
         <div className="space-y-1.5 border-t p-2">
           {items.map((item) => (
             <ToolCard key={item.key} item={item} chatId={chatId} nested />
@@ -196,7 +201,7 @@ const ItemView = memo(function ItemView({ item, chatId, nested }: { item: Item; 
     case "peer":
       return <div className="rounded-md border border-dashed px-3 py-2" data-testid="peer-message">
         <div className="mb-1 text-[12px] font-medium">{roleName(item.from, agents)} → {roleName(item.to, agents)} · 협업 메시지</div>
-        <Markdown text={item.text} />
+        <div data-chat-search-text><Markdown text={item.text} /></div>
       </div>;
     case "user":
       return (
@@ -214,7 +219,7 @@ const ItemView = memo(function ItemView({ item, chatId, nested }: { item: Item; 
                 ))}
               </div>
             )}
-            {item.text && <div className="whitespace-pre-wrap text-[13px] text-foreground select-text">{item.text}</div>}
+            {item.text && <div data-chat-search-text className="whitespace-pre-wrap text-[13px] text-foreground select-text">{item.text}</div>}
           </div>
           <ItemTime at={item.at} />
         </div>
@@ -226,7 +231,7 @@ const ItemView = memo(function ItemView({ item, chatId, nested }: { item: Item; 
           <div className="min-w-0">
             <RoleName chatId={chatId} role={item.role} expression={item.expression} avatar={false} />
             <div className="group relative mt-0.5">
-              <Markdown text={item.text} />
+              <div data-chat-search-text><Markdown text={item.text} /></div>
               {item.streaming && <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse-dot rounded-sm bg-primary align-text-bottom" />}
               {!item.streaming && (
                 <CopyButton text={item.text} className="absolute -top-6 right-0 opacity-0 group-hover:opacity-100" label="메시지 복사" />
@@ -261,7 +266,7 @@ const ItemView = memo(function ItemView({ item, chatId, nested }: { item: Item; 
     case "artifacts":
       return <ArtifactCard item={item} nested={nested} />;
     case "notice":
-      return <Notice tone={item.tone}>{item.text}</Notice>;
+      return <Notice tone={item.tone}><span data-chat-search-text>{item.text}</span></Notice>;
   }
 });
 
@@ -274,7 +279,7 @@ function ArtifactCard({ item, nested }: { item: ArtifactItem; nested: boolean })
       </div>
       <div className="flex flex-wrap gap-x-3 gap-y-1 text-[12px]">
         {item.paths.map((path, index) => (
-          <ArtifactPreview key={`${path}-${index}`} href={path} label={artifactFileLabel(path)} />
+          <span key={`${path}-${index}`} data-chat-search-text><ArtifactPreview href={path} label={artifactFileLabel(path)} /></span>
         ))}
       </div>
     </div>
@@ -314,8 +319,8 @@ function ImageCard({ item, chatId }: { item: Extract<Item, { kind: "image" }>; c
           {item.status === "running" ? "생성 중" : item.status === "done" ? "완료" : "오류"}
         </span>
       </div>
-      {item.prompt && <Markdown text={item.prompt} className="text-[12px] text-muted-foreground" />}
-      {item.error && <div className="text-[12.5px] text-destructive select-text">{item.error}</div>}
+      {item.prompt && <div data-chat-search-text><Markdown text={item.prompt} className="text-[12px] text-muted-foreground" /></div>}
+      {item.error && <div data-chat-search-text className="text-[12.5px] text-destructive select-text">{item.error}</div>}
       {item.attachment && <AttachmentChip a={item.attachment} />}
     </div>
   );
@@ -323,13 +328,15 @@ function ImageCard({ item, chatId }: { item: Extract<Item, { kind: "image" }>; c
 
 const ToolCard = memo(function ToolCard({ item, chatId, nested }: { item: Extract<Item, { kind: "tool" }>; chatId: number; nested: boolean }) {
   const [open, setOpen] = useState(false);
+  const searching = !!useContext(ChatSearchQuery).trim();
+  const showOpen = open || searching;
   const state = !item.result ? "running" : item.result.ok ? "ok" : "fail";
   const shell = item.name === "Bash" || item.name === "PowerShell" || item.name === "명령";
   const brief = item.input.split("\n").find((l) => l.trim() && l.trim() !== "{") ?? "";
   return (
     <div className={cn("overflow-hidden rounded-lg border bg-card", !nested && "ml-3.5")} data-testid="tool-card">
-      <button className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-accent/60" onClick={() => setOpen(!open)}>
-        <ChevronRight className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", open && "rotate-90")} />
+      <button type="button" className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-accent/60" aria-expanded={showOpen} disabled={searching} onClick={() => setOpen(!open)}>
+        <ChevronRight className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", showOpen && "rotate-90")} />
         {shell ? <Terminal className="size-3.5 shrink-0 text-muted-foreground" /> : <Wrench className="size-3.5 shrink-0 text-muted-foreground" />}
         <span className="shrink-0 text-[12.5px] font-medium">{item.name}</span>
         <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-muted-foreground">{brief.trim()}</span>
@@ -338,16 +345,17 @@ const ToolCard = memo(function ToolCard({ item, chatId, nested }: { item: Extrac
         {state === "ok" && <Check className="size-3.5 shrink-0 text-success" />}
         {state === "fail" && <X className="size-3.5 shrink-0 text-destructive" />}
       </button>
-      {open && (
+      {showOpen && (
         <div className="space-y-2 border-t p-2.5">
           {item.diffs?.length ? (
             <DiffList files={item.diffs} defaultOpen />
           ) : (
-            <pre className="max-h-64 overflow-auto rounded-md bg-code-bg p-2.5 font-mono text-[12px] whitespace-pre-wrap select-text">{item.input}</pre>
+            <pre data-chat-search-text className="max-h-64 overflow-auto rounded-md bg-code-bg p-2.5 font-mono text-[12px] whitespace-pre-wrap select-text">{item.input}</pre>
           )}
           {item.result && (
             <div className="relative">
               <pre
+                data-chat-search-text
                 className={cn(
                   "max-h-72 overflow-auto rounded-md bg-code-bg p-2.5 font-mono text-[12px] whitespace-pre-wrap select-text",
                   !item.result.ok && "text-destructive",
@@ -408,8 +416,8 @@ function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval"
         {high ? <ShieldAlert className="size-4 text-destructive" /> : <Hand className="size-4 text-warning" />}
         <span className="text-[13px] font-semibold">승인 요청</span>
         <RoleName chatId={chatId} role="orch" size={24} />
-        <Badge className="font-mono">{r.title}</Badge>
-        {high && <Badge className="border-destructive/40 text-destructive">위험 · {r.riskReason}</Badge>}
+        <Badge className="font-mono"><span data-chat-search-text>{r.title}</span></Badge>
+        {high && <Badge className="border-destructive/40 text-destructive"><span data-chat-search-text>위험 · {r.riskReason}</span></Badge>}
         {receiptText ? (
           <span className="ml-auto flex items-center gap-1 text-[12px] text-primary" data-testid="approval-receipt" role="status" aria-live="polite">
             <Loader2 className="size-3.5 animate-spin" />
@@ -429,15 +437,15 @@ function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval"
         </div>
       )}
       {r.judgeReason && (
-        <div className="rounded-md bg-orch/10 px-2.5 py-1.5 text-[12.5px] select-text" data-testid="judge-reason">
+        <div className="rounded-md bg-orch/10 px-2.5 py-1.5 text-[12.5px] select-text" data-testid="judge-reason" data-chat-search-text>
           {r.judgeReason}
         </div>
       )}
-      {r.reason && <div className="text-[12.5px] text-muted-foreground select-text">{r.reason}</div>}
+      {r.reason && <div data-chat-search-text className="text-[12.5px] text-muted-foreground select-text">{r.reason}</div>}
       {r.diffs?.length ? (
         <DiffList files={r.diffs} defaultOpen={!status} />
       ) : (
-        <pre className="max-h-56 overflow-auto rounded-md bg-code-bg p-2.5 font-mono text-[12px] whitespace-pre-wrap select-text">{r.detail}</pre>
+        <pre data-chat-search-text className="max-h-56 overflow-auto rounded-md bg-code-bg p-2.5 font-mono text-[12px] whitespace-pre-wrap select-text">{r.detail}</pre>
       )}
       {!status && !masterView && (
         <Button size="sm" onClick={() => void select({ chatId, node: "orch" })} data-testid="approval-open-master">마스터 대화에서 확인</Button>
@@ -470,6 +478,8 @@ function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval"
 function AutoApproval({ item, chatId }: { item: Extract<Item, { kind: "auto" }>; chatId: number }) {
   const who = useRole(chatId, item.request.role).name;
   const [open, setOpen] = useState(false);
+  const searching = !!useContext(ChatSearchQuery).trim();
+  const showOpen = open || searching;
   const r = item.request;
   const allowed = item.decision === "allow";
   const brief = r.detail.split("\n").find((l) => l.trim() && l.trim() !== "{")?.trim() ?? "";
@@ -477,24 +487,26 @@ function AutoApproval({ item, chatId }: { item: Extract<Item, { kind: "auto" }>;
     <div className="text-[12px]" data-testid="auto-approval" data-decision={item.decision}>
       <button
         className="flex w-full min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-muted-foreground hover:bg-accent/60"
+        aria-expanded={showOpen}
+        disabled={searching}
         onClick={() => setOpen(!open)}
       >
         {allowed ? <ShieldCheck className="size-3.5 shrink-0 text-success" /> : <X className="size-3.5 shrink-0 text-destructive" />}
         <span className={cn("shrink-0 font-medium", allowed ? "text-success" : "text-destructive")}>
           {MASTER_LABEL} {allowed ? "승인" : "거부"}
         </span>
-        <span className="shrink-0">· {who} · {r.title}</span>
+        <span className="shrink-0">· {who} · <span data-chat-search-text>{r.title}</span></span>
         <span className="min-w-0 truncate font-mono">{brief}</span>
-        <span className="min-w-0 shrink truncate">— {item.reason}</span>
+        <span className="min-w-0 shrink truncate">— <span data-chat-search-text>{item.reason}</span></span>
       </button>
-      {open && (
+      {showOpen && (
         <div className="mt-1 ml-6 space-y-1.5">
           {r.diffs?.length ? (
             <DiffList files={r.diffs} />
           ) : (
-            <pre className="max-h-48 overflow-auto rounded-md bg-code-bg p-2 font-mono text-[12px] whitespace-pre-wrap select-text">{r.detail}</pre>
+            <pre data-chat-search-text className="max-h-48 overflow-auto rounded-md bg-code-bg p-2 font-mono text-[12px] whitespace-pre-wrap select-text">{r.detail}</pre>
           )}
-          {r.riskReason && <div className="text-muted-foreground">자동 분류: {r.riskReason}</div>}
+          {r.riskReason && <div className="text-muted-foreground">자동 분류: <span data-chat-search-text>{r.riskReason}</span></div>}
         </div>
       )}
     </div>
@@ -509,6 +521,9 @@ const STATUS_LABEL = { running: "진행 중", done: "완료", error: "오류", s
 
 function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }>; chatId: number }) {
   const [expanded, setExpanded] = useState(false);
+  const searchQuery = useContext(ChatSearchQuery);
+  const searching = !!searchQuery.trim();
+  const showRequest = expanded || searching;
   const select = useStore((s) => s.select);
   const consult = useStore((s) => s.consults[chatId]?.find((c) => c.id === item.consultId));
   const requestBrief = item.request.split("\n").find((line) => line.trim())?.trim() ?? "(요청 내용 없음)";
@@ -521,11 +536,12 @@ function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }
           type="button"
           className="flex min-w-0 flex-1 items-center gap-2 text-left"
           data-testid="consult-request-toggle"
-          aria-expanded={expanded}
-          aria-label={`요청 ${expanded ? "접기" : "펼치기"}`}
+          aria-expanded={showRequest}
+          aria-label={searching ? "검색 중 요청 펼침" : `요청 ${showRequest ? "접기" : "펼치기"}`}
+          disabled={searching}
           onClick={() => setExpanded(!expanded)}
         >
-          <ChevronRight className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", expanded && "rotate-90")} />
+          <ChevronRight className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", showRequest && "rotate-90")} />
           <RoleName chatId={chatId} role={item.from} size={24} />
           <ArrowRight className="size-3.5 text-muted-foreground" />
           <RoleName chatId={chatId} role={item.to} size={24} />
@@ -557,20 +573,20 @@ function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }
       </div>
       {item.reason && (
         <div className="border-t px-3 py-1.5 text-[11.5px] text-muted-foreground select-text" data-testid="consult-reason">
-          배정 이유 · {item.reason}
+          배정 이유 · <span data-chat-search-text>{item.reason}</span>
         </div>
       )}
       {item.status !== "running" && item.summary?.trim() && (
         <div className="border-t px-3 py-2 text-[12px]" data-testid="consult-summary">
           <div className="mb-1 text-[11px] font-medium text-muted-foreground">결과 요약</div>
-          <Markdown text={item.summary} className="text-[12.5px]" />
+          <div data-chat-search-text><Markdown text={item.summary} className="text-[12.5px]" /></div>
         </div>
       )}
-      {expanded && (
+      {showRequest && (
         <div className="border-t bg-background/40 p-3" data-testid="consult-request-details">
           <div className="rounded-lg border bg-card px-3 py-2">
             <div className="mb-1 text-[11px] font-medium text-muted-foreground">요청</div>
-            <div data-testid="consult-request-body">
+            <div data-testid="consult-request-body" data-chat-search-text>
               <Markdown text={item.request} className="text-[13px]" />
             </div>
             {item.attachments.length > 0 && (
@@ -596,7 +612,7 @@ function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }
       )}
       {item.files && item.files.length > 0 && (
         <div className="border-t px-3 py-2 text-[12px] text-muted-foreground">
-          변경한 파일: <span className="font-mono">{item.files.join(", ")}</span>
+          변경한 파일: <span data-chat-search-text className="font-mono">{item.files.join(", ")}</span>
         </div>
       )}
     </div>
@@ -613,10 +629,10 @@ function AskCard({ item, chatId }: { item: Extract<Item, { kind: "ask" }>; chatI
         <MessageCircleQuestion className="size-4 text-primary" />
         마스터의 질문
       </div>
-      <Markdown text={item.question} />
+      <div data-chat-search-text><Markdown text={item.question} /></div>
       {item.answer !== undefined ? (
         <div className="text-[12.5px] text-muted-foreground">
-          답변: <span className="text-foreground">{item.answer}</span>
+          답변: <span data-chat-search-text className="text-foreground">{item.answer}</span>
         </div>
       ) : (
         <>

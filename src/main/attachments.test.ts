@@ -83,3 +83,60 @@ test("generated attachment metadata and file contents survive store reload", () 
     rmSync(f.root, { recursive: true, force: true });
   }
 });
+
+test("fromPath copies non-image Korean and spaced filenames without changing source bytes", () => {
+  const f = fixture();
+  try {
+    const source = join(f.root, "회의 자료 01.txt");
+    const sourceBytes = Buffer.from("원본 문서\0bytes", "utf8");
+    writeFileSync(source, sourceBytes);
+
+    const ref = f.attachments.fromPath(f.chatId, source);
+
+    assert.equal(ref.name, "회의 자료 01.txt");
+    assert.equal(ref.mime, "text/plain");
+    assert.equal(ref.size, sourceBytes.byteLength);
+    assert.notEqual(ref.path, source);
+    assert.deepEqual(readFileSync(ref.path), sourceBytes);
+    assert.deepEqual(readFileSync(source), sourceBytes);
+  } finally {
+    f.store.close();
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("fromPath stores duplicate filenames at separate paths", () => {
+  const f = fixture();
+  try {
+    const firstDir = mkdtempSync(join(f.root, "first-"));
+    const secondDir = mkdtempSync(join(f.root, "second-"));
+    const first = join(firstDir, "중복 자료.txt");
+    const second = join(secondDir, "중복 자료.txt");
+    writeFileSync(first, "first");
+    writeFileSync(second, "second");
+
+    const refs = [f.attachments.fromPath(f.chatId, first), f.attachments.fromPath(f.chatId, second)];
+
+    assert.notEqual(refs[0].path, refs[1].path);
+    assert.deepEqual(readFileSync(refs[0].path, "utf8"), "first");
+    assert.deepEqual(readFileSync(refs[1].path, "utf8"), "second");
+    assert.equal((f.store.db.prepare("SELECT COUNT(*) AS count FROM attachments WHERE chat_id = ?").get(f.chatId) as { count: number }).count, 2);
+  } finally {
+    f.store.close();
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("fromPath rejects directories before creating a database attachment", () => {
+  const f = fixture();
+  try {
+    assert.throws(
+      () => f.attachments.fromPath(f.chatId, f.root),
+      /폴더는 첨부할 수 없습니다\. 파일을 선택해 주세요\./,
+    );
+    assert.equal((f.store.db.prepare("SELECT COUNT(*) AS count FROM attachments WHERE chat_id = ?").get(f.chatId) as { count: number }).count, 0);
+  } finally {
+    f.store.close();
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});

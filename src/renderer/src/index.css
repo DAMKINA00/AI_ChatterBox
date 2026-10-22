@@ -1,6 +1,15 @@
 @import "tailwindcss";
 @import "pretendard/dist/web/variable/pretendardvariable-dynamic-subset.css";
 
+::highlight(chat-search) {
+  background-color: #e5b84e66;
+  color: inherit;
+}
+::highlight(chat-search-active) {
+  background-color: #f5ba42;
+  color: #15171b;
+}
+
 @custom-variant dark (&:where(.dark, .dark *));
 
 .working-orbit { transform-origin: 12px 12px; animation: working-orbit 2.4s linear infinite; }

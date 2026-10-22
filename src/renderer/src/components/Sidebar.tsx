@@ -148,9 +148,13 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
   // Message-content matches come from the main process (debounced).
   const [contentHits, setContentHits] = useState<Set<number>>(new Set());
   useEffect(() => {
-    if (!q) return setContentHits(new Set());
-    const t = setTimeout(() => void api.searchChats(q).then((ids) => setContentHits(new Set(ids))), 200);
-    return () => clearTimeout(t);
+    setContentHits(new Set());
+    if (!q) return;
+    let canceled = false;
+    const t = setTimeout(() => void api.searchChats(q).then((ids) => {
+      if (!canceled) setContentHits(new Set(ids));
+    }).catch(() => { if (!canceled) setContentHits(new Set()); }), 200);
+    return () => { canceled = true; clearTimeout(t); };
   }, [q]);
   const visibleProjects = projects.filter((p) => showArchived || !p.archived);
   const working = chats.filter((c) => c.status === "working" || c.status === "approval");

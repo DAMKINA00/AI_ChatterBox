@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useContext, useState } from "react";
 import { ChevronRight, FilePlus2, FileMinus2, FilePen } from "lucide-react";
 import type { FileDiff } from "../../../shared/types";
 import { cn } from "../lib/utils";
+import { ChatSearchQuery } from "./ChatSearch";
 
 export function diffStats(diff: string): { add: number; del: number } {
   let add = 0;
@@ -36,6 +37,7 @@ export function DiffBody({ diff }: { diff: string }) {
       {lines.map((l, i) => (
         <div
           key={i}
+          data-chat-search-text
           className={cn(
             "px-3 whitespace-pre",
             l.startsWith("+") && "bg-success/12 text-success",
@@ -62,20 +64,25 @@ export function DiffList({ files, defaultOpen = false }: { files: FileDiff[]; de
 
 function DiffFile({ file, defaultOpen }: { file: FileDiff; defaultOpen: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
+  const searching = !!useContext(ChatSearchQuery).trim();
+  const showOpen = open || searching;
   const Icon = file.kind === "add" ? FilePlus2 : file.kind === "delete" ? FileMinus2 : FilePen;
   return (
     <div>
       <button
+        type="button"
         className="flex w-full items-center gap-2 bg-card px-3 py-1.5 text-left text-[12.5px] hover:bg-accent"
+        aria-expanded={showOpen}
+        disabled={searching}
         onClick={() => setOpen(!open)}
         title={file.movePath ? `${file.path} → ${file.movePath}` : file.path}
       >
-        <ChevronRight className={cn("size-3.5 text-muted-foreground transition-transform", open && "rotate-90")} />
+        <ChevronRight className={cn("size-3.5 text-muted-foreground transition-transform", showOpen && "rotate-90")} />
         <Icon className="size-3.5 text-muted-foreground" />
-        <span className="min-w-0 flex-1 truncate font-mono">{shortPath(file.path)}{file.movePath && ` → ${shortPath(file.movePath)}`}</span>
+        <span data-chat-search-text className="min-w-0 flex-1 truncate font-mono">{shortPath(file.path)}{file.movePath && ` → ${shortPath(file.movePath)}`}</span>
         <Stats diff={file.diff} />
       </button>
-      {open && <DiffBody diff={file.diff} />}
+      {showOpen && <DiffBody diff={file.diff} />}
     </div>
   );
 }

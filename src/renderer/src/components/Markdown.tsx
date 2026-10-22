@@ -20,6 +20,7 @@ export function CopyButton({ text, className, label = "복사" }: { text: string
   return (
     <button
       type="button"
+      data-chat-search-ignore
       aria-label={label}
       title={label}
       onClick={() => {

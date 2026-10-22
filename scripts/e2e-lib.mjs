@@ -81,13 +81,14 @@ export function countProcs(name) {
 }
 
 /** Launch the built app (or E2E_EXE) on a scratch data dir. */
-export async function launch(dataDir) {
+export async function launch(dataDir, { elevateCore = false } = {}) {
   const exe = process.env.E2E_EXE;
   const app = await electron.launch({
-    ...(exe ? { executablePath: exe, args: ["--test-data"] } : { args: [root] }),
+    ...(exe ? { executablePath: exe, args: ["--test-data", ...(elevateCore ? ["--elevate-test-core"] : [])] } : { args: [root, ...(elevateCore ? ["--elevate-test-core"] : [])] }),
+    timeout: elevateCore ? 150_000 : 30_000,
     env: { ...process.env, AI_CHATTERBOX_DATA: dataDir, AI_CHATTERBOX_HIDE: "1" },
   });
-  const page = await app.firstWindow();
+  const page = await app.firstWindow({ timeout: elevateCore ? 150_000 : 30_000 });
   page.on("pageerror", (e) => console.log("[pageerror]", e.message));
   page.on("console", (m) => m.type() === "error" && console.log("[renderer]", m.text()));
   await page.waitForSelector('[data-testid="sidebar"]');

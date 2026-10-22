@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string[]]$Paths)
+param([Parameter(Mandatory=$true)][string[]]$Paths, [ValidateSet('asInvoker','requireAdministrator')][string]$ExpectedLevel = 'asInvoker')
 $ErrorActionPreference = 'Stop'
 Add-Type @'
 using System;
@@ -24,7 +24,7 @@ foreach ($taskPath in $Paths) {
   $taskBytes = New-Object byte[] $taskLength
   [Runtime.InteropServices.Marshal]::Copy($taskPointer, $taskBytes, 0, $taskLength)
   $taskManifest = [Text.Encoding]::UTF8.GetString($taskBytes)
-  if ($taskManifest -notmatch 'requestedExecutionLevel\s+level=["'']requireAdministrator["'']') { throw "Expected requireAdministrator: $taskAbsolute" }
-  Write-Output "PASS requireAdministrator: $taskAbsolute"
+  if ($taskManifest -notmatch ('requestedExecutionLevel\s+level=["'']' + [regex]::Escape($ExpectedLevel) + '["'']')) { throw "Expected ${ExpectedLevel}: $taskAbsolute" }
+  Write-Output "PASS ${ExpectedLevel}: $taskAbsolute"
  } finally { [void][ManifestResource]::FreeLibrary($taskModule) }
 }

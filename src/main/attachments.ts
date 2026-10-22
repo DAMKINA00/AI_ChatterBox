@@ -40,6 +40,7 @@ export class AttachmentStore {
   }
 
   fromPath(chatId: number, src: string): AttachmentRef {
+    if (!statSync(src).isFile()) throw new Error("폴더는 첨부할 수 없습니다. 파일을 선택해 주세요.");
     const name = basename(src);
     const dest = this.target(chatId, name);
     copyFileSync(src, dest);

@@ -1,5 +1,5 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ArrowDown, Check, ChevronDown, CircleAlert, History, ImagePlus, Loader2, Paperclip, Pause, Play, RotateCcw, SendHorizontal, ShieldCheck, Workflow, X } from "lucide-react";
+import { ArrowDown, Check, ChevronDown, CircleAlert, History, ImagePlus, Loader2, Paperclip, Pause, Play, RotateCcw, Search, SendHorizontal, ShieldCheck, Workflow, X } from "lucide-react";
 import {
   APPROVAL_MODE_LABEL,
   AGENT_LABEL,
@@ -44,6 +44,7 @@ import {
 } from "./ui";
 import { StatusIcon } from "./Sidebar";
 import { WorkingIndicator } from "./WorkingIndicator";
+import { ChatSearch, ChatSearchQuery } from "./ChatSearch";
 
 export function ChatView({ chat, project, node }: { chat: Chat; project: Project; node?: NodeId }) {
   const events = useStore((s) => s.events[chat.id]);
@@ -53,8 +54,24 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
   const items = useMemo(() => buildTimeline(events ?? [], node, busy), [buildTimeline, events, node, busy]);
   const instructionAt = useMemo(() => latestInstructionAt(events ?? [], chat.createdAt), [events, chat.createdAt]);
   const [dragging, setDragging] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
   const composer = useRef<ComposerHandle>(null);
   const plan = useMemo(() => planOf(events ?? []), [events]);
+  const canAttach = !node || node === "orch";
+
+  useEffect(() => {
+    const keydown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f" && !document.querySelector('[role="dialog"]')) {
+        e.preventDefault();
+        setSearchOpen(true);
+        document.querySelector<HTMLInputElement>('[aria-label="대화에서 찾을 내용"]')?.select();
+      }
+    };
+    window.addEventListener("keydown", keydown);
+    return () => window.removeEventListener("keydown", keydown);
+  }, []);
+  useEffect(() => { setDragging(false); }, [node]);
 
   const agents = useStore((s) => s.agents[chat.id]);
   const nodeLabel = useMemo(() => {
@@ -70,26 +87,30 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
   return (
     <div
       className="relative flex h-full min-h-0 flex-col"
+      data-testid="chat-view"
       onDragOver={(e) => {
         if (e.dataTransfer.types.includes("Files")) {
           e.preventDefault();
-          setDragging(true);
+          e.dataTransfer.dropEffect = canAttach ? "copy" : "none";
+          setDragging(canAttach);
         }
       }}
       onDragLeave={(e) => {
         if (e.currentTarget === e.target || !e.currentTarget.contains(e.relatedTarget as Node)) setDragging(false);
       }}
       onDrop={(e) => {
+        if (!e.dataTransfer.types.includes("Files")) return;
         e.preventDefault();
         setDragging(false);
-        composer.current?.addFiles([...e.dataTransfer.files]);
+        if (canAttach) composer.current?.addFiles([...e.dataTransfer.files]);
       }}
     >
-      <ChatHeader chat={chat} project={project} nodeLabel={nodeLabel} masterExpression={latestExpression(events ?? [], "orch")} />
+      <ChatHeader chat={chat} project={project} nodeLabel={nodeLabel} masterExpression={latestExpression(events ?? [], "orch")} onSearch={() => setSearchOpen(true)} />
       <TeamChips chat={chat} />
       {!node && <GoalBar chat={chat} />}
       {!node && plan && <PlanPanel chat={chat} plan={plan} onRevise={() => composer.current?.setText("/plan 수정: ")} />}
-      <Timeline items={items} chatId={chat.id} role={streamRole} busy={busy} instructionAt={instructionAt} empty={!events?.length} loading={!events} masterView={!node || node === "orch"} />
+      <Timeline items={items} chatId={chat.id} role={streamRole} busy={busy} instructionAt={instructionAt} empty={!events?.length} loading={!events} masterView={!node || node === "orch"}
+        searchOpen={searchOpen} searchQuery={searchQuery} onSearchQuery={setSearchQuery} onCloseSearch={() => { setSearchOpen(false); setSearchQuery(""); }} />
       {chat.status === "interrupted" && <InterruptedBanner chat={chat} />}
       {node && node !== "orch" ? (
         <div className="border-t px-6 py-2.5 text-center text-[12px] text-muted-foreground">
@@ -103,9 +124,10 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
         <Composer ref={composer} chat={chat} project={project} busy={busy} />
       )}
       {dragging && (
-        <div className="pointer-events-none absolute inset-2 z-20 flex flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-primary bg-primary/8 text-primary">
+        <div data-testid="file-drop-overlay" className="pointer-events-none absolute inset-2 z-20 flex flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-primary bg-background/95 text-primary">
           <ImagePlus className="size-8" />
-          <div className="text-[14px] font-medium">여기에 놓아 첨부</div>
+          <div className="text-[14px] font-medium">파일을 여기에 놓아 첨부</div>
+          <div className="text-[12px] text-muted-foreground">이미지·문서·코드 파일을 여러 개 한 번에 추가할 수 있습니다</div>
         </div>
       )}
     </div>
@@ -128,7 +150,7 @@ function ProviderControls({ agent, web = false, apiProvider = agent === "deepsee
   </div>;
 }
 
-function ChatHeader({ chat, project, nodeLabel, masterExpression }: { chat: Chat; project: Project; nodeLabel: string | null; masterExpression: AgentExpression }) {
+function ChatHeader({ chat, project, nodeLabel, masterExpression, onSearch }: { chat: Chat; project: Project; nodeLabel: string | null; masterExpression: AgentExpression; onSearch: () => void }) {
   const updateChat = useStore((s) => s.updateChat);
   const models = useStore((s) => s.models);
   const label = useModelLabel();
@@ -155,6 +177,9 @@ function ChatHeader({ chat, project, nodeLabel, masterExpression }: { chat: Chat
         <div className="max-w-[35%] truncate text-[11.5px] text-muted-foreground" title={`${project.name} · ${project.folder}`}>
           {project.name} · {project.folder}
         </div>
+        <Tooltip content="대화 내용 검색 (Ctrl+F)">
+          <Button variant="ghost" size="icon-sm" aria-label="대화 내용 검색" onClick={onSearch}><Search /></Button>
+        </Tooltip>
       </div>
       <div className="flex w-full min-w-0 max-w-full items-center gap-2 overflow-x-auto whitespace-nowrap" data-testid="chat-header-master-row">
         <ProviderControls agent={orch.agent} master>
@@ -484,7 +509,7 @@ function InterruptedBanner({ chat }: { chat: Chat }) {
   );
 }
 
-function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, masterView }: { items: ReturnType<typeof buildItems>; chatId: number; role?: Role; busy: boolean; instructionAt: number; empty: boolean; loading: boolean; masterView: boolean }) {
+function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, masterView, searchOpen, searchQuery, onSearchQuery, onCloseSearch }: { items: ReturnType<typeof buildItems>; chatId: number; role?: Role; busy: boolean; instructionAt: number; empty: boolean; loading: boolean; masterView: boolean; searchOpen: boolean; searchQuery: string; onSearchQuery: (q: string) => void; onCloseSearch: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
   const stick = useRef(true);
@@ -503,8 +528,8 @@ function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, ma
 
   useLayoutEffect(() => {
     const el = ref.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
-  }, [items]);
+    if (el && stick.current && !searchOpen) el.scrollTop = el.scrollHeight;
+  }, [items, searchOpen]);
   useEffect(() => {
     stick.current = true;
     const el = ref.current;
@@ -512,10 +537,12 @@ function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, ma
   }, [chatId]);
 
   return (
-    <div className="relative min-h-0 flex-1">
+    <ChatSearchQuery.Provider value={searchOpen ? searchQuery : ""}>
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      {searchOpen && <ChatSearch root={ref} revision={items} query={searchQuery} onQuery={onSearchQuery} onClose={onCloseSearch} />}
       <div
         ref={ref}
-        className="h-full overflow-y-auto"
+        className="min-h-0 flex-1 overflow-y-auto"
         data-testid="timeline"
         onScroll={(e) => {
           const el = e.currentTarget;
@@ -561,6 +588,7 @@ function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, ma
         </Button>
       )}
     </div>
+    </ChatSearchQuery.Provider>
   );
 }
 
@@ -572,7 +600,7 @@ function EmptyChat() {
       </div>
       <div className="text-[15px] font-semibold">무엇을 할까요?</div>
       <div className="max-w-md text-[13px] leading-relaxed text-muted-foreground">
-        지시를 보내면 마스터가 계획을 세우고, 일의 양에 맞춰 클로드·지피티·제미나이·그록·딥시크 작업자를 꾸려 구현과 리뷰를 나눠 맡깁니다. 이미지는 붙여넣기(Ctrl+V)나 끌어다 놓기로 첨부할 수 있어요.
+        지시를 보내면 마스터가 계획을 세우고, 일의 양에 맞춰 클로드·지피티·제미나이·그록·딥시크 작업자를 꾸려 구현과 리뷰를 나눠 맡깁니다. 파일은 끌어다 놓기로, 이미지는 붙여넣기(Ctrl+V)로 첨부할 수 있어요.
       </div>
     </div>
   );
@@ -629,18 +657,18 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
     async (files: File[]) => {
       if (!files.length) return;
       setUploading((n) => n + files.length);
-      try {
-        for (const f of files) {
+      for (const f of files) {
+        try {
           const path = api.pathForFile(f);
           const added = path
             ? await api.attachFromPaths(chat.id, [path])
             : [await api.attachFromBytes(chat.id, f.name || "clipboard.png", f.type, new Uint8Array(await f.arrayBuffer()))];
           setAttachments((a) => [...a, ...added]);
+        } catch (e) {
+          toast(`${f.name || "파일"} 첨부 실패: ${errorMessage(e)}`);
+        } finally {
+          setUploading((n) => n - 1);
         }
-      } catch (e) {
-        toast(`첨부하지 못했습니다: ${errorMessage(e)}`);
-      } finally {
-        setUploading((n) => n - files.length);
       }
     },
     [chat.id, toast],
