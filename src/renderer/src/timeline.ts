@@ -129,6 +129,26 @@ function messageExpression(items: Item[], node: NodeId, role: Role, state: Expre
   return expression;
 }
 
+function itemsAtPath(items: Item[], path: number[]): Item[] | undefined {
+  for (const index of path) {
+    const item = items[index];
+    if (item?.kind !== "consult") return undefined;
+    items = item.children;
+  }
+  return items;
+}
+
+function applyAtPath(items: Item[], path: number[], e: TimelineEvent, expression?: AgentExpression, depth = 0): Item[] {
+  if (depth === path.length) return apply(items, e, expression);
+  const index = path[depth];
+  const item = items[index] as Extract<Item, { kind: "consult" }>;
+  const children = applyAtPath(item.children, path, e, expression, depth + 1);
+  if (children === item.children) return items;
+  const next = items.slice();
+  next[index] = { ...item, children };
+  return next;
+}
+
 function applyInConsult(items: Item[], consultId: number, e: TimelineEvent, expression?: AgentExpression): Item[] {
   let changed = false;
   const next = items.map((item) => {
@@ -151,16 +171,17 @@ interface FoldState {
   top: Item[];
   consultTargets: Map<number, Role>;
   expressions: ExpressionState;
+  consultPaths: Map<number, number[] | null>;
 }
 
-const emptyFold = (): FoldState => ({ top: [], consultTargets: new Map(), expressions: new Map() });
-const copyFold = (state: FoldState): FoldState => ({ top: state.top, consultTargets: new Map(state.consultTargets), expressions: new Map(state.expressions) });
+const emptyFold = (): FoldState => ({ top: [], consultTargets: new Map(), expressions: new Map(), consultPaths: new Map() });
+const copyFold = (state: FoldState): FoldState => ({ top: state.top, consultTargets: new Map(state.consultTargets), expressions: new Map(state.expressions), consultPaths: new Map(state.consultPaths) });
 
 function foldEvents(events: TimelineEvent[], view: View, state: FoldState, start = 0, beforeEvent?: (index: number, state: FoldState) => void) {
   let { top } = state;
-  const { consultTargets, expressions } = state;
+  const { consultTargets, expressions, consultPaths } = state;
   for (let index = start; index < events.length; index++) {
-    if (beforeEvent) beforeEvent(index, { top, consultTargets, expressions });
+    if (beforeEvent) beforeEvent(index, { top, consultTargets, expressions, consultPaths });
     const e = events[index];
     if (e.event.type === "consult_start") consultTarget(e, consultTargets);
     const where = belongs(e, view, consultTargets);
@@ -168,15 +189,20 @@ function foldEvents(events: TimelineEvent[], view: View, state: FoldState, start
     const role = (e.role ?? "orch") as Role;
     const node = e.node;
     const ev = e.event;
+    const path = where === "child" ? consultPaths.get(consultOf(node)!) : [];
+    const target = path ? itemsAtPath(top, path) : undefined;
+    // apply() only appends or replaces items, so these paths survive subsequent events.
+    // Duplicate/malformed consult ids retain the recursive fallback used by older histories.
+    if (ev.type === "consult_start") consultPaths.set(ev.consultId, target && !consultPaths.has(ev.consultId) ? [...path!, target.length] : null);
     if (ev.type === "expression") {
       expressions.set(expressionKey(node, role), currentExpression(ev.expression));
       continue;
     }
-    const expression = ev.type === "text_delta" ? messageExpression(top, node, role, expressions, "speaking") : ev.type === "text" ? messageExpression(top, node, role, expressions, "neutral") : undefined;
+    const expression = ev.type === "text_delta" ? messageExpression(target ?? top, node, role, expressions, "speaking") : ev.type === "text" ? messageExpression(target ?? top, node, role, expressions, "neutral") : undefined;
     if (where === "child") {
       const id = consultOf(e.node);
       if (id !== null) {
-        const next = applyInConsult(top, id, e, expression);
+        const next = target && path ? applyAtPath(top, path, e, expression) : applyInConsult(top, id, e, expression);
         if (next !== top) {
           top = next;
           if (ev.type === "turn_end") expressions.delete(expressionKey(node, role));
@@ -246,6 +272,26 @@ export function createTimelineBuilder(): typeof buildItems {
     return result;
   };
 }
+
+/** Keep recent chat/view folds alive when React unmounts a chat, without retaining every view. */
+export function createTimelineCache(limit = 6) {
+  const entries = new Map<string, { chatId: number; build: typeof buildItems }>();
+  return {
+    build(chatId: number, events: TimelineEvent[], view: View, live: boolean) {
+      const key = `${chatId}:${view ?? "all"}`;
+      const entry = entries.get(key) ?? { chatId, build: createTimelineBuilder() };
+      entries.delete(key);
+      entries.set(key, entry);
+      if (entries.size > limit) entries.delete(entries.keys().next().value!);
+      return entry.build(events, view, live);
+    },
+    delete(chatId: number) {
+      for (const [key, entry] of entries) if (entry.chatId === chatId) entries.delete(key);
+    },
+  };
+}
+
+export const chatTimelines = createTimelineCache();
 
 function closeHistory(items: Item[]): Item[] {
   let changed = false;

@@ -1,4 +1,4 @@
-import { memo, useContext, useState, type ReactNode } from "react";
+import { memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
   ArrowRight,
@@ -21,6 +21,7 @@ import { CONSULT_KIND_LABEL, MASTER_LABEL, roleName, roleTone, type AgentExpress
 import { api, cn, errorMessage, formatBytes } from "../lib/utils";
 import { useStore } from "../store";
 import type { Item } from "../timeline";
+import { needsAttention, windowItems } from "../timeline-window";
 import { Markdown, CopyButton } from "./Markdown";
 import { FileLink } from "./FileLink";
 import { ArtifactPreview } from "./ArtifactPreview";
@@ -134,16 +135,59 @@ function groupItems(items: Item[]): ItemEntry[] {
   return entries;
 }
 
-export const ItemList = memo(function ItemList({ items, chatId, nested = false }: { items: Item[]; chatId: number; nested?: boolean }) {
-  const entries = groupItems(items);
+export const ItemList = memo(function ItemList({ items, chatId, nested = false, live = false, paginate = true }: { items: Item[]; chatId: number; nested?: boolean; live?: boolean; paginate?: boolean }) {
+  const searching = !!useContext(ChatSearchQuery).trim();
+  const pageSize = nested ? 20 : 100;
+  const root = useRef<HTMLDivElement>(null);
+  const anchor = useRef<{ element: Element; top: number } | null>(null);
+  // Keep the first visible item stable while new messages arrive above/below it.
+  // shortcut: the window grows during an uninterrupted visit; virtualize if long visits become costly.
+  const [first, setFirst] = useState(() => {
+    const index = Math.max(0, items.length - pageSize);
+    return { key: items[index]?.key, index };
+  });
+  const firstIndex = items.findIndex(item => item.key === first.key);
+  // shortcut: DOM-based search needs full history; use a data index if large searches become costly.
+  const start = paginate && !searching ? Math.min(items.length, firstIndex >= 0 ? firstIndex : first.index) : 0;
+  const { visible, hidden } = useMemo(() => windowItems(items, start, live), [items, start, live]);
+  const entries = useMemo(() => groupItems(visible), [visible]);
+  const showEarlier = useCallback(() => {
+    const scroll = root.current?.closest('[data-testid="timeline"]');
+    const top = scroll?.getBoundingClientRect().top ?? 0;
+    const element = [...(root.current?.children ?? [])].find(child => child.hasAttribute("data-history-entry") && child.getBoundingClientRect().bottom > top);
+    if (element) anchor.current = { element, top: element.getBoundingClientRect().top };
+    const index = Math.max(0, start - pageSize);
+    setFirst({ key: items[index]?.key, index });
+  }, [items, start, pageSize]);
+  useLayoutEffect(() => {
+    const saved = anchor.current;
+    const scroll = root.current?.closest('[data-testid="timeline"]');
+    if (saved?.element.isConnected && scroll) scroll.scrollTop += saved.element.getBoundingClientRect().top - saved.top;
+    anchor.current = null;
+  }, [first]);
+  useEffect(() => {
+    if (nested || !hidden) return;
+    const scroll = root.current?.closest('[data-testid="timeline"]');
+    if (!scroll) return;
+    let previousTop = scroll.scrollTop;
+    const onScroll = () => {
+      if (scroll.scrollTop < previousTop && scroll.scrollTop < 120) showEarlier();
+      previousTop = scroll.scrollTop;
+    };
+    scroll.addEventListener("scroll", onScroll);
+    return () => scroll.removeEventListener("scroll", onScroll);
+  }, [nested, hidden, showEarlier]);
   return (
-    <div className={cn("flex flex-col", nested ? "gap-0.5" : "gap-1")}>
+    <div ref={root} className={cn("flex flex-col", nested ? "gap-0.5" : "gap-1")} data-testid={nested ? "nested-history" : "history-list"}>
+      {hidden > 0 && <Button variant="ghost" size="sm" data-testid="load-earlier" onClick={showEarlier}>이전 기록 더 보기 · {hidden}개</Button>}
       {entries.map((entry) =>
-        entry.kind === "tool-group" ? (
-          <ToolGroup key={entry.items[0].key} items={entry.items} chatId={chatId} nested={nested} />
-        ) : (
-          <ItemView key={entry.item.key} item={entry.item} chatId={chatId} nested={nested} />
-        )
+        <div key={entry.kind === "tool-group" ? entry.items[0].key : entry.item.key} data-history-entry>
+          {entry.kind === "tool-group" ? (
+            <ToolGroup items={entry.items} chatId={chatId} nested={nested} />
+          ) : (
+            <ItemView item={entry.item} chatId={chatId} nested={nested} />
+          )}
+        </div>
       )}
     </div>
   );
@@ -524,6 +568,8 @@ function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }
   const searchQuery = useContext(ChatSearchQuery);
   const searching = !!searchQuery.trim();
   const showRequest = expanded || searching;
+  const [progressExpanded, setProgressExpanded] = useState(item.status === "running");
+  const attention = needsAttention(item, true);
   const select = useStore((s) => s.select);
   const consult = useStore((s) => s.consults[chatId]?.find((c) => c.id === item.consultId));
   const requestBrief = item.request.split("\n").find((line) => line.trim())?.trim() ?? "(요청 내용 없음)";
@@ -601,7 +647,10 @@ function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }
       )}
       {item.children.length > 0 ? (
         <div className="border-t p-3" data-testid="consult-progress">
-          <ItemList items={item.children} chatId={chatId} nested />
+          {!attention && !searching && <button type="button" className="mb-1 flex items-center gap-1 text-[12px] text-muted-foreground hover:text-foreground" data-testid="consult-progress-toggle" aria-expanded={progressExpanded} onClick={() => setProgressExpanded(!progressExpanded)}>
+            <ChevronRight className={cn("size-3.5", progressExpanded && "rotate-90")} /> 작업 기록 {item.children.length}개 · {progressExpanded ? "접기" : "펼치기"}
+          </button>}
+          {(attention || progressExpanded || searching) && <ItemList items={item.children} chatId={chatId} nested live={item.status === "running"} />}
         </div>
       ) : (
         item.status === "running" && (

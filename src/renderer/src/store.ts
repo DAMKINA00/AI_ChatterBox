@@ -14,6 +14,7 @@ import type {
   UsageInfo,
 } from "../../shared/types";
 import { api, errorMessage } from "./lib/utils";
+import { chatTimelines } from "./timeline";
 
 export interface Selection {
   chatId: number;
@@ -269,6 +270,7 @@ export const useStore = create<State>((set, get) => ({
     await api.deleteProject(id);
     set((s) => {
       const gone = new Set(s.chats.filter((c) => c.projectId === id).map((c) => c.id));
+      for (const chatId of gone) chatTimelines.delete(chatId);
       return {
         projects: s.projects.filter((p) => p.id !== id),
         chats: s.chats.filter((c) => c.projectId !== id),
@@ -297,6 +299,7 @@ export const useStore = create<State>((set, get) => ({
   },
   async deleteChat(id) {
     await api.deleteChat(id);
+    chatTimelines.delete(id);
     set((s) => ({ chats: s.chats.filter((c) => c.id !== id), selection: s.selection?.chatId === id ? null : s.selection }));
   },
 }));

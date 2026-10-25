@@ -21,7 +21,7 @@ import {
 } from "../../../shared/types";
 import { api, cn, errorMessage } from "../lib/utils";
 import { useStore } from "../store";
-import { buildItems, createTimelineBuilder, latestExpression, planOf } from "../timeline";
+import { buildItems, chatTimelines, latestExpression, planOf } from "../timeline";
 import { GoalBar, PlanPanel } from "./PlanGoal";
 import { SLASH_COMMANDS, StatusDialog, type SlashCommand } from "./Commands";
 import { AttachmentChip, ItemList } from "./Items";
@@ -50,8 +50,7 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
   const events = useStore((s) => s.events[chat.id]);
   const consults = useStore((s) => s.consults[chat.id]);
   const busy = chat.status === "working" || chat.status === "approval";
-  const buildTimeline = useMemo(() => createTimelineBuilder(), [chat.id]);
-  const items = useMemo(() => buildTimeline(events ?? [], node, busy), [buildTimeline, events, node, busy]);
+  const items = useMemo(() => events ? chatTimelines.build(chat.id, events, node, busy) : [], [chat.id, events, node, busy]);
   const instructionAt = useMemo(() => latestInstructionAt(events ?? [], chat.createdAt), [events, chat.createdAt]);
   const [dragging, setDragging] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -109,7 +108,7 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
       <TeamChips chat={chat} />
       {!node && <GoalBar chat={chat} />}
       {!node && plan && <PlanPanel chat={chat} plan={plan} onRevise={() => composer.current?.setText("/plan 수정: ")} />}
-      <Timeline items={items} chatId={chat.id} role={streamRole} busy={busy} instructionAt={instructionAt} empty={!events?.length} loading={!events} masterView={!node || node === "orch"}
+      <Timeline key={node ?? "all"} items={items} chatId={chat.id} role={streamRole} busy={busy} instructionAt={instructionAt} empty={!events?.length} loading={!events} masterView={!node || node === "orch"}
         searchOpen={searchOpen} searchQuery={searchQuery} onSearchQuery={setSearchQuery} onCloseSearch={() => { setSearchOpen(false); setSearchQuery(""); }} />
       {chat.status === "interrupted" && <InterruptedBanner chat={chat} />}
       {node && node !== "orch" ? (
@@ -559,7 +558,7 @@ function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, ma
           ) : empty ? (
             <EmptyChat />
           ) : (
-            <ItemList items={history} chatId={chatId} />
+            <ItemList items={history} chatId={chatId} live={busy} />
           )}
           {busy && (
             <div className="mt-4 flex items-center gap-2 text-[12px] text-muted-foreground" data-testid="working">
@@ -568,7 +567,7 @@ function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, ma
           )}
           {pending.length > 0 && (
             <div className="mt-4" data-testid="pending-approvals" aria-label="승인 대기 요청">
-              <ItemList items={pending} chatId={chatId} />
+              <ItemList items={pending} chatId={chatId} paginate={false} />
             </div>
           )}
         </div>

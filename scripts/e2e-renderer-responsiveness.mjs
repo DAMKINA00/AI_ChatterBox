@@ -179,10 +179,11 @@ try {
   await page.reload();
   await page.waitForSelector('[data-testid="sidebar"]');
   await selectChat(page, ids.historyChat);
-  await page.waitForFunction(({ marker }) => {
-    const messages = [...document.querySelectorAll('[data-testid="agent-message"]')];
-    return messages.length >= 300 && messages.some(element => element.textContent?.includes(marker));
-  }, { marker: HISTORY_MARKER }, { timeout: 30_000 });
+  await page.waitForSelector('[data-testid="consult-summary"]');
+  check("completed histories defer worker detail rendering", await page.getByTestId("agent-message").count() === 0);
+  const firstConsult = page.getByTestId("consult-card").first();
+  await firstConsult.getByTestId("consult-progress-toggle").click();
+  await firstConsult.getByTestId("load-earlier").click();
 
   const initial = await page.evaluate(() => ({
     messages: document.querySelectorAll('[data-testid="agent-message"]').length,
@@ -190,7 +191,7 @@ try {
     autoApprovals: document.querySelectorAll('[data-testid="auto-approval"]').length,
     historyMarker: [...document.querySelectorAll('[data-testid="agent-message"]')].some(element => element.textContent?.includes("renderer-history-001-1")),
   }));
-  check("initial synthetic history loaded", initial.messages === 300 && initial.toolGroups === 100 && initial.historyMarker, JSON.stringify(initial));
+  check("requested historical details load intact", initial.messages === 3 && initial.toolGroups === 1 && initial.historyMarker, JSON.stringify(initial));
 
   const firstToolGroup = page.locator('[data-testid="task-list-group"]').first();
   await firstToolGroup.getByTestId("task-list-toggle").click();
@@ -311,7 +312,7 @@ try {
     marker: [...document.querySelectorAll('[data-testid="agent-message"]')].some(element => element.textContent?.includes("renderer-history-001-1")),
     toolGroups: document.querySelectorAll('[data-testid="task-list-group"]').length,
   }));
-  check("final streaming message is exact and old history remains", finalMessage === STREAM_FINAL_TEXT && afterStream.marker && afterStream.toolGroups === 100, JSON.stringify({ finalMessage, afterStream }));
+  check("final streaming message is exact and expanded history remains", finalMessage === STREAM_FINAL_TEXT && afterStream.marker && afterStream.toolGroups === 1, JSON.stringify({ finalMessage, afterStream }));
 
   await selectChat(page, ids.emptyChat);
   await page.waitForFunction(() => document.querySelector('[data-testid="chat-title"]')?.textContent === "빈 fixture");

@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AgentEvent, NodeId, Role, TimelineEvent } from "../../shared/types";
-import { apply, buildItems, createTimelineBuilder, currentExpression, latestExpression, normalizePlanStepTitle } from "./timeline.ts";
+import { apply, buildItems, createTimelineBuilder, createTimelineCache, currentExpression, latestExpression, normalizePlanStepTitle } from "./timeline.ts";
 
 let nextId = 1;
 function event(node: NodeId, role: Role | null, payload: AgentEvent): TimelineEvent {
@@ -15,6 +15,32 @@ function liveEvent(node: NodeId, role: Role | null, payload: AgentEvent, at: num
 }
 
 const emptyAttachments = [];
+
+test("chat timeline cache survives switches, isolates views, and applies background updates", () => {
+  const cache = createTimelineCache();
+  const a = [event("orch", "orch", { type: "text_delta", text: "draft" })];
+  const b = [event("orch", "orch", { type: "text", text: "other chat" })];
+  const first = cache.build(1, a, undefined, true);
+  cache.build(2, b, undefined, false);
+  cache.build(1, a, "orch", true);
+  assert.equal(cache.build(1, a, undefined, true), first);
+  const updated = [...a, event("orch", "orch", { type: "text", text: "final" }), event("orch", "orch", { type: "turn_end", ok: true })];
+  assert.deepEqual(cache.build(1, updated, undefined, false), buildItems(updated, undefined, false));
+  assert.equal(first[0].text, "draft");
+  cache.delete(1);
+  assert.notEqual(cache.build(1, a, undefined, true), first);
+});
+
+test("chat timeline cache evicts the least recently visited view", () => {
+  const cache = createTimelineCache(2);
+  const events = [event("orch", "orch", { type: "text", text: "history" })];
+  const first = cache.build(1, events, undefined, false);
+  const second = cache.build(2, events, undefined, false);
+  assert.equal(cache.build(1, events, undefined, false), first);
+  cache.build(3, events, undefined, false);
+  assert.equal(cache.build(1, events, undefined, false), first);
+  assert.notEqual(cache.build(2, events, undefined, false), second);
+});
 
 test("plan step display normalizes only legacy Gemini worker prefixes", () => {
   assert.equal(normalizePlanStepTitle("[Antigravity 1호] 멕시코 조사"), "[제미나이 1호] 멕시코 조사");
@@ -76,6 +102,20 @@ test("nested consult dialogue remains inside its parent card", () => {
   const nested = parent.children.find((x) => x.kind === "consult" && x.consultId === 11)!;
   assert.equal(nested.kind, "consult");
   assert.equal(nested.children.find((x) => x.kind === "message")?.expression, "happy");
+});
+
+test("indexed consult updates preserve duplicate-id and missing-parent history behavior", () => {
+  const events: TimelineEvent[] = [
+    event("orch", "orch", { type: "consult_start", consultId: 1, kind: "implement", from: "orch", to: "w1", request: "first", attachments: [] }),
+    event("orch", "orch", { type: "text", text: "separate top-level message" }),
+    event("orch", "orch", { type: "consult_start", consultId: 1, kind: "implement", from: "orch", to: "w1", request: "duplicate", attachments: [] }),
+    event("consult:1", "w1", { type: "text", text: "both legacy cards" }),
+    event("consult:999", "w2", { type: "text", text: "missing parent" }),
+  ];
+  const items = buildItems(events, undefined, false);
+  assert.equal(items.length, 3);
+  const cards = items.filter(item => item.kind === "consult");
+  assert.deepEqual(cards.map(card => card.children.map(child => child.kind === "message" ? child.text : "")), [["both legacy cards"], ["both legacy cards"]]);
 });
 
 test("invalid expressions and old history use safe defaults; turn completion closes streams", () => {
