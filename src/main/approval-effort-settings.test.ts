@@ -135,7 +135,7 @@ test("workers ignore stale per-chat effort overrides and use project manual sett
       const chat = f.store.chat(f.chat.id)!;
       const project = f.store.project(f.project.id)!;
       assert.equal(f.chats.roleConfig(chat, project, worker.key).effort, expected, kind);
-      assert.deepEqual(await f.chats.assignmentEffort(f.chat.id, worker.key, "medium"), { requestedEffort: "medium", effort: expected }, kind);
+      assert.deepEqual(await f.chats.assignmentEffort(f.chat.id, worker.key, "medium"), { requestedEffort: "medium", effort: kind === "gemini" ? "" : expected }, kind);
     }
   } finally {
     await f.close();

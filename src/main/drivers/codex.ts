@@ -1,11 +1,11 @@
 // Codex driver: one shared `codex app-server` process (JSON-RPC over stdio, one JSON object per line),
 // one CodexDriver per thread.
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import type { ProjectListResponse } from "../codex-schema/v2/ProjectListResponse";
 import type { ProjectCreateParams } from "../codex-schema/v2/ProjectCreateParams";
 import type { FileDiff, ModelOption, UsageInfo, TokenCounts, AgentMetrics } from "../../shared/types";
-import { readLines, shutdown } from "../proc";
+import { readLines } from "../proc";
 import { classifyWindow, type UsageWindow } from "../../shared/usage";
 import { fileNote, IMAGE_MIMES, type AgentDriver, type AgentInput, type DriverHost, type DriverOptions } from "./types";
 import type { RequestId, ServerNotification, ServerRequest, InitializeResponse, ClientRequest } from "../codex-schema";
@@ -26,6 +26,9 @@ import type {
   RateLimitSnapshot,
 } from "../codex-schema/v2";
 
+export const CODEX_DISPOSE_TIMEOUT_MS = 3000;
+const CODEX_KILL_TIMEOUT_MS = 2000;
+
 type Method = ClientRequest["method"] | "project/list" | "project/create";
 
 // App workers own all delegation; native children have no app approval/history route.
@@ -35,6 +38,10 @@ export const APP_CODEX_CONFIG = { "features.multi_agent": false, "features.multi
 export class CodexServer {
   private child?: ChildProcess;
   private ready?: Promise<void>;
+  private closing?: Promise<void>;
+  private closeError?: Error;
+
+  get stopping() { return !!this.closing || !!this.closeError; }
   private nextId = 1;
   private pending = new Map<RequestId, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   private threads = new Map<string, CodexDriver>();
@@ -44,12 +51,15 @@ export class CodexServer {
   onUsage?: (u: UsageInfo) => void;
   private workerProject?: Promise<string>;
 
-  constructor(private exePath: string) {}
+  /** `env` selects the account (CODEX_HOME); one server per account, never shared across accounts. */
+  constructor(private exePath: string, readonly env: Record<string, string> = {}) {}
 
   ensure(): Promise<void> {
+    if (this.closing) return Promise.reject(new Error("Codex 서버 종료 중입니다."));
+    if (this.closeError) return Promise.reject(this.closeError);
     if (this.ready && this.child) return this.ready;
     this.loaded.clear();
-    const child = spawn(this.exePath, ["app-server", ...Object.entries(APP_CODEX_CONFIG).flatMap(([k, v]) => ["-c", `${k}=${v}`])], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    const child = spawn(this.exePath, ["app-server", ...Object.entries(APP_CODEX_CONFIG).flatMap(([k, v]) => ["-c", `${k}=${v}`])], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true, env: { ...process.env, ...this.env } });
     this.child = child;
     child.stderr!.setEncoding("utf8");
     child.stderr!.on("data", (d: string) => (this.stderrTail = (this.stderrTail + d).slice(-4000)));
@@ -87,6 +97,7 @@ export class CodexServer {
   }
 
   request<R>(method: Method, params: unknown): Promise<R> {
+    if (this.stopping) return Promise.reject(new Error("Codex 서버 종료 중이거나 종료 확인에 실패했습니다."));
     if (!this.child) return Promise.reject(new Error("codex app-server가 실행 중이 아닙니다."));
     const id = this.nextId++;
     this.write({ id, method, params });
@@ -168,11 +179,51 @@ export class CodexServer {
     if (threadId) this.threads.get(threadId)?.onNotification(n);
   }
 
-  async dispose() {
+  /** Never report disposal complete until the process has actually exited. */
+  dispose(force = false): Promise<void> {
+    if (this.closing) return this.closing;
     const child = this.child;
-    this.child = undefined;
+    if (!child) return Promise.resolve();
     this.ready = undefined;
-    if (child) await shutdown(child);
+    this.closing = this.closeProcess(child, force).then(() => {
+      if (this.child === child) this.child = undefined;
+      this.closeError = undefined;
+      this.loaded.clear();
+      this.workerProject = undefined;
+      for (const p of this.pending.values()) p.reject(new Error("Codex 서버가 종료되었습니다."));
+      this.pending.clear();
+    }).catch((error: unknown) => {
+      this.closeError = new Error(`Codex 서버 종료를 확인하지 못했습니다. 계정 변경을 중단했습니다: ${error instanceof Error ? error.message : String(error)}`);
+      throw this.closeError;
+    }).finally(() => { this.closing = undefined; });
+    return this.closing;
+  }
+
+  private async closeProcess(child: ChildProcess, force: boolean): Promise<void> {
+    let exited = child.exitCode !== null || child.signalCode !== null;
+    let onExit!: () => void;
+    const exit = new Promise<void>(resolve => { onExit = () => { exited = true; resolve(); }; });
+    child.once("exit", onExit);
+    const waitForExit = async (ms: number) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try { if (!exited) await Promise.race([exit, new Promise<void>(resolve => { timer = setTimeout(resolve, ms); })]); }
+      finally { clearTimeout(timer); }
+      return exited;
+    };
+    try {
+      if (exited) return;
+      if (!force) {
+        try { child.stdin?.end(); } catch { /* stdin may already be closed */ }
+        if (await waitForExit(CODEX_DISPOSE_TIMEOUT_MS)) return;
+      }
+      if (process.platform === "win32" && child.pid !== undefined) {
+        await new Promise<void>((resolve, reject) => execFile("taskkill", ["/PID", String(child.pid), "/T", "/F"],
+          { windowsHide: true, timeout: CODEX_KILL_TIMEOUT_MS }, error => error ? reject(error) : resolve()));
+      } else if (!child.kill("SIGKILL")) {
+        throw new Error("프로세스 강제 종료 요청에 실패했습니다.");
+      }
+      if (!await waitForExit(CODEX_KILL_TIMEOUT_MS)) throw new Error("강제 종료 후에도 프로세스 종료 응답이 없습니다.");
+    } finally { child.removeListener("exit", onExit); }
   }
 }
 
@@ -623,9 +674,22 @@ export class CodexDriver implements AgentDriver {
 
   async dispose(): Promise<void> {
     if (this.threadId) {
-      if (this.server.loaded.has(this.threadId)) await this.server.request("thread/unsubscribe", { threadId: this.threadId });
-      this.server.detach(this.threadId);
-      this.server.loaded.delete(this.threadId);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Error("Codex 대화 구독 해제 응답 시간이 초과되었습니다.");
+      try {
+        if (this.server.loaded.has(this.threadId)) await Promise.race([
+          this.server.request("thread/unsubscribe", { threadId: this.threadId }),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(timeout), CODEX_DISPOSE_TIMEOUT_MS); }),
+        ]).catch(async error => {
+          if (error !== timeout) throw error;
+          // A deadline alone is insufficient: account directories must outlive the server.
+          await this.server.dispose(true);
+        });
+      } finally {
+        clearTimeout(timer);
+        this.server.detach(this.threadId);
+        this.server.loaded.delete(this.threadId);
+      }
     }
   }
 

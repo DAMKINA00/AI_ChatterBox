@@ -3,7 +3,7 @@ import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { connect } from "node:net";
 import { execFileSync } from "node:child_process";
-import type { AgentKind, ApprovalDecision, ProjectSettings, Theme, GeminiWebAccountId } from "../shared/types";
+import { CLI_ACCOUNT_KINDS, type AgentKind, type ApprovalDecision, type CliAccountId, type CliAccountKind, type CliAccountPolicies, type ProjectSettings, type Theme, type GeminiWebAccountId } from "../shared/types";
 import type { AIStudioAction, AIStudioInput } from "../shared/aistudio";
 import { Store } from "./db";
 import { ChatManager } from "./chats";
@@ -19,6 +19,11 @@ let attachments: AttachmentStore;
 let orchestrator: Orchestrator;
 let preparingUpdate = false;
 let pendingCalls = 0;
+
+function withAccountPolicy(settings: ProjectSettings): ProjectSettings {
+  if (!settings || settings.accountPolicy === undefined) return settings;
+  return { ...settings, accountPolicy: chats.sanitizeAccountPolicy(settings.accountPolicy) };
+}
 
 function registerHandlers(rpc: CoreRpc) {
   const channels: string[] = [];
@@ -36,11 +41,13 @@ function registerHandlers(rpc: CoreRpc) {
   ipcMain.handle("projects:list", () => store.listProjects());
   ipcMain.handle("projects:create", (_e, input: { name: string; folder: string; settings: ProjectSettings }) => {
     if (!input.folder || !existsSync(input.folder)) throw new Error("작업 폴더가 없습니다.");
-    return store.createProject(input.name.trim() || "새 프로젝트", input.folder, input.settings);
+    return store.createProject(input.name.trim() || "새 프로젝트", input.folder, withAccountPolicy(input.settings));
   });
   ipcMain.handle("projects:update", async (_e, id: number, patch) => {
     if (patch.folder !== undefined && (!patch.folder || !existsSync(patch.folder) || !statSync(patch.folder).isDirectory()))
       throw new Error("작업 폴더가 없습니다.");
+    // A stale form must not write back a removed account or a malformed policy.
+    if (patch.settings) patch = { ...patch, settings: withAccountPolicy(patch.settings) };
     const before = store.project(id);
     const p = store.updateProject(id, patch);
     if (patch.settings || patch.folder) {
@@ -153,6 +160,18 @@ function registerHandlers(rpc: CoreRpc) {
     }
     throw new Error("지원하지 않는 웹 계정 관리 요청입니다.");
   });
+  ipcMain.handle("cli-accounts:list", () => chats.listCliAccounts());
+  ipcMain.handle("cli-accounts:create", (_e, kind: CliAccountKind, label?: string) => {
+    if (!(CLI_ACCOUNT_KINDS as readonly string[]).includes(kind)) throw new Error("지원하지 않는 CLI 계열입니다.");
+    return chats.createCliAccount(kind, label);
+  });
+  ipcMain.handle("cli-accounts:login", (_e, id: CliAccountId) => { chats.loginCliAccount(id); });
+  ipcMain.handle("cli-accounts:logout", (_e, id: CliAccountId) => chats.logoutCliAccount(id));
+  ipcMain.handle("cli-accounts:refresh", (_e, id?: CliAccountId) => chats.refreshCliAccount(id ?? undefined));
+  ipcMain.handle("cli-accounts:update", (_e, id: CliAccountId, patch: { label?: string; enabled?: boolean }) => chats.updateCliAccount(id, patch ?? {}));
+  ipcMain.handle("cli-accounts:remove", (_e, id: CliAccountId) => chats.removeCliAccount(id));
+  ipcMain.handle("cli-accounts:get-policy", () => chats.getCliAccountPolicy());
+  ipcMain.handle("cli-accounts:set-policy", (_e, policies: CliAccountPolicies) => chats.setCliAccountPolicy(policies));
   ipcMain.handle("theme:get", () => (store.getSetting("theme") as Theme) ?? "dark");
   ipcMain.handle("theme:set", (_e, theme: Theme) => {
     store.setSetting("theme", theme);
@@ -162,7 +181,6 @@ function registerHandlers(rpc: CoreRpc) {
     if (wait === true) await refresh;
     return chats.usage();
   });
-  ipcMain.handle("aistudio:export-config", () => chats.aiStudio().antigravityConfig());
   ipcMain.handle("files:resolve-link", (_e, chatId: number, href: string) => {
     const chat = store.chat(chatId);
     const project = chat && store.project(chat.projectId);

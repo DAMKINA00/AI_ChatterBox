@@ -8,7 +8,6 @@ import { Store } from "./db";
 import { ChatManager } from "./chats";
 import { Orchestrator } from "./orchestrator";
 import type { AgentInput } from "./drivers/types";
-import { geminiBridgeTool } from "./drivers/gemini-protocol";
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "cbx-master-accounts-")), path = join(root, "test.db");
@@ -150,12 +149,6 @@ test("master availability wait is cancelled by stop and cannot dispatch after it
     assert.equal((await f.call("spawn", { kind: "gemini", job: "write", webAccountId: "gemini-4" })).isError, true);
     assert.equal(f.sent.length, 0);
   } finally { await f.close(); }
-});
-
-test("Antigravity master recognizes the account tool as an app bridge operation", () => {
-  assert.equal(geminiBridgeTool("call_mcp_tool", { ServerName: "chatterbox_bridge", ToolName: "gemini_web_accounts" }), true);
-  assert.equal(geminiBridgeTool("mcp__chatterbox_bridge__gemini_web_accounts"), true);
-  assert.equal(geminiBridgeTool("call_mcp_tool", { ServerName: "other", ToolName: "gemini_web_accounts" }), false);
 });
 
 test("master can retry across several accounts while duplicate protection remains per account", async () => {

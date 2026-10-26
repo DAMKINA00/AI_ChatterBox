@@ -13,6 +13,13 @@ import { existsSync, statSync } from "node:fs";
 import { basename, isAbsolute, relative, resolve as resolvePath } from "node:path";
 import {
   chatOrchestrator,
+  CLI_ACCOUNT_KINDS,
+  cliAccountKindForAgent,
+  defaultCliAccountId,
+  isCliAccountId,
+  type CliAccountId,
+  type CliAccountKind,
+  type ResolvedCliAccount,
   AGENT_EXPRESSIONS,
   GEMINI_WRITING_INSTRUCTIONS,
   AGENT_LABEL,
@@ -51,6 +58,7 @@ import { WORKER_EFFORTS } from "./effort";
 import { conversationAccount, webAccountId } from "./drivers/gemini-web-protocol";
 import { WEB_LOW_REMAINING } from "./drivers/gemini-web-accounts";
 import { isAIStudioModel } from "../shared/aistudio";
+import { cliRemaining, CLI_LOW_REMAINING } from "./cli-accounts";
 
 const KINDS: ConsultKind[] = ["implement", "review", "opinion", "writing"];
 const MAX_DEPTH = 3;
@@ -60,6 +68,13 @@ const WEB_ACCOUNTS_TOOL: ToolDef = {
   name: "gemini_web_accounts",
   description: "마스터가 직접 전체 Gemini 웹 계정의 잔여량·조회 시각·로그인·작업 상태와 작업자 연결을 확인합니다. 기본은 사용량 갱신. 모두 작업 중/잔여량 부족이면 waitForAvailable=true로 10초마다 재확인하며 기다립니다. 계정을 선택하거나 작업자를 실행하지 않으며 선택은 마스터가 spawn/ask의 webAccountId로 합니다.",
   inputSchema: { type: "object", properties: { refresh: { type: "boolean" }, waitForAvailable: { type: "boolean" } }, additionalProperties: false },
+};
+const CLI_ACCOUNT_INPUT = { type: "string", pattern: "^(claude|gpt|grok)-([1-9]|10)$", description: "Claude/Codex/Grok CLI 계정 ID. 작업자 계열과 같아야 합니다. 프로젝트·전역 fixed 정책에서는 정책 계정만 허용하며, auto/기본 정책에서는 명시 지정을 적용합니다. 지정 해제는 clearAccountId=true로 요청하며 accountId와 함께 지정할 수 없습니다. 계정 번호를 작업자 번호로 추정하지 마세요." };
+const CLEAR_CLI_ACCOUNT_INPUT = { type: "boolean", description: "true이면 저장된 CLI 계정 지정을 해제하고 프로젝트·전역 정책을 따릅니다. accountId와 동시에 지정할 수 없습니다." };
+const CLI_ACCOUNTS_TOOL: ToolDef = {
+  name: "cli_accounts",
+  description: "Claude/Codex/Grok CLI 계정별 로그인·잔여량·실행 중 작업자와 적용 정책을 조회합니다. 계정을 선택하거나 작업을 자동 재시도하지 않습니다. 10분이 지난 잔여량은 미확인입니다. 기본은 캐시 조회이며 refresh=true만 로그인·사용량을 갱신합니다.",
+  inputSchema: { type: "object", properties: { kind: { type: "string", enum: ["claude", "gpt", "grok"] }, refresh: { type: "boolean" } }, additionalProperties: false },
 };
 const DISCUSSION_INPUT = {
   type: "object", description: "관련 쟁점을 작업자끼리 직접 토의할 그룹. to는 진행자, peers는 의견을 주고받을 다른 작업자 닉네임입니다. opinion 또는 writing 전용이며 진행자는 각 참여자의 실제 응답을 취합해야 합니다.",
@@ -96,7 +111,7 @@ const ASK_TOOL = (forMaster: boolean): ToolDef => ({
       reason: { type: "string", description: "이 작업자를 선택한 이유. 마스터 배정 시 필수." },
       ...(forMaster ? { effort: { type: "string", enum: [...WORKER_EFFORTS], description: "추론 수준. 일반 작업 medium, 복잡한 분석·구현 high, 가장 어려운 추론·검증 xhigh. 모델 지원 범위를 확인하고 reason에 선택 근거를 적으세요." } } : {}),
       ...(forMaster ? { discussion: DISCUSSION_INPUT } : {}),
-      ...(forMaster ? { webAccountId: WEB_ACCOUNT_INPUT } : {}),
+      ...(forMaster ? { webAccountId: WEB_ACCOUNT_INPUT, accountId: CLI_ACCOUNT_INPUT, clearAccountId: CLEAR_CLI_ACCOUNT_INPUT } : {}),
       requiresImage: { type: "boolean", description: "실제 이미지 생성·편집 도구가 필요한 작업이면 true" },
       supersedes: { type: "integer", description: "이 배정으로 보완할 실패한 협의 id" },
       scope: { type: "array", items: { type: "string" } },
@@ -129,6 +144,8 @@ const ASK_PARALLEL_TOOL: ToolDef = {
             scope: { type: "array", items: { type: "string" } },
             discussion: DISCUSSION_INPUT,
             webAccountId: WEB_ACCOUNT_INPUT,
+            accountId: CLI_ACCOUNT_INPUT,
+            clearAccountId: CLEAR_CLI_ACCOUNT_INPUT,
           },
           required: ["to", "message", "kind", "reason", "effort"],
         },
@@ -141,10 +158,10 @@ const ASK_PARALLEL_TOOL: ToolDef = {
 const SPAWN_TOOL: ToolDef = {
   name: "spawn",
   description:
-    "해제된 같은 계열의 작업자를 낮은 번호부터 다시 활성화하며, 없을 때 새로 만듭니다. kind=claude → 클로드 N호(Claude Code), kind=gpt → 지피티 N호(Codex), kind=gemini → 제미나이 N호(Antigravity), kind=grok → Grok N호, kind=deepseek → 딥시크 N호(API). 이전 번호·대화 기록을 유지합니다. job에 맡길 역할을 한 줄로 적으세요. 동시에 필요한 수만 확보하세요.",
+    "해제된 같은 계열의 작업자를 낮은 번호부터 다시 활성화하며, 없을 때 새로 만듭니다. kind=claude → 클로드 N호(Claude Code), kind=gpt → 지피티 N호(Codex), kind=gemini → 제미나이 N호(Web / AI Studio), kind=grok → Grok N호, kind=deepseek → 딥시크 N호(API). 이전 번호·대화 기록을 유지합니다. job에 맡길 역할을 한 줄로 적으세요. 동시에 필요한 수만 확보하세요.",
   inputSchema: {
     type: "object",
-    properties: { kind: { type: "string", enum: ["claude", "gpt", "gemini", "grok", "deepseek"] }, job: { type: "string" }, webAccountId: WEB_ACCOUNT_INPUT },
+    properties: { kind: { type: "string", enum: ["claude", "gpt", "gemini", "grok", "deepseek"] }, job: { type: "string" }, webAccountId: WEB_ACCOUNT_INPUT, accountId: CLI_ACCOUNT_INPUT, clearAccountId: CLEAR_CLI_ACCOUNT_INPUT },
     required: ["kind", "job"],
   },
 };
@@ -214,28 +231,32 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     `너는 사용자의 지시를 받아 팀을 꾸리고 일을 나눠 맡기는 마스터다. 작업 폴더: ${project.folder}`,
     "- 너는 배정·검토·취합 담당이다. 간단한 질문·짧은 설명·이미 주어진 정보만으로 답할 수 있는 확인은 direct로 기록한 뒤 작업자를 생성하거나 호출하지 않고 직접 답한다. 상세 원인 조사·구현·이미지·문서 제작 등 본 작업은 앱 작업자에게 맡긴다. 결과에 누락·모순이 있으면 보완 요청하고 최종 답변을 취합한다. 사용자가 명시적으로 직접 수행을 요구한 예외에도 기존 승인·작업 범위 규칙을 지킨다.",
     `- 지시마다 먼저 ${t("route_request")}(mode=direct|delegated, reason=이유)를 호출한다. 반환되는 실제 사용 가능 도구·모델·사용량으로 후보를 확인한다. 도구 사용 불가/미확인은 가능하다고 가정하지 않는다.`,
-    "- 모든 위임은 이 앱의 chatterbox_bridge spawn/ask/ask_parallel만 사용한다. CLI 내부 spawn_agent/Agent/Task/팀 도구나 별도 CLI 프로세스로 작업자를 만들지 않는다. 글로벌 스킬의 Luna 선호와 관계없이 앱 상단에서 선택한 Claude·Codex·Antigravity·Grok 모델을 사용한다.",
+    "- 모든 위임은 이 앱의 chatterbox_bridge spawn/ask/ask_parallel만 사용한다. CLI 내부 spawn_agent/Agent/Task/팀 도구나 별도 CLI 프로세스로 작업자를 만들지 않는다. 글로벌 스킬의 Luna 선호와 관계없이 앱 상단에서 선택한 Claude·Codex·Gemini·Grok 모델을 사용한다.",
     "- 마스터 추론은 기본적으로 모델의 자동 설정을 쓰며 사용자가 직접 선택할 수 있다. 작업자의 추론은 마스터가 배정마다 effort=medium|high|xhigh로 선택한다. 일반·범위가 명확한 작업은 medium, 복잡한 분석·구현은 high, 가장 어려운 원인 추론·중요 검증은 xhigh를 쓴다. route_request의 reasoningEfforts에 나온 지원 수준 안에서 고르고 reason에 담당자와 추론 수준 선택 근거를 함께 적는다. Gemini Pro가 medium/high만 제공하면 그중 고른다. low/max를 지정하거나 CLI·환경 설정으로 우회하지 않는다. 프로젝트 설정에서 사용자가 수동 지정한 작업자 추론은 우선 적용된다.",
     `- 클로드 선호 작업: ${s.claudeStrengths}\n  주의점: ${s.claudeCautions}`,
     `- 지피티 선호 작업: ${s.gptStrengths}\n  주의점: ${s.gptCautions}`,
     `- Grok 선호 작업: ${s.grokStrengths} 주의점: ${s.grokCautions}`,
     `- DeepSeek 선호 작업: ${s.deepseekStrengths} 주의점: ${s.deepseekCautions}`,
-    "- 사용자가 이름·봇·CLI를 명시한 작업은 그 담당에게 우선 배정한다. 글쓰기·코드·이미지의 기본 선호는 명시적 지정을 덮어쓰지 않는다. Gemini는 Antigravity 작업자를 뜻하며 웹 모델을 선택했을 때만 Gemini 웹으로 실행한다. 다른 봇으로 임의 변경하지 말고 실제 도구 오류와 한도를 보고한다.",
+    "- 사용자가 이름·봇·CLI를 명시한 작업은 그 담당에게 우선 배정한다. 글쓰기·코드·이미지의 기본 선호는 명시적 지정을 덮어쓰지 않는다. Gemini는 선택한 AI Studio 또는 Gemini 웹 모델로 실행한다. 다른 봇으로 임의 변경하지 말고 실제 도구 오류와 한도를 보고한다.",
     `- 제미나이 선호 작업: ${s.geminiStrengths}\n  주의점: ${s.geminiCautions}` ,
     "- 글쓰기 본 작업은 제미나이에게 kind=writing으로 배정한다. 요청에 독자·목적·분량·말투와 확인된 사실, 캐릭터 대사에는 성격·관계·상황·말투 예시를 전달한다. 기술 문서는 클로드·지피티가 사실을 확인 → 제미나이가 본문을 작성·다듬기 → 클로드·지피티가 기술 내용과 파일 반영을 확인한다. 제미나이가 비활성·한도·실패 상태면 이유를 기록하고 글쓰기를 클로드·지피티에 재배정할 수 있다. 간단한 답변은 마스터가 직접 한다.",
     "- Gemini 웹 계정 판단·선택은 마스터가 직접 한다. 제미나이 1호 등 작업자에게 계정 선택을 맡기지 않는다. gemini_web_accounts로 전체 계정의 remainingPercent, usage.checkedAt, state, enabled를 확인한다. 이전 작업자의 계정이 대기 상태이고 잔여량 10% 초과이면 유지한다. 부족하거나 작업 중이면 대기 중인 활성 계정 중 잔여량이 가장 많은 계정을 선택해 spawn(kind=gemini, webAccountId=선택한 ID)으로 작업자를 만든다. 기존 작업의 맥락을 이어갈 때는 같은 작업자에게 ask(webAccountId=새 계정)로 지정한다. 작업자 수 제한이면 기존 작업자를 재사용한다. 미조회·오래된 잔여량을 가용으로 추정하지 않는다.",
     "- 모든 웹 계정이 작업 중이거나 잔여량 부족이면 gemini_web_accounts(waitForAvailable=true)로 완료·초기화를 기다린 뒤 마스터가 다시 선택한다. 선택 이후 한도가 부족해지면 작업자는 요청·대화·초안을 보존하고 마스터에게 실패를 반환한다. 마스터가 계정 목록을 갱신해 직접 새 계정을 지정하고 실패 협의 id를 supersedes로 이어받는다. 작업자가 임의로 계정을 바꾸지 않는다. agents와 ask 결과의 지정/실행 계정 ID를 보고하며 작업자 번호를 계정 번호로 추정하지 않는다.",
+    "- Claude/Codex/Grok CLI 계정 정책은 프로젝트 accountPolicy > 전역 cliAccountPolicy > 기본 fixed/*-1 순이다. 프로젝트·전역 fixed 정책에서는 정책 계정이 최우선이며, 저장된 작업자 지정도 이를 덮어쓰지 못한다. 다른 accountId 지정은 거부되므로 정책 변경을 사용자에게 요청한다. auto 또는 기본(default) 정책에서만 명시·저장된 accountId를 우선 적용한다. clearAccountId=true는 저장된 지정을 해제하고 정책을 따르며 release도 지정을 해제한다. 결과의 정책과 출처를 확인한다.",
+    "- auto에서는 마스터가 cli_accounts로 로그인·enabled·실행 중 작업자·remainingPercent·checkedAt를 직접 확인한다. 잔여량이 10%를 초과하는 계정 중 실행 중 작업자가 없는 계정을 우선하고 잔여량이 가장 많은 계정을 accountId로 지정한다. 대기 계정이 없으면 잔여량 10% 초과 계정을 여러 작업자가 공유할 수 있다. 미조회·10분 초과·미확인 잔여량은 사용 가능으로 추정하지 않는다. 적합한 계정이 없으면 갱신하거나 사용자에게 알린다.",
+    "- 앱은 CLI 한도 소진 시 자동 계정 전환이나 작업 재시도를 하지 않는다. fixed는 실패를 보고한다. auto는 마스터가 cli_accounts로 다시 확인하고 실패 협의 id를 supersedes에 넣어 다른 계정으로 재배정한다. 계정 변경은 새 세션과 요약 인계로 처리한다. auto에서 accountId를 생략하면 기존 지정 계정을 유지하고, 지정이 없으면 정책 계정(없으면 *-1)을 사용한다. 앱이 잔여량으로 대신 선택하지 않는다.",
+    "- 작업자 번호를 CLI 계정 번호로 추정하지 않는다. spawn/ask/ask_parallel의 accountId로 계정을 명시하고 agents와 협의 결과의 실제 실행 계정을 확인하여 최종 결과에도 실행 계정을 보고한다. Gemini 웹의 webAccountId는 별도이다.",
     "- Gemini 웹은 로컬 파일·명령·MCP를 실행할 수 없으므로 message에 필요한 자료를 포함하거나 attach에 UTF-8 텍스트 파일을 명시한다. 웹에는 추론 단계 설정·토큰 수가 없으므로 effort는 배정 의도로만 기록된다.",
     "- 기술 업무의 기본 배정은 클로드 중심이다. 일반 분석·구현·테스트·문서의 기술 검증과 파일 제작은 먼저 클로드에게 맡기고, 독립 작업이 많으면 클로드 작업자를 추가해 나눈다. 지피티는 이미지 도구가 필요한 작업, 중요한 양쪽 조사·다른 관점의 검증, 사용자의 지피티 지정, 또는 클로드의 한도·실행 불가·과부하에 따른 재배정에 우선 사용한다. 매번 두 계열을 균등하게 배정하지 않는다. 명시적인 담당 지정이 있으면 그 CLI 작업자에게 배정한다.",
     "- 위 기준은 기본 선호이며 절대적인 우열이 아니다. 필요한 도구 사용 가능 여부를 먼저 확인하고, 사용자가 지정한 담당·선호 기준·관련 맥락·작업량·사용 한도를 고려한다. 두 계열을 매번 모두 부르지 않는다. 실패하면 원인을 반영해 재배정하고 가능한 담당자가 없으면 미완료 사유를 알린다.",
-    "- 시각 작업도 구분한다. 이미지 생성·편집은 지정이 없을 때 이미지 도구가 있는 Codex에게, 명시적으로 Antigravity/Grok 등 다른 작업자를 지정하면 그 작업자에게 requiresImage=true로 배정한다. 제공된 이미지 도구의 실제 결과만 완료로 인정한다. 그 밖의 모션그래픽·애니메이션의 코드·타임라인·연출 제작은 클로드에게 우선 배정한다. 모션그래픽에 새 이미지 소재가 필요하면 그 이미지 생성만 지피티에 맡기고 클로드가 결과를 통합한다.",
+    "- 시각 작업도 구분한다. 이미지 생성·편집은 지정이 없을 때 이미지 도구가 있는 Codex에게, 명시적으로 Gemini/Grok 등 다른 작업자를 지정하면 그 작업자에게 requiresImage=true로 배정한다. 제공된 이미지 도구의 실제 결과만 완료로 인정한다. 그 밖의 모션그래픽·애니메이션의 코드·타임라인·연출 제작은 클로드에게 우선 배정한다. 모션그래픽에 새 이미지 소재가 필요하면 그 이미지 생성만 지피티에 맡기고 클로드가 결과를 통합한다.",
     `- 중요한 버그 수정·오류 분석이라고 판단하면 ${t("route_request")}(mode=delegated, dualInvestigation=true, reason=중요도 판단 근거)를 기록한다. 예: 데이터 손실·보안·설비 안전·서비스 중단에 영향이 크거나, 반복 장애의 원인이 불확실하고 잘못 고쳤을 때 피해가 큰 경우. 사용자에게 양쪽 조사를 명시적으로 요청받은 경우도 적용한다. 단순 문구·서식 수정이나 일반 질문에 모두 호출하지 않는다.`,
     `- 양쪽 조사: 클로드와 지피티에게 동일한 문제·증상·소스·로그·완료 기준을 주고 ${t("ask_parallel")}(각 kind=opinion)로 독립 조사시킨다. 다른 쪽 결론을 먼저 전달하거나 파일 수정을 맡기지 않는다. 각각 원인 후보·근거(파일/로그)·재현 방법·수정안·불확실성을 보고하게 한다. 두 결과가 오면 공통점과 차이를 대조하고, 충돌은 추가 증거로 확인해 마스터가 최종 원인·수정 방향을 취합한다. 이후 구현은 정한 담당자에게 맡기고 교차 리뷰 규칙을 유지한다. 한쪽을 실행할 수 없으면 양쪽 조사를 완료했다고 하지 말고 제한과 확인된 결과를 보고한다.`,
-    `- 팀: ${t("spawn")}(kind=claude|gpt|gemini|grok|deepseek)로 작업자를 만든다. 작업자 수는 일의 양에 맞춘다: 작은 일은 한 명, 큰 일은 범위를 나눠 여러 명(동시에 클로드 최대 ${s.maxClaudeWorkers}명, 지피티 최대 ${s.maxGptWorkers}명, Antigravity 최대 ${s.maxGeminiWorkers}명, Grok 최대 ${s.maxGrokWorkers}명, 딥시크 최대 ${s.maxDeepseekWorkers}명). 다 쓴 작업자는 ${t("release")}로 해제한다. ${t("agents")}로 팀을 확인한다.`,
+    `- 팀: ${t("spawn")}(kind=claude|gpt|gemini|grok|deepseek)로 작업자를 만든다. 작업자 수는 일의 양에 맞춘다: 작은 일은 한 명, 큰 일은 범위를 나눠 여러 명(동시에 클로드 최대 ${s.maxClaudeWorkers}명, 지피티 최대 ${s.maxGptWorkers}명, 제미나이 최대 ${s.maxGeminiWorkers}명, Grok 최대 ${s.maxGrokWorkers}명, 딥시크 최대 ${s.maxDeepseekWorkers}명). 다 쓴 작업자는 ${t("release")}로 해제한다. ${t("agents")}로 팀을 확인한다.`,
     "- 한 요청 안에서도 UI·로직·테스트·자료 조사처럼 독립 가능한 파트를 나누고 담당·파일 범위·입출력 계약·의존성을 체크리스트에 기록한다. 파트는 ask_parallel로 동시에 맡긴다. 각 파트 담당에게 동료 닉네임과 연결되는 부분을 명시하고 직접 협의하게 한다. 마스터가 모든 대화를 중계하지 않는다. 작업 중인 동료와는 send_message로 계약·진행·질문을 주고받고, 대기 동료의 결과가 필요하면 ask/ask_parallel을 사용한다. 결과는 read_messages와 agents로 확인한 뒤 통합·검증한다.",
     `- 일 맡기기: ${t("ask")}(to=닉네임, kind, message, scope). 서로 독립적인 일은 반드시 ${t("ask_parallel")}(tasks=[…])로 한 번에 맡겨 동시에 진행한다(하나씩 기다리지 말 것). 파일을 변경할 작업은 종류와 관계없이 scope를 겹치지 않게 나눈다. 읽기·토의는 동시에 가능하며, 리뷰·의견에서 수정할 때도 범위와 승인을 따른다.`,
     `- 관련 쟁점·서로 맞물린 설계·문장과 연출 등 직접 논의가 필요한 항목은 주제별 토의 그룹으로 묶는다. ${t("ask")}(to=클로드/지피티 진행자, kind=opinion|writing, discussion={topic:주제, peers:[참여 닉네임]}, message=목표·공통 자료·쟁점·완료 기준, reason, effort)로 맡긴다. 진행자가 참여자에게 직접 ask로 초안과 근거를 주고받아 합의·이견·남은 확인을 정리하고, 너는 그룹별 결과와 필요한 최종 결정만 취합한다. 사소한 확인까지 매번 중계하지 않는다.`,
-    "- 토의 중 필요한 파일 수정·명령 실행도 지정 범위와 승인을 따른다. 주제와 사용자의 지정을 따라 Claude·Codex·Antigravity·Grok에서 진행자와 참여자를 정한다. Gemini 웹은 MCP가 없어 진행자는 될 수 없으며 제공된 자료로 참여한다. 참여자는 토의 시점에 대기 상태로 두고 다른 병렬 작업·토의 그룹에 중복 배정하지 않는다. 중요한 오류는 먼저 양쪽 독립 조사 결과를 확보한 뒤 토의 그룹에서 대조한다. 토의 결과를 교차 리뷰로 대신하지 않는다. 실제 참여 응답이 없으면 토의 완료로 보고하지 말고 보완하거나 미완료 사유를 알린다.",
+    "- 토의 중 필요한 파일 수정·명령 실행도 지정 범위와 승인을 따른다. 주제와 사용자의 지정을 따라 Claude·Codex·Gemini·Grok에서 진행자와 참여자를 정한다. Gemini 웹은 MCP가 없어 진행자는 될 수 없으며 제공된 자료로 참여한다. 참여자는 토의 시점에 대기 상태로 두고 다른 병렬 작업·토의 그룹에 중복 배정하지 않는다. 중요한 오류는 먼저 양쪽 독립 조사 결과를 확보한 뒤 토의 그룹에서 대조한다. 토의 결과를 교차 리뷰로 대신하지 않는다. 실제 참여 응답이 없으면 토의 완료로 보고하지 말고 보완하거나 미완료 사유를 알린다.",
     s.reviewGate
       ? "- 너 자신 또는 작업자가 코드를 바꾸면 끝내기 전에, 그 코드를 만들지 않은 작업자에게 리뷰를 맡긴다 (kind=review). 일반 변경의 리뷰는 다른 클로드 작업자도 가능하다. 중요한 오류·보안·안전 등 다른 계열 관점이 꼭 필요한 경우 지피티로 교차검증한다. 네가 직접 바꾼 파일도 빠짐없이 넘긴다. 지적이 나오면 고치고 다시 리뷰받는다."
       : "- 리뷰는 필요하다고 판단할 때만 맡긴다 (kind=review).",
@@ -308,6 +329,7 @@ interface Running {
   recovering?: boolean;
   recoveryError?: string;
   webAccountId?: GeminiWebAccountId;
+  cliAccountId?: CliAccountId;
   consultId: number;
   caller: Role;
   target: Role;
@@ -483,7 +505,7 @@ export class Orchestrator {
       reg = this.chats.bridge.register(
         {
           tools: master
-            ? [ROUTE_TOOL, WEB_ACCOUNTS_TOOL, SPAWN_TOOL, ASK_TOOL(true), ASK_PARALLEL_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, RELEASE_TOOL, AGENTS_TOOL, CHECKLIST_TOOL, GOAL_TOOL, ASK_USER_TOOL, EXPRESSION_TOOL]
+            ? [ROUTE_TOOL, WEB_ACCOUNTS_TOOL, CLI_ACCOUNTS_TOOL, SPAWN_TOOL, ASK_TOOL(true), ASK_PARALLEL_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, RELEASE_TOOL, AGENTS_TOOL, CHECKLIST_TOOL, GOAL_TOOL, ASK_USER_TOOL, EXPRESSION_TOOL]
             : [ASK_TOOL(false), ASK_PARALLEL_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, AGENTS_TOOL, EXPRESSION_TOOL],
           call: (name, args) => this.call(chatId, role, name, args),
         },
@@ -546,6 +568,12 @@ export class Orchestrator {
           this.chats.emit(chatId, "orch", "orch", { type: "dispatch", instructionId: inst.id, mode: args.mode, reason: String(args.reason).trim(), dualInvestigation });
           const capabilities = await this.chats.teamCapabilities(this.chats.store.chat(chatId)!);
           if (this.instructions.get(chatId) !== inst || this.stopped.has(chatId) || ["pausing", "paused"].includes(this.chats.store.chat(chatId)?.status ?? "")) return textResult("작업이 중지되거나 새 지시로 변경되었습니다.", true);
+          const cli = this.cliAccountsInfo(chatId);
+          for (const kind of CLI_ACCOUNT_KINDS) {
+            const accounts = cli.accounts.filter(a => a.kind === kind);
+            const policy = cli.policies[kind];
+            if (accounts.length > 1 || policy.source !== "default") Object.assign(capabilities[kind], { cliAccounts: accounts, accountPolicy: policy });
+          }
           return textResult(JSON.stringify({ capabilities, team: this.agentsText(chatId), dualInvestigation, note: "사용 가능 도구·사용량은 현재 확인값이며 인증/한도 오류는 실행 시 보고됩니다. 이미지 미확인은 사용 가능으로 간주하지 마세요." }));
         }
         case "set_expression":
@@ -564,6 +592,18 @@ export class Orchestrator {
             results.every((r) => r.isError),
           ));
           return await (master ? this.waitForMasterConsult(chatId, result) : result);
+        }
+        case "cli_accounts": {
+          if (!master) return textResult("CLI 계정 조회·선택은 마스터가 직접 합니다.", true);
+          if (args.kind !== undefined && !(CLI_ACCOUNT_KINDS as readonly unknown[]).includes(args.kind)) return textResult("kind는 claude, gpt, grok 중 하나여야 합니다.", true);
+          if (args.refresh !== undefined && typeof args.refresh !== "boolean") return textResult("refresh는 boolean이어야 합니다.", true);
+          const epoch = this.epochs.get(chatId);
+          if (args.refresh === true) {
+            if (args.kind) await Promise.all(this.chats.listCliAccounts(args.kind).map(a => this.chats.refreshCliAccount(a.accountId)));
+            else await this.chats.refreshCliAccount();
+          }
+          if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch || !this.chats.store.chat(chatId)) return textResult("계정 조회 중 작업이 중지되거나 채팅이 종료되었습니다.", true);
+          return textResult(JSON.stringify({ ...this.cliAccountsInfo(chatId, args.kind), minimumRemainingPercent: CLI_LOW_REMAINING, selection: "master", note: "자동 선택·전환·작업 재시도 없음. remainingPercent=null은 미조회·오류·10분 초과입니다. auto에서는 로그인·enabled·실행 중 작업자를 확인하고 잔여량 10% 초과인 대기 계정을 우선 지정하고, 대기 계정이 없으면 같은 조건의 계정을 여러 작업자가 공유할 수 있습니다. refresh=true만 실측을 갱신합니다." }));
         }
         case "gemini_web_accounts": {
           if (!master) return textResult("Gemini 웹 계정 선택·조회는 마스터가 직접 합니다.", true);
@@ -586,7 +626,7 @@ export class Orchestrator {
         case "spawn":
           if (!master) break;
           if (!["claude", "gpt", "gemini", "grok", "deepseek"].includes(args.kind)) return textResult("지원하지 않는 작업자 종류입니다.", true);
-          return this.spawn(chatId, args.kind, String(args.job ?? ""), args.webAccountId);
+          return this.spawn(chatId, args.kind, String(args.job ?? ""), args.webAccountId, args.accountId, args.clearAccountId);
         case "release":
           if (!master) break;
           return await this.release(chatId, String(args.nickname ?? ""));
@@ -646,9 +686,48 @@ export class Orchestrator {
           ? ` · 지정 계정=${a.webAccountId ?? "마스터 선택 필요"} · 현재 실행 계정=${r?.webAccountId ?? "없음"} · 최근 대화 계정=${conversationAccount(a.sessionId) ?? "없음"}` : "";
         const quota = accounts.find(x => x.accountId === (r?.webAccountId ?? a.webAccountId ?? conversationAccount(a.sessionId)));
         const balance = quota ? ` · 잔여=${quota.remainingPercent === undefined ? "미확인" : `${quota.remainingPercent}%`} · 사용량 조회=${quota.usage.checkedAt || "미조회"}` : "";
-        return `- ${a.nickname} (${WORKER_KIND_LABEL[a.kind]}) · ${a.job || "역할 미정"} · ${state}${account}${balance}${result}`;
+        const cli = this.chats.roleAccount(chatId, a.key);
+        const cliInfo = this.cliAccountText(chatId, cli, r?.cliAccountId, true);
+        return `- ${a.nickname} (${WORKER_KIND_LABEL[a.kind]}) · ${a.job || "역할 미정"} · ${state}${account}${balance}${cliInfo ? ` · ${cliInfo} · 최근 세션 계정=${a.sessionAccountId ?? "없음"}` : ""}${result}`;
       })
       .join("\n");
+  }
+
+  private cliAccountsInfo(chatId: number, kind?: CliAccountKind) {
+    const project = this.chats.store.project(this.chats.store.chat(chatId)!.projectId)!;
+    const policies = Object.fromEntries((kind ? [kind] : CLI_ACCOUNT_KINDS).map(k => [k, this.chats.resolveAccountPolicy(k, project.settings)])) as Record<CliAccountKind, ResolvedCliAccount>;
+    const accounts = this.chats.listCliAccounts(kind).map(a => ({
+      accountId: a.accountId, kind: a.kind, label: a.label, enabled: a.enabled, isDefault: a.isDefault,
+      authStatus: a.authStatus, authCheckedAt: a.auth?.checkedAt ?? null,
+      remainingPercent: cliRemaining(a) ?? null, checkedAt: a.usage?.checkedAt ?? null,
+      runningWorkers: a.runningWorkers,
+      workers: [...this.running].flatMap(([id, roles]) => [...roles].filter(([, r]) => r.cliAccountId === a.accountId)
+        .map(([role, r]) => ({ chatId: id, nickname: this.name(id, role), role, consultId: r.consultId,
+          assignedAccountId: this.chats.roleAccount(id, role)?.accountId ?? null, executedAccountId: r.cliAccountId }))),
+    }));
+    return { accounts, policies };
+  }
+
+  private cliAccountText(chatId: number, selected: ResolvedCliAccount | null, executed?: CliAccountId, pending = false, configuredPolicy?: ResolvedCliAccount): string {
+    if (!selected) return "";
+    if (selected.source === "default" && this.chats.listCliAccounts(selected.kind).length === 1 && (!executed || executed === defaultCliAccountId(selected.kind))) return "";
+    const settings = this.chats.store.project(this.chats.store.chat(chatId)!.projectId)!.settings;
+    const policy = configuredPolicy ?? this.chats.resolveAccountPolicy(selected.kind, settings);
+    const quota = this.chats.getCliAccount(executed ?? selected.accountId);
+    const remaining = cliRemaining(quota);
+    return `지정 계정=${selected.accountId} · ${pending ? "현재 실행 계정" : "실제 실행 계정"}=${executed ?? (pending ? "없음" : "연결 전 실패/중지")} · 모드=${selected.mode} · 출처=${selected.source} · 정책 출처=${policy.source} · 정책 계정=${policy.accountId} · 잔여=${remaining === undefined ? "미확인" : `${remaining}%`} · 사용량 조회=${quota?.usage?.checkedAt ?? "미조회"}${selected.mode === "auto" ? " · auto 자동 선택 없음: cli_accounts 확인 후 accountId 지정" : ""}`;
+  }
+
+  private selectedCliAccount(chatId: number, kind: CliAccountKind, value: unknown, clear?: unknown): CliAccountId | null | undefined {
+    if (clear !== undefined && typeof clear !== "boolean") throw new Error("clearAccountId는 boolean이어야 합니다.");
+    if (value !== undefined && clear !== undefined) throw new Error("accountId와 clearAccountId는 동시에 지정할 수 없습니다.");
+    if (clear === true || value === null) return null;
+    if (value === undefined) return undefined;
+    const settings = this.chats.store.project(this.chats.store.chat(chatId)!.projectId)!.settings;
+    const policy = this.chats.resolveAccountPolicy(kind, settings);
+    if (isCliAccountId(value) && value.startsWith(`${kind}-`) && policy.mode === "fixed" && policy.source !== "default" && value !== policy.accountId)
+      throw new Error(`사용자가 fixed로 지정한 계열입니다. 정책 변경을 사용자에게 요청하세요. (${kind}: ${policy.source} 정책 계정=${policy.accountId})`);
+    return this.chats.assertCliAccount(value, kind).accountId;
   }
 
   private selectedWebAccount(value: unknown): GeminiWebAccountId {
@@ -660,13 +739,16 @@ export class Orchestrator {
     return id;
   }
 
-  private spawn(chatId: number, kind: WorkerKind, job: string, requestedAccount?: unknown): ToolResult {
+  private spawn(chatId: number, kind: WorkerKind, job: string, requestedAccount?: unknown, requestedCliAccount?: unknown, clearCliAccount?: unknown): ToolResult {
     const chat = this.chats.store.chat(chatId)!;
     const project = this.chats.store.project(chat.projectId)!;
     if (this.planning.has(chatId)) return textResult("지금은 계획 모드입니다. 작업자를 만들지 말고 계획만 세우세요.", true);
     const web = kind === "gemini" && this.chats.usesGeminiWeb(chat);
     if (!web && requestedAccount !== undefined) return textResult("webAccountId는 Gemini 웹 작업자에게만 지정할 수 있습니다.", true);
     const accountId = web ? this.selectedWebAccount(requestedAccount) : undefined;
+    const cliKind = cliAccountKindForAgent(WORKER_AGENT[kind]);
+    if ((requestedCliAccount !== undefined || clearCliAccount !== undefined) && !cliKind) return textResult("accountId는 Claude/Codex/Grok CLI 작업자에게만 지정할 수 있습니다.", true);
+    const cliAccount = cliKind ? this.selectedCliAccount(chatId, cliKind, requestedCliAccount, clearCliAccount) : undefined;
     if (!web && !this.chats.cliInfo().find((c) => c.agent === WORKER_AGENT[kind])?.path)
       return textResult(`${WORKER_KIND_LABEL[kind]} CLI가 설치되지 않았습니다. 사용 가능한 작업자를 선택하거나 미완료 사유를 보고하세요.`, true);
     const max = kind === "claude" ? project.settings.maxClaudeWorkers : kind === "gpt" ? project.settings.maxGptWorkers : kind === "grok" ? project.settings.maxGrokWorkers : kind === "deepseek" ? project.settings.maxDeepseekWorkers : project.settings.maxGeminiWorkers;
@@ -675,9 +757,11 @@ export class Orchestrator {
       return textResult(`${WORKER_KIND_LABEL[kind]}는 동시에 ${max}명까지입니다. 기존 작업자에게 맡기거나 다 쓴 작업자를 release 하세요.`, true);
     const a = this.chats.store.createAgent(chatId, kind, job);
     if (accountId) this.chats.store.updateAgent(a.id, { webAccountId: accountId });
+    if (cliAccount !== undefined) this.chats.setWorkerAccount(chatId, a.key, cliAccount);
+    const cliInfo = this.cliAccountText(chatId, this.chats.roleAccount(chatId, a.key), undefined, true);
     this.chats.agentsChanged(chatId);
     this.chats.emit(chatId, "orch", "orch", { type: "notice", text: `${a.nickname} 합류${accountId ? ` · 마스터 지정 웹 계정 ${accountId.slice(7)}` : ""}${job ? ` · ${job}` : ""}` });
-    return textResult(`${a.nickname}이(가) 준비되었습니다.${accountId ? ` 마스터 지정 계정=${accountId}.` : ""} ask(to="${a.nickname}")로 일을 맡기세요. 이전 기록이 있으면 유지됩니다.`);
+    return textResult(`${a.nickname}이(가) 준비되었습니다.${accountId ? ` 마스터 지정 계정=${accountId}.` : ""} ask(to="${a.nickname}")로 일을 맡기세요. 이전 기록이 있으면 유지됩니다.${cliInfo ? `\n[CLI ${cliInfo}]` : ""}`);
   }
 
   private async release(chatId: number, nickname: string): Promise<ToolResult> {
@@ -686,6 +770,7 @@ export class Orchestrator {
     if (a.status === "released") return textResult(`${a.nickname}은(는) 이미 해제되었습니다.`);
     if (this.running.get(chatId)?.has(a.key)) return textResult(`${a.nickname}은(는) 아직 작업 중이라 해제할 수 없습니다.`, true);
     await this.chats.disposeRole(chatId, a.key);
+    if (cliAccountKindForAgent(WORKER_AGENT[a.kind])) this.chats.setWorkerAccount(chatId, a.key, null);
     this.chats.store.updateAgent(a.id, { status: "released" });
     this.chats.agentsChanged(chatId);
     this.chats.emit(chatId, "orch", "orch", { type: "notice", text: `${a.nickname} 해제` });
@@ -756,7 +841,7 @@ export class Orchestrator {
       message = `[토의 주제: ${parent.discussion.topic}]\n${callerName}이(가) 토의를 진행하며 너의 의견을 기다린다. 이번 응답에 반론·근거·확인 질문을 담고 진행자에게 다시 ask하지 마라.\n\n${message}`;
     }
     if (target.kind === "gemini" && this.chats.usesGeminiWeb(this.chats.store.chat(chatId)!) && kind === "implement" && !args.requiresImage)
-      return textResult("Gemini 웹은 로컬 파일·명령을 실행할 수 없습니다. Antigravity CLI를 선택하거나 분석/글쓰기로 요청하세요.", true);
+      return textResult("Gemini 웹은 로컬 파일·명령을 실행할 수 없습니다. AI Studio 모델을 선택하거나 분석/글쓰기로 요청하세요.", true);
     if (args.requiresImage) {
       if (kind !== "implement") return textResult("이미지 생성은 implement로 요청하세요.", true);
       // Codex is the default; an explicitly chosen worker gets the chance to use its own tools.
@@ -793,6 +878,15 @@ export class Orchestrator {
     }
     // Worker-to-worker questions inherit the level chosen by the master for the caller.
     const web = target.kind === "gemini" && this.chats.usesGeminiWeb(this.chats.store.chat(chatId)!);
+    let cliAccount: CliAccountId | null | undefined;
+    if (args.accountId !== undefined || args.clearAccountId !== undefined) {
+      if (caller !== "orch") return textResult("CLI 계정 지정은 마스터만 할 수 있습니다. 마스터에게 변경을 요청하세요.", true);
+      const cliKind = cliAccountKindForAgent(WORKER_AGENT[target.kind]);
+      if (!cliKind) return textResult("accountId는 Claude/Codex/Grok CLI 작업자에게만 지정할 수 있습니다.", true);
+      cliAccount = this.selectedCliAccount(chatId, cliKind, args.accountId, args.clearAccountId);
+      if (cliAccount !== undefined && ([...(this.assignments.get(chatId)?.values() ?? [])].some(a => a.target.key === target.key) || this.chats.liveDriver(chatId, target.key)?.running))
+        return textResult("해당 작업자는 실행/대기 중입니다. 완료 후 CLI 계정을 지정하세요.", true);
+    }
     if (args.webAccountId !== undefined) {
       if (caller !== "orch") return textResult("웹 계정 지정은 마스터만 할 수 있습니다. 선택 요청은 마스터에게 보고하세요.", true);
       if (!web) return textResult("webAccountId는 Gemini 웹 작업자에게만 지정할 수 있습니다.", true);
@@ -805,12 +899,12 @@ export class Orchestrator {
     }
     if (web && !target.webAccountId) return textResult("기존 Gemini 웹 작업자의 계정이 지정되지 않았습니다. 마스터가 gemini_web_accounts 조회 후 ask의 webAccountId를 직접 지정하세요.", true);
     const inherited = caller === "orch" ? args.effort : this.chats.store.consult(this.running.get(chatId)?.get(caller)?.consultId ?? -1)?.effort || "medium";
-    const response = await this.consult(chatId, caller, target, kind, message, scope, attach, reason || (parent?.discussion ? `토의 ${parent.discussion.topic} · ${callerName} → ${target.nickname}` : ""), supersedes, inherited, discussion);
+    const response = await this.consult(chatId, caller, target, kind, message, scope, attach, reason || (parent?.discussion ? `토의 ${parent.discussion.topic} · ${callerName} → ${target.nickname}` : ""), supersedes, inherited, discussion, false, cliAccount);
     if (parent?.discussion && !response.isError) parent.discussionReplies!.add(target.key);
     return response;
   }
 
-  private limitCheck(chatId: number, project: Project, target: Role, kind: ConsultKind, message: string, accountId?: GeminiWebAccountId): string | null {
+  private limitCheck(chatId: number, project: Project, target: Role, kind: ConsultKind, message: string, accountId?: GeminiWebAccountId | CliAccountId): string | null {
     const inst = this.instructions.get(chatId);
     if (!inst) return null;
     const s = project.settings;
@@ -845,15 +939,25 @@ export class Orchestrator {
     for (const f of w) f();
   }
 
-  private async consult(chatId: number, caller: Role, target: ChatAgent, kind: ConsultKind, message: string, scope: string[], attach: string[], reason: string, supersedes?: number, requestedEffort?: string, discussion?: Discussion, resuming = false): Promise<ToolResult> {
+  private async consult(chatId: number, caller: Role, target: ChatAgent, kind: ConsultKind, message: string, scope: string[], attach: string[], reason: string, supersedes?: number, requestedEffort?: string, discussion?: Discussion, resuming = false, accountChange?: CliAccountId | null): Promise<ToolResult> {
     const epoch = this.epochs.get(chatId);
     const chat = this.chats.store.chat(chatId)!;
     const project = this.chats.store.project(chat.projectId)!;
     const callerName = this.name(chatId, caller);
-    const limited = resuming ? (this.stopped.has(chatId) || this.planning.has(chatId) ? "작업이 중지되었거나 계획 모드입니다." : null) : this.limitCheck(chatId, project, target.key, kind, message, target.kind === "gemini" && this.chats.usesGeminiWeb(chat) ? target.webAccountId : undefined);
+    const cliKind = cliAccountKindForAgent(WORKER_AGENT[target.kind]);
+    let cliPolicy = cliKind ? this.chats.resolveAccountPolicy(cliKind, project.settings) : undefined;
+    let cliSelection = accountChange !== undefined && cliPolicy
+      ? cliPolicy.mode === "fixed" && cliPolicy.source !== "default" ? cliPolicy : this.chats.resolveAccountPolicy(cliKind!, project.settings, accountChange ?? undefined)
+      : this.chats.roleAccount(chatId, target.key);
+    if (cliSelection) this.chats.assertCliAccount(cliSelection.accountId, cliSelection.kind);
+    const limited = resuming ? (this.stopped.has(chatId) || this.planning.has(chatId) ? "작업이 중지되었거나 계획 모드입니다." : null) : this.limitCheck(chatId, project, target.key, kind, message, target.kind === "gemini" && this.chats.usesGeminiWeb(chat) ? target.webAccountId : cliSelection?.accountId);
     if (limited) {
       this.chats.emit(chatId, this.chats.route(chatId, caller), caller, { type: "notice", text: `${target.nickname}에게 맡기기 거절 · ${limited.split(".")[0]}` });
       return textResult(limited + this.takeQueued(chatId), true);
+    }
+    if (accountChange !== undefined) {
+      this.chats.setWorkerAccount(chatId, target.key, accountChange);
+      target.cliAccountId = accountChange ?? undefined;
     }
     const inst = this.instructions.get(chatId);
     if (inst && !resuming) {
@@ -900,7 +1004,7 @@ export class Orchestrator {
       if (kind === "implement") await this.acquireScope(chatId, consult.id, scope);
       this.chats.setRoute(chatId, target.key, node);
 
-      const result = await new Promise<{ ok: boolean; interrupted?: boolean; error?: string; text: string; files: string[]; webAccountId?: GeminiWebAccountId }>((resolve) => {
+      const result = await new Promise<{ ok: boolean; interrupted?: boolean; error?: string; text: string; files: string[]; webAccountId?: GeminiWebAccountId; cliAccountId?: CliAccountId }>((resolve) => {
         let settled = false;
         const r: Running = {
           lastEventAt: Date.now(),
@@ -922,7 +1026,7 @@ export class Orchestrator {
             const missing = discussion?.peers.filter(p => !r.discussionReplies!.has(p.key));
             const issue = end.ok && missing?.length ? `토의 미완료: ${missing.map(p => p.nickname).join(", ")}의 실제 참여 응답이 없습니다. 보완하거나 미완료 사유를 보고하세요.`
               : end.ok && message.includes("[이미지 결과 필수]") && ![...r.files].some(path => /\.(png|jpe?g|webp)$/i.test(path) && existsSync(resolvePath(project.folder, path))) ? "이미지 생성 미완료: 실제 이미지 파일이나 첨부 결과를 확인하지 못했습니다." : "";
-            resolve({ ...end, ...(issue ? { ok: false, error: issue } : {}), text: issue ? `${issue}\n${r.text}` : r.text, files: [...r.files], webAccountId: r.webAccountId });
+            resolve({ ...end, ...(issue ? { ok: false, error: issue } : {}), text: issue ? `${issue}\n${r.text}` : r.text, files: [...r.files], webAccountId: r.webAccountId, cliAccountId: r.cliAccountId });
           },
         };
         const m = this.running.get(chatId) ?? new Map<Role, Running>();
@@ -932,7 +1036,11 @@ export class Orchestrator {
         if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch) return r.resolve({ ok: false, interrupted: true });
         void (async () => {
           try {
+            cliSelection = this.chats.roleAccount(chatId, target.key);
+            cliPolicy = cliSelection ? this.chats.resolveAccountPolicy(cliSelection.kind, this.chats.store.project(chat.projectId)!.settings) : undefined;
+            if (cliSelection) this.chats.assertCliAccount(cliSelection.accountId, cliSelection.kind);
             const driver = await this.chats.driver(chatId, target.key, reasoning.effort);
+            r.cliAccountId = this.chats.runningAccount(chatId, target.key);
             if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch || settled) return r.resolve({ ok: false, interrupted: true });
             await driver.send({
               text: kindPrefix(kind, callerName, scope) + message + `\n\n[현재 팀과 최근 결과]\n${this.agentsText(chatId, true)}` + this.readMessages(chatId, target.key),
@@ -952,9 +1060,13 @@ export class Orchestrator {
       this.chats.agentsChanged(chatId);
       const hasResult = !!result.text.trim() || result.files.length > 0;
       const status = this.stopped.has(chatId) ? "stopped" : result.ok && hasResult ? "done" : result.interrupted ? "stopped" : "error";
+      const cliInfo = this.cliAccountText(chatId, cliSelection, result.cliAccountId, false, cliPolicy);
       const accountInfo = target.kind === "gemini" && this.chats.usesGeminiWeb(chat)
-        ? `[Gemini 웹 지정 계정=${target.webAccountId ?? "없음"} · 실제 실행 계정=${result.webAccountId ?? "연결 전 실패/중지"}]\n` : "";
-      const summary = accountInfo + [!result.ok ? result.error : undefined, result.text.trim()].filter(Boolean).join("\n")
+        ? `[Gemini 웹 지정 계정=${target.webAccountId ?? "없음"} · 실제 실행 계정=${result.webAccountId ?? "연결 전 실패/중지"}]\n` : cliInfo ? `[CLI ${cliInfo}]\n` : "";
+      const quotaFailure = !result.ok && ["claude", "gpt", "grok"].includes(target.kind)
+        && /rate[ _-]?limit|usage[ _-]?limit|quota|\btoo many requests\b|\byou(?:'ve|’ve| have) (?:hit|reached) your (?:usage )?limit\b|(?:계정|사용량|요청|구독|이용|잔여)\s*한도.{0,12}(?:소진|초과|부족)|^한도\s*(?:소진|초과|부족)|\b429\b/i.test(result.error ?? "");
+      const quotaNotice = quotaFailure ? "[CLI 한도 소진 — 자동 계정 전환·재시도 없음. fixed는 실패를 보고하고, auto는 마스터가 cli_accounts 조회 후 다른 계정에 supersedes로 재배정하세요.]\n" : "";
+      const summary = accountInfo + quotaNotice + [!result.ok ? result.error : undefined, result.text.trim()].filter(Boolean).join("\n")
         + (!result.text.trim() && !result.error ? (result.files.length ? `산출물 ${result.files.length}개를 생성·수정했습니다.` : "작업자의 응답과 산출물이 없습니다.") : "");
       const finished = this.chats.store.finishConsult(consult.id, status, summary, result.files);
       this.chats.sink.consult(finished);
@@ -1058,6 +1170,7 @@ export class Orchestrator {
         break;
       case "notice":
         if (event.webAccountId) r.webAccountId = event.webAccountId;
+        if (event.cliAccountId) r.cliAccountId = event.cliAccountId;
         break;
       case "text_delta":
         r.text += event.text;
@@ -1084,7 +1197,7 @@ export class Orchestrator {
         if (event.status === "done" && event.attachment) r.files.add(event.attachment.path);
         break;
       case "turn_end":
-        r.resolve({ ok: event.ok, interrupted: event.interrupted, error: event.error });
+        r.resolve({ ok: event.ok, interrupted: event.interrupted, error: event.error ?? (!event.ok ? r.lastError : undefined) });
         break;
     }
   }
@@ -1398,8 +1511,16 @@ export class Orchestrator {
         if (agent === "codex") {
           const threadId = chat.orchCodexThreadId;
           if (!threadId) throw new Error("아직 압축할 대화가 없습니다.");
-          await this.chats.driver(chatId, "orch");
-          await this.chats.codex().request("thread/compact/start", { threadId });
+          const [owner, generation] = (this.chats.store.getSetting(`orchSessionAccount:${chatId}:codex`) ?? "").split("@");
+          if (owner && (!isCliAccountId(owner) || !owner.startsWith("gpt-"))) throw new Error("마스터 스레드의 CLI 계정 기록이 올바르지 않습니다.");
+          // Legacy threads without an owner record belong to the original default account.
+          const accountId = isCliAccountId(owner) ? owner : this.chats.runningAccount(chatId, "orch") ?? "gpt-1";
+          const account = this.chats.assertCliAccount(accountId, "gpt");
+          if (generation !== undefined && (generation === "" || !Number.isFinite(Number(generation)) || Number(generation) !== account.createdAt))
+            throw new Error("마스터 대화를 만든 계정이 삭제·재생성되어 압축할 수 없습니다. 새 대화로 이어가세요.");
+          const server = this.chats.codex(accountId);
+          await server.ensure();
+          await server.request("thread/compact/start", { threadId });
           this.chats.emit(chatId, "orch", null, { type: "notice", text: "마스터 대화를 압축했습니다 (Codex)." });
         } else {
           await this.chats.startTurn(chatId, "/compact", [], async () => {

@@ -35,13 +35,13 @@ try {
   ({ app, page } = await launch(data)); await isolate(app); await page.reload();
   await page.setViewportSize({ width: 1420, height: 1000 }); await openChat(page);
   const usage = await page.getByTestId("usage-bar").allTextContents();
-  check("usage names are 클로드 / 지피티 / 제미나이 / 그록", usage.length === 4 && ["클로드", "지피티", "제미나이", "그록"].every((name, i) => usage[i].startsWith(name)), usage.join(" | "));
+  check("usage names are 클로드 / 지피티 / 그록", usage.length === 3 && ["클로드", "지피티", "그록"].every((name, i) => usage[i].startsWith(name)), usage.join(" | "));
   await page.getByTestId("connection-settings").click();
   check("Gemini web management keeps its own name", await page.getByTestId("gemini-web-manage").getByText("제미나이 웹 계정 관리", { exact: true }).count() === 1);
   await page.keyboard.press("Escape");
   for (const name of ["클로드", "지피티", "제미나이", "그록"]) check(`${name} header model control`, await page.getByLabel(`이 채팅의 ${name} 모델`, { exact: true }).count() === 1);
   await page.getByLabel("이 채팅의 마스터 모델", { exact: true }).click();
-  check("master picker offers all four CLI providers", (await page.getByRole("menu").textContent()).includes("그록 모델") && (await page.getByRole("menu").textContent()).includes("제미나이 모델"));
+  check("master picker keeps Grok and managed Gemini providers", (await page.getByRole("menu").textContent()).includes("그록 모델") && (await page.getByRole("menu").textContent()).includes("제미나이 모델") && (await page.getByRole("menu").textContent()).includes("AI Studio · Argon"));
   check("web account is not offered as master", !(await page.getByRole("menu").textContent()).includes("제미나이 웹 · Argon"));
   await page.getByRole("menuitem", { name: /grok test model/ }).click();
   let chat = (await page.evaluate(() => window.chatterbox.listChats()))[0];

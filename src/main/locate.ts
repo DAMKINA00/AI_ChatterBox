@@ -11,19 +11,6 @@ export function findGrok(override?: string): string | null {
   return onPath("grok") ?? (existsSync(local) ? local : null);
 }
 
-export function findGemini(override?: string): string | null {
-  if (override && existsSync(override)) return override;
-  const found = onPath("agy");
-  if (found) return found;
-  const paths = process.platform === "win32"
-    ? [process.env.LOCALAPPDATA, join(homedir(), "AppData", "Local")]
-      .filter((dir): dir is string => !!dir?.trim())
-      .map((dir) => join(dir, "agy", "bin", "agy.exe"))
-    : [join(homedir(), ".local", "bin", "agy")];
-  // An inherited LOCALAPPDATA may be stale; still check the current user's install.
-  return paths.find(existsSync) ?? null;
-}
-
 function onPath(name: string): string | undefined {
   for (const dir of (process.env.PATH ?? "").split(delimiter)) {
     if (!dir.trim()) continue;

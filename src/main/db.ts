@@ -3,9 +3,13 @@
 import { DatabaseSync } from "node:sqlite";
 import {
   DEFAULT_SETTINGS,
+  normalizeGeminiModel,
+  normalizeOrchestratorModel,
   MAX_CONSULTS,
   MAX_REVIEWS,
   WORKER_KIND_LABEL,
+  isCliAccountId,
+  type CliAccountId,
   type WorkerKind,
   type AgentEvent,
   type AttachmentRef,
@@ -193,6 +197,8 @@ function projectSettings(json: string): ProjectSettings {
   for (const [key, values] of Object.entries(previous)) if (values.includes(saved[key])) delete saved[key];
   const settings = { ...DEFAULT_SETTINGS, ...saved };
   if (settings.approvalMode === "orchestrator" && settings.delegateHighRisk) settings.approvalMode = "orchestrator-all";
+  settings.geminiModel = normalizeGeminiModel(settings.geminiModel);
+  settings.orchestratorModel = normalizeOrchestratorModel(settings.orchestratorModel);
   settings.delegateHighRisk = settings.approvalMode === "orchestrator-all";
   const bounded = (value: number, min: number, max: number, fallback: number) => Number.isFinite(value) ? Math.min(max, Math.max(min, Math.floor(value))) : fallback;
   settings.maxConsults = bounded(settings.maxConsults, 1, MAX_CONSULTS, DEFAULT_SETTINGS.maxConsults);
@@ -218,7 +224,7 @@ const toChat = (r: Row): Chat => ({
   codexThreadId: r.codex_thread_id,
   claudeModelOverride: r.claude_model_override,
   codexModelOverride: r.codex_model_override,
-  geminiModelOverride: r.gemini_model_override ?? null,
+  geminiModelOverride: r.gemini_model_override == null ? null : normalizeGeminiModel(r.gemini_model_override),
   grokModelOverride: r.grok_model_override ?? null,
   deepseekModelOverride: r.deepseek_model_override ?? null,
   orchestratorEffortOverride: r.orchestrator_effort_override ?? null,
@@ -228,7 +234,7 @@ const toChat = (r: Row): Chat => ({
   grokEffortOverride: r.grok_effort_override ?? null,
   deepseekEffortOverride: r.deepseek_effort_override ?? null,
   approvalModeOverride: r.approval_mode_override ?? null,
-  orchestratorModelOverride: r.orchestrator_model_override ?? null,
+  orchestratorModelOverride: r.orchestrator_model_override == null ? null : normalizeOrchestratorModel(r.orchestrator_model_override),
   goal: r.goal_json ? JSON.parse(r.goal_json) : null,
   status: r.status,
   unread: !!r.unread,
@@ -266,6 +272,9 @@ const toAgent = (r: Row): ChatAgent => ({
   job: r.job,
   sessionId: r.session_id,
   webAccountId: r.web_account_id ?? undefined,
+  ...(isCliAccountId(r.cli_account_id) ? { cliAccountId: r.cli_account_id } : {}),
+  ...(isCliAccountId(r.session_account_id) ? { sessionAccountId: r.session_account_id } : {}),
+  ...(isCliAccountId(r.session_account_id) && Number.isFinite(r.session_account_gen) ? { sessionAccountGeneration: r.session_account_gen } : {}),
   status: r.status,
   createdAt: r.created_at,
 });
@@ -395,11 +404,18 @@ export class Store {
       .run(chatId, kind, n, `${WORKER_KIND_LABEL[kind]} ${n}호`, job, Date.now());
     return this.agent(Number(r.lastInsertRowid))!;
   }
-  updateAgent(id: number, patch: { sessionId?: string; status?: "active" | "released"; job?: string; webAccountId?: GeminiWebAccountId }) {
+  /**
+   * `cliAccountId: null` returns the worker to the project/global policy; releasing a worker also
+   * drops its assignment. A new `sessionAccountId` replaces the session generation with the given one.
+   */
+  updateAgent(id: number, patch: { sessionId?: string; status?: "active" | "released"; job?: string; webAccountId?: GeminiWebAccountId; cliAccountId?: CliAccountId | null; sessionAccountId?: CliAccountId; sessionAccountGeneration?: number }) {
     const a = this.agent(id)!;
+    const cliAccountId = patch.cliAccountId === null || patch.status === "released" ? null : patch.cliAccountId ?? a.cliAccountId ?? null;
+    const generation = patch.sessionAccountId !== undefined ? patch.sessionAccountGeneration ?? null : patch.sessionAccountGeneration ?? a.sessionAccountGeneration ?? null;
     this.db
-      .prepare("UPDATE agents SET session_id = ?, status = ?, job = ?, web_account_id = ? WHERE id = ?")
-      .run(patch.sessionId ?? a.sessionId, patch.status ?? a.status, patch.job ?? a.job, patch.webAccountId ?? a.webAccountId ?? null, id);
+      .prepare("UPDATE agents SET session_id = ?, status = ?, job = ?, web_account_id = ?, cli_account_id = ?, session_account_id = ?, session_account_gen = ? WHERE id = ?")
+      .run(patch.sessionId ?? a.sessionId, patch.status ?? a.status, patch.job ?? a.job, patch.webAccountId ?? a.webAccountId ?? null,
+        cliAccountId, patch.sessionAccountId ?? a.sessionAccountId ?? null, generation, id);
     return this.agent(id)!;
   }
 
@@ -410,6 +426,9 @@ export class Store {
       if (!cols.includes(column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
     };
     add("agents", "web_account_id", "web_account_id TEXT");
+    add("agents", "cli_account_id", "cli_account_id TEXT");
+    add("agents", "session_account_id", "session_account_id TEXT");
+    add("agents", "session_account_gen", "session_account_gen INTEGER");
     add("chats", "approval_mode_override", "approval_mode_override TEXT");
     add("chats", "orchestrator_model_override", "orchestrator_model_override TEXT");
     add("chats", "goal_json", "goal_json TEXT");
@@ -586,6 +605,21 @@ export class Store {
   deleteChat(id: number) {
     this.clearChatSettings(id);
     this.db.prepare("DELETE FROM chats WHERE id = ?").run(id);
+  }
+  /**
+   * A removed CLI account: assigned workers return to the policy, and every session it owned
+   * (workers and masters) is marked generation -1 so a re-created account with the same ID never
+   * resumes it — the next run starts fresh with a handoff summary.
+   */
+  clearCliAccount(accountId: CliAccountId) {
+    if (!isCliAccountId(accountId)) throw new Error("등록되지 않은 CLI 계정입니다.");
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare("UPDATE agents SET cli_account_id = NULL WHERE cli_account_id = ?").run(accountId);
+      this.db.prepare("UPDATE agents SET session_account_gen = -1 WHERE session_account_id = ?").run(accountId);
+      this.db.prepare("UPDATE settings SET value = ? WHERE key LIKE 'orchSessionAccount:%' AND (value = ? OR value LIKE ?)").run(`${accountId}@-1`, accountId, `${accountId}@%`);
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   disconnectWebAccount(accountId: GeminiWebAccountId) {
     if (!/^gemini-([1-9]|10)$/.test(accountId)) throw new Error("등록되지 않은 웹 계정입니다.");

@@ -2,11 +2,9 @@
 // The orchestrator's own session is blocked inside a consult tool call while workers ask for
 // approvals, so judging happens in this side conversation. It keeps context across requests
 // (decisions so far), answers strict JSON, and anything malformed/slow falls back to the user.
-import { chatOrchestrator, roleName, CONSULT_KIND_LABEL, type AgentEvent, type ApprovalRequest, type ConsultKind, type Role, type UsageInfo } from "../shared/types";
+import { chatOrchestrator, roleName, CONSULT_KIND_LABEL, type AgentEvent, type ApprovalRequest, type ConsultKind, type Role, type UsageInfo, type CliAccountId } from "../shared/types";
 import type { ChatManager } from "./chats";
 import type { ApprovalInput, JudgeAnswer } from "./approvals";
-import { join, dirname } from "node:path";
-import { GeminiDriver } from "./drivers/gemini";
 import { AIStudioDriver, ChatCompletionDriver } from "./drivers/aistudio";
 import { isAIStudioModel } from "../shared/aistudio";
 import { GrokDriver } from "./drivers/grok";
@@ -28,6 +26,7 @@ const JUDGE_INSTRUCTIONS = [
 ].join("\n");
 
 interface Session {
+  accountId?: CliAccountId;
   driver: AgentDriver;
   key: string;
   text: string;
@@ -49,26 +48,33 @@ export class ApprovalJudge {
   constructor(
     private chats: ChatManager,
     private context: (chatId: number, role?: Role) => JudgeContext,
-  ) {}
+  ) {
+    chats.releaseAccountJudges = async id => {
+      for (const [chatId, session] of this.sessions) if (session.accountId === id) await this.interrupt(chatId, true);
+    };
+  }
 
-  private async session(chatId: number): Promise<Session> {
+  private async session(chatId: number, accountId?: CliAccountId): Promise<Session> {
     const generation = this.generation;
     const chatGeneration = this.chatGenerations.get(chatId) ?? 0;
     const chat = this.chats.store.chat(chatId)!;
     const project = this.chats.store.project(chat.projectId)!;
     const { agent, model } = chatOrchestrator(chat, project);
+    if (agent === "gemini" && !isAIStudioModel(model)) throw new Error("Gemini 웹은 승인 판단 마스터로 사용할 수 없습니다.");
+    const token = accountId ? this.chats.accountToken(accountId) : "";
+    const accountEnv = accountId ? this.chats.cliAccounts().env(accountId) : {};
     const { effort } = await this.chats.assignmentEffort(chatId, "orch");
     if (generation !== this.generation || chatGeneration !== (this.chatGenerations.get(chatId) ?? 0)) throw new Error("승인 판단 초기화가 취소되었습니다.");
-    const key = `${agent}:${model}:${effort}:${project.folder}:${chat.approvalModeOverride ?? project.settings.approvalMode}`;
+    const key = `${agent}:${model}:${effort}:${project.folder}:${accountId ?? ""}:${token}:${chat.approvalModeOverride ?? project.settings.approvalMode}`;
     const cur = this.sessions.get(chatId);
     if (cur && cur.key === key) return cur;
     if (cur) {
       cur.active?.controller.abort();
       cur.done?.(false);
-      void cur.driver.dispose();
+      await cur.driver.dispose();
     }
 
-    const s: Session = { driver: undefined as unknown as AgentDriver, key, text: "", queue: Promise.resolve() };
+    const s: Session = { accountId, driver: undefined as unknown as AgentDriver, key, text: "", queue: Promise.resolve() };
     const host: DriverHost = {
       emit: (e: AgentEvent) => {
         if (e.type === "text") s.text = e.text;
@@ -99,9 +105,9 @@ export class ApprovalJudge {
         } finally { if (s.active === active) active.resume(); }
       },
       image: (image) => this.chats.generatedImage(chatId, image),
-      usage: (u: UsageInfo) => this.chats.mergeUsage(u),
+      usage: (u: UsageInfo) => this.chats.mergeUsage(u, accountId, token),
     };
-    const opts = { cwd: project.folder, nativeId: null, exePath: "", model: model || undefined, effort, instructions: JUDGE_INSTRUCTIONS, ephemeral: true };
+    const opts = { accountEnv, cwd: project.folder, nativeId: null, exePath: "", model: model || undefined, effort, instructions: JUDGE_INSTRUCTIONS, ephemeral: true };
     s.driver =
       agent === "claude"
         ? new ClaudeDriver(
@@ -116,20 +122,23 @@ export class ApprovalJudge {
             host,
           )
         : agent === "gemini" && isAIStudioModel(model) ? new AIStudioDriver(opts, { service: this.chats.aiStudio() }, host)
-        : agent === "gemini" ? new GeminiDriver({ ...opts, exePath: this.chats.geminiExe() }, { bridge: this.chats.bridge, hookScript: join(dirname(this.chats.bridgeScript), "antigravity-hook.js"), tmpDir: this.chats.tmpDir }, host)
         : agent === "grok" ? new GrokDriver({ ...opts, exePath: this.chats.grokExe() }, () => ({}), host)
         : agent === "deepseek" ? new ChatCompletionDriver(opts, { provider: "deepseek", service: this.chats.deepSeek() }, host)
-        : new CodexDriver(opts, this.chats.codex(), host);
+        : new CodexDriver(opts, this.chats.codex(accountId), host);
     this.sessions.set(chatId, s);
     return s;
   }
 
   async decide(chatId: number, request: ApprovalRequest, input: ApprovalInput): Promise<JudgeAnswer | null> {
-    const s = await this.session(chatId);
-    // One question at a time per chat.
-    const run = s.queue.then(() => this.sessions.get(chatId) === s ? this.ask(chatId, s, request, input) : null);
-    s.queue = run.catch(() => undefined);
-    return run;
+    const accountId = this.chats.runningAccount(chatId, "orch") ?? this.chats.roleAccount(chatId, "orch")?.accountId;
+    const release = accountId ? this.chats.holdJudgeAccount(accountId) : () => {};
+    try {
+      const s = await this.session(chatId, accountId);
+      // One question at a time per chat; queued decisions also hold their account.
+      const run = s.queue.then(() => this.sessions.get(chatId) === s ? this.ask(chatId, s, request, input) : null);
+      s.queue = run.catch(() => undefined);
+      return await run;
+    } finally { release(); }
   }
 
   private async ask(chatId: number, s: Session, request: ApprovalRequest, input: ApprovalInput): Promise<JudgeAnswer | null> {
@@ -206,14 +215,15 @@ export class ApprovalJudge {
     void this.interrupt(chatId);
   }
 
-  async interrupt(chatId: number) {
+  async interrupt(chatId: number, strict = false) {
     this.chatGenerations.set(chatId, (this.chatGenerations.get(chatId) ?? 0) + 1);
     const s = this.sessions.get(chatId);
-    this.sessions.delete(chatId);
+    if (!strict) this.sessions.delete(chatId);
     s?.active?.controller.abort();
     s?.done?.(false);
     await s?.driver.stop().catch(() => undefined);
-    await s?.driver.dispose().catch(() => undefined);
+    if (strict) { await s?.driver.dispose(); if (this.sessions.get(chatId) === s) this.sessions.delete(chatId); }
+    else await s?.driver.dispose().catch(() => undefined);
   }
 
   async dispose() {

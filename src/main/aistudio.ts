@@ -339,9 +339,5 @@ export class AIStudioService {
     this.accountChange = run.catch(() => undefined);
     return run;
   }
-  /** Import through Custom Model Enabler's own UI so existing vendor settings and credentials stay intact. */
-  antigravityConfig() {
-    return { models: [{ name: "models/chatterbox-aistudio-argon", displayName: "AI Studio · Argon", provider: "custom", externalModelName: this.saved.model,
-      apiUrl: this.saved.baseUrl + "/v1", apiKey: "", apiFormat: "openai", enabled: true }] };
-  }
+
 }

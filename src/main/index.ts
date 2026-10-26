@@ -153,7 +153,7 @@ function createWindow() {
 }
 
 function registerUi(channels: string[], rpc: CoreRpc) {
-  const internal = new Set(["attachment:info", "window:save", "files:resolve-link", "aistudio:export-config"]);
+  const internal = new Set(["attachment:info", "window:save", "files:resolve-link"]);
   const local = new Set(["theme:set", "aistudio"]);
   for (const channel of channels.filter(channel => !internal.has(channel) && !local.has(channel))) {
     ipcMain.handle(channel, async (_event, ...args) => {
@@ -179,11 +179,6 @@ function registerUi(channels: string[], rpc: CoreRpc) {
       const status = await rpc.call("aistudio", ["launch"]);
       await shell.openExternal(status.settings.baseUrl);
       return status;
-    }
-    if (action === "export-antigravity") {
-      const target = await dialog.showSaveDialog(win!, { title: "Antigravity Custom Model Enabler 설정 저장", defaultPath: "chatterbox-aistudio-argon.json", filters: [{ name: "JSON", extensions: ["json"] }] });
-      if (target.filePath) writeFileSync(target.filePath, JSON.stringify(await rpc.call("aistudio:export-config"), null, 2), "utf8");
-      return rpc.call("aistudio", ["status"]);
     }
     return rpc.call("aistudio", [action, input]);
   });

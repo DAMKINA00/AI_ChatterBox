@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { CircleAlert, ExternalLink, Loader2, RefreshCw, Save, Settings2, Sparkles, Square, Zap } from "lucide-react";
-import type { AIStudioAction, AIStudioAccount, AIStudioStatus } from "../../../shared/aistudio";
+import { CircleAlert, ExternalLink, Loader2, RefreshCw, Save, Sparkles, Square, Zap } from "lucide-react";
+import { type AIStudioAction, type AIStudioAccount, type AIStudioStatus } from "../../../shared/aistudio";
 import { api, errorMessage } from "../lib/utils";
 import { Button, Dialog, DialogContent, DialogFooter, Input, Label } from "./ui";
 import { GeminiWebDialog } from "./GeminiWebDialog";
@@ -186,7 +186,6 @@ export function AIStudioDialog({ open, onOpenChange, onUseModel }: Props) {
                 <Button type="button" variant="outline" onClick={() => void run("start")} disabled={!!pending}><Zap /> 서비스 시작</Button>
                 <Button type="button" variant="outline" onClick={() => void run("stop")} disabled={!!pending}><Square /> 서비스 중지</Button>
                 <Button type="button" variant="outline" onClick={() => void run("open")} disabled={!!pending}><ExternalLink /> 매니저 열기</Button>
-                <Button type="button" variant="outline" onClick={() => void run("export-antigravity")} disabled={!!pending}><Settings2 /> Antigravity 설정 내보내기</Button>
               </div>
               <p className="text-[11.5px] text-muted-foreground">제미나이에서 이 모델을 호출하면 필요한 매니저를 자동 설치·실행하고 연결된 계정으로 서비스를 시작합니다. Google 로그인과 계정 연결은 먼저 완료해야 합니다.</p>
             </div>

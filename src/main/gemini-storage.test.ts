@@ -217,10 +217,10 @@ test("Gemini model override persists, reloads, clears with null, and reloads cle
   let store: Store | undefined = f.store;
   try {
     assert.equal(store.chat(f.chatId)!.geminiModelOverride, null);
-    assert.equal(store.updateChat(f.chatId, { geminiModelOverride: "gemini-2.5-pro", touch: true }).geminiModelOverride, "gemini-2.5-pro");
+    assert.equal(store.updateChat(f.chatId, { geminiModelOverride: "aistudio:gemini-4-argon", touch: true }).geminiModelOverride, "aistudio:gemini-4-argon");
     store.close();
     store = new Store(f.dbPath);
-    assert.equal(store.chat(f.chatId)!.geminiModelOverride, "gemini-2.5-pro");
+    assert.equal(store.chat(f.chatId)!.geminiModelOverride, "aistudio:gemini-4-argon");
     assert.equal(store.updateChat(f.chatId, { geminiModelOverride: null, touch: true }).geminiModelOverride, null);
     store.close();
     store = new Store(f.dbPath);

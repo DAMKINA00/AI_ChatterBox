@@ -53,7 +53,7 @@ export class GeminiWebDriver implements AgentDriver {
   get running() { return !!this.controller; }
   async send(input: AgentInput) {
     if (this.disposed || this.running) throw new Error("웹 작업자가 종료되었거나 이미 실행 중입니다.");
-    if (!input.noWrites && !input.requiresImage) throw new Error("Gemini 웹은 로컬 파일을 수정할 수 없습니다. Antigravity CLI를 선택하세요.");
+    if (!input.noWrites && !input.requiresImage) throw new Error("Gemini 웹은 로컬 파일을 수정할 수 없습니다. AI Studio 모델을 선택하세요.");
     if (this.pool && !input.webAccountId) throw new Error("마스터가 Gemini 웹 계정을 선택해야 합니다. gemini_web_accounts 조회 후 spawn/ask의 webAccountId를 지정하세요.");
     const controller = new AbortController();
     this.controller = controller;

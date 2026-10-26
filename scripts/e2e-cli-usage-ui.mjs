@@ -21,12 +21,12 @@ try {
     for (const channel of ["cli:info", "models:list", "usage:get"]) ipcMain.removeHandler(channel);
     ipcMain.handle("cli:info", () => new Promise(resolve => setTimeout(() => resolve([]), 300)));
     ipcMain.handle("models:list", () => []);
-    globalThis.fixtureUsage = { gemini: { error: "fixture timeout" }, grok: { error: "fixture connection" } };
+    globalThis.fixtureUsage = { grok: { error: "fixture connection" } };
     globalThis.usageRequests = [];
     ipcMain.handle("usage:get", (_e, wait) => {
       globalThis.usageRequests.push(wait);
       if (!wait) {
-        setTimeout(() => send("usage", { gemini: { weekly: { usedPercent: 20 } }, grok: { weekly: { usedPercent: 0 } } }), 30);
+        setTimeout(() => send("usage", { grok: { weekly: { usedPercent: 0 } } }), 30);
         return globalThis.fixtureUsage;
       }
       return new Promise(resolve => { globalThis.finishUsage = resolve; });
@@ -35,26 +35,26 @@ try {
   await page.reload();
   const button = page.getByTestId("usage-refresh");
   await button.waitFor();
-  const gemini = page.getByTestId("usage-bar").filter({ hasText: "제미나이" });
   const grok = page.getByTestId("usage-bar").filter({ hasText: "그록" });
-  check("startup keeps fresh usage arriving before CLI initialization completes", (await gemini.textContent()).includes("80%") && (await grok.textContent()).includes("100%"));
+  check("Gemini CLI usage row is removed", await page.getByTestId("usage-bar").filter({ hasText: "제미나이" }).count() === 0);
+  check("startup keeps fresh usage arriving before CLI initialization completes", (await grok.textContent()).includes("100%"));
   await app.evaluate(() => globalThis.fixtureSendUsage(globalThis.fixtureUsage));
-  await gemini.getByText("조회 실패", { exact: true }).waitFor();
-  check("cached failures show no invented percentages", (await gemini.textContent()).includes("조회 실패") && !(await gemini.textContent()).includes("%"));
+  await grok.getByText("조회 실패", { exact: true }).waitFor();
+  check("cached failures show no invented percentages", (await grok.textContent()).includes("조회 실패") && !(await grok.textContent()).includes("%"));
   await button.click();
   check("manual refresh stays disabled while the providers are pending", await button.isDisabled());
   check("manual refresh requests completed results", (await app.evaluate(() => globalThis.usageRequests)).at(-1) === true);
   await app.evaluate(() => {
-    globalThis.fixtureUsage = { gemini: { weekly: { usedPercent: 20 }, updatedAt: Date.now() }, grok: { weekly: { usedPercent: 0 }, updatedAt: Date.now() } };
+    globalThis.fixtureUsage = { grok: { weekly: { usedPercent: 0 }, updatedAt: Date.now() } };
     globalThis.finishUsage(globalThis.fixtureUsage);
   });
   await page.waitForFunction(() => !document.querySelector('[data-testid="usage-refresh"]')?.disabled);
-  check("Gemini recovery clears the old error and displays real remaining usage", (await gemini.textContent()).includes("80%") && !(await gemini.textContent()).includes("조회 실패"));
+  check("Grok recovery clears the old error and displays real remaining usage", (await grok.textContent()).includes("100%") && !(await grok.textContent()).includes("조회 실패"));
   check("Grok zero usage shows a full remaining gauge", (await grok.textContent()).includes("100%") && await grok.locator('[style]').evaluate(element => element.style.width === "100%"));
   await button.click();
-  await app.evaluate(() => globalThis.finishUsage({ gemini: { error: "로그인이 필요합니다" }, grok: { monthly: { usedPercent: 25 }, updatedAt: Date.now() } }));
+  await app.evaluate(() => globalThis.finishUsage({ grok: { monthly: { usedPercent: 25 }, updatedAt: Date.now() } }));
   await page.waitForFunction(() => !document.querySelector('[data-testid="usage-refresh"]')?.disabled);
-  check("new errors remove stale percentages", (await gemini.textContent()).includes("조회 실패") && !(await gemini.textContent()).includes("80%"));
+  check("new Grok snapshots replace stale percentages", (await grok.textContent()).includes("월간") && !(await grok.textContent()).includes("100%"));
   check("monthly Grok allowance is labeled correctly", (await grok.textContent()).includes("월간") && (await grok.textContent()).includes("75%"));
   await page.screenshot({ path: join(data, "usage-refresh.png") });
   console.log(`${count}/${count} passed; evidence: ${data}`);

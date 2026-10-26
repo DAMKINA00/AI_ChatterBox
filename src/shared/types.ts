@@ -1,12 +1,16 @@
 // Types shared by main, preload and renderer.
+import { AISTUDIO_MODEL, isAIStudioModel } from "./aistudio";
 import type { ProviderUsage } from "./usage";
 import type { AIStudioAction, AIStudioInput, AIStudioStatus, AIStudioUsageRange, AIStudioUsageReport } from "./aistudio";
 import type { DeepSeekAction, DeepSeekBalance, DeepSeekInput, DeepSeekStatus } from "./deepseek";
 
 export type AgentKind = "claude" | "codex" | "gemini" | "grok" | "deepseek";
 export const GEMINI_WEB_MODEL = "gemini-web-argon";
+/** Legacy CLI selections now use AI Studio; existing Web/AIS selections stay intact. */
+export const normalizeGeminiModel = (model: string): string => model === GEMINI_WEB_MODEL || isAIStudioModel(model) ? model : AISTUDIO_MODEL;
+export const normalizeOrchestratorModel = (model: string): OrchestratorModel => (model.startsWith("gemini:") ? `gemini:${normalizeGeminiModel(model.slice(7))}` : model) as OrchestratorModel;
 export type GeminiWebAccountId = `gemini-${1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10}`;
-export const GEMINI_WRITING_INSTRUCTIONS = "기본 글쓰기 담당은 Antigravity/Gemini다. 사용자가 다른 작업을 명시적으로 지정하면 해당 요청을 수행한다. 사용 가능한 도구만 사용하고, 없는 기능이나 실행하지 않은 결과를 꾸며내지 않는다.";
+export const GEMINI_WRITING_INSTRUCTIONS = "기본 글쓰기 담당은 Gemini다. 사용자가 다른 작업을 명시적으로 지정하면 해당 요청을 수행한다. 사용 가능한 도구만 사용하고, 없는 기능이나 실행하지 않은 결과를 꾸며내지 않는다.";
 
 export interface GeminiWebUsage {
   status: "unknown" | "available" | "limited" | "error";
@@ -32,6 +36,57 @@ export interface GeminiWebAccountStatus extends GeminiWebStatus {
   label: string;
   enabled: boolean;
   remainingPercent?: number;
+}
+
+/** CLI account families. Codex uses the worker kind "gpt". */
+export const CLI_ACCOUNT_KINDS = ["claude", "gpt", "grok"] as const;
+export type CliAccountKind = (typeof CLI_ACCOUNT_KINDS)[number];
+export type CliAccountId = `${CliAccountKind}-${1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10}`;
+export const MAX_CLI_ACCOUNTS = 10;
+
+export function isCliAccountId(value: unknown): value is CliAccountId {
+  return typeof value === "string" && /^(claude|gpt|grok)-([1-9]|10)$/.test(value);
+}
+export function cliAccountKindOf(id: CliAccountId): CliAccountKind {
+  return id.slice(0, id.lastIndexOf("-")) as CliAccountKind;
+}
+export const defaultCliAccountId = (kind: CliAccountKind): CliAccountId => `${kind}-1`;
+/** Account family of a CLI agent; null for agents without CLI accounts. */
+export function cliAccountKindForAgent(agent: AgentKind): CliAccountKind | null {
+  return agent === "claude" ? "claude" : agent === "codex" ? "gpt" : agent === "grok" ? "grok" : null;
+}
+
+export interface CliAccount {
+  accountId: CliAccountId;
+  kind: CliAccountKind;
+  label: string;
+  /** null = the CLI's own default directory (~/.claude, ~/.codex, ~/.grok); only `*-1`. */
+  configDir: string | null;
+  enabled: boolean;
+  createdAt: number;
+  auth?: { loggedIn: boolean; checkedAt: number; email?: string };
+  usage?: ProviderUsage & { checkedAt: number };
+}
+
+export interface CliAccountStatus extends CliAccount {
+  isDefault: boolean;
+  authStatus: "authenticated" | "required" | "unknown";
+  /** Lowest remaining percent of the 5-hour and weekly windows; undefined when unknown or stale. */
+  remainingPercent?: number;
+  /** Live drivers currently running a turn on this account (all chats). */
+  runningWorkers: number;
+}
+
+export interface CliAccountPolicy {
+  mode: "fixed" | "auto";
+  accountId?: CliAccountId;
+}
+export type CliAccountPolicies = Partial<Record<CliAccountKind, CliAccountPolicy>>;
+export interface ResolvedCliAccount {
+  kind: CliAccountKind;
+  mode: "fixed" | "auto";
+  accountId: CliAccountId;
+  source: "explicit" | "project" | "global" | "default";
 }
 
 export interface TokenCounts {
@@ -87,6 +142,12 @@ export interface ChatAgent {
   sessionId: string | null;
   /** Gemini web account explicitly selected by the master; absent on legacy/unbound workers. */
   webAccountId?: GeminiWebAccountId;
+  /** CLI account explicitly assigned by the master; absent = project/global policy. */
+  cliAccountId?: CliAccountId;
+  /** CLI account that created `sessionId`; a different account never resumes it. */
+  sessionAccountId?: CliAccountId;
+  /** `createdAt` of that account when the session was made; -1 = the account was removed. */
+  sessionAccountGeneration?: number;
   status: "active" | "released";
   createdAt: number;
 }
@@ -118,7 +179,7 @@ export function parseOrchestrator(m: string): { agent: AgentKind; model: string 
   const i = m.indexOf(":");
   const prefix = m.slice(0, i);
   const agent: AgentKind = ["claude", "codex", "gemini", "grok", "deepseek"].includes(prefix) ? prefix as AgentKind : "claude";
-  return { agent, model: m.slice(i + 1) };
+  return { agent, model: agent === "gemini" ? normalizeGeminiModel(m.slice(i + 1)) : m.slice(i + 1) };
 }
 
 export interface ProjectSettings {
@@ -133,7 +194,7 @@ export interface ProjectSettings {
   claudeModel: string;
   /** GPT worker model id (Codex model/list). */
   codexModel: string;
-  /** Antigravity model slug. Empty selects an available Pro-compatible Gemini model. */
+  /** Gemini Web or AI Studio model ID. */
   geminiModel: string;
   grokModel: string;
   grokStrengths: string;
@@ -164,6 +225,8 @@ export interface ProjectSettings {
   approvalMode: ApprovalMode;
   /** Let the orchestrator also allow high-risk requests (otherwise they go to the user). */
   delegateHighRisk: boolean;
+  /** Per-family CLI account policy; a missing family follows the app-wide policy. */
+  accountPolicy?: CliAccountPolicies;
 }
 
 export type ApprovalMode = "orchestrator-all" | "orchestrator" | "user";
@@ -184,7 +247,7 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   orchestratorModel: "claude:opus",
   claudeModel: "opus",
   codexModel: "gpt-6-astra",
-  geminiModel: "",
+  geminiModel: AISTUDIO_MODEL,
   grokModel: "",
   grokStrengths: "사용자가 지정한 작업, 조사·구현·이미지 생성과 동료 협업.",
   grokCautions: "실제 CLI·모델·도구 제공 여부를 확인하고 불가능한 기능은 실행한 것처럼 보고하지 않습니다.",
@@ -198,7 +261,7 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   grokEffort: "auto",
   deepseekEffort: "auto",
   geminiStrengths: "문장 다듬기, 대사·시나리오, 문서 작성·요약·번역을 우선 배정하며 명시적으로 지정한 다른 작업도 수행합니다.",
-  geminiCautions: "CLI는 승인과 작업 범위 안에서 코드·이미지 도구를 사용합니다. Gemini 웹은 로컬 파일·명령·MCP를 실행할 수 없습니다. 실제 계정에서 제공되는 모델과 도구만 사용합니다.",
+  geminiCautions: "AI Studio는 승인과 작업 범위 안에서 로컬 도구를 사용합니다. Gemini 웹은 로컬 파일·명령·MCP를 실행할 수 없습니다. 실제 계정에서 제공되는 모델과 도구만 사용합니다.",
   reviewGate: true,
   maxConsults: 100,
   maxReviews: 20,
@@ -347,7 +410,7 @@ export type AgentEvent =
   | { type: "consult_end"; consultId: number; status: ConsultStatus; summary: string; files: string[] }
   | { type: "ask_user"; id: string; question: string; options: string[] }
   | { type: "ask_user_answer"; id: string; answer: string }
-  | { type: "notice"; text: string; webAccountId?: GeminiWebAccountId }
+  | { type: "notice"; text: string; webAccountId?: GeminiWebAccountId; cliAccountId?: CliAccountId }
   /** Checklist from the orchestrator's native plan tool (Claude TodoWrite / Codex update_plan). */
   | { type: "plan_update"; steps: PlanStep[]; explanation?: string }
   /** /plan proposal lifecycle: proposed → running → done / cancelled. */
@@ -413,9 +476,26 @@ export interface UsageInfo {
   grok?: ProviderUsage;
   deepseek?: DeepSeekBalance;
   geminiWeb?: GeminiWebUsage;
+  /** Per CLI account; the family keys above keep the `*-1` values. */
+  accounts?: Partial<Record<CliAccountId, ProviderUsage>>;
+}
+
+export interface CliAccountsApi {
+  list(): Promise<CliAccountStatus[]>;
+  create(kind: CliAccountKind, label?: string): Promise<CliAccountStatus[]>;
+  /** Opens a new console with the account's environment and returns immediately; refresh afterwards. */
+  login(id: CliAccountId): Promise<void>;
+  logout(id: CliAccountId): Promise<CliAccountStatus[]>;
+  refresh(id?: CliAccountId): Promise<CliAccountStatus[]>;
+  update(id: CliAccountId, patch: { label?: string; enabled?: boolean }): Promise<CliAccountStatus[]>;
+  remove(id: CliAccountId): Promise<CliAccountStatus[]>;
+  getPolicy(): Promise<CliAccountPolicies>;
+  /** Replaces the whole app-wide policy. */
+  setPolicy(policies: CliAccountPolicies): Promise<CliAccountPolicies>;
 }
 
 export interface ChatterBoxApi {
+  cliAccounts: CliAccountsApi;
   deepSeek(action: DeepSeekAction, input?: DeepSeekInput): Promise<DeepSeekStatus>;
   aiStudio(action: AIStudioAction, input?: AIStudioInput): Promise<AIStudioStatus>;
   aiStudioUsage(range?: AIStudioUsageRange): Promise<AIStudioUsageReport>;

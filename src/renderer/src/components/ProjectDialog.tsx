@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { FolderOpen } from "lucide-react";
-import { APPROVAL_MODE_LABEL, DEFAULT_SETTINGS, MAX_CONSULTS, MAX_REVIEWS, parseOrchestrator, type AgentKind, type Project, type ProjectSettings } from "../../../shared/types";
-import { api, cn } from "../lib/utils";
+import { APPROVAL_MODE_LABEL, DEFAULT_SETTINGS, MAX_CONSULTS, MAX_REVIEWS, parseOrchestrator, type AgentKind, type CliAccountStatus, type Project, type ProjectSettings } from "../../../shared/types";
+import { CLI_KINDS, CLI_KIND_LABEL, existingCliAccountPolicies } from "../lib/cli-accounts-ui";
+import { CliAccountPolicyField } from "./CliAccountPolicyField";
+import { api, cn, errorMessage } from "../lib/utils";
 import { useStore } from "../store";
 import { defaultEffortForModel, EffortPicker } from "./EffortPicker";
 import { ModelPicker } from "./ModelPicker";
@@ -25,6 +27,8 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
   const [name, setName] = useState("");
   const [folder, setFolder] = useState("");
   const [settings, setSettings] = useState<ProjectSettings>(DEFAULT_SETTINGS);
+  const [cliAccounts, setCliAccounts] = useState<CliAccountStatus[]>();
+  const [cliAccountsError, setCliAccountsError] = useState<string>();
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -33,6 +37,18 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
     setFolder(project?.folder ?? "");
     setSettings(project ? { ...DEFAULT_SETTINGS, ...project.settings } : DEFAULT_SETTINGS);
   }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    setCliAccountsError(undefined);
+    setCliAccounts(undefined);
+    void api.cliAccounts.list().then(accounts => { if (active) setCliAccounts(accounts); })
+      .catch(error => { if (active) setCliAccountsError(errorMessage(error)); });
+    return () => { active = false; };
+  }, [open]);
+
+  const accountPolicy = cliAccounts ? existingCliAccountPolicies(settings.accountPolicy, cliAccounts) : undefined;
 
   const set = <K extends keyof ProjectSettings>(k: K, v: ProjectSettings[K]) => setSettings((s) => ({ ...s, [k]: v }));
 
@@ -58,16 +74,23 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
     if (busy) return;
     setBusy(true);
     try {
+      // The server validates policies even when the account list is unavailable.
+      const accounts = await api.cliAccounts.list().catch(() => cliAccounts);
+      if (accounts) setCliAccounts(accounts);
+      setCliAccountsError(undefined);
+      const nextSettings = { ...settings, accountPolicy: existingCliAccountPolicies(settings.accountPolicy, accounts) };
       if (project) {
-        const saved = await updateProject(project.id, { name: name.trim() || project.name, folder, settings });
+        const saved = await updateProject(project.id, { name: name.trim() || project.name, folder, settings: nextSettings });
         if (saved) onOpenChange(false);
       } else {
-        const p = await createProject({ name: name.trim(), folder, settings });
+        const p = await createProject({ name: name.trim(), folder, settings: nextSettings });
         if (p) {
           onOpenChange(false);
           await createChat(p.id);
         }
       }
+    } catch (error) {
+      setCliAccountsError(errorMessage(error));
     } finally {
       setBusy(false);
     }
@@ -150,7 +173,7 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
                 <EffortPicker agent="codex" model={settings.codexModel} worker value={settings.codexEffort ?? "auto"} onChange={(v) => set("codexEffort", v)} ariaLabel="지피티 작업자 추론 수준" />
               </div>
             </ModelRow>
-            <ModelRow label="제미나이 작업자" hint="Antigravity CLI / 제미나이 웹">
+            <ModelRow label="제미나이 작업자" hint="AI Studio / 제미나이 웹">
               <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
                 <ModelPicker
                   agents={["gemini"]}
@@ -302,6 +325,24 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
               </div>
             </div>
           </div>
+
+          <section className="grid gap-3 rounded-lg border p-3.5" data-testid="project-cli-account-policy">
+            <div>
+              <h3 className="text-[12px] font-medium text-muted-foreground">CLI 계정 선택</h3>
+              <p className="text-[11.5px] text-muted-foreground">이 프로젝트에 적용할 계정 선택 모드입니다. 변경은 다음 배정부터 적용됩니다.</p>
+            </div>
+            {cliAccountsError && <p role="alert" className="text-[12px] text-destructive">{cliAccountsError}</p>}
+            {CLI_KINDS.map(kind => <div key={kind} className="grid gap-1.5">
+              <span className="text-[12px] font-medium">{CLI_KIND_LABEL[kind]}</span>
+              <CliAccountPolicyField kind={kind} accounts={cliAccounts ?? []} value={accountPolicy?.[kind]} inherit disabled={!cliAccounts || busy}
+                onChange={value => {
+                  const next = { ...accountPolicy };
+                  if (value) next[kind] = value;
+                  else delete next[kind];
+                  set("accountPolicy", next);
+                }} />
+            </div>)}
+          </section>
 
           <div className="grid gap-3 rounded-lg border p-3.5">
             <div className="text-[12px] font-medium text-muted-foreground">승인</div>

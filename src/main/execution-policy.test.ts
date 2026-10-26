@@ -19,18 +19,23 @@ test("planning command gate rejects composition and executable read options", ()
 
 function engine() {
   const chats: any = { store: { chat: () => ({ id: 1 }), listAgents: () => [], events: () => [], listConsults: () => [], getSetting: () => undefined, setSetting() {} }, emit() {}, route: (_id: number, role: string) => role };
+  chats.store.project = () => ({ settings: {} });
+  chats.roleAccount = () => null;
+  chats.runningAccount = () => undefined;
+  chats.listCliAccounts = () => [];
+  chats.resolveAccountPolicy = (kind: string) => ({ kind, mode: "fixed", accountId: `${kind}-1`, source: "default" });
   chats.assignmentEffort = async () => ({ requestedEffort: "medium", effort: "medium" });
   const orchestrator: any = new Orchestrator(chats);
   return { chats, orchestrator };
 }
 const write: any = { role: "orch", node: "orch", title: "Write", detail: "a", key: "Write", writes: true, paths: ["a"] };
 
-test("Gemini CLI and AI Studio switches hand over context without mixing model histories", () => {
+test("AI Studio model switches hand over context without mixing model histories", () => {
   const { chats, orchestrator: o } = engine();
   const settings = new Map<string, string>();
   chats.store.getSetting = (key: string) => settings.get(key);
   chats.store.setSetting = (key: string, value: string) => settings.set(key, value);
-  chats.store.project = () => ({ settings: { orchestratorModel: "gemini:gemini-pro" } });
+  chats.store.project = () => ({ settings: { orchestratorModel: "gemini:aistudio:previous-model" } });
   chats.store.events = () => [{ role: "orch", event: { type: "text", text: "previous verified result" } }];
   const chat = { id: 1, projectId: 1, orchestratorModelOverride: null };
   assert.equal(o.handover(chat), "");

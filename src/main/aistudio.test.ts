@@ -172,9 +172,6 @@ test("settings and exported custom model config never contain the API key", () =
   assert.equal("secret" in settings, false);
   assert.doesNotMatch(JSON.stringify(settings), /super-secret-api-key|encrypted:/);
 
-  const exported = service.antigravityConfig();
-  assert.equal(exported.models[0].apiKey, "");
-  assert.doesNotMatch(JSON.stringify(exported), /super-secret-api-key|encrypted:/);
   assert.match(saved.values.get("aiStudio") ?? "", /encrypted:/);
 });
 

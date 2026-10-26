@@ -56,7 +56,7 @@ export interface ApprovalHost {
   judge?(chatId: number, request: ApprovalRequest, input: ApprovalInput): Promise<JudgeAnswer | null>;
 }
 
-const SECRET_PATH = /(\.ssh[\\/]|\.aws[\\/]|\.gnupg[\\/]|\.git-credentials|\.npmrc|\.pypirc|(^|[\\/\s'"])\.env(\.|$|[\\/\s'"])|id_rsa|id_ed25519|credentials(\.json)?($|[\s'"])|\.claude[\\/]\.credentials|\.codex[\\/]auth\.json|\btokens?\.json)/i;
+const SECRET_PATH = /(\.ssh[\\/]|\.aws[\\/]|\.gnupg[\\/]|\.git-credentials|\.npmrc|\.pypirc|(^|[\\/\s'"])\.env(\.|$|[\\/\s'"])|id_rsa|id_ed25519|credentials(\.json)?($|[\s'"])|\.claude[\\/]\.credentials|\.codex[\\/]auth\.json|\.grok[\\/]auth\.json|cli-accounts[\\/](claude|gpt|grok)-\d+[\\/](\.credentials\.json|auth\.json)|\btokens?\.json)/i;
 
 /** Hard floor: never auto-allowed unless the project delegates high-risk requests. */
 const CRITICAL_CMD: [RegExp, string][] = [

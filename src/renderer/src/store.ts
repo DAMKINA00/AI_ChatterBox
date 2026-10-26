@@ -4,6 +4,7 @@ import type {
   Chat,
   ChatAgent,
   CliInfo,
+  CliAccountStatus,
   Consult,
   ModelOption,
   NodeId,
@@ -39,6 +40,7 @@ interface State {
   expanded: Record<string, boolean>;
   usage: UsageInfo;
   cli: CliInfo[];
+  cliAccounts: CliAccountStatus[];
   theme: Theme;
   models: Partial<Record<AgentKind, ModelOption[]>>;
   modelErrors: Partial<Record<AgentKind, string>>;
@@ -108,6 +110,7 @@ export const useStore = create<State>((set, get) => ({
   expanded: loadExpanded(),
   usage: {},
   cli: [],
+  cliAccounts: [],
   theme: "dark",
   models: {},
   modelErrors: {},

@@ -1,20 +1,6 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { existsSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import type { DriverHost } from "./types";
-
-/** Antigravity's official PostToolUse only reports the artifact directory, not tool output. */
-export function imageFileSnapshot(directory: unknown): Map<string, string> {
-  const result = new Map<string, string>();
-  if (typeof directory !== "string" || !isAbsolute(directory)) return result;
-  try {
-    for (const entry of readdirSync(directory, { withFileTypes: true }).slice(0, 512)) {
-      if (!entry.isFile() || !/\.(png|jpe?g|webp)$/i.test(entry.name)) continue;
-      const path = join(directory, entry.name), stat = statSync(path);
-      result.set(path, `${stat.mtimeMs}:${stat.size}`);
-    }
-  } catch { /* Missing or unreadable output is not a generated result. */ }
-  return result;
-}
 
 /** Read only image outputs reported by a successful generation tool, never its input references. */
 export function publishGeneratedImages(result: unknown, id: string, host: DriverHost): number {

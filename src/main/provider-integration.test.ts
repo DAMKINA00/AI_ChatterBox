@@ -8,7 +8,6 @@ import { Store } from "./db";
 import { ChatManager } from "./chats";
 import { AttachmentStore } from "./attachments";
 import { GrokDriver } from "./drivers/grok";
-import { GeminiDriver } from "./drivers/gemini";
 import { AIStudioDriver } from "./drivers/aistudio";
 import { AISTUDIO_MODEL } from "../shared/aistudio";
 import { publishGeneratedImages } from "./drivers/generated-images";
@@ -44,7 +43,7 @@ test("three-provider DB upgrade preserves workers, sessions and new Grok setting
     assert.equal(chats.roleConfig(store.chat(chat.id)!, p, "orch").agent, "grok");
     assert.equal(chats.roleConfig(store.chat(chat.id)!, p, grok.key).effort, p.settings.grokEffort);
     store.updateChat(chat.id, { orchestratorModelOverride: `gemini:${GEMINI_WEB_MODEL}` });
-    await assert.rejects(chats.driver(chat.id, "orch"), /마스터는 Antigravity CLI/);
+    await assert.rejects(chats.driver(chat.id, "orch"), /마스터는 AI Studio/);
     store.updateChat(chat.id, { orchestratorModelOverride: `gemini:${AISTUDIO_MODEL}`, geminiModelOverride: AISTUDIO_MODEL });
     assert.ok(await chats.driver(chat.id, "orch") instanceof AIStudioDriver);
     assert.ok(await chats.driver(chat.id, old.key, "") instanceof AIStudioDriver);
@@ -55,7 +54,7 @@ test("three-provider DB upgrade preserves workers, sessions and new Grok setting
     assert.equal(store.agent(grok.id)!.sessionId, "grok-worker");
     assert.equal(store.getSetting(`orchSession:${chat.id}:gemini`), "master-gemini");
     assert.equal(store.getSetting(`orchSession:${chat.id}:grok`), "master-grok");
-    assert.deepEqual(parseOrchestrator("gemini:gemini-pro"), { agent: "gemini", model: "gemini-pro" });
+    assert.deepEqual(parseOrchestrator("gemini:gemini-pro"), { agent: "gemini", model: AISTUDIO_MODEL });
     assert.deepEqual(parseOrchestrator("grok:grok-4.6"), { agent: "grok", model: "grok-4.6" });
     store.setSetting(`teamMessages:${chat.id}:w1`, "100");
     store.setSetting(`aistudio-context:${chat.id}:orch:${AISTUDIO_MODEL}`, "private history");
@@ -72,7 +71,7 @@ test("three-provider DB upgrade preserves workers, sessions and new Grok setting
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test("Antigravity and Grok publish validated image tool outputs as durable app attachments", async () => {
+test("Grok publishes validated image tool outputs as durable app attachments", async () => {
   const root = mkdtempSync(join(tmpdir(), "cbx-provider-images-"));
   const store = new Store(join(root, "app.db"));
   try {
@@ -88,23 +87,33 @@ test("Antigravity and Grok publish validated image tool outputs as durable app a
     (grok as any)._running = true;
     await grok.hook({ sessionId: "s", hookCallbackId: "chatterbox-approval", hookEventName: "pre_tool_use", toolUseId: "image", toolName: "image_gen", toolInput: { prompt: "flower" } });
     grok.onUpdate({ sessionId: "s", update: { sessionUpdate: "tool_call_update", toolCallId: "image", status: "completed", rawOutput: { path } } });
-    const gemini = new GeminiDriver({ cwd: root, nativeId: "a", exePath: "unused" }, { bridge: {} as any, hookScript: "unused", tmpDir: root }, host);
-    Object.assign(gemini, { _running: true, hooksReady: true, noWrites: false });
-    const payload = { conversationId: "a", stepIdx: 1, toolCall: { name: "generate_image", args: { Prompt: "flower" } } };
-    assert.equal((await gemini.hook("pre", payload)).decision, "auto_approve");
-    await gemini.hook("post", { ...payload, toolResponse: `![image](${path})` });
-    assert.equal(events.filter(e => e.type === "image_generation" && e.status === "done").length, 3);
     assert.ok(events.filter(e => e.type === "image_generation").every(e => e.attachment.mime === "image/png" && e.attachment.path !== path));
     // Merely viewing a reference image is not an image generation result.
     grok.onUpdate({ sessionId: "s", update: { sessionUpdate: "tool_call_update", toolCallId: "read", status: "completed", content: [{ type: "image", data: png }] } });
-    assert.equal(events.filter(e => e.type === "image_generation").length, 3);
-    // The documented hook has only the artifact directory and tool call, without toolResponse.
-    const official = { ...payload, stepIdx: 2, artifactDirectoryPath: root };
-    await gemini.hook("pre", official);
-    writeFileSync(join(root, "fresh-image.png"), Buffer.from(png, "base64"));
-    await gemini.hook("post", official);
-    assert.equal(events.filter(e => e.type === "image_generation").length, 4);
-    await gemini.hook("post", official);
-    assert.equal(events.filter(e => e.type === "image_generation").length, 4);
+    assert.equal(events.filter(e => e.type === "image_generation").length, 2);
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("legacy Gemini CLI selections resolve to AIS while Web, AIS and Grok settings survive", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cbx-retired-gemini-"));
+  const store = new Store(join(root, "app.db"));
+  const chats = new ChatManager(store, { agents() {}, chat() {}, consult() {}, usage() {}, event() {} }, root, "unused");
+  try {
+    const project = store.createProject("legacy", root, { ...DEFAULT_SETTINGS, geminiModel: "gemini-pro", orchestratorModel: "gemini:gemini-pro", grokModel: "grok-kept" });
+    const chat = store.createChat(project.id, "history");
+    const worker = store.createAgent(chat.id, "gemini", "existing");
+    store.addEvent(chat.id, "orch", "orch", { type: "text", text: "preserved history" });
+    store.updateAgent(worker.id, { sessionId: "existing-native-session" });
+    assert.equal(project.settings.geminiModel, AISTUDIO_MODEL);
+    assert.equal(project.settings.orchestratorModel, `gemini:${AISTUDIO_MODEL}`);
+    assert.equal(project.settings.grokModel, "grok-kept");
+    assert.deepEqual((await chats.models("gemini")).map(m => m.id), [GEMINI_WEB_MODEL, AISTUDIO_MODEL]);
+    assert.equal(chats.cliInfo().some(info => info.agent === "gemini"), false);
+    assert.equal(chats.cliInfo().some(info => info.agent === "grok"), true);
+    for (const [input, expected] of [["legacy-cli", AISTUDIO_MODEL], [GEMINI_WEB_MODEL, GEMINI_WEB_MODEL], ["aistudio:custom", "aistudio:custom"]]) {
+      assert.equal(store.updateChat(chat.id, { geminiModelOverride: input }).geminiModelOverride, expected);
+    }
+    assert.equal(store.agent(worker.id)!.sessionId, "existing-native-session");
+    assert.equal(store.events(chat.id).at(-1)?.event.type, "text");
+  } finally { await chats.dispose(); store.close(); rmSync(root, { recursive: true, force: true }); }
 });

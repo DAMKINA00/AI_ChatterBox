@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
-import { ChevronRight, Globe2, KeyRound, RotateCw, Settings, Sparkles } from "lucide-react";
+import { ChevronRight, Globe2, KeyRound, RotateCw, Settings, Sparkles, Terminal } from "lucide-react";
 import { pickUsage, type UsageDisplay } from "../../../shared/usage";
 import { api, cn, errorMessage } from "../lib/utils";
 import { useStore } from "../store";
 import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, Tooltip } from "./ui";
+import type { UsageInfo, CliAccountStatus } from "../../../shared/types";
+import { multipleCliAccounts, type CliKind } from "../lib/cli-accounts-ui";
+import { CliAccountsDialog } from "./CliAccountsDialog";
 import { GeminiWebDialog } from "./GeminiWebDialog";
 import { AIStudioDialog } from "./AIStudioDialog";
 import { AIStudioUsage } from "./AIStudioUsage";
@@ -40,15 +43,43 @@ function Bar({ name, d, color, error, updatedAt }: { name: string; d: UsageDispl
   );
 }
 
+export function CliUsageBars({ kind, name, color, usage, accounts }: { kind: CliKind; name: string; color: string; usage: UsageInfo; accounts: CliAccountStatus[] }) {
+  const multiple = multipleCliAccounts(accounts, kind);
+  const provider = kind === "gpt" ? "codex" : kind;
+  if (!multiple.length) return <Bar name={name} d={pickUsage(usage[provider])} color={color} error={kind === "grok" ? usage.grok?.error : undefined} updatedAt={kind === "grok" ? usage.grok?.updatedAt : undefined} />;
+  return <section className="space-y-1" data-testid={`cli-usage-${kind}`} aria-label={`${name} 계정별 잔여량`}>
+    <div className="text-[11px] font-medium text-muted-foreground">{name}</div>
+    <div className="space-y-1 pl-2">
+      {multiple.map(account => {
+        const accountUsage = usage.accounts?.[account.accountId] ?? account.usage;
+        return <div key={account.accountId} title={`${account.accountId}${!account.enabled ? " · 배정 제외" : ""}`}>
+          <Bar name={account.label} d={accountUsage?.error ? null : pickUsage(accountUsage)} color={color} error={accountUsage?.error} updatedAt={account.usage?.checkedAt ?? account.auth?.checkedAt} />
+        </div>;
+      })}
+    </div>
+  </section>;
+}
+
+export async function refreshUsageAndAccounts(wait = false): Promise<void> {
+  const [usage, cliAccounts] = await Promise.allSettled([api.usage(wait), api.cliAccounts.list()]);
+  if (usage.status === "fulfilled") useStore.setState({ usage: usage.value });
+  else useStore.getState().toast(errorMessage(usage.reason));
+  if (cliAccounts.status === "fulfilled") useStore.setState({ cliAccounts: cliAccounts.value });
+  else useStore.getState().toast(errorMessage(cliAccounts.reason));
+}
+
 /** Remaining usage: weekly by default, the 5-hour window when it has ≤ 10% left. */
 export function UsageBar() {
+  const [cliOpen, setCliOpen] = useState(false);
   const [webOpen, setWebOpen] = useState(false);
   const [aiStudioOpen, setAiStudioOpen] = useState(false);
   const [deepseekOpen, setDeepseekOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const usage = useStore((s) => s.usage);
+  const cliAccounts = useStore((s) => s.cliAccounts);
   useEffect(() => {
-    const t = setInterval(() => void api.usage().then((u) => useStore.setState({ usage: u })), 5 * 60 * 1000);
+    void api.cliAccounts.list().then(cliAccounts => useStore.setState({ cliAccounts })).catch(error => useStore.getState().toast(errorMessage(error)));
+    const t = setInterval(() => void refreshUsageAndAccounts(), 5 * 60 * 1000);
     return () => clearInterval(t);
   }, []);
   return (
@@ -58,7 +89,9 @@ export function UsageBar() {
         <div className="flex items-center gap-0.5">
           <button type="button" disabled={refreshing} aria-label="사용량·잔고 새로고침" title="연결된 계정의 사용량과 API 잔고 다시 조회" data-testid="usage-refresh" className="rounded p-1 hover:bg-accent disabled:opacity-50" onClick={async () => {
             setRefreshing(true);
-            try { useStore.setState({ usage: await api.usage(true) }); }
+            try {
+              await refreshUsageAndAccounts(true);
+            }
             catch (error) { useStore.getState().toast(errorMessage(error)); }
             finally { setRefreshing(false); }
           }}><RotateCw className={cn("size-3", refreshing && "animate-spin")} /></button>
@@ -75,6 +108,11 @@ export function UsageBar() {
               <DropdownMenuItem onSelect={() => setWebOpen(true)} data-testid="gemini-web-manage" className="group gap-3 rounded-lg px-3 py-2.5">
                 <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-gemini/10"><Globe2 className="!text-gemini" /></span>
                 <span className="min-w-0 flex-1"><span className="block text-[12px] font-medium">제미나이 웹 계정 관리</span><span className="mt-0.5 block text-[11px] text-muted-foreground">Google 로그인 · 계정 전환</span></span>
+                <ChevronRight className="!size-3.5 opacity-40 group-data-[highlighted]:opacity-100" />
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setCliOpen(true)} data-testid="cli-accounts-manage" className="group gap-3 rounded-lg px-3 py-2.5">
+                <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10"><Terminal className="!text-primary" /></span>
+                <span className="min-w-0 flex-1"><span className="block text-[12px] font-medium">CLI 계정 관리</span><span className="mt-0.5 block text-[11px] text-muted-foreground">Claude · Codex · Grok 로그인과 계정 선택</span></span>
                 <ChevronRight className="!size-3.5 opacity-40 group-data-[highlighted]:opacity-100" />
               </DropdownMenuItem>
               <DropdownMenuItem onSelect={() => setAiStudioOpen(true)} data-testid="aistudio-manage" className="group gap-3 rounded-lg px-3 py-2.5">
@@ -94,11 +132,11 @@ export function UsageBar() {
           </DropdownMenu>
         </div>
       </div>
-      <Bar name="클로드" d={pickUsage(usage.claude)} color="bg-claude" />
-      <Bar name="지피티" d={pickUsage(usage.codex)} color="bg-gpt" />
-      <Bar name="제미나이" d={pickUsage(usage.gemini)} color="bg-gemini" error={usage.gemini?.error} updatedAt={usage.gemini?.updatedAt} />
-      <Bar name="그록" d={pickUsage(usage.grok)} color="bg-grok" error={usage.grok?.error} updatedAt={usage.grok?.updatedAt} />
+      <CliUsageBars kind="claude" name="클로드" color="bg-claude" usage={usage} accounts={cliAccounts} />
+      <CliUsageBars kind="gpt" name="지피티" color="bg-gpt" usage={usage} accounts={cliAccounts} />
+      <CliUsageBars kind="grok" name="그록" color="bg-grok" usage={usage} accounts={cliAccounts} />
       <DeepSeekBalance compact />
+      <CliAccountsDialog open={cliOpen} onOpenChange={setCliOpen} />
       <GeminiWebDialog open={webOpen} onOpenChange={setWebOpen} />
       <AIStudioDialog open={aiStudioOpen} onOpenChange={setAiStudioOpen} />
       <DeepSeekDialog open={deepseekOpen} onOpenChange={setDeepseekOpen} />

@@ -1,4 +1,4 @@
-/** Separate from the existing Gemini Web and Antigravity CLI model IDs. */
+/** Separate from the Gemini Web model ID. */
 export const AISTUDIO_MODEL = "aistudio:gemini-4-argon";
 export const isAIStudioModel = (id: string | undefined) => !!id?.startsWith("aistudio:");
 export const AI_STUDIO_ACCOUNT_LIMIT = 10;
@@ -37,7 +37,7 @@ export interface AIStudioStatus {
   error?: string;
   webLinks?: Record<string, { accountId?: string; state: "connected" | "error"; message: string; checkedAt: number }>;
 }
-export type AIStudioAction = "status" | "save" | "launch" | "start" | "stop" | "refresh" | "enable" | "open" | "export-antigravity" | "sync-web";
+export type AIStudioAction = "status" | "save" | "launch" | "start" | "stop" | "refresh" | "enable" | "open" | "sync-web";
 export interface AIStudioInput {
   baseUrl?: string;
   model?: string;

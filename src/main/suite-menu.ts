@@ -34,11 +34,6 @@ export function suiteMenu(usage: UsageCompanionSnapshot, update: Readonly<AppUpd
       toggle("Claude Desktop 연결", "claudeDesktop", "claude-desktop"),
       { label: "Claude 웹 로그인", click: () => actions.command("claude-login") },
       { label: "Claude 웹 로그아웃", enabled: !!state?.claudeLoggedIn, click: () => actions.command("claude-logout") },
-      { label: "Gemini 조회 차단 해제", visible: !!state?.geminiBlocked, click: () => actions.command("gemini-unblock") },
-      { label: "Gemini 등급", submenu: [null, "Free", "Google AI Pro", "Google AI Ultra"].map(plan => ({
-        label: plan ?? "자동 감지", type: "radio" as const, checked: state?.geminiPlan === plan,
-        click: () => actions.command("gemini-plan", plan),
-      })) },
       { label: "사용량 데이터 폴더", click: () => actions.command("data-folder") },
     ] },
     { type: "separator" },

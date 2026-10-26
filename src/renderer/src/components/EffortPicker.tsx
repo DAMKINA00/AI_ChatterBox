@@ -1,6 +1,5 @@
 import { useEffect, useMemo } from "react";
 import { ChevronDown, RotateCcw } from "lucide-react";
-import { isAIStudioModel } from "../../../shared/aistudio";
 import { GEMINI_WEB_MODEL, type AgentKind, type ModelOption } from "../../../shared/types";
 import { cn } from "../lib/utils";
 import { useStore } from "../store";
@@ -17,14 +16,14 @@ export function effortLabel(value: string | null | undefined): string {
   return value;
 }
 
-/** Resolve Gemini's empty model to the CLI-reported default metadata. */
+/** Resolve an empty API model to the provider's reported default metadata. */
 export function modelOption(
   models: Partial<Record<AgentKind, ModelOption[]>>,
   agent: AgentKind,
   model: string,
 ): ModelOption | undefined {
   const list = models[agent] ?? [];
-  return list.find((m) => m.id === model) ?? ((agent === "gemini" || agent === "deepseek") && !model ? list.find((m) => m.isDefault) : undefined);
+  return list.find((m) => m.id === model) ?? (agent === "deepseek" && !model ? list.find((m) => m.isDefault) : undefined);
 }
 
 export function effortOptions(
@@ -86,7 +85,7 @@ export function EffortPicker({
   const modelErrors = useStore((s) => s.modelErrors);
   const loadModels = useStore((s) => s.loadModels);
   const webModel = agent === "gemini" && model === GEMINI_WEB_MODEL;
-  const aiStudioModel = agent === "gemini" && isAIStudioModel(model);
+  const aiStudioModel = agent === "gemini" && !webModel;
 
   useEffect(() => {
     if (!webModel && !aiStudioModel) void loadModels(agent);

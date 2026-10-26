@@ -99,7 +99,7 @@ function persistedProject() {
 }
 
 async function isolateModelListing(app) {
-  // Model pickers still render their controls and Gemini's automatic option, but no CLI listing or model turn is allowed.
+  // Model pickers render only the managed Gemini Web/AI Studio choices; no CLI listing or model turn is allowed.
   await app.evaluate(({ ipcMain }) => {
     ipcMain.removeHandler("models:list");
     ipcMain.handle("models:list", async () => []);
@@ -166,27 +166,23 @@ try {
   );
 
   const geminiPicker = page.getByLabel("이 채팅의 제미나이 모델");
-  check("Gemini header model picker renders Pro automatic selection", (await geminiPicker.textContent())?.includes("Pro 자동 선택"));
+  check("Gemini header model picker renders AI Studio", (await geminiPicker.textContent())?.includes("AI Studio · Argon"));
   await geminiPicker.click();
-  const automatic = page.getByRole("menuitem", { name: "Pro 자동 선택", exact: true });
-  check("Gemini model list includes the automatic selection item", (await automatic.count()) === 1);
-  await automatic.click();
-
-  await page.evaluate(async () => {
-    await window.chatterbox.updateChat(1, { geminiModelOverride: "gemini-test-model" });
-  });
-  await page.waitForFunction(() => document.querySelector('[aria-label="이 채팅의 제미나이 모델"]')?.textContent?.includes("gemini-test-model"));
+  const geminiMenuText = await page.getByRole("menu").textContent();
+  check("Gemini worker exposes only Web and AI Studio models", geminiMenuText?.includes("제미나이 웹 · Argon") && geminiMenuText.includes("AI Studio · Argon") && !geminiMenuText.includes("Pro 자동 선택") && !geminiMenuText.includes("직접 입력"), geminiMenuText);
+  await page.getByRole("menuitem").filter({ hasText: "gemini-web-argon" }).click();
+  await page.waitForFunction(() => document.querySelector('[aria-label="이 채팅의 제미나이 모델"]')?.textContent?.includes("제미나이 웹 · Argon"));
   await geminiPicker.click();
   const reset = page.getByRole("menuitem", { name: /프로젝트 값 사용/ });
   check("Gemini chat override can return to the project value", (await reset.count()) === 1);
   await reset.click();
-  await page.waitForFunction(() => document.querySelector('[aria-label="이 채팅의 제미나이 모델"]')?.textContent?.includes("Pro 자동 선택"));
+  await page.waitForFunction(() => document.querySelector('[aria-label="이 채팅의 제미나이 모델"]')?.textContent?.includes("AI Studio · Argon"));
 
   const dialog = await openSettings(page);
   const projectGeminiPicker = dialog.getByLabel("제미나이 모델");
-  check("project Gemini model picker uses the automatic selection label", (await projectGeminiPicker.textContent())?.includes("Pro 자동 선택"));
+  check("project Gemini model picker uses the managed AI Studio label", (await projectGeminiPicker.textContent())?.includes("AI Studio · Argon"));
   await projectGeminiPicker.click();
-  check("project Gemini model list can select automatic selection", (await page.getByRole("menuitem", { name: "Pro 자동 선택", exact: true }).count()) === 1);
+  check("project Gemini model list exposes the fixed AI Studio model", (await page.getByRole("menuitem").filter({ hasText: "aistudio:gemini-4-argon" }).count()) === 1);
   await page.keyboard.press("Escape");
   await dialog.getByLabel("제미나이가 잘 맡는 작업").fill("저장된 Gemini 강점");
   await dialog.getByLabel("제미나이 작업자 주의점").fill("저장된 Gemini 주의점");

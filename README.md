@@ -1,10 +1,16 @@
 # AI_ChatterBox
 
-채팅 하나에 지시하면 **마스터**가 계획을 세우고, 일의 양에 맞춰 **클로드 N호**(Claude Code), **지피티 N호**(Codex), **제미나이 N호**(Antigravity, Gemini 웹 또는 AI Studio), **그록 N호**(Grok CLI), **딥시크 N호**(DeepSeek API) 작업자를 꾸려 구현과 리뷰를 나눠 맡기는 Windows 데스크톱 앱입니다 (Electron + React + TypeScript).
+채팅 하나에 지시하면 **마스터**가 계획을 세우고, 일의 양에 맞춰 **클로드 N호**(Claude Code), **지피티 N호**(Codex), **제미나이 N호**(Gemini 웹 또는 AI Studio), **그록 N호**(Grok CLI), **딥시크 N호**(DeepSeek API) 작업자를 꾸려 구현과 리뷰를 나눠 맡기는 Windows 데스크톱 앱입니다 (Electron + React + TypeScript).
 
 ![GPT 오케스트레이터가 GPT에 구현, Claude에 리뷰를 맡긴 화면](docs/screenshots/v2-fix-gpt.png)
 
 ## 주요 기능
+
+### CLI 계정 관리와 Gemini 경로 정리 (0.4.36)
+- Claude·Codex·Grok 계정을 계열별 최대 10개 관리합니다. 기본 계정은 기존 CLI 저장소를 사용하고 추가 계정은 앱 전용 폴더에서 로그인·사용량·세션을 분리합니다. 프로젝트/전체 고정 계정 또는 마스터 계정 배정을 선택합니다. 한도 오류에서 몰래 자동 재호출하지 않고 마스터에게 상태를 전달합니다.
+- 계정 전환 시 기존 세션을 다른 계정으로 열지 않고 이전 대화 요약을 인계합니다. 승인 판단도 마스터 계정을 따르며 실행·승인 판단 중인 계정의 로그아웃/삭제는 차단합니다.
+- Gemini Antigravity CLI 실행·사용량 조회·설정 내보내기를 제거했습니다. Gemini Web·AI Studio와 Grok은 유지합니다. 이전 CLI 모델 선택값은 AI Studio로 읽고 기존 기록·로그인 파일은 보존합니다. 통합 사용량 모니터에서도 Antigravity 조회를 제거했습니다.
+- [0.4.36 검증 기록](docs/validation-0.4.36.md)
 
 ### 통합 설치·GitHub 업데이트·작업자 복구 (0.4.35)
 - 설치 프로그램으로 한 번 압축을 푼 뒤 고정된 설치 경로에서 앱을 실행합니다. 매번 임시 폴더에 압축을 풀던 포터블 실행 단계를 없앴습니다.
@@ -62,7 +68,7 @@
 
 ### 작업 방식과 협업 흐름
 - 프로젝트 하나가 작업 폴더 하나입니다. 프로젝트 아래에 채팅을 만들며, 채팅을 펼치면 `마스터 대화 · 클로드 1호 · 클로드 2호 · 지피티 1호 … · 협의 N (보낸 쪽 → 받는 쪽)` 트리가 나타납니다.
-- 마스터가 필요한 만큼 작업자를 만들고(`spawn`) 닉네임으로 일을 맡깁니다(`ask`). 고칠 범위(scope)가 겹치지 않는 구현과 리뷰는 동시에 진행되며, 작업자끼리도 닉네임으로 서로 묻습니다. 범위 밖 쓰기는 자동 거부되고, 서로 기다리는 순환 호출은 거절됩니다. 기본 동시 한도는 클로드 3명 + 지피티 3명 + Antigravity 1명 + Grok 3명 + DeepSeek 3명이며 프로젝트 설정에서 조절합니다.
+- 마스터가 필요한 만큼 작업자를 만들고(`spawn`) 닉네임으로 일을 맡깁니다(`ask`). 고칠 범위(scope)가 겹치지 않는 구현과 리뷰는 동시에 진행되며, 작업자끼리도 닉네임으로 서로 묻습니다. 범위 밖 쓰기는 자동 거부되고, 서로 기다리는 순환 호출은 거절됩니다. 기본 동시 한도는 클로드 3명 + 지피티 3명 + 제미나이 1명 + Grok 3명 + DeepSeek 3명이며 프로젝트 설정에서 조절합니다.
 - 슬래시 명령으로 `/plan`(계획 → 실행/수정/취소), `/goal`(목표를 끝날 때까지 진행), `/review`, `/status`, `/model`, `/new`, `/stop`, `/compact`를 지원합니다.
 - 한 작업도 UI·API·테스트 등 겹치지 않는 파트로 나눠 `ask_parallel`로 배정합니다. 작업자는 `send_message`로 진행 중인 동료와 직접 협의하며 다음 앱 도구 호출이나 배정 때 메시지를 받습니다. `read_messages`로 새 메시지를 확인하고 대기 동료에게 `ask`/`ask_parallel`로 의견·리뷰를 요청합니다. 메시지는 양쪽 작업자 대화에 저장됩니다. 실제 분담과 도구 선택은 선택한 모델의 지시 이행에 따릅니다.
 - 기본 협업 흐름은 계획 → 작업자 구성 → 범위를 나눠 구현 → 다른 작업자가 리뷰 → 수정 → 최종 보고 순으로 이어집니다. 협의 내용은 채팅 안에 카드로 실시간 표시됩니다 (예: "마스터 → 클로드 2호 · 구현 · src/ui/**").
@@ -72,7 +78,7 @@
 - **제미나이 웹 계정 관리 → AI Studio 연결**에서 같은 로그인 세션을 동기화합니다. 최대 10개 계정을 관리하고, 모델별 한도 전환은 AIStudio2API의 계정 라우팅을 사용합니다. 실제 쿨다운과 계정별 모델 목록을 표시합니다.
 - AI Studio 전용 사용량에서 최근 24시간·7일·30일의 요청·토큰과 계정·모델·채널별 기록을 조회합니다. Gemini Web 사용량과 별도로 표시하며 Google의 잔여 한도 비율로 환산하지 않습니다.
 - 영상 도구는 기본적으로 꺼져 있습니다. 영상 검증을 위한 추가 생성은 수행하지 않습니다.
-- Antigravity Custom Model Enabler용 설정을 내보낼 수 있습니다. 설치와 검증 범위는 [AI Studio · Argon 안내](docs/aistudio-argon.md), 참조 프로젝트는 [제3자 구성요소](docs/third-party-aistudio.md)를 확인하세요.
+- 설치와 검증 범위는 [AI Studio · Argon 안내](docs/aistudio-argon.md), 참조 프로젝트는 [제3자 구성요소](docs/third-party-aistudio.md)를 확인하세요.
 
 ### DeepSeek API (0.4.18)
 - DeepSeek Flash·V4 Pro를 마스터와 작업자로 선택할 수 있습니다. 모델 메뉴의 **DeepSeek API 설정**에서 키를 저장하고 **모델 확인**으로 연결을 확인합니다. 키는 Windows 보안 저장소로 암호화하며 연결 확인은 생성 요청을 보내지 않습니다.
@@ -98,9 +104,9 @@
 - 도중에 한도가 부족해지면 초안·맥락을 보존하고 마스터가 새 계정을 선택해 이어서 배정합니다. 모두 작업 중이거나 잔여량이 부족하면 완료·초기화를 기다립니다. 지정 계정과 실제 실행 계정을 결과에 기록합니다.
 
 ### 마스터와 다섯 계열 작업자
-- 마스터는 요청 이해, 작업 배정, 결과 검토, 최종 취합을 담당합니다. 간단한 답변과 사전 확인은 직접 하고 본격적인 분석·구현·이미지·문서 제작은 작업자에게 맡깁니다. Claude / Codex / Antigravity / Grok CLI, AI Studio Argon, DeepSeek API를 마스터로 선택할 수 있습니다. Gemini 웹은 작업자 전용입니다.
-- CLI 작업자는 각자 세션에서 승인된 범위의 파일을 고칩니다. 기본은 기술 작업 Claude, 이미지 Codex, 글쓰기 Antigravity이며, 사용자가 작업자를 명시하면 그 지정을 우선합니다. Antigravity·Grok 이미지 요청도 자신의 도구로 실행하고 실제 이미지 첨부가 있어야 완료 처리합니다. Gemini 웹은 로컬 파일·명령·MCP를 사용할 수 없습니다.
-- 마스터·Claude·Codex·Antigravity·Grok·DeepSeek 모델을 프로젝트마다 정하고, 채팅 상단에서 채팅별로 바꿀 수 있습니다. Antigravity는 로그인한 Pro 계정에서 제공하는 모델만 표시합니다. Grok은 공식 CLI가 보고하는 모델과 추론 수준을 표시합니다.
+- 마스터는 요청 이해, 작업 배정, 결과 검토, 최종 취합을 담당합니다. 간단한 답변과 사전 확인은 직접 하고 본격적인 분석·구현·이미지·문서 제작은 작업자에게 맡깁니다. Claude / Codex / Grok CLI, AI Studio Argon, DeepSeek API를 마스터로 선택할 수 있습니다. Gemini 웹은 작업자 전용입니다.
+- CLI 작업자는 각자 세션에서 승인된 범위의 파일을 고칩니다. 기본은 기술 작업 Claude, 이미지 Codex, 글쓰기 Gemini이며, 사용자가 작업자를 명시하면 그 지정을 우선합니다. Grok 이미지 요청도 자신의 도구로 실행하고 실제 이미지 첨부가 있어야 완료 처리합니다. Gemini 웹은 로컬 파일·명령·MCP를 사용할 수 없습니다.
+- 마스터·Claude·Codex·Gemini·Grok·DeepSeek 모델을 프로젝트마다 정하고, 채팅 상단에서 채팅별로 바꿀 수 있습니다. Gemini는 Web과 AI Studio만 선택합니다. Grok은 공식 CLI가 보고하는 모델과 추론 수준을 표시합니다.
 
 ### 승인 정책과 안전장치
 - 마스터와 작업자의 파일 수정과 명령 실행에 같은 승인 설정을 적용합니다. 프로젝트 기본값을 정하고 채팅별로 바꿀 수 있습니다. **마스터 자동 승인**은 별도의 판단 세션이 맡고 고위험 요청·실패·시간 초과·추가 결정은 사용자 카드로 돌아옵니다.
@@ -118,7 +124,7 @@
 - 마크다운과 코드 하이라이트, 도구 호출 카드, diff 보기, 다크/라이트 테마, 사용량 표시(클로드 / 지피티 / 제미나이 / 그록, 제공되지 않는 수치는 정보 없음), 채팅과 메시지 검색, 창 크기 기억을 지원합니다.
 - 긴 채팅은 이미 처리한 기록을 재사용하고, 스트리밍 출력은 50ms 단위로 묶어 화면을 갱신합니다. 승인 요청과 도구 결과는 바로 반영합니다.
 - 상단은 제목, 마스터와 승인 방식, 네 계열 작업자의 세 줄로 표시합니다. 긴 제목은 줄바꿈하고 좁은 창에서는 모델 설정 줄을 가로로 스크롤합니다.
-- 왼쪽 사용량의 새로고침 버튼으로 CLI 계정 한도를 다시 조회합니다. Gemini는 Antigravity `/usage`, Grok은 공식 ACP 계정 한도에서 읽으며 Grok의 월간 계정은 월간으로 표시합니다.
+- 왼쪽 사용량의 새로고침 버튼으로 CLI 계정 한도를 다시 조회합니다. Grok은 공식 ACP 계정 한도에서 읽으며 Grok의 월간 계정은 월간으로 표시합니다.
 - 화면이 멈춘 경우 `Ctrl+R` 또는 **보기 → 새로 고침**으로 화면만 다시 불러올 수 있습니다. 마스터와 작업자 프로세스는 유지되지만 아직 보내지 않은 입력은 초기화될 수 있습니다.
 
 ## 필요한 것
@@ -133,7 +139,7 @@
   1. `%LOCALAPPDATA%\OpenAI\Codex\bin\<ver>\codex.exe`
   2. PATH
   3. `~\.codex\packages\standalone\releases`
-- **제미나이 작업자를 쓸 경우(선택):** Antigravity CLI(`agy`)에 Google AI Pro 계정으로 로그인하거나 Gemini 웹 계정을 연결합니다. AI Studio · Argon은 별도 로컬 AIStudio2API가 필요합니다. [Gemini 설치 안내](docs/gemini-pro.md) · [Gemini 웹 연결](docs/gemini-web.md) · [AI Studio 연결](docs/aistudio-argon.md)
+- **제미나이 작업자를 쓸 경우(선택):** Gemini 웹 계정을 연결합니다. AI Studio · Argon은 별도 로컬 AIStudio2API가 필요합니다. [Gemini 설치 안내](docs/gemini-pro.md) · [Gemini 웹 연결](docs/gemini-web.md) · [AI Studio 연결](docs/aistudio-argon.md)
 
 - **Grok 작업자 또는 마스터(선택):** `npm install -g @xai-official/grok` 후 `grok login`. Windows 공식 네이티브 실행 파일 `%USERPROFILE%\.grok\bin\grok.exe`를 자동 탐색합니다. ACP 세션과 승인 hook을 지원하는 CLI가 필요합니다. [공식 CLI 안내](https://docs.x.ai/build/cli/reference).
 

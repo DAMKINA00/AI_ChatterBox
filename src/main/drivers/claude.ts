@@ -70,7 +70,7 @@ export class ClaudeDriver implements AgentDriver {
   }
 
   private start(): ChildProcess {
-    if (this.opts.workerSession && this.nativeId) new ClaudeSessionArchive().restore(this.nativeId);
+    if (this.opts.workerSession && this.nativeId) this.archiveStore().restore(this.nativeId);
     const { key, url } = this.env.bridge.register({
       tools: [
         {
@@ -126,7 +126,7 @@ export class ClaudeDriver implements AgentDriver {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       // Approvals and consults can take a long time; don't let MCP calls time out.
-      env: { ...process.env, MCP_TOOL_TIMEOUT: String(24 * 3600 * 1000), ...(this.opts.effort ? { CLAUDE_CODE_EFFORT_LEVEL: this.opts.effort } : {}) },
+      env: { ...process.env, ...this.opts.accountEnv, MCP_TOOL_TIMEOUT: String(24 * 3600 * 1000), ...(this.opts.effort ? { CLAUDE_CODE_EFFORT_LEVEL: this.opts.effort } : {}) },
     });
     child.stderr!.setEncoding("utf8");
     let stderr = "";
@@ -345,7 +345,12 @@ export class ClaudeDriver implements AgentDriver {
   async archive(): Promise<void> {
     if (!this.opts.workerSession || !this.nativeId || this._running) return;
     await this.dispose();
-    new ClaudeSessionArchive().archive(this.nativeId);
+    this.archiveStore().archive(this.nativeId);
+  }
+
+  /** The transcripts live in the account's own configuration directory. */
+  private archiveStore() {
+    return new ClaudeSessionArchive(this.opts.accountEnv?.CLAUDE_CONFIG_DIR || undefined);
   }
 
   /** Model the process was started with; a different one needs a restart (resume keeps the session). */
@@ -358,11 +363,11 @@ export class ClaudeDriver implements AgentDriver {
  * Claude's rate-limit usage without a model turn: the local "/usage" command answers from the CLI
  * (0 tokens). Returns its text, or null.
  */
-export async function claudeUsageText(exePath: string, cwd: string): Promise<string | null> {
+export async function claudeUsageText(exePath: string, cwd: string, env: Record<string, string> = {}): Promise<string | null> {
   const child = spawn(
     exePath,
     ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--tools", "", "--strict-mcp-config", "--no-session-persistence"],
-    { cwd, stdio: ["pipe", "pipe", "ignore"], windowsHide: true },
+    { cwd, stdio: ["pipe", "pipe", "ignore"], windowsHide: true, env: { ...process.env, ...env } },
   );
   try {
     return await new Promise<string | null>((resolve) => {
@@ -387,11 +392,12 @@ export async function claudeUsageText(exePath: string, cwd: string): Promise<str
 }
 
 /** Model list from the CLI itself (stream-json control_request "initialize" → response.models). */
-export async function listClaudeModels(exePath: string, cwd: string): Promise<{ value: string; displayName: string; description?: string; supportsEffort?: boolean; supportedEffortLevels?: string[] }[]> {
+export async function listClaudeModels(exePath: string, cwd: string, env: Record<string, string> = {}): Promise<{ value: string; displayName: string; description?: string; supportsEffort?: boolean; supportedEffortLevels?: string[] }[]> {
   const child = spawn(exePath, ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"], {
     cwd,
     stdio: ["pipe", "pipe", "ignore"],
     windowsHide: true,
+    env: { ...process.env, ...env },
   });
   try {
     const models = await new Promise<any[]>((resolve, reject) => {

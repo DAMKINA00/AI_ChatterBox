@@ -24,7 +24,7 @@ const settings = {
   orchestratorModel: "claude:opus",
   claudeModel: "opus",
   codexModel: "gpt-6-astra",
-  geminiModel: "",
+  geminiModel: "aistudio:gemini-4-argon",
   orchestratorEffort: "auto",
   claudeEffort: "auto",
   codexEffort: "auto",
@@ -202,12 +202,9 @@ try {
   check("worker menu excludes low when metadata does not allow it", !codexMenuText?.includes("low") && codexMenuText?.includes("medium") && codexMenuText.includes("high") && codexMenuText.includes("xhigh"), codexMenuText);
   await page.getByRole("menuitem", { name: "high", exact: true }).click();
   const geminiPicker = dialog.getByLabel("제미나이 모델");
-  check("empty Gemini model uses the metadata default", (await geminiPicker.textContent())?.includes("Pro 자동 선택"));
+  check("Gemini worker uses the managed AI Studio model", (await geminiPicker.textContent())?.includes("AI Studio · Argon"));
   const geminiEffort = dialog.getByLabel("제미나이 작업자 추론 수준");
-  await geminiEffort.click();
-  const geminiMenuText = await page.getByRole("menu").textContent();
-  check("Gemini worker keeps low out of the manual levels", geminiMenuText?.includes("자동 배정") && geminiMenuText.includes("medium") && geminiMenuText.includes("high") && !geminiMenuText.includes("low"), geminiMenuText);
-  await page.keyboard.press("Escape");
+  check("Gemini worker effort is managed by AI Studio", await geminiEffort.isDisabled() && (await geminiEffort.textContent())?.includes("AI Studio 모델 설정"));
   await dialog.getByRole("button", { name: "저장", exact: true }).click();
   await page.waitForSelector('[role="dialog"]', { state: "detached" });
   check("project effort changes persist", persistedProject().codexEffort === "high", JSON.stringify(persistedProject()));

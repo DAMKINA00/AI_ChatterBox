@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ChevronDown, Globe2, KeyRound, Loader2, PencilLine, RotateCcw, Sparkles } from "lucide-react";
 import { DEEPSEEK_MODEL } from "../../../shared/deepseek";
-import { isAIStudioModel } from "../../../shared/aistudio";
+import { AISTUDIO_MODEL, isAIStudioModel } from "../../../shared/aistudio";
 import { AGENT_LABEL, GEMINI_WEB_MODEL, type AgentKind } from "../../../shared/types";
 import { cn } from "../lib/utils";
 import { latestModels } from "../../../shared/models";
@@ -33,12 +33,16 @@ const MODEL_GROUP_LABEL: Record<AgentKind, string> = {
 };
 
 const GEMINI_WEB_LABEL = "제미나이 웹 · Argon";
+const GEMINI_MODEL_OPTIONS = [
+  { id: GEMINI_WEB_MODEL, label: GEMINI_WEB_LABEL },
+  { id: AISTUDIO_MODEL, label: "AI Studio · Argon" },
+] as const;
 
 /** "claude:opus" for the orchestrator (both CLIs), or a plain model id for a worker. */
 export function useModelLabel() {
   const models = useStore((s) => s.models);
   return (agent: AgentKind, id: string) =>
-    models[agent]?.find((m) => m.id === id)?.label ?? (agent === "gemini" && isAIStudioModel(id) ? "AI Studio · Argon" : agent === "gemini" && id === GEMINI_WEB_MODEL ? GEMINI_WEB_LABEL : id || (agent === "gemini" ? "Pro 자동 선택" : agent === "deepseek" ? DEEPSEEK_MODEL : "기본값"));
+    models[agent]?.find((m) => m.id === id)?.label ?? (agent === "gemini" && (id === AISTUDIO_MODEL || isAIStudioModel(id)) ? "AI Studio · Argon" : agent === "gemini" && id === GEMINI_WEB_MODEL ? GEMINI_WEB_LABEL : id || (agent === "gemini" ? "AI Studio · Argon" : agent === "deepseek" ? DEEPSEEK_MODEL : "기본값"));
 }
 
 interface Props {
@@ -67,22 +71,21 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
   const [deepseekOpen, setDeepseekOpen] = useState(false);
   const encoded = agents.length > 1;
   const encodedAgent = agents.find((a) => value.startsWith(`${a}:`)) ?? agents[0];
-  const current = encoded
+  const rawCurrent = encoded
     ? { agent: encodedAgent, id: value.slice(value.indexOf(":") + 1) }
     : { agent: agents[0], id: value };
-  const webSelected = current.agent === "gemini" && current.id === GEMINI_WEB_MODEL;
-  const aiStudioSelected = current.agent === "gemini" && isAIStudioModel(current.id);
+  const current = rawCurrent.agent === "gemini" && !rawCurrent.id ? { ...rawCurrent, id: AISTUDIO_MODEL } : rawCurrent;
 
   useEffect(() => {
-    for (const a of agents) if (!(a === "gemini" && (webSelected || aiStudioSelected))) void loadModels(a);
-  }, [agents.join(","), aiStudioSelected, loadModels, webSelected]);
+    for (const a of agents) if (a !== "gemini") void loadModels(a);
+  }, [agents.join(","), loadModels]);
 
   const make = (agent: AgentKind, id: string) => (encoded ? `${agent}:${id}` : id);
 
   return (
     <>
       <DropdownMenu onOpenChange={(open) => {
-        if (open) for (const a of agents) if (!(a === "gemini" && (webSelected || aiStudioSelected)) && errors[a]) void loadModels(a);
+        if (open) for (const a of agents) if (a !== "gemini" && errors[a]) void loadModels(a);
       }}>
         <DropdownMenuTrigger asChild>
           <Button
@@ -113,38 +116,48 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
             <div key={a}>
               {i > 0 && <DropdownMenuSeparator />}
               <DropdownMenuLabel>{MODEL_GROUP_LABEL[a]}</DropdownMenuLabel>
-              {(a === "gemini" || a === "grok" || a === "deepseek") && (
+              {a === "gemini" ? (
                 <>
-                  {a === "gemini" && !encoded && <DropdownMenuItem onSelect={() => setGeminiWebOpen(true)} data-testid="gemini-web-connect">
+                  {!encoded && <DropdownMenuItem onSelect={() => setGeminiWebOpen(true)} data-testid="gemini-web-connect">
                     <Globe2 />
                     제미나이 웹 계정 관리…
                   </DropdownMenuItem>}
-                  {a === "gemini" && <DropdownMenuItem onSelect={() => setAiStudioOpen(true)} data-testid="aistudio-connect">
+                  <DropdownMenuItem onSelect={() => setAiStudioOpen(true)} data-testid="aistudio-connect">
                     <Sparkles />
                     AI Studio · Argon 설정…
-                  </DropdownMenuItem>}
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  {(encoded ? GEMINI_MODEL_OPTIONS.slice(1) : GEMINI_MODEL_OPTIONS).map((option) => (
+                    <DropdownMenuCheckItem key={option.id} checked={current.agent === a && current.id === option.id} onSelect={() => onChange(make(a, option.id))}>
+                      <span className="flex-1 truncate">{option.label}</span>
+                      <span className="font-mono text-[11px] text-muted-foreground">{option.id}</span>
+                    </DropdownMenuCheckItem>
+                  ))}
+                </>
+              ) : (a === "grok" || a === "deepseek") && (
+                <>
                   {a === "deepseek" && <DropdownMenuItem onSelect={() => setDeepseekOpen(true)} data-testid="deepseek-connect">
                     <KeyRound />
                     DeepSeek API 설정…
                   </DropdownMenuItem>}
                   <DropdownMenuSeparator />
                   <DropdownMenuCheckItem checked={current.agent === a && current.id === ""} onSelect={() => onChange(make(a, ""))}>
-                    <span className="flex-1 truncate">{a === "gemini" ? "Pro 자동 선택" : a === "deepseek" ? "API 기본 모델" : "CLI 기본 모델"}</span>
+                    <span className="flex-1 truncate">{a === "deepseek" ? "API 기본 모델" : "CLI 기본 모델"}</span>
                   </DropdownMenuCheckItem>
                 </>
               )}
-              {!models[a] && !errors[a] && !(a === "gemini" && (webSelected || aiStudioSelected)) && (
+              {a !== "gemini" && !models[a] && !errors[a] && (
                 <div className="flex items-center gap-2 px-2 py-1.5 text-[12px] text-muted-foreground">
                   <Loader2 className="size-3.5 animate-spin" /> 목록을 불러오는 중…
                 </div>
               )}
-              {errors[a] && !(a === "gemini" && (webSelected || aiStudioSelected)) && <>
+              {a !== "gemini" && errors[a] && <>
                 <div className="px-2 py-1.5 text-[12px] text-destructive">{errors[a]}</div>
                 <DropdownMenuItem onSelect={(event) => { event.preventDefault(); void loadModels(a); }}>
                   <RotateCcw /> 목록 다시 확인
                 </DropdownMenuItem>
               </>}
-              {models[a] &&
+              {a !== "gemini" && models[a] &&
                 latestModels(a, models[a]!.filter(m => !encoded || m.id !== GEMINI_WEB_MODEL), current.agent === a ? [current.id] : []).map((m) => (
                   <DropdownMenuCheckItem
                     key={m.id}
@@ -156,7 +169,7 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
                     <span className="font-mono text-[11px] text-muted-foreground">{m.id}</span>
                   </DropdownMenuCheckItem>
                 ))}
-              <DropdownMenuItem
+              {a !== "gemini" && <DropdownMenuItem
                 onSelect={() => {
                   setCustomText(current.agent === a ? current.id : "");
                   setCustom(a);
@@ -164,7 +177,7 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
               >
                 <PencilLine />
                 직접 입력…
-              </DropdownMenuItem>
+              </DropdownMenuItem>}
             </div>
           ))}
         </DropdownMenuContent>
@@ -175,8 +188,6 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
           description={
             custom === "codex"
               ? "Codex가 받는 모델 id (예: gpt-6-astra)"
-              : custom === "gemini"
-                ? "Antigravity가 받는 Gemini 모델 id"
               : custom === "grok" ? "Grok CLI 모델 id" : custom === "deepseek" ? "DeepSeek API 모델 id" : "Claude Code --model 값 (별칭 또는 전체 id)"
           }
           className="w-[420px]"

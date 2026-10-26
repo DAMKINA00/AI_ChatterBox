@@ -11,7 +11,6 @@ export default defineConfig({
           index: resolve("src/main/index.ts"),
           // Loaded by claude.exe / codex.exe as an MCP server (Electron's binary running as Node).
           "bridge-mcp": resolve("src/main/bridge-mcp.ts"),
-          "antigravity-hook": resolve("src/main/antigravity-hook.ts"),
         },
       },
     },

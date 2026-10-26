@@ -25,15 +25,6 @@ function fixture(initial: Record<string, unknown> = {}) {
   return { root, store, project, chats, snapshots };
 }
 
-function fakeGemini(stdout: string, error: any = null) {
-  let ended = false;
-  const patched = mock.method(childProcess, "execFile", ((_exe: string, _args: string[], _options: any, callback: Function) => {
-    queueMicrotask(() => callback(error, stdout, ""));
-    return { stdin: { end: () => { ended = true; } } };
-  }) as any);
-  return { patched, get ended() { return ended; } };
-}
-
 function fakeGrok(replies: Array<{ result?: unknown; error?: { code?: number; message: string } }>) {
   const requests: any[] = [], children: any[] = [];
   const patched = mock.method(childProcess, "spawn", (_exe: string, args: string[]) => {
@@ -68,26 +59,21 @@ function fakeGrok(replies: Array<{ result?: unknown; error?: { code?: number; me
   return { requests, children, restore: () => patched.mock.restore() };
 }
 
-const geminiUsage = JSON.stringify({
-  status: "SUCCESS", num_turns: 0,
-  command: { name: "usage", data: { groups: [{ name: "Gemini Models", buckets: [{ window: "weekly", remaining_fraction: 0.8 }] }] } },
-});
 const grokUsage = { config: { currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", end: END }, creditUsagePercent: 20 } };
 
-test("refreshUsage settles a synchronous Codex failure while still refreshing Gemini and Grok", async () => {
-  const f = fixture();
-  const gemini = fakeGemini(geminiUsage);
+test("refreshUsage settles a synchronous Codex failure without invoking removed Gemini CLI and still refreshes Grok", async () => {
+  const f = fixture({ gemini: { weekly: { usedPercent: 42 } } });
+  const exec = mock.method(childProcess, "execFile", () => { throw new Error("Removed Gemini CLI must not run"); });
   const grok = fakeGrok([{ result: grokUsage }]);
   try {
     (f.chats as any).codex = () => { throw new Error("codex missing"); };
     await f.chats.refreshUsage();
-    assert.equal(gemini.ended, true);
-    assert.ok(Math.abs((f.chats.usage().gemini?.weekly?.usedPercent ?? NaN) - 20) < 1e-9);
     assert.deepEqual(f.chats.usage().grok?.weekly?.usedPercent, 20);
-    assert.equal(typeof f.chats.usage().gemini?.updatedAt, "number");
+    assert.equal(f.chats.usage().gemini, undefined);
+    assert.equal(exec.mock.callCount(), 0);
     assert.equal(typeof f.chats.usage().grok?.updatedAt, "number");
   } finally {
-    gemini.patched.mock.restore(); grok.restore();
+    exec.mock.restore(); grok.restore();
     await f.chats.dispose(); f.store.close(); rmSync(f.root, { recursive: true, force: true });
   }
 });

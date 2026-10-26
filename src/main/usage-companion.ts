@@ -1,7 +1,6 @@
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawn as nodeSpawn, type SpawnOptions } from "node:child_process";
 import type {
-  GeminiPlan,
   UsageCommandName,
   UsageCompanionSnapshot,
   UsageMonitorState,
@@ -13,12 +12,11 @@ const START_TIMEOUT_MS = 20_000;
 const STOP_TIMEOUT_MS = 15_000;
 const TITLE = "AI 사용량 모니터";
 const NO_VALUE_COMMANDS = new Set<UsageCommandName>([
-  "show", "hide", "refresh", "accounts", "claude-login", "claude-logout", "gemini-unblock", "data-folder", "quit",
+  "show", "hide", "refresh", "accounts", "claude-login", "claude-logout", "data-folder", "quit",
 ]);
 const BOOLEAN_COMMANDS = new Set<UsageCommandName>([
   "topmost", "characters", "taskbar", "startup", "usage-alerts", "activity-alerts", "claude-desktop",
 ]);
-const PLANS = new Set<Exclude<GeminiPlan, null>>(["Free", "Google AI Pro", "Google AI Ultra"]);
 
 export interface UsageWritable {
   write(data: string): unknown;
@@ -87,10 +85,10 @@ function validState(value: unknown): value is UsageMonitorState {
   const state = value as Record<string, unknown>;
   const booleans = [
     "visible", "topmost", "characters", "taskbar", "startup", "usageAlerts", "activityAlerts",
-    "claudeDesktop", "claudeLoggedIn", "geminiBlocked",
+    "claudeDesktop", "claudeLoggedIn",
   ];
   if (booleans.some(key => typeof state[key] !== "boolean")) return false;
-  return state.geminiPlan === null || (typeof state.geminiPlan === "string" && PLANS.has(state.geminiPlan as Exclude<GeminiPlan, null>));
+  return true;
 }
 
 function copyState(state: UsageMonitorState): UsageMonitorState {
@@ -370,8 +368,8 @@ export class UsageCompanion {
     }
   }
 
-  private validateCommand(name: string, value: unknown): { command: UsageCommandName; value?: boolean | GeminiPlan } {
-    if (!NO_VALUE_COMMANDS.has(name as UsageCommandName) && !BOOLEAN_COMMANDS.has(name as UsageCommandName) && name !== "gemini-plan") throw new Error(`지원하지 않는 사용량 모니터 명령입니다: ${name}`);
+  private validateCommand(name: string, value: unknown): { command: UsageCommandName; value?: boolean } {
+    if (!NO_VALUE_COMMANDS.has(name as UsageCommandName) && !BOOLEAN_COMMANDS.has(name as UsageCommandName)) throw new Error(`지원하지 않는 사용량 모니터 명령입니다: ${name}`);
     const command = name as UsageCommandName;
     if (NO_VALUE_COMMANDS.has(command)) {
       if (value !== undefined) throw new Error(`명령 '${name}'에는 값이 필요하지 않습니다.`);
@@ -381,13 +379,12 @@ export class UsageCompanion {
       if (typeof value !== "boolean") throw new Error(`명령 '${name}'에는 불리언 값이 필요합니다.`);
       return { command, value };
     }
-    if (value !== null && !PLANS.has(value as Exclude<GeminiPlan, null>)) throw new Error("Gemini 등급 값이 올바르지 않습니다.");
-    return { command, value: value as GeminiPlan };
+    throw new Error(`지원하지 않는 사용량 모니터 명령입니다: ${name}`);
   }
 
-  private write(session: ChildSession, command: { command: UsageCommandName; value?: boolean | GeminiPlan }) {
+  private write(session: ChildSession, command: { command: UsageCommandName; value?: boolean }) {
     const payload: Record<string, unknown> = { command: command.command };
-    if (command.value !== undefined || command.command === "gemini-plan") payload.value = command.value;
+    if (command.value !== undefined) payload.value = command.value;
     session.child.stdin!.write(`${JSON.stringify(payload)}\n`);
   }
 }

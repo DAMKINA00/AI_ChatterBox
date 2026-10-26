@@ -137,7 +137,7 @@ function ProviderControls({ agent, web = false, apiProvider = agent === "deepsee
   const cli = useStore(s => s.cli.find(c => c.agent === agent));
   const refresh = useStore(s => s.refreshCli);
   const [checking, setChecking] = useState(false);
-  const inactive = !web && !apiProvider && cli?.authStatus !== "authenticated";
+  const inactive = agent !== "gemini" && !web && !apiProvider && cli?.authStatus !== "authenticated";
   const status = !cli?.path ? "CLI 미설치" : cli.authStatus === "required" ? "로그인 필요" : "로그인 확인 필요";
   return <div className="flex shrink-0 flex-nowrap items-center gap-1.5" data-testid={master ? "orch-badge" : "provider-controls"} data-provider={agent} data-state={web ? "web" : apiProvider ? "api" : inactive ? "inactive" : "ready"}>
     <div className={cn("flex min-w-0 items-center gap-1.5", inactive && "opacity-45 grayscale")}>{children}</div>

@@ -148,7 +148,7 @@ export function StatusDialog({ open, onOpenChange, chat, project }: { open: bool
           <div className="mt-1 text-[12px] font-medium text-muted-foreground">기타</div>
           {row("승인 방식", APPROVAL_MODE_LABEL[chat.approvalModeOverride ?? project.settings.approvalMode])}
           {row("목표", chat.goal ? `${chat.goal.objective} (${chat.goal.status})` : "없음")}
-          {row("남은 사용량", (["claude", "codex", "gemini", "grok", "deepseek"] as const).map(a => { const d = pickUsage(usage[a]); return `${AGENT_LABEL[a]} ${d ? `${d.window} ${Math.round(d.remaining)}%` : "정보 없음"}`; }).join(" · "))}
+          {row("남은 사용량", (["claude", "codex", "grok", "deepseek"] as const).map(a => { const d = pickUsage(usage[a]); return `${AGENT_LABEL[a]} ${d ? `${d.window} ${Math.round(d.remaining)}%` : "정보 없음"}`; }).join(" · "))}
           {row("작업 폴더", <span className="font-mono text-[12px] break-all">{project.folder}</span>)}
         </div>
       </DialogContent>

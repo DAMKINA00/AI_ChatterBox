@@ -72,53 +72,6 @@ AI Studio 작업자는 프로젝트 폴더 범위에서 파일 읽기·목록 �
 
 영상은 기본적으로 꺼져 있습니다. 설정에서 **영상 생성 사용**을 명시적으로 켠 뒤 사용자가 영상을 요청한 경우에만 영상 도구를 노출합니다. 이 변경에서 영상 로그인·생성·저장 흐름은 실행 검증하지 않았습니다.
 
-## Antigravity 모델 가져오기
-
-AI Studio 설정 화면의 **Antigravity 설정 내보내기**는 다음과 같은 Custom Model Enabler 가져오기 구조를 만듭니다. `externalModelName`은 AIStudio2API의 실제 `/v1/models` ID와 같아야 합니다.
-
-```json
-{
-  "models": [
-    {
-      "name": "models/chatterbox-aistudio-argon",
-      "displayName": "AI Studio · Argon",
-      "provider": "custom",
-      "externalModelName": "gemini-4-argon",
-      "apiUrl": "http://127.0.0.1:2048/v1",
-      "apiKey": "",
-      "apiFormat": "openai",
-      "enabled": true
-    }
-  ]
-}
-```
-
-내보내기는 비밀값을 JSON에 넣지 않습니다. 해당 클라이언트가 로컬 API 키를 요구하면 `.env`의 키를 대상 프로그램에 직접 입력하고 파일이나 대화에 공개하지 않습니다. 이 설정은 Custom Model Enabler의 모델 가져오기용이며 `agy` CLI가 이 패치를 지원한다는 의미가 아닙니다.
-
-## 데스크톱과 IDE
-
-`antigravity-add-model`은 standalone Electron 데스크톱과 VS Code 기반 IDE에 서로 다른 절차를 사용합니다. 앱을 닫은 뒤 실행합니다.
-
-Standalone 데스크톱:
-
-```powershell
-npm run patch:check -- --resources "C:\path\to\Antigravity\resources"
-npm run doctor:repair -- --resources "C:\path\to\Antigravity\resources"
-npm run patch:restore -- --resources "C:\path\to\Antigravity\resources"
-```
-
-`patch:check`는 검사만 하며, `doctor:repair`가 적용, `patch:restore`가 관리된 백업 복원입니다. 적용과 복원 전 데스크톱을 종료하고 끝난 뒤 직접 다시 엽니다.
-
-IDE:
-
-```powershell
-npm run ide:check -- --resources "C:\path\to\Antigravity IDE\resources"
-npm run ide:apply -- --resources "C:\path\to\Antigravity IDE\resources"
-npm run ide:restore -- --resources "C:\path\to\Antigravity IDE\resources"
-```
-
-IDE 절차는 확인된 `jetski.cloudCodeUrl` 설정과 독립 로컬 프록시를 관리합니다. standalone 배포 스크립트로 IDE를 패치하거나, `agy` CLI가 데스크톱/IDE 패치를 소비한다고 가정하지 않습니다.
-
 ## 검증 범위
 
 - [확인] 별도 준비 절차에서 공식 `v0.2.13` Windows runtime을 내려받고 릴리스 digest를 일치 확인.
@@ -139,3 +92,5 @@ IDE 절차는 확인된 `jetski.cloudCodeUrl` 설정과 독립 로컬 프록시�
 - [미실행] 영상 요청. 이번 검증에서 영상을 요청하지 않았으며 기본값은 영상 비활성입니다.
 
 현재 외부 관리 프로그램인 AIStudio2API에 의존합니다. 릴리스·모델 목록·계정 자격·실제 쿨다운은 실행 시점과 Google 측 상태에 따라 달라질 수 있습니다.
+
+0.4.36부터 Gemini는 Web과 AI Studio만 지원합니다. Antigravity CLI 및 Custom Model Enabler 설정 내보내기는 제거되었습니다.

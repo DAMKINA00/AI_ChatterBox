@@ -96,7 +96,7 @@ function fixture(options: { geminiModel?: string; geminiStrengths?: string } = {
 const call = (engine: any, chatId: number, caller: Role, kind: string, to: string) =>
   engine.call(chatId, caller, "ask", { to, kind, scope: ["delegated/**"], message: `${kind} 요청`, reason: "writing routing regression", effort: "medium" });
 
-test("Antigravity accepts explicit code, review and writing; web retains local-tool limits", async () => {
+test("AI Studio accepts explicit code, review and writing; web retains local-tool limits", async () => {
   for (const geminiModel of [GEMINI_WEB_MODEL, "gemini-test-medium"]) {
     const f = fixture({ geminiModel });
     try {
@@ -117,7 +117,7 @@ test("Antigravity accepts explicit code, review and writing; web retains local-t
   }
 });
 
-test("Antigravity peers can request implementation as well as review", async () => {
+test("AI Studio peers can request implementation as well as review", async () => {
   const f = fixture({ geminiModel: "gemini-test-medium" });
   try {
     const gemini = f.store.createAgent(f.chat.id, "gemini", "technical peer");

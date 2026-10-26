@@ -27,7 +27,7 @@ function fixture() {
   return { store, project, chat, chats, engine, sent, async close() { await engine.judge.dispose(); await chats.dispose(); store.close(); rmSync(root, { recursive: true, force: true }); } };
 }
 
-test("master defaults to auto; parallel assignments keep separate effort and persist Gemini's supported fallback", async () => {
+test("master defaults to auto; parallel assignments keep separate effort and leave AI Studio effort to the service", async () => {
   const f = fixture();
   try {
     assert.equal((await f.chats.assignmentEffort(f.chat.id, "orch")).effort, "");
@@ -38,9 +38,9 @@ test("master defaults to auto; parallel assignments keep separate effort and per
       { to: gemini.nickname, kind: "writing", message: "write dialogue", reason: "complex character voice: xhigh", effort: "xhigh" },
     ] });
     assert.ok(!response.isError);
-    assert.deepEqual(f.sent.sort((a, b) => a.role.localeCompare(b.role)), [{ role: claude.key, effort: "medium" }, { role: gemini.key, effort: "high" }]);
-    const records = f.store.listConsults(f.chat.id);
-    assert.deepEqual(records.map((c) => [c.requestedEffort, c.effort, c.status]), [["medium", "medium", "done"], ["xhigh", "high", "done"]]);
+    assert.deepEqual(f.sent.sort((a, b) => a.role.localeCompare(b.role)), [{ role: claude.key, effort: "medium" }, { role: gemini.key, effort: "" }]);
+    const records = f.store.listConsults(f.chat.id).sort((a, b) => a.toRole.localeCompare(b.toRole));
+    assert.deepEqual(records.map((c) => [c.requestedEffort, c.effort, c.status]), [["medium", "medium", "done"], ["xhigh", "", "done"]]);
   } finally { await f.close(); }
 });
 

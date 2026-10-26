@@ -23,9 +23,9 @@ class GrokConnection {
   private nextId = 0;
   private pending = new Map<number, { resolve(value: any): void; reject(error: Error): void }>();
   private closed = false;
-  constructor(exe: string, cwd: string, instructions = "", private incoming: (message: any) => Promise<any> = async () => { throw new Error("Unsupported Grok callback"); }, private exited: (error: Error) => void = () => {}) {
+  constructor(exe: string, cwd: string, instructions = "", private incoming: (message: any) => Promise<any> = async () => { throw new Error("Unsupported Grok callback"); }, private exited: (error: Error) => void = () => {}, env: Record<string, string> = {}) {
     this.child = spawn(exe, ["--permission-mode", "default", "--no-subagents", ...(instructions ? ["--rules", instructions] : []), "agent", "stdio"], {
-      cwd, windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+      cwd, windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...env, ELECTRON_RUN_AS_NODE: "1" },
     });
     let stderr = "";
     this.child.stderr!.setEncoding("utf8");
@@ -83,8 +83,8 @@ export function grokAuthMethod(init: any): string | undefined {
 }
 
 /** Checks existing credentials headlessly; never opens a login or sends a prompt. */
-export async function readGrokAuth(exe: string, cwd: string): Promise<"authenticated" | "required" | "unknown"> {
-  const connection = new GrokConnection(exe, cwd);
+export async function readGrokAuth(exe: string, cwd: string, env: Record<string, string> = {}): Promise<"authenticated" | "required" | "unknown"> {
+  const connection = new GrokConnection(exe, cwd, "", undefined, undefined, env);
   try {
     const init = await connection.request("initialize", initialize, 10000);
     const methodId = grokAuthMethod(init);
@@ -96,8 +96,8 @@ export async function readGrokAuth(exe: string, cwd: string): Promise<"authentic
 }
 
 /** Reads the logged-in account allowance without creating a session or sending a prompt. */
-export async function readGrokUsage(exe: string, cwd: string): Promise<ProviderUsage> {
-  const connection = new GrokConnection(exe, cwd);
+export async function readGrokUsage(exe: string, cwd: string, env: Record<string, string> = {}): Promise<ProviderUsage> {
+  const connection = new GrokConnection(exe, cwd, "", undefined, undefined, env);
   try {
     const init = await connection.request("initialize", initialize, 15000);
     const methodId = grokAuthMethod(init);
@@ -116,8 +116,8 @@ export async function readGrokUsage(exe: string, cwd: string): Promise<ProviderU
   } finally { await connection.close(); }
 }
 
-export async function listGrokModels(exe: string, cwd: string): Promise<ModelOption[]> {
-  const connection = new GrokConnection(exe, cwd);
+export async function listGrokModels(exe: string, cwd: string, env: Record<string, string> = {}): Promise<ModelOption[]> {
+  const connection = new GrokConnection(exe, cwd, "", undefined, undefined, env);
   try {
     const init = await connection.request("initialize", initialize);
     const result = await connection.request("x.ai/models/list", {}).catch(() => null);
@@ -230,7 +230,7 @@ export class GrokDriver implements AgentDriver {
       if (this.connection !== connection) return;
       this.connection = undefined;
       this.finish(false, error.message);
-    });
+    }, this.opts.accountEnv);
     this.connection = connection;
     const init = await connection.request("initialize", initialize);
     if (epoch !== this.epoch) throw new Error("Grok 실행이 취소되었습니다.");

@@ -1,5 +1,3 @@
-export type GeminiPlan = null | "Free" | "Google AI Pro" | "Google AI Ultra";
-
 export interface UsageMonitorState {
   visible: boolean;
   topmost: boolean;
@@ -10,8 +8,6 @@ export interface UsageMonitorState {
   activityAlerts: boolean;
   claudeDesktop: boolean;
   claudeLoggedIn: boolean;
-  geminiBlocked: boolean;
-  geminiPlan: GeminiPlan;
 }
 
 export interface UsageNotification {
@@ -41,7 +37,5 @@ export type UsageCommandName =
   | "claude-desktop"
   | "claude-login"
   | "claude-logout"
-  | "gemini-unblock"
-  | "gemini-plan"
   | "data-folder"
   | "quit";

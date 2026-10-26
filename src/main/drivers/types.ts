@@ -59,6 +59,8 @@ export interface DriverOptions {
   codexConfig?: Record<string, unknown>;
   /** Don't keep the conversation on disk (the approval judge). */
   ephemeral?: boolean;
+  /** CLI account directory (CLAUDE_CONFIG_DIR / GROK_HOME); empty or absent = the CLI default. */
+  accountEnv?: Record<string, string>;
 }
 
 export const IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);

@@ -23,7 +23,7 @@ class FakeChild extends EventEmitter implements UsageChild {
 }
 
 function state(): UsageMonitorState {
-  return { visible: false, topmost: false, characters: true, taskbar: true, startup: false, usageAlerts: true, activityAlerts: false, claudeDesktop: true, claudeLoggedIn: true, geminiBlocked: false, geminiPlan: "Google AI Pro" };
+  return { visible: false, topmost: false, characters: true, taskbar: true, startup: false, usageAlerts: true, activityAlerts: false, claudeDesktop: true, claudeLoggedIn: true };
 }
 
 function fixture(saved?: Record<string, unknown>, allowed = true) {
@@ -55,9 +55,10 @@ test("starts one hosted child, waits for state, validates framing, and sends all
   await starting;
   await f.companion.command("show");
   await f.companion.command("topmost", true);
-  await f.companion.command("gemini-plan", null);
+  await assert.rejects(f.companion.command("gemini-plan" as any, null), /지원하지 않는/);
+  await assert.rejects(f.companion.command("gemini-unblock" as any), /지원하지 않는/);
   assert.deepEqual(f.child.stdin.writes.map(line => JSON.parse(line)), [
-    { command: "show" }, { command: "topmost", value: true }, { command: "gemini-plan", value: null },
+    { command: "show" }, { command: "topmost", value: true },
   ]);
   const quitting = f.companion.command("quit");
   assert.equal(f.child.stdin.writes.at(-1), '{"command":"quit"}\n');
@@ -154,7 +155,7 @@ test("reports child notifications and ignores malformed or oversized lines", asy
   f.child.emitState(state());
   await starting;
   assert.equal(f.notifications.some(n => n.title === "알림" && n.error === false), true);
-  assert.equal(f.companion.snapshot().state?.geminiPlan, "Google AI Pro");
+  assert.equal(f.companion.snapshot().state?.claudeLoggedIn, true);
   rmSync(f.root, { recursive: true, force: true });
 });
 
