@@ -6,6 +6,14 @@
 
 ## 주요 기능
 
+### 통합 설치·GitHub 업데이트·작업자 복구 (0.4.35)
+- 설치 프로그램으로 한 번 압축을 푼 뒤 고정된 설치 경로에서 앱을 실행합니다. 매번 임시 폴더에 압축을 풀던 포터블 실행 단계를 없앴습니다.
+- AIUsageMonitor와 .NET 런타임을 함께 설치합니다. ChatterBox 트레이 하나에서 모니터 켜기·끄기, 계정 관리, 캐릭터·작업표시줄 표시, 알림과 로그인 설정을 조작합니다. 모니터를 켜 둔 동안 채팅 창을 닫아도 트레이에서 계속 실행합니다.
+- 대화·계정·첨부는 기존 `%APPDATA%\AI_ChatterBox`, 사용량 모니터 설정·로그인 프로필은 기존 `%LOCALAPPDATA%\AIUsageMonitor`를 계속 사용합니다. `AIUSAGEMONITOR_DATA_DIR` 지정도 유지하며 두 저장소를 합치지 않습니다. 시작 메뉴 바로가기는 설치형으로 교체합니다.
+- GitHub Releases에서 시작 30초 후, 이후 6시간마다 새 버전을 확인하고 내려받습니다. 트레이의 **업데이트하고 재시작**으로 적용하며, 작업·승인 대기가 있으면 적용하지 않습니다. 적용 전 새 작업을 막고 모니터와 코어를 정상 종료합니다. 일반 종료만으로 자동 설치하지 않습니다.
+- 작업자 오류를 15초마다 점검하여 마스터에 원래 요청과 실패 기록을 전달합니다. 종료 신호 없이 오류 상태가 60초 유지된 작업자는 먼저 세션을 정리합니다. 마스터가 재시도하거나 다른 작업자에 재배정하며, 중지·일시 정지·승인 대기는 건드리지 않습니다. 한 지시에서 세 차례 복구 요청으로 해결되지 않으면 사용자 확인을 표시합니다.
+- 수동 설치·제거는 실행 중인 앱을 강제로 종료하지 않습니다. 기존 단독 모니터가 실행 중이면 정상 종료한 뒤 통합 모니터를 켜세요.
+
 ### 채팅 전환 속도 개선 (0.4.33)
 - 최근 대화 100개를 먼저 표시하고, 위로 스크롤하거나 **이전 기록 더 보기**를 누르면 과거 기록을 추가로 표시합니다. 진행 중인 작업과 미응답 질문·승인 요청은 계속 접근할 수 있습니다.
 - 완료된 작업자의 상세 기록은 **작업 기록 펼치기**로 열며, 처음에는 최근 20개부터 표시합니다. 전체 대화 기록과 에이전트의 작업 맥락은 보존합니다. 검색어를 적용하면 이전 기록과 접힌 작업 내용도 검색합니다.
@@ -99,7 +107,7 @@
 - 직접 승인에서는 **이번만 허용**, **이 채팅 동안 허용**, **거부** 중에서 고릅니다. 고위험 요청은 채팅 전체 허용을 기억하지 않습니다.
 - **전체 위험 승인**은 판단 세션이 사용자 지시 범위 안의 고위험 요청도 허용·거부하며, 판단이 불확실하거나 응답하지 못한 경우도 자동 허용합니다. 명시적인 거부는 유지합니다. 설정을 바꾸면 이전 승인 기억은 초기화됩니다. 계획·리뷰·의견도 수정 권한을 요청할 수 있으며, 판정기 자신의 변경은 관리자 승인을 받습니다.
 - `--dangerously-skip-permissions`나 Codex yolo 모드 같은 위험 우회 플래그는 쓰지 않습니다.
-- 권한 설정 참고: [Codex App Server](https://learn.chatgpt.com/docs/app-server), [Claude Code permissions](https://code.claude.com/docs/en/permissions), [Electron Windows 설정](https://www.electron.build/docs/api/app-builder-lib.interface.windowsconfiguration/), [Portable 설정](https://www.electron.build/docs/api/app-builder-lib.interface.portableoptions/).
+- 권한 설정 참고: [Codex App Server](https://learn.chatgpt.com/docs/app-server), [Claude Code permissions](https://code.claude.com/docs/en/permissions), [Electron Windows 설정](https://www.electron.build/docs/api/app-builder-lib.interface.windowsconfiguration/), [NSIS 설치형 설정](https://www.electron.build/docs/nsis/).
 
 ### 조작과 편의 기능
 - 작업 중에는 입력창의 **일시 중지** 버튼으로 그 채팅의 마스터와 작업자를 멈추고, **재시작** 버튼으로 이어서 실행합니다. `/stop` 명령은 이어갈 정보와 대기 중인 추가 지시를 남기지 않고 작업을 멈춥니다.
@@ -131,9 +139,11 @@
 
 ## 실행 파일
 
-저장소를 받은 뒤 `npm install`, `npm run dist`로 `dist\AI_ChatterBox-<버전>-portable.exe`를 만들고 더블클릭해 실행합니다. 설치는 필요 없습니다. 기존 작업이 끝난 뒤 앱을 종료하고 새 파일로 실행하세요.
+저장소를 받은 뒤 `npm ci`, `npm run dist`로 `dist\AI_ChatterBox-<버전>-setup.exe`를 만듭니다. 번들 빌드에는 .NET 10 SDK와 형제 폴더의 `AIUsageMonitor` 소스가 필요합니다. 다른 위치는 `AI_USAGE_SOURCE`로 지정하고 `build/usage-monitor.json`에 기록한 커밋을 체크아웃하세요. 설치 프로그램을 실행한 뒤 시작 메뉴의 **AI_ChatterBox**로 앱을 실행하세요. 기본 설치 위치는 `%LOCALAPPDATA%\Programs\ai-chatterbox`이며 현재 Windows 사용자 계정에 설치합니다. 이후에는 트레이에서 업데이트를 적용하거나 앱을 종료한 뒤 새 설치 프로그램을 실행할 수 있습니다.
 
-- 실행할 때마다 임시 폴더에 압축을 풀기 때문에 처음 창이 뜰 때까지 10초쯤 걸립니다.
+- 설치 후에는 고정된 경로의 실행 파일을 직접 실행합니다. 시작 메뉴의 기존 포터블 바로가기도 설치형으로 교체됩니다. 따로 고정한 작업표시줄 바로가기는 설치형 앱으로 다시 고정하세요.
+- Windows **설정 → 앱 → 설치된 앱**에서 제거할 수 있습니다. 일반적인 업데이트·제거는 두 앱의 사용자 데이터를 삭제하지 않습니다.
+- `v<package.json 버전>` 태그를 GitHub에 올리면 Windows 빌드·검사 후 설치 파일, blockmap, `latest.yml`을 릴리스에 함께 게시합니다. 업데이트 앱에는 GitHub 토큰을 넣지 않습니다. 공개 릴리스 채널은 `DAMKINA00/AI_ChatterBox`입니다.
 - 실행기와 채팅 화면은 일반 권한으로 실행합니다. 마스터·에이전트 코어를 시작할 때만 UAC 승인을 요청합니다. 취소하면 다시 시도하거나 종료할 수 있습니다. 파일 드롭을 사용하려면 바로가기를 **관리자 권한으로 실행**하지 마세요. CLI의 쓰기·명령 승인은 Windows 권한과 별도로 적용됩니다.
 - 서명하지 않은 exe라서 처음 실행할 때 SmartScreen이 막으면 **추가 정보 → 실행**을 누르세요.
 - 데이터는 `%APPDATA%\AI_ChatterBox`에 저장됩니다.
@@ -175,10 +185,10 @@ npm run dev
 | `node scripts/smoke-cli-permissions.mjs` | 실제 Claude/Codex 마스터·작업자의 수정·명령·승인·표정 검사 (사용량 발생) |
 | `node scripts/smoke-cli-restrictions.mjs` | 실제 CLI의 명시적 읽기 전용 지시, 별도 판단 세션의 고위험 위임 분기 검사 (사용량 발생) |
 | `node scripts/verify-character-assets.mjs` | 49개 PNG의 크기·투명도 검사와 표정 갤러리 캡처 |
-| `pwsh -File scripts/verify-admin-manifest.ps1 -Paths dist/AI_ChatterBox-<버전>-portable.exe` | UI 실행기의 asInvoker 매니페스트 검사. 이전 버전은 -ExpectedLevel requireAdministrator 지정 |
+| `pwsh -File scripts/verify-admin-manifest.ps1 -Paths dist/AI_ChatterBox-<버전>-setup.exe,dist/win-unpacked/AI_ChatterBox.exe` | 설치 프로그램과 UI 실행기의 asInvoker 매니페스트 검사. 이전 버전은 -ExpectedLevel requireAdministrator 지정 |
 | `node scripts/e2e-chat-search-drop.mjs` | 격리 데이터로 대화 검색·파일 드롭·첨부 보관 검사 (모델 호출 없음) |
 | `node scripts/e2e-core-lifecycle.mjs --elevated` | 일반 UI/관리자 코어 토큰·파이프·정상 종료·화면 강제 종료 후 코어 정리 검사 (UAC 확인 필요, 모델 호출 없음) |
-| `npm run dist` | `dist\AI_ChatterBox-<버전>-portable.exe` 만들기 |
+| `npm run dist` | `dist\AI_ChatterBox-<버전>-setup.exe` 설치 프로그램 만들기 |
 | `npm run codex:schema` | 설치된 codex 버전으로 `src/main/codex-schema` 다시 만들기 |
 | `node scripts/e2e-v1.mjs` | 화면·구조 검사: 트리, 첨부 3가지, 이미지 이해, 마크다운, 모델 상속, 재실행 |
 | `node scripts/e2e-v2.mjs [A B C D]` | 협업 검사: Claude/GPT 오케스트레이터로 버그 수정 → 교차 리뷰, 한도, 중지 |

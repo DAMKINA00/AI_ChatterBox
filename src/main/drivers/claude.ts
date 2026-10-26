@@ -132,10 +132,22 @@ export class ClaudeDriver implements AgentDriver {
     let stderr = "";
     child.stderr!.on("data", (d: string) => (stderr = (stderr + d).slice(-4000)));
     readLines(child, (line) => this.onLine(line));
-    child.on("error", (e) => this.host.emit({ type: "error", kind: "process", message: `claude 실행 실패: ${e.message}` }));
-    child.on("exit", (code) => {
-      if (this.child === child) this.child = undefined;
+    child.on("error", (e) => {
       this.env.bridge.unregister(key);
+      if (this.child !== child) return;
+      this.child = undefined;
+      const running = this._running;
+      this._running = false;
+      this.pendingSteers.clear();
+      const message = `claude 실행 실패: ${e.message}`;
+      this.host.emit({ type: "error", kind: "process", message });
+      if (running) this.host.emit({ type: "turn_end", ok: false, error: message, interrupted: this.stopping });
+      this.stopping = false;
+    });
+    child.on("exit", (code) => {
+      this.env.bridge.unregister(key);
+      if (this.child !== child) return;
+      this.child = undefined;
       if (this._running) {
         this._running = false;
         if (this.stopping) this.host.emit({ type: "turn_end", ok: false, interrupted: true });

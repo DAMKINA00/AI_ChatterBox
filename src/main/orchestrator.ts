@@ -276,6 +276,9 @@ interface Instruction {
   dualInvestigation?: boolean;
   repaired?: boolean;
   waitingForResults?: boolean;
+  recoveryAttempts?: number;
+  recoveryAfter?: number;
+  recoveryNote?: string;
   /** The user's instruction text (context for the approval judge). */
   text: string;
   asks: number;
@@ -300,6 +303,10 @@ interface PauseState {
   planning: boolean; reviewing: boolean; assignments: PausedAssignment[];
 }
 interface Running {
+  lastEventAt: number;
+  lastError?: string;
+  recovering?: boolean;
+  recoveryError?: string;
   webAccountId?: GeminiWebAccountId;
   consultId: number;
   caller: Role;
@@ -316,6 +323,8 @@ interface Running {
 }
 
 export class Orchestrator {
+  private recoveryTimer?: ReturnType<typeof setInterval>;
+  private recoveryFlights = new Set<number>();
   private bridgeKeys = new Map<string, { key: string; url: string }>();
   private instructions = new Map<number, Instruction>();
   /** Running consults per chat, by target worker. */
@@ -369,6 +378,93 @@ export class Orchestrator {
     chats.onDriverEvent = (chatId, role, event) => this.observe(chatId, role, event);
     chats.sendHandler = (chat, input) => this.instruct(chat, input);
     chats.busySend = (chat, input, delivery) => chat.status !== "paused" && delivery === "now" ? this.deliverNow(chat, input) : this.queue(chat, input);
+  }
+
+  startRecovery() {
+    if (this.recoveryTimer) return;
+    this.recoveryTimer = setInterval(() => void this.sweepWorkerRecovery().catch(() => undefined), 15_000);
+    this.recoveryTimer.unref();
+  }
+
+  stopRecovery() {
+    clearInterval(this.recoveryTimer);
+    this.recoveryTimer = undefined;
+  }
+
+  get recovering() { return this.recoveryFlights.size > 0; }
+
+  /** Only explicit errors trigger recovery; quiet tools and approval waits are not failures. */
+  async sweepWorkerRecovery(now = Date.now()) {
+    for (const [chatId, inst] of this.instructions) {
+      const chat = this.chats.store.chat(chatId);
+      if (!chat || this.stopped.has(chatId) || ["paused", "pausing", "approval"].includes(chat.status) || this.recoveryFlights.has(chatId)) continue;
+      this.recoveryFlights.add(chatId);
+      try {
+        for (const [role, running] of this.running.get(chatId) ?? []) {
+          if (!running.lastError || running.recovering || now - running.lastEventAt < 60_000) continue;
+          const driver = this.chats.liveDriver(chatId, role);
+          running.recovering = true;
+          running.recoveryError = running.lastError;
+          try {
+            // Dispose the failed session before releasing its write scope or assigning a replacement.
+            if (driver?.running) await driver.dispose();
+            if (driver?.running) throw new Error("작업자 프로세스가 아직 실행 중입니다.");
+            await this.chats.disposeRole(chatId, role);
+            running.recovering = false;
+            if (this.instructions.get(chatId) !== inst || this.stopped.has(chatId)) {
+              running.resolve({ ok: false, interrupted: true });
+              continue;
+            }
+            running.resolve({ ok: false, error: running.recoveryError });
+            this.chats.emit(chatId, this.chats.route(chatId, role), role, { type: "turn_end", ok: false, error: running.recoveryError });
+          } catch (error) {
+            running.recovering = false;
+            running.recoveryError = undefined;
+            running.lastEventAt = now;
+            this.chats.emit(chatId, "orch", "orch", { type: "notice", text: `오류 작업자 정리를 완료하지 못했습니다: ${String(error)}. 다른 작업자에게 같은 파일을 재배정하지 않습니다.` });
+          }
+        }
+        // Let settled consults persist their final status and release the worker queue.
+        await Promise.resolve();
+        if (this.instructions.get(chatId) !== inst || this.stopped.has(chatId) || (inst.recoveryAfter ?? 0) > now) continue;
+        const all = this.chats.store.listConsults(chatId).filter(c => c.instructionId === inst.id);
+        const failed = all.filter(c => c.status === "error" && !all.some(next => next.supersedes === c.id && next.status !== "stopped"));
+        if (!failed.length) continue;
+        const attempts = inst.recoveryAttempts ?? 0;
+        if (attempts >= 3) {
+          if (inst.recoveryAfter !== Infinity) {
+            inst.recoveryAfter = Infinity;
+            this.chats.emit(chatId, "orch", "orch", { type: "notice", text: "작업자 오류 복구를 세 차례 요청했지만 해결되지 않았습니다. 로그인·한도·실행 환경을 확인해 주세요. 기존 결과와 실패 기록은 보존했습니다." });
+            if (!this.chats.isBusy(chatId)) this.chats.updateChat(chatId, { status: "error", unread: true });
+          }
+          continue;
+        }
+        const note = `[앱 작업자 오류 점검 ${attempts + 1}/3 — 기존 지시 계속]\n${failed.map(c => `협의 ${c.id} · ${this.name(chatId, c.toRole)}: ${clipText(c.responseSummary ?? "응답 종료 실패", 1200)}\n원래 요청: ${clipText(c.request, 1200)}`).join("\n\n")}\n원인을 확인하고 가능한 오류를 해결하세요. 기존 변경과 결과를 먼저 확인하고, ask의 supersedes에 실패 협의 id를 넣어 같은 작업자를 재시도하거나 가용한 다른 작업자에게 재배정하세요. 로그인·한도·사용자 승인이 필요하면 ask_user로 알리고 기다리세요. 성공하지 않은 일을 완료로 보고하지 마세요. 승인 정책과 기존 작업 범위·배정 한도는 그대로 적용됩니다.`;
+        const master = await this.chats.driver(chatId, "orch");
+        if (this.instructions.get(chatId) !== inst || this.stopped.has(chatId) || ["paused", "pausing", "approval"].includes(this.chats.store.chat(chatId)?.status ?? "")) continue;
+        let accepted = false;
+        if (master.running) {
+          try { accepted = !!(await master.steer?.({ text: note, attachments: [] })); } catch { /* retry after the native turn settles */ }
+          inst.recoveryNote = accepted ? undefined : note;
+          if (!accepted && this.masterConsultWaiters.get(chatId)?.size) {
+            this.wakeMasterConsults(chatId);
+            accepted = true;
+          }
+        } else {
+          this.chats.updateChat(chatId, { status: "working", touch: true });
+          await master.send({ text: note + this.takeQueued(chatId), attachments: [], noWrites: false });
+          accepted = true;
+        }
+        inst.recoveryAfter = now + 60_000;
+        if (accepted) {
+          inst.recoveryAttempts = attempts + 1;
+          this.chats.emit(chatId, "orch", "orch", { type: "notice", text: `마스터에게 오류 작업 ${failed.length}건의 점검·복구를 요청했습니다 (${attempts + 1}/3).` });
+        }
+      } catch (error) {
+        inst.recoveryAfter = now + 60_000;
+        this.chats.emit(chatId, "orch", "orch", { type: "notice", text: `마스터 오류 점검 전달 실패: ${String(error)}. 다음 점검에서 다시 확인합니다.` });
+      } finally { this.recoveryFlights.delete(chatId); }
+    }
   }
 
   private agents(chatId: number) {
@@ -807,6 +903,7 @@ export class Orchestrator {
       const result = await new Promise<{ ok: boolean; interrupted?: boolean; error?: string; text: string; files: string[]; webAccountId?: GeminiWebAccountId }>((resolve) => {
         let settled = false;
         const r: Running = {
+          lastEventAt: Date.now(),
           consultId: consult.id,
           caller,
           target: target.key,
@@ -819,8 +916,9 @@ export class Orchestrator {
           discussion,
           discussionReplies: discussion ? new Set() : undefined,
           resolve: (end) => {
-            if (settled) return;
+            if (settled || r.recovering) return;
             settled = true;
+            if (r.recoveryError && !this.stopped.has(chatId)) end = { ok: false, error: r.recoveryError };
             const missing = discussion?.peers.filter(p => !r.discussionReplies!.has(p.key));
             const issue = end.ok && missing?.length ? `토의 미완료: ${missing.map(p => p.nickname).join(", ")}의 실제 참여 응답이 없습니다. 보완하거나 미완료 사유를 보고하세요.`
               : end.ok && message.includes("[이미지 결과 필수]") && ![...r.files].some(path => /\.(png|jpe?g|webp)$/i.test(path) && existsSync(resolvePath(project.folder, path))) ? "이미지 생성 미완료: 실제 이미지 파일이나 첨부 결과를 확인하지 못했습니다." : "";
@@ -952,7 +1050,12 @@ export class Orchestrator {
     }
     const r = this.running.get(chatId)?.get(role);
     if (!r) return;
+    r.lastEventAt = Date.now();
+    if (["text", "text_delta", "tool_call", "tool_result", "file_change"].includes(event.type)) r.lastError = undefined;
     switch (event.type) {
+      case "error":
+        r.lastError = event.message;
+        break;
       case "notice":
         if (event.webAccountId) r.webAccountId = event.webAccountId;
         break;
@@ -1211,10 +1314,12 @@ export class Orchestrator {
   private takeQueued(chatId: number): string {
     const inst = this.instructions.get(chatId);
     if (!inst) return "";
+    const recovery = inst.recoveryNote;
+    inst.recoveryNote = undefined;
     const fresh = inst.queued.splice(0);
     inst.pinned.push(...fresh.map((x) => x.text + attachmentNote(x.attachments)));
-    if (!inst.pinned.length) return "";
-    return "\n\n[사용자 추가 지시 — 작업 중에 도착함, 최종 보고까지 반드시 반영]\n" + inst.pinned.map((t) => `- ${t}`).join("\n");
+    if (!inst.pinned.length) return recovery ? `\n\n${recovery}` : "";
+    return "\n\n[사용자 추가 지시 — 작업 중에 도착함, 최종 보고까지 반드시 반영]\n" + inst.pinned.map((t) => `- ${t}`).join("\n") + (recovery ? `\n\n${recovery}` : "");
   }
 
   // ---------- slash commands

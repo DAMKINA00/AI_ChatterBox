@@ -1,0 +1,11 @@
+{
+  "repository": "DAMKINA00/AI_UsageMonitor",
+  "revision": "e5e1f006405462cf9be4d1d52b2871e04a9f88be",
+  "project": "AIUsageMonitor.csproj",
+  "publish": {
+    "runtime": "win-x64",
+    "selfContained": true,
+    "singleFile": false,
+    "output": ".scratch/usage-monitor-publish"
+  }
+}

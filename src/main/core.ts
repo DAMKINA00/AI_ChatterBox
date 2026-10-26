@@ -17,12 +17,20 @@ let store: Store;
 let chats: ChatManager;
 let attachments: AttachmentStore;
 let orchestrator: Orchestrator;
+let preparingUpdate = false;
+let pendingCalls = 0;
 
 function registerHandlers(rpc: CoreRpc) {
   const channels: string[] = [];
   const ipcMain = { handle(channel: string, handler: (...args: any[]) => unknown) {
     channels.push(channel);
-    rpc.handle(channel, (...args) => handler(undefined, ...args));
+    rpc.handle(channel, async (...args) => {
+      if (preparingUpdate && channel !== "window:save") throw new Error("업데이트 적용을 준비하고 있습니다. 새 작업은 재시작 후 보내 주세요.");
+      const backgroundRead = ["usage:get", "cli:info", "models:list", "aistudio:usage"].includes(channel);
+      if (!backgroundRead) pendingCalls++;
+      try { return await handler(undefined, ...args); }
+      finally { if (!backgroundRead) pendingCalls--; }
+    });
   } };
   // projects
   ipcMain.handle("projects:list", () => store.listProjects());
@@ -189,17 +197,36 @@ export async function runCore(dataDir: string, pipe: string, token: string, test
     orchestrator = new Orchestrator(chats);
     const channels = registerHandlers(rpc);
     await chats.start();
+    orchestrator.startRecovery();
     return { channels, elevated, pid: process.pid, version: app.getVersion(), window: store.getSetting("window"), theme: store.getSetting("theme") ?? "dark", chats: store.listChats() };
   })();
   void boot.catch(() => undefined);
   const dispose = () => disposing ??= (async () => {
     stopping = true;
+    orchestrator?.stopRecovery();
     await boot.catch(() => undefined);
     await orchestrator?.judge.dispose().catch(() => undefined);
     await chats?.dispose().catch(() => undefined);
     try { store?.close(); } catch { /* already closed */ }
   })();
   rpc.handle("core:boot", () => boot);
+  rpc.handle("core:prepare-update", async () => {
+    if (preparingUpdate || chats.isBusyForUpdate()) return false;
+    preparingUpdate = true;
+    orchestrator.stopRecovery();
+    const deadline = Date.now() + 5_000;
+    while ((pendingCalls || orchestrator.recovering) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
+    if (pendingCalls || orchestrator.recovering || chats.isBusyForUpdate()) {
+      preparingUpdate = false;
+      orchestrator.startRecovery();
+      return false;
+    }
+    return true;
+  });
+  rpc.handle("core:cancel-update", () => {
+    preparingUpdate = false;
+    orchestrator.startRecovery();
+  });
   rpc.handle("core:shutdown", async () => {
     await dispose();
     setTimeout(() => app.exit(0), 50);

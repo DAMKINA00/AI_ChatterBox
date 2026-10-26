@@ -1,4 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain, protocol, shell, nativeTheme, screen } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, protocol, shell, nativeTheme, screen, Notification } from "electron";
+import { execFile } from "node:child_process";
+import updaterPackage from "electron-updater";
 import { mkdirSync, readFileSync, existsSync, statSync, copyFileSync, writeFileSync, cpSync } from "node:fs";
 import { join, basename, resolve } from "node:path";
 import type { AttachmentRef, Chat, Theme } from "../shared/types";
@@ -8,6 +10,9 @@ import { mayOpenDocument, resolveLink } from "./file-links";
 import { launchCore } from "./core-launch";
 import { runCore } from "./core";
 import type { CoreRpc } from "./core-rpc";
+import { AppUpdates } from "./app-updates";
+import { UsageCompanion } from "./usage-companion";
+import { suiteMenu } from "./suite-menu";
 
 const argument = (name: string) => process.argv.find(value => value.startsWith(`--${name}=`))?.slice(name.length + 3);
 const coreMode = process.argv.includes("--agent-core");
@@ -29,6 +34,74 @@ let tray: AppTray | undefined;
 let core: CoreRpc | undefined;
 let chatCache: Chat[] = [];
 let windowSetting: string | undefined;
+let usage: UsageCompanion | undefined;
+let updates: AppUpdates | undefined;
+let applyingUpdate = false;
+let startupSetting: boolean | undefined;
+
+const reportDesktopError = (error: unknown) => dialog.showErrorBox("AI ChatterBox", error instanceof Error ? error.message : String(error));
+
+function syncStartup(enabled: boolean) {
+  if (startupSetting === enabled || !app.isPackaged || testData) return;
+  app.setLoginItemSettings({ openAtLogin: enabled, args: ["--minimized"] });
+  startupSetting = enabled;
+  // Only retire the old monitor's own Run entry; account/profile settings remain untouched.
+  execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+    "$k='HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'; $v=(Get-ItemProperty -LiteralPath $k -Name AIUsageMonitor -ErrorAction SilentlyContinue).AIUsageMonitor; if($v -match '(?i)(?:^|[\\\\\" ])AIUsageMonitor\\.exe(?:\"| |$)'){Remove-ItemProperty -LiteralPath $k -Name AIUsageMonitor -ErrorAction Stop}"],
+    { windowsHide: true }, error => { if (error) reportDesktopError(new Error("기존 사용량 모니터의 시작 프로그램 항목을 정리하지 못했습니다. Windows 시작 프로그램 설정에서 AIUsageMonitor를 꺼 주세요.")); });
+}
+
+async function cancelUpdate() {
+  applyingUpdate = false;
+  await core?.call("core:cancel-update").catch(() => undefined);
+  await usage?.start().catch(reportDesktopError);
+}
+
+async function installUpdate() {
+  if (applyingUpdate || updates?.state.status !== "ready") return;
+  applyingUpdate = true;
+  try {
+    if (!await core?.call("core:prepare-update")) throw new Error("진행 중인 작업이나 승인 요청이 있습니다. 작업이 끝난 뒤 업데이트를 적용해 주세요.");
+    await usage?.stop();
+    await persistBounds();
+    if (!updates.install()) await cancelUpdate();
+  } catch (error) {
+    await cancelUpdate();
+    reportDesktopError(error);
+  }
+}
+
+function startDesktopServices() {
+  const { autoUpdater } = updaterPackage;
+  const allowed = app.isPackaged && !testData && process.platform === "win32";
+  usage = new UsageCompanion({
+    exe: join(process.resourcesPath, "usage-monitor", "AIUsageMonitor.exe"), settingsFile: join(dataDir, "desktop.json"), allowed,
+    changed: snapshot => { tray?.refresh(); if (snapshot.running && snapshot.state) syncStartup(snapshot.state.startup); },
+    notification: notice => { if (Notification.isSupported()) new Notification({ title: notice.title, body: notice.message }).show(); },
+  });
+  updates = new AppUpdates(autoUpdater, {
+    version: app.getVersion(), enabled: allowed && !process.env.PORTABLE_EXECUTABLE_DIR,
+    changed: state => { tray?.refresh(); if (state.status === "error" && applyingUpdate && !quitting) void cancelUpdate(); },
+    downloaded: state => {
+      if (Notification.isSupported()) {
+        const notice = new Notification({ title: `AI ChatterBox ${state.version} 업데이트 준비 완료`, body: "작업이 끝나면 트레이의 ‘업데이트하고 재시작’을 눌러 적용하세요." });
+        notice.on("click", () => tray?.show()); notice.show();
+      }
+    },
+  });
+  tray = new AppTray({
+    window: () => win && !win.isDestroyed() ? win : null, createWindow, chats: () => chatCache, quit: () => app.quit(),
+    keepAlive: () => !!usage?.snapshot().enabled || !!usage?.snapshot().running,
+    extraMenu: () => suiteMenu(usage!.snapshot(), updates!.state, {
+      enable: enabled => { void usage!.setEnabled(enabled).then(() => enabled ? usage!.command("show") : undefined).catch(reportDesktopError); },
+      command: (name, value) => { void usage!.command(name, value).catch(reportDesktopError); },
+      check: () => { void updates!.check(); }, install: () => { void installUpdate(); },
+    }),
+  });
+  tray.start();
+  updates.start();
+  void usage.start().then(() => usage!.snapshot().running ? usage!.command("show") : undefined).catch(() => undefined);
+}
 
 interface Bounds { x?: number; y?: number; width: number; height: number; maximized?: boolean }
 function savedBounds(): Bounds {
@@ -163,7 +236,10 @@ app.whenReady().then(async () => {
       core = rpc;
       const boot = await rpc.call("core:boot", [], 120_000);
       if (boot.version !== app.getVersion()) throw new Error("화면과 코어 버전이 다릅니다.");
-      if (testData) Object.assign(globalThis, { __chatterboxCoreTest: { pid: boot.pid, elevated: boot.elevated } });
+      if (testData) Object.assign(globalThis, { __chatterboxCoreTest: {
+        pid: boot.pid, elevated: boot.elevated,
+        prepareUpdate: () => rpc.call("core:prepare-update"), cancelUpdate: () => rpc.call("core:cancel-update"),
+      } });
       windowSetting = boot.window;
       nativeTheme.themeSource = boot.theme as Theme;
       chatCache = boot.chats;
@@ -189,9 +265,8 @@ app.whenReady().then(async () => {
         if (!attachment || !existsSync(attachment.path)) return new Response("not found", { status: 404 });
         return new Response(readFileSync(attachment.path), { headers: { "content-type": attachment.mime } });
       });
-      tray = new AppTray({ window: () => win && !win.isDestroyed() ? win : null, createWindow, chats: () => chatCache, quit: () => app.quit() });
-      tray.start();
-      createWindow();
+      startDesktopServices();
+      if (testData || !process.argv.includes("--minimized")) createWindow();
       break;
     } catch (error) {
       core?.close(); core = undefined;
@@ -207,13 +282,16 @@ app.whenReady().then(async () => {
 app.on("before-quit", event => {
   if (coreMode || quitting) return;
   quitting = true;
-  tray?.destroy();
   event.preventDefault();
   void (async () => {
+    try { await usage?.stop(); }
+    catch (error) { quitting = false; reportDesktopError(error); return; }
+    updates?.stop();
+    tray?.destroy();
     await persistBounds();
     await core?.call("core:shutdown", [], 30_000).catch(() => undefined);
     core?.close();
     app.quit();
   })();
 });
-app.on("window-all-closed", () => { if (!coreMode) app.quit(); });
+app.on("window-all-closed", () => { if (!coreMode && !usage?.snapshot().enabled && !usage?.snapshot().running) app.quit(); });

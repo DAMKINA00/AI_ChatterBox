@@ -1,7 +1,7 @@
 // System tray: closing the window while work is running keeps the app (and the CLIs) alive here.
 // Real quit is from the tray menu or 파일 > 종료, with a confirmation when work would be cut off.
 // Tray notifications tell the user when a chat finishes or needs them.
-import { app, BrowserWindow, dialog, Menu, nativeImage, Notification, Tray } from "electron";
+import { app, BrowserWindow, dialog, Menu, nativeImage, Notification, Tray, type MenuItemConstructorOptions } from "electron";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { Chat } from "../shared/types";
@@ -12,6 +12,8 @@ export interface TrayHost {
   createWindow(): void;
   chats(): Chat[];
   quit(): void;
+  keepAlive?(): boolean;
+  extraMenu?(): MenuItemConstructorOptions[];
 }
 
 const busy = (c: Chat) => c.status === "working" || c.status === "approval";
@@ -80,7 +82,7 @@ export class AppTray {
     n.show();
   }
 
-  private refresh() {
+  refresh() {
     if (!this.tray) return;
     const n = this.busyCount();
     this.tray.setToolTip(n ? `AI_ChatterBox · 작업 중 ${n}개` : "AI_ChatterBox");
@@ -89,6 +91,8 @@ export class AppTray {
         { label: n ? `작업 중 ${n}개` : "진행 중인 작업 없음", enabled: false },
         { type: "separator" },
         { label: "열기", click: () => this.show() },
+        ...(this.host.extraMenu?.() ?? []),
+        { type: "separator" },
         { label: "종료", click: () => void this.confirmQuit() },
       ]),
     );
@@ -107,11 +111,11 @@ export class AppTray {
 
   /** Window close while working: hide to the tray instead of quitting. Returns true if handled. */
   hideIfBusy(): boolean {
-    if (this.busyCount() === 0) return false;
+    if (this.busyCount() === 0 && !this.host.keepAlive?.()) return false;
     this.host.window()?.hide();
     if (!this.hiddenNoticeShown && Notification.isSupported()) {
       this.hiddenNoticeShown = true;
-      new Notification({ title: "AI_ChatterBox", body: "작업이 끝날 때까지 트레이에서 계속 실행됩니다.", icon: this.icon() }).show();
+      new Notification({ title: "AI_ChatterBox", body: "작업과 사용량 모니터는 트레이에서 계속 실행됩니다. 종료하려면 트레이 메뉴를 이용하세요.", icon: this.icon() }).show();
     }
     return true;
   }

@@ -1,7 +1,7 @@
 {
   "name": "ai-chatterbox",
   "productName": "AI_ChatterBox",
-  "version": "0.4.33",
+  "version": "0.4.35",
   "private": true,
   "description": "Desktop agent team for Claude Code, Codex, Antigravity, Grok, DeepSeek API and Gemini web",
   "main": "out/main/index.js",
@@ -15,7 +15,8 @@
     "test:ui": "electron-vite build && node scripts/e2e-settings-workers.mjs",
     "codex:schema": "node scripts/gen-codex-schema.mjs",
     "e2e:v1": "electron-vite build && node scripts/e2e-v1.mjs",
-    "dist": "electron-vite build && electron-builder --win portable --x64"
+    "dist": "node scripts/build-usage-monitor.mjs && electron-vite build && electron-builder --win nsis --x64 --publish never",
+    "build:usage": "node scripts/build-usage-monitor.mjs"
   },
   "build": {
     "appId": "net.damkina.aichatterbox",
@@ -36,6 +37,14 @@
       {
         "from": "scripts/install-aistudio.ps1",
         "to": "scripts/install-aistudio.ps1"
+      },
+      {
+        "from": ".scratch/usage-monitor-publish",
+        "to": "usage-monitor",
+        "filter": [
+          "**/*",
+          "!**/*.pdb"
+        ]
       }
     ],
     "asarUnpack": [
@@ -47,17 +56,31 @@
       "icon": "build/icon.png",
       "target": [
         {
-          "target": "portable",
+          "target": "nsis",
           "arch": [
             "x64"
           ]
         }
       ]
     },
-    "portable": {
-      "requestExecutionLevel": "user",
-      "artifactName": "AI_ChatterBox-${version}-portable.exe"
-    }
+    "nsis": {
+      "artifactName": "AI_ChatterBox-${version}-setup.exe",
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": false,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AI_ChatterBox",
+      "deleteAppDataOnUninstall": false
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "DAMKINA00",
+        "repo": "AI_ChatterBox",
+        "releaseType": "release"
+      }
+    ]
   },
   "devDependencies": {
     "@radix-ui/react-context-menu": "^2.4.1",
@@ -89,5 +112,8 @@
     "typescript": "^7.0.2",
     "vite": "^7.3.7",
     "zustand": "^5.0.15"
+  },
+  "dependencies": {
+    "electron-updater": "6.8.11"
   }
 }

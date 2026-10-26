@@ -491,6 +491,10 @@ export class ChatManager {
     return Object.values(this.live.get(chatId) ?? {}).some((l) => l?.driver.running);
   }
 
+  isBusyForUpdate(): boolean {
+    return this.store.listChats().some(chat => ["working", "approval", "pausing"].includes(chat.status) || this.isBusy(chat.id));
+  }
+
   // ---------- roles and drivers
   /** Agent + model a role uses right now (orchestrator follows the project; workers may be overridden per chat). */
   roleConfig(chat: Chat, project: Project, role: Role): RoleConfig {

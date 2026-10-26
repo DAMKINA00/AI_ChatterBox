@@ -1,0 +1,64 @@
+name: Windows suite release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - name: Read pinned monitor revision and validate tag
+        id: monitor
+        shell: pwsh
+        run: |
+          $package = Get-Content package.json -Raw | ConvertFrom-Json
+          if ($env:GITHUB_REF_NAME -ne "v$($package.version)") { throw 'Tag must match package.json version' }
+          $monitor = Get-Content build/usage-monitor.json -Raw | ConvertFrom-Json
+          "revision=$($monitor.revision)" >> $env:GITHUB_OUTPUT
+      - uses: actions/checkout@v6
+        with:
+          repository: DAMKINA00/AI_UsageMonitor
+          ref: ${{ steps.monitor.outputs.revision }}
+          path: .scratch/usage-source
+          persist-credentials: false
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: dotnet run --project .scratch/usage-source/tests/AIUsageMonitor.Regression -c Release -- hosted-protocol
+      - name: Build installed suite
+        shell: pwsh
+        run: |
+          $env:AI_USAGE_SOURCE = Join-Path $env:GITHUB_WORKSPACE '.scratch/usage-source'
+          npm run dist
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Publish complete update assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $release = gh release view $tag --json isDraft 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            if (-not ($release | ConvertFrom-Json).isDraft) { throw 'Release already published; use a new version' }
+          } else {
+            gh release create $tag --verify-tag --draft --title "AI ChatterBox $tag" --generate-notes
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $assets = Get-ChildItem dist/AI_ChatterBox-*-setup.exe,dist/AI_ChatterBox-*-setup.exe.blockmap,dist/latest.yml
+          if ($assets.Count -ne 3) { throw 'Expected setup, blockmap and latest.yml' }
+          gh release upload $tag $assets.FullName --clobber
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          gh release edit $tag --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

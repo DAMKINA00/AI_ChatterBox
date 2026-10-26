@@ -37,6 +37,17 @@ try {
     return { chat, attachment };
   }, { base, defaults: DEFAULTS });
   check("attachments cross the privilege boundary intact", readFileSync(created.attachment.path, "utf8") === "binary IPC ✓");
+  await started.page.evaluate(id => window.chatterbox.updateChat(id, { status: "working" }), created.chat.id);
+  check("active work refuses update preparation", !await app.evaluate(() => globalThis.__chatterboxCoreTest.prepareUpdate()));
+  await started.page.evaluate(id => window.chatterbox.updateChat(id, { status: "idle" }), created.chat.id);
+  check("idle core admits update preparation", await app.evaluate(() => globalThis.__chatterboxCoreTest.prepareUpdate()));
+  const blocked = await started.page.evaluate(async () => {
+    try { await window.chatterbox.listChats(); return false; }
+    catch (error) { return String(error).includes("업데이트 적용"); }
+  });
+  check("update admission blocks new core work", blocked);
+  await app.evaluate(() => globalThis.__chatterboxCoreTest.cancelUpdate());
+  check("canceling update restores the core", (await started.page.evaluate(() => window.chatterbox.listChats())).length > 0);
   await app.close(); app = undefined;
   check("normal UI quit shuts down the core", await exited(info.core.pid));
   // The elevated run needs only one consent prompt. Repeat lifecycle/crash checks without elevation.
