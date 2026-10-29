@@ -25,5 +25,11 @@ export default defineConfig({
   },
   renderer: {
     plugins: [react(), tailwindcss()],
+    build: {
+      rollupOptions: {
+        // remote.html is served to browsers by the remote web server (src/main/remote-web.ts).
+        input: { index: resolve("src/renderer/index.html"), remote: resolve("src/renderer/remote.html") },
+      },
+    },
   },
 });

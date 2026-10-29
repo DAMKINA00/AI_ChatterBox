@@ -13,6 +13,8 @@ import type { CoreRpc } from "./core-rpc";
 import { AppUpdates } from "./app-updates";
 import { UsageCompanion } from "./usage-companion";
 import { suiteMenu } from "./suite-menu";
+import { RemoteWeb } from "./remote-web";
+import type { RemoteWebAction, RemoteWebInput } from "../shared/remote-web";
 
 const argument = (name: string) => process.argv.find(value => value.startsWith(`--${name}=`))?.slice(name.length + 3);
 const coreMode = process.argv.includes("--agent-core");
@@ -38,6 +40,7 @@ let usage: UsageCompanion | undefined;
 let updates: AppUpdates | undefined;
 let applyingUpdate = false;
 let startupSetting: boolean | undefined;
+let remote: RemoteWeb | undefined;
 
 const reportDesktopError = (error: unknown) => dialog.showErrorBox("AI ChatterBox", error instanceof Error ? error.message : String(error));
 
@@ -182,6 +185,10 @@ function registerUi(channels: string[], rpc: CoreRpc) {
     }
     return rpc.call("aistudio", [action, input]);
   });
+  // Remote web settings stay in the UI process (the server lives here); the core never sees the password hash.
+  remote = new RemoteWeb({ file: join(dataDir, "remote-web.json"), staticDir: join(import.meta.dirname, "../renderer"), call: (channel, args) => rpc.call(channel, args) });
+  void remote.apply();
+  ipcMain.handle("remote-web", (_event, action: RemoteWebAction, input?: RemoteWebInput) => remote!.action(action, input));
   ipcMain.handle("shell:openPath", async (_event, path: string) => {
     if (typeof path !== "string" || !existsSync(path)) throw new Error("파일이나 폴더를 찾을 수 없습니다.");
     if (!mayOpenDocument(path)) throw new Error("실행 파일은 탐색기에서 확인해 주세요.");
@@ -247,6 +254,7 @@ app.whenReady().then(async () => {
           tray?.chatChanged(chat);
         }
         win?.webContents.send(channel, ...args);
+        remote?.publish(channel, args);
       };
       rpc.onClose = () => {
         if (quitting) return;
@@ -282,6 +290,7 @@ app.on("before-quit", event => {
     try { await usage?.stop(); }
     catch (error) { quitting = false; reportDesktopError(error); return; }
     updates?.stop();
+    await remote?.stop();
     tray?.destroy();
     await persistBounds();
     await core?.call("core:shutdown", [], 30_000).catch(() => undefined);

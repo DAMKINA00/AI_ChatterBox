@@ -1600,11 +1600,12 @@ export class Orchestrator {
 
   answerAsk(chatId: number, askId: string, answer: string) {
     const a = this.asks.get(askId);
-    if (!a || a.chatId !== chatId) return;
+    if (!a || a.chatId !== chatId) return false;
     this.asks.delete(askId);
     this.chats.emit(chatId, "orch", null, { type: "ask_user_answer", id: askId, answer });
     this.chats.updateChat(chatId, { status: "working" });
     a.resolve(`사용자 답변: ${answer}`);
+    return true;
   }
 
   // ---------- stop

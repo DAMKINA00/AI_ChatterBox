@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ChevronRight, Globe2, KeyRound, RotateCw, Settings, Sparkles, Terminal } from "lucide-react";
+import { ChevronRight, Globe2, KeyRound, RotateCw, Settings, Smartphone, Sparkles, Terminal } from "lucide-react";
 import { pickUsage, type UsageDisplay } from "../../../shared/usage";
 import { api, cn, errorMessage } from "../lib/utils";
 import { useStore } from "../store";
@@ -12,6 +12,7 @@ import { AIStudioDialog } from "./AIStudioDialog";
 import { AIStudioUsage } from "./AIStudioUsage";
 import { DeepSeekDialog } from "./DeepSeekDialog";
 import { DeepSeekBalance } from "./DeepSeekBalance";
+import { RemoteWebDialog } from "./RemoteWebDialog";
 
 function resetText(ts?: number | null) {
   if (!ts) return "";
@@ -74,6 +75,7 @@ export function UsageBar() {
   const [webOpen, setWebOpen] = useState(false);
   const [aiStudioOpen, setAiStudioOpen] = useState(false);
   const [deepseekOpen, setDeepseekOpen] = useState(false);
+  const [remoteOpen, setRemoteOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const usage = useStore((s) => s.usage);
   const cliAccounts = useStore((s) => s.cliAccounts);
@@ -125,6 +127,11 @@ export function UsageBar() {
                 <span className="min-w-0 flex-1"><span className="block text-[12px] font-medium">DeepSeek API 설정</span><span className="mt-0.5 block text-[11px] text-muted-foreground">API 키 · 모델 · 잔고</span></span>
                 <ChevronRight className="!size-3.5 opacity-40 group-data-[highlighted]:opacity-100" />
               </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setRemoteOpen(true)} data-testid="remote-web-manage" className="group gap-3 rounded-lg px-3 py-2.5">
+                <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10"><Smartphone className="!text-primary" /></span>
+                <span className="min-w-0 flex-1"><span className="block text-[12px] font-medium">원격 웹 접속</span><span className="mt-0.5 block text-[11px] text-muted-foreground">브라우저에서 채팅 확인 · 추가 지시 · 승인</span></span>
+                <ChevronRight className="!size-3.5 opacity-40 group-data-[highlighted]:opacity-100" />
+              </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuLabel className="px-3">사용 기록</DropdownMenuLabel>
               <AIStudioUsage compact onOpen={() => setAiStudioOpen(true)} />
@@ -140,6 +147,7 @@ export function UsageBar() {
       <GeminiWebDialog open={webOpen} onOpenChange={setWebOpen} />
       <AIStudioDialog open={aiStudioOpen} onOpenChange={setAiStudioOpen} />
       <DeepSeekDialog open={deepseekOpen} onOpenChange={setDeepseekOpen} />
+      <RemoteWebDialog open={remoteOpen} onOpenChange={setRemoteOpen} />
     </div>
   );
 }

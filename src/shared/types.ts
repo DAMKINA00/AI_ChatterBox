@@ -3,6 +3,7 @@ import { AISTUDIO_MODEL, isAIStudioModel } from "./aistudio";
 import type { ProviderUsage } from "./usage";
 import type { AIStudioAction, AIStudioInput, AIStudioStatus, AIStudioUsageRange, AIStudioUsageReport } from "./aistudio";
 import type { DeepSeekAction, DeepSeekBalance, DeepSeekInput, DeepSeekStatus } from "./deepseek";
+import type { RemoteWebAction, RemoteWebInput, RemoteWebStatus } from "./remote-web";
 
 export type AgentKind = "claude" | "codex" | "gemini" | "grok" | "deepseek";
 export const GEMINI_WEB_MODEL = "gemini-web-argon";
@@ -544,7 +545,8 @@ export interface ChatterBoxApi {
   command(chatId: number, name: string, arg: string): Promise<void>;
   dismissInterrupted(chatId: number): Promise<void>;
   answerApproval(chatId: number, approvalId: string, decision: ApprovalDecision): Promise<ApprovalDecision | null>;
-  answerAskUser(chatId: number, askId: string, answer: string): Promise<void>;
+  /** false when the question was already answered or is gone. */
+  answerAskUser(chatId: number, askId: string, answer: string): Promise<boolean>;
   // attachments
   attachFromPaths(chatId: number, paths: string[]): Promise<AttachmentRef[]>;
   attachFromBytes(chatId: number, name: string, mime: string, bytes: Uint8Array): Promise<AttachmentRef>;
@@ -556,6 +558,7 @@ export interface ChatterBoxApi {
   models(agent: AgentKind): Promise<ModelOption[]>;
   geminiWeb(action: "status" | "open" | "login" | "refresh", accountId?: GeminiWebAccountId): Promise<GeminiWebStatus>;
   geminiWebAccounts(action: "list" | "add" | "update" | "logout" | "remove", input?: { accountId?: GeminiWebAccountId; label?: string; enabled?: boolean }): Promise<GeminiWebAccountStatus[]>;
+  remoteWeb(action: RemoteWebAction, input?: RemoteWebInput): Promise<RemoteWebStatus>;
   getTheme(): Promise<Theme>;
   setTheme(theme: Theme): Promise<void>;
   usage(wait?: boolean): Promise<UsageInfo>;

@@ -58,6 +58,7 @@ const api: ChatterBoxApi = {
   aiStudio: (action, input) => ipcRenderer.invoke("aistudio", action, input),
   deepSeek: (action, input) => ipcRenderer.invoke("deepseek", action, input),
   aiStudioUsage: (range) => ipcRenderer.invoke("aistudio:usage", range),
+  remoteWeb: (action, input) => ipcRenderer.invoke("remote-web", action, input),
   getTheme: () => ipcRenderer.invoke("theme:get"),
   setTheme: (theme) => ipcRenderer.invoke("theme:set", theme),
   usage: (wait?: boolean) => ipcRenderer.invoke("usage:get", wait),

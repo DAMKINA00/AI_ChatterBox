@@ -15,7 +15,7 @@ import type {
   UsageInfo,
 } from "../../shared/types";
 import { api, errorMessage } from "./lib/utils";
-import { chatTimelines } from "./timeline";
+import { appendEvent, chatTimelines } from "./timeline";
 
 export interface Selection {
   chatId: number;
@@ -73,30 +73,6 @@ function loadExpanded(): Record<string, boolean> {
   } catch {
     return {};
   }
-}
-
-/** Appends a live event, coalescing streaming deltas so the list stays small. */
-function appendEvent(list: TimelineEvent[], e: TimelineEvent): TimelineEvent[] {
-  const last = list[list.length - 1];
-  const sameStream = (x: TimelineEvent | undefined) => x && x.event.type === "text_delta" && x.node === e.node && x.role === e.role;
-  if (e.event.type === "text_delta" && sameStream(last)) {
-    const merged = { ...last!, event: { type: "text_delta" as const, text: (last!.event as { text: string }).text + e.event.text } };
-    return [...list.slice(0, -1), merged];
-  }
-  if (e.event.type === "text") {
-    // The final text replaces the streamed preview of the same conversation.
-    const i = list.findLastIndex((x) => sameStream(x));
-    if (i >= 0) return [...list.slice(0, i), ...list.slice(i + 1), e];
-  }
-  if (e.event.type === "turn_end") {
-    // Drop a dangling preview (interrupted stream).
-    const i = list.findLastIndex((x) => sameStream(x));
-    if (i >= 0) {
-      const d = list[i];
-      return [...list.slice(0, i), { ...d, event: { type: "text", text: (d.event as { text: string }).text } }, ...list.slice(i + 1), e];
-    }
-  }
-  return [...list, e];
 }
 
 export const useStore = create<State>((set, get) => ({

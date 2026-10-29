@@ -1,0 +1,26 @@
+# AI ChatterBox 원격 웹 접속 — Caddy 사이트 블록 예시
+# 운영 중인 D:\Photo\ComfyUI\web_gateway\public\Caddyfile 맨 아래에 추가합니다 (절차: docs/remote-web.md).
+# 47821은 앱 설정의 "내부 포트" 기본값입니다. 앱에서 포트를 바꾸면 여기도 같이 바꾸세요.
+# CSP·X-Frame-Options 등 보안 헤더는 앱이 직접 보내므로 여기서 중복 지정하지 않습니다.
+
+ai.damkina.net {
+	encode zstd gzip
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000"
+	}
+
+	# (권장) 앞단 보호: 앱 로그인 앞에 브라우저 기본 인증을 한 겹 더 둡니다.
+	# 분산 로그인 시도·대기열 포화를 앱까지 오기 전에 막습니다. 해시 생성: D:\Photo\ComfyUI\tools\caddy.exe hash-password
+	# basic_auth {
+	# 	damkina <caddy hash-password 출력값>
+	# }
+
+	reverse_proxy 127.0.0.1:47821 {
+		# 앱은 이 헤더만 접속자 IP로 씁니다(X-Forwarded-For는 쓰지 않음). {client_ip}는 Caddy가 확인한 값이며,
+		# header_up은 브라우저가 같은 이름으로 보낸 값을 덮어씁니다. 이 줄이 없으면 앱 설정에서 "Caddy를 거쳐 접속함"을 끄세요.
+		header_up X-ChatterBox-Client-IP {client_ip}
+		# 실시간 갱신(SSE)을 버퍼링 없이 바로 전달합니다.
+		flush_interval -1
+	}
+}
