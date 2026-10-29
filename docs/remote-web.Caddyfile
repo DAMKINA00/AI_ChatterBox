@@ -1,26 +1,56 @@
-# AI ChatterBox 원격 웹 접속 — Caddy 사이트 블록 예시
-# 운영 중인 D:\Photo\ComfyUI\web_gateway\public\Caddyfile 맨 아래에 추가합니다 (절차: docs/remote-web.md).
-# 47821은 앱 설정의 "내부 포트" 기본값입니다. 앱에서 포트를 바꾸면 여기도 같이 바꾸세요.
+# AI ChatterBox 원격 웹 접속 — Caddy 설정 예시 (절차: docs/remote-web.md)
+#
+# 구성 A: 이 PC의 Caddy가 공인 80/443을 직접 받는 경우 → 아래 "이 PC" 블록만 쓰고 tls internal 줄과 전역 trusted_proxies는 빼세요.
+# 구성 B(현재 운영): 공유기가 공인 80/443을 NAS(192.168.0.250)의 Caddy로 넘기고, NAS가 이 PC의 Caddy(443)로 넘깁니다.
+#   → 이 PC: 전역 trusted_proxies + 아래 블록(tls internal 포함). NAS: 맨 아래 "NAS Caddy" 블록.
 # CSP·X-Frame-Options 등 보안 헤더는 앱이 직접 보내므로 여기서 중복 지정하지 않습니다.
+
+# ---------- 이 PC (D:\Photo\ComfyUI\web_gateway\public\Caddyfile) ----------
+
+# 전역 옵션(파일 맨 앞, 기존 전역 블록이 있으면 병합). NAS가 보낸 X-Forwarded-For만 {client_ip}로 신뢰합니다.
+{
+	servers {
+		trusted_proxies static 192.168.0.250/32
+	}
+}
 
 ai.damkina.net {
 	encode zstd gzip
+	# 구성 B: 공인 인증서는 NAS Caddy가 발급. 이 PC는 NAS→이 PC 구간만 내부 CA로 TLS 처리합니다.
+	tls internal
 	header {
 		-Server
 		Strict-Transport-Security "max-age=31536000"
 	}
 
-	# (권장) 앞단 보호: 앱 로그인 앞에 브라우저 기본 인증을 한 겹 더 둡니다.
-	# 분산 로그인 시도·대기열 포화를 앱까지 오기 전에 막습니다. 해시 생성: D:\Photo\ComfyUI\tools\caddy.exe hash-password
-	# basic_auth {
-	# 	damkina <caddy hash-password 출력값>
-	# }
+	# 앞단 인증(공개 필수 조건): 페이지·API·SSE 모든 경로에 적용됩니다. 사용자명 chatterbox.
+	# 비밀번호 원문은 %APPDATA%\AI_ChatterBox\remote-web-basicauth.txt에만 보관하고, 여기에는 bcrypt 해시만 넣습니다.
+	# 해시 생성: D:\Photo\ComfyUI\tools\caddy.exe hash-password  (표준 입력으로 비밀번호를 두 번 입력)
+	basic_auth {
+		chatterbox <caddy hash-password 출력값>
+	}
 
 	reverse_proxy 127.0.0.1:47821 {
-		# 앱은 이 헤더만 접속자 IP로 씁니다(X-Forwarded-For는 쓰지 않음). {client_ip}는 Caddy가 확인한 값이며,
-		# header_up은 브라우저가 같은 이름으로 보낸 값을 덮어씁니다. 이 줄이 없으면 앱 설정에서 "Caddy를 거쳐 접속함"을 끄세요.
+		# 앱은 이 헤더만 접속자 IP로 씁니다(X-Forwarded-For는 쓰지 않음). {client_ip}는 Caddy가 확인한 값이며
+		# (구성 B에서는 trusted_proxies 덕분에 NAS가 전달한 실제 접속자 IP), 브라우저가 보낸 같은 이름의 값을 덮어씁니다.
 		header_up X-ChatterBox-Client-IP {client_ip}
 		# 실시간 갱신(SSE)을 버퍼링 없이 바로 전달합니다.
 		flush_interval -1
 	}
 }
+
+# ---------- NAS Caddy (구성 B, 공인 80/443을 받는 쪽; NAS의 Caddy 설정에 추가) ----------
+# relight 등과 같은 방식으로 이 PC의 Caddy(192.168.0.144:443)로 넘깁니다. 공인 인증서는 NAS Caddy가 자동 발급합니다.
+# 이 PC의 내부 CA 루트(공개 인증서): D:\Photo\ComfyUI\web_gateway\public\caddy-state\data\caddy\pki\authorities\local\root.crt
+#   → NAS로 복사해 아래 경로에 둡니다. NAS에서 X-Forwarded-For를 덮어쓰도록 NAS에는 trusted_proxies를 두지 마세요.
+#
+# ai.damkina.net {
+# 	reverse_proxy https://192.168.0.144:443 {
+# 		transport http {
+# 			tls_server_name ai.damkina.net
+# 			tls_trust_pool file /path/on/nas/chatterbox-pc-root.crt
+# 			# Caddy 2.8 미만이면 위 줄 대신: tls_trusted_ca_certs /path/on/nas/chatterbox-pc-root.crt
+# 		}
+# 		flush_interval -1
+# 	}
+# }

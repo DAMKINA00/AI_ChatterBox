@@ -77,9 +77,31 @@ NAS 로그인 보안 규칙:
 ## 접속자 IP와 프록시 전제
 - 접속자 IP는 Caddy가 넣는 `X-ChatterBox-Client-IP` 헤더에서만 읽습니다. 사이트 블록의 `header_up X-ChatterBox-Client-IP {client_ip}`가 이 값을 넣으며, 이는 Caddy가 확인한 클라이언트 IP입니다. `header_up`은 브라우저가 같은 이름으로 보낸 값을 덮어씁니다. 위조한 `X-ChatterBox-Client-IP: 6.6.6.6`이 실제 IP로 바뀌는 것을 임시 Caddy 2.11.4 인스턴스로 확인했습니다.
 - 이 헤더는 원격 웹 접속 창의 "이 PC의 Caddy를 거쳐 접속함"(기본 켜짐)이 켜져 있고, 연결한 쪽(소켓 피어)이 127.0.0.1/::1이며, 값이 올바른 IP일 때만 씁니다. 그 밖에는 소켓 주소를 씁니다. `X-Forwarded-For`는 어떤 경우에도 쓰지 않습니다.
-- 전제: **Caddy가 인터넷 접속을 직접 받는 단독 구성**입니다. Caddy 앞에 다른 프록시나 CDN을 둔다면, `{client_ip}`가 실제 접속자가 되도록 Caddy 전역 옵션에 `trusted_proxies`를 설정해야 합니다.
+- 전제: `{client_ip}`가 실제 접속자여야 합니다. Caddy가 인터넷 접속을 직접 받으면 그대로 맞습니다. 앞에 다른 프록시가 있으면 그 프록시의 주소만 `trusted_proxies`로 신뢰해야 합니다. 현재 운영 구성(NAS Caddy가 앞단)은 아래 "NAS Caddy가 앞단인 구성"을 보세요.
 - 사이트 블록에 `header_up` 줄이 없으면 외부에서 보낸 헤더 값이 그대로 전달될 수 있습니다. 그런 구성이면 이 설정을 끄세요. 끄면 모든 원격 접속이 127.0.0.1 하나로 집계되어, IP별 잠금이 전체 잠금처럼 동작합니다.
 - 이 PC의 로컬 프로세스는 이 값을 위조할 수 있습니다(로컬 프로세스는 이미 신뢰 범위로 봅니다).
+
+## NAS Caddy가 앞단인 구성 (현재 운영)
+
+2026-10-29 확인 결과, 공유기는 공인 80/443을 이 PC가 아니라 **NAS(192.168.0.250)의 Caddy(내부 8080/8443)**로 넘깁니다.
+
+```
+브라우저 ─HTTPS─▶ 공유기 ─▶ NAS Caddy :8443 (공인 인증서, relight·filter·git 등)
+                              └─HTTPS(SNI=호스트명)─▶ 이 PC Caddy :443 ─▶ 127.0.0.1:47821 (앱)
+```
+
+- 근거: 공인 IP로 접속하면 NAS:8443과 같은 인증서·본문을 받고, 포트 80은 301로 응답합니다(이 PC Caddy는 308). NAS에서 이 PC 443으로 HTTPS 연결이 열려 있는 것도 확인했습니다.
+- 이 구성에서는 Let's Encrypt 확인 요청이 NAS로 가므로, **공인 인증서는 NAS Caddy가 발급**해야 합니다. 이 PC Caddy만 설정하면 발급이 계속 실패합니다(인증 확인 요청이 HTTPS로 넘겨지거나 `tls: internal error`).
+- **이 PC Caddy** (`docs/remote-web.Caddyfile` 상단 블록)
+  - `ai.damkina.net` 블록에 `tls internal`을 넣어 이 PC의 Let's Encrypt 재시도를 멈춥니다. NAS→이 PC 구간은 Caddy 내부 CA 인증서로 TLS 처리합니다(짧은 유효기간, Caddy가 자동 갱신).
+  - 전역 `servers { trusted_proxies static 192.168.0.250/32 }`: NAS에서 온 요청만 `X-Forwarded-For`를 믿어 `{client_ip}`를 실제 접속자로 만듭니다. 다른 출처(127.0.0.1, 다른 LAN 기기)가 보낸 `X-Forwarded-For`와 위조한 `X-ChatterBox-Client-IP`는 무시되거나 덮어쓰입니다(임시 Caddy로 확인).
+  - 기존 사이트 영향: relight 게이트웨이는 loopback에서 온 `CF-Connecting-IP`만 쓰고 `X-Forwarded-*`는 쓰지 않습니다(`gateway.py`의 `trusted_client_ip`). 접근 로그는 설정돼 있지 않습니다. 적용 전후 응답이 같음을 확인했습니다.
+  - `basic_auth`(사용자명 `chatterbox`)는 이 PC 블록에 둡니다. NAS에는 두지 않습니다(중복 인증 방지).
+- **NAS Caddy** (`docs/remote-web.Caddyfile` 하단 주석 블록)
+  - relight와 같은 방식으로 `reverse_proxy https://192.168.0.144:443`에 `tls_server_name ai.damkina.net`을 둡니다. 이 PC 내부 CA 루트(`D:\Photo\ComfyUI\web_gateway\public\caddy-state\data\caddy\pki\authorities\local\root.crt`, 공개 인증서, 2036년 만료)를 NAS로 복사해 `tls_trust_pool file`(Caddy 2.8 미만은 `tls_trusted_ca_certs`)로 신뢰합니다. 전체 TLS 검증을 끄는 `tls_insecure_skip_verify`는 쓰지 않습니다.
+  - `flush_interval -1`로 SSE를 바로 전달합니다.
+  - NAS에는 `trusted_proxies`를 두지 마세요. 그래야 NAS가 받은 `X-Forwarded-For`를 실제 접속자 IP로 덮어씁니다.
+  - 이 블록을 이 PC에서 NAS 역할로 띄운 임시 Caddy로 확인했습니다. 인증 없이 401, basic_auth로 `/` 200, `/api/auth-info` 200이었습니다.
 
 ## 보안 설계
 
@@ -97,7 +119,7 @@ NAS 로그인 보안 규칙:
 | XSS | Markdown은 react-markdown으로 렌더링하며 raw HTML은 렌더링하지 않음. 링크는 기본 URL 필터를 거치고 `noopener noreferrer`로 엶. 외부 이미지는 불러오지 않음. CSP는 `default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'` 등 |
 | 노출 정보 | 프로젝트는 id·이름만 보냄(폴더 경로·설정 제외). 첨부 파일 내용과 이미지 원본은 제공하지 않음 |
 
-> 원격 지시와 승인은 이 PC에서 관리자 권한 코어가 명령을 실행하게 할 수 있습니다. 긴 비밀번호를 쓰고, 필요하면 Caddy `basic_auth`로 인증을 한 겹 더 두세요(예시 파일 참고).
+> 원격 지시와 승인은 이 PC에서 관리자 권한 코어가 명령을 실행하게 할 수 있습니다. 긴 비밀번호를 쓰고, 공개할 때는 Caddy `basic_auth`(사용자명 `chatterbox`, 예시 파일 참고)를 반드시 앞단에 두세요.
 
 ## 적용 절차
 
@@ -137,28 +159,30 @@ NAS 쪽:
 ```powershell
 $dir = "D:\Photo\ComfyUI\web_gateway\public"
 $caddy = "D:\Photo\ComfyUI\tools\caddy.exe"
-Copy-Item "$dir\Caddyfile" "$dir\Caddyfile.backup-remote-$(Get-Date -Format yyyyMMdd-HHmm)"
-# docs\remote-web.Caddyfile의 ai.damkina.net 블록을 Caddyfile 맨 아래에 붙여 넣은 뒤:
+# 운영과 같은 저장소를 쓰도록 run_caddy.bat과 같은 환경 변수를 둡니다.
+$env:XDG_DATA_HOME = "$dir\caddy-state\data"; $env:XDG_CONFIG_HOME = "$dir\caddy-state\config"
+Copy-Item "$dir\Caddyfile" "$dir\Caddyfile.bak-$(Get-Date -Format yyyyMMdd-HHmm)-remoteweb"
+# docs\remote-web.Caddyfile의 "이 PC" 부분(전역 trusted_proxies 병합 + ai.damkina.net 블록)을 반영한 뒤:
 & $caddy validate --config "$dir\Caddyfile" --adapter caddyfile
 & $caddy reload   --config "$dir\Caddyfile" --adapter caddyfile
 ```
 
 - 블록의 `header_up X-ChatterBox-Client-IP {client_ip}` 줄은 지우지 마세요. IP별 잠금이 이 값에 의존합니다(위 "접속자 IP와 프록시 전제").
-- **권장 운영 조건:** 블록 안의 `basic_auth` 주석을 풀어 앞단 인증을 한 겹 더 두세요. 해시는 `& $caddy hash-password`로 만듭니다.
-- `reload`는 관리 API(localhost:2019)를 사용합니다. 현재 Caddyfile에는 `admin off`가 없으므로 그대로 동작합니다.
-- 인증서는 DNS가 반영된 뒤 첫 접속 때 Caddy가 자동으로 발급합니다(80/443이 외부에서 이 PC로 포워딩되어 있어야 합니다. 다른 서브도메인이 이미 이 경로를 쓰고 있습니다).
+- **basic_auth(공개 필수 조건)**: 사용자명은 `chatterbox`입니다. 24자 이상 무작위 비밀번호를 만들어 원문은 `%APPDATA%\AI_ChatterBox\remote-web-basicauth.txt`에만 보관합니다. 해시는 `& $caddy hash-password`에 표준 입력으로 두 번 넣어 만듭니다(명령줄 인자로 넘기지 않음). Caddyfile에는 bcrypt 해시만 넣습니다. 운영 Caddyfile에는 2026-10-29에 적용했습니다.
+- `reload`는 관리 API(localhost:2019)를 사용합니다. 현재 Caddyfile에는 `admin off`가 없으므로 그대로 동작합니다. 파일 내용이 그대로인데 인증서 재시도를 바로 시작하려면 `reload --force`를 씁니다.
+- 공인 인증서는 **NAS Caddy가** 발급합니다(위 "NAS Caddy가 앞단인 구성"). NAS에 블록을 추가하고 NAS Caddy를 다시 불러오면 DNS가 반영된 상태에서 자동으로 발급됩니다.
 
 ### 4. 확인
 ```powershell
 Resolve-DnsName ai.damkina.net
-curl.exe -sI https://ai.damkina.net/            # 200, strict-transport-security, content-security-policy
-curl.exe -s  https://ai.damkina.net/api/chats   # {"error":"로그인이 필요합니다."} (401)
+curl.exe -sI https://ai.damkina.net/            # 401 + WWW-Authenticate: Basic (basic_auth), 유효한 공인 인증서
+# basic_auth 자격으로: / → 200(로그인 화면), /api/auth-info → 200, /api/chats → 401(앱 로그인 필요)
 ```
-휴대폰(LTE)에서 `https://ai.damkina.net`에 접속해 로그인하고, 채팅 목록 → 채팅 → 지시 전송까지 확인합니다. 앱의 원격 웹 접속 창에서 세션이 보이면 정상입니다.
+휴대폰(LTE)에서 `https://ai.damkina.net`에 접속합니다. 브라우저 인증창에서 `chatterbox`와 비밀번호를 입력하고, 앱 로그인 → 채팅 목록 → 채팅 → 지시 전송까지 확인합니다. 앱의 원격 웹 접속 창에서 세션이 보이면 정상입니다.
 
 ### 되돌리기
 - 앱: 원격 웹 접속 스위치를 끕니다. 서버가 즉시 닫히고 모든 세션이 끝납니다.
-- Caddy: 백업한 Caddyfile을 복원한 뒤 `reload`합니다.
+- Caddy: 백업한 Caddyfile을 복원한 뒤 `reload`합니다. 운영 백업은 `Caddyfile.bak-20261029-remoteweb`(블록 추가 전)과 `Caddyfile.bak-20261029-2304-nasproxy`(tls internal·trusted_proxies 적용 전)입니다. NAS 블록을 넣었다면 NAS Caddy에서도 제거합니다.
 - DNS: `ai` CNAME을 삭제합니다.
 
 ## 개발·검증
