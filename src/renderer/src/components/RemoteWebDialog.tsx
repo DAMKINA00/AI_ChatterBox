@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CircleAlert, CircleCheck, Globe, KeyRound, LogOut, RefreshCw, ShieldCheck } from "lucide-react";
-import { REMOTE_WEB_MIN_PASSWORD, type RemoteAuthProvider, type RemoteWebAction, type RemoteWebInput, type RemoteWebStatus } from "../../../shared/remote-web";
+import { REMOTE_UPLOAD_STORAGE, REMOTE_WEB_MIN_PASSWORD, type RemoteAuthProvider, type RemoteWebAction, type RemoteWebInput, type RemoteWebStatus } from "../../../shared/remote-web";
 import { api, errorMessage, timeAgo } from "../lib/utils";
 import { Badge, Button, Dialog, DialogContent, DialogFooter, Input, Label, Switch } from "./ui";
 
@@ -69,6 +69,59 @@ function LoginMethod({ status, busy, run }: { status: RemoteWebStatus; busy: boo
         <span className="text-[11px] text-muted-foreground">로그인 방식을 바꾸면 모든 원격 세션이 로그아웃됩니다.</span>
         <Button type="button" size="sm" variant="outline" disabled={busy || !dirty}
           onClick={() => void run("update", provider === "synology-dsm" ? { provider, dsmUrl: url, dsmCertSha256: pin, dsmAllowedUsers: allowedUsers, dsmFailureLimit: Number(limit) } : { provider })}>로그인 방식 저장</Button>
+      </div>
+    </div>
+  );
+}
+
+/** Cap on the disk use of all remote uploads (sent ones too); the core refuses uploads past it (507). */
+function UploadStorage({ status, busy, run }: { status: RemoteWebStatus; busy: boolean; run: Run }) {
+  const saved = status.uploadStorageGb ?? REMOTE_UPLOAD_STORAGE.defaultGb;
+  const [gb, setGb] = useState(String(saved));
+  useEffect(() => setGb(String(saved)), [saved]);
+  const value = Number(gb);
+  const valid = gb.trim() !== "" && Number.isFinite(value) && value >= REMOTE_UPLOAD_STORAGE.minGb && value <= REMOTE_UPLOAD_STORAGE.maxGb;
+  return (
+    <div className="grid gap-2 rounded-lg border p-3 text-[12px]" data-testid="remote-web-upload-storage">
+      <Label htmlFor="remote-upload-storage">원격 첨부 저장 한도</Label>
+      <div className="flex items-center gap-2">
+        <Input id="remote-upload-storage" inputMode="decimal" value={gb} onChange={e => setGb(e.target.value.replace(/[^\d.]/g, "").slice(0, 5))} className="w-20 font-mono text-[12px]" />
+        <span>GB</span>
+        <Button type="button" size="sm" variant="outline" disabled={busy || !valid || value === saved} onClick={() => void run("update", { uploadStorageGb: value })}>저장</Button>
+      </div>
+      <span className="text-[11px] text-muted-foreground">
+        원격 웹으로 올린 첨부 파일(보낸 것 포함)의 합계 한도입니다({REMOTE_UPLOAD_STORAGE.minGb}~{REMOTE_UPLOAD_STORAGE.maxGb}GB, 기본 {REMOTE_UPLOAD_STORAGE.defaultGb}GB). 이 한도를 넘거나 PC 디스크 여유 공간이 {REMOTE_UPLOAD_STORAGE.minFreeBytes / 1024 ** 3}GB 미만이 되면 업로드를 거부합니다. 원격 첨부가 있는 채팅을 삭제하면 공간이 돌아옵니다.
+      </span>
+    </div>
+  );
+}
+
+/** D1: folders under which remote users may create one new project folder. Empty = remote project creation off. */
+function ProjectRoots({ status, busy, run }: { status: RemoteWebStatus; busy: boolean; run: Run }) {
+  const saved = status.projectRoots ?? [];
+  const [path, setPath] = useState("");
+  const [label, setLabel] = useState("");
+  const save = (roots: { path: string; label: string }[]) => run("update", { projectRoots: roots.map(r => ({ id: "", label: r.label, path: r.path })) });
+  return (
+    <div className="grid gap-2 rounded-lg border p-3" data-testid="remote-web-project-roots">
+      <div className="text-[12px] font-medium">원격 새 프로젝트 허용 위치</div>
+      <p className="text-[11px] text-muted-foreground">원격 웹에서는 여기 지정한 폴더 바로 아래에 새 폴더를 하나 만들어서만 프로젝트를 만들 수 있습니다. 비어 있으면 원격 프로젝트 생성이 꺼집니다.</p>
+      {saved.length > 0 && (
+        <ul className="grid gap-1">
+          {saved.map(r => (
+            <li key={r.id} className="flex items-center gap-2 rounded-md bg-muted/50 px-2 py-1.5 text-[11.5px]">
+              <span className="font-medium">{r.label}</span>
+              {!r.fileId && <span className="text-destructive" title="보안 확인 정보가 없는 예전 등록입니다. 제거한 뒤 다시 추가하세요.">재등록 필요</span>}
+              <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground" title={r.path}>{r.path}</span>
+              <Button type="button" size="xs" variant="ghost" disabled={busy} onClick={() => void save(saved.filter(x => x.id !== r.id))}>제거</Button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="grid grid-cols-[1fr_140px_auto] gap-2">
+        <Input aria-label="허용 위치 폴더 경로" placeholder="D:\AI" value={path} onChange={e => setPath(e.target.value)} spellCheck={false} className="font-mono text-[12px]" />
+        <Input aria-label="허용 위치 이름" placeholder="표시 이름" value={label} onChange={e => setLabel(e.target.value)} />
+        <Button type="button" size="sm" variant="outline" disabled={busy || !path.trim()} onClick={() => void save([...saved, { path: path.trim(), label: label.trim() }]).then(next => { if (next) { setPath(""); setLabel(""); } })}>추가</Button>
       </div>
     </div>
   );
@@ -199,6 +252,34 @@ export function RemoteWebDialog({ open, onOpenChange }: { open: boolean; onOpenC
               </ul>
             ) : <div className="text-[11.5px] text-muted-foreground">로그인한 원격 세션이 없습니다. 세션은 앱을 다시 시작하면 모두 끝납니다.</div>}
           </div>
+
+          {status && (
+            <label className="flex items-start gap-2 rounded-lg border p-3 text-[12px]" data-testid="remote-web-internet-emergency">
+              <input type="checkbox" className="mt-0.5" checked={!!status.allowInternetEmergency} disabled={busy || (!status.emergencyPasswordLong && !status.allowInternetEmergency)}
+                onChange={e => void run("update", { allowInternetEmergency: e.target.checked })} />
+              <span>인터넷에서도 비상용 로그인 허용
+                <span className="block text-[11px] text-muted-foreground">기본은 꺼짐: 비상용 로컬 비밀번호는 OTP가 없어 LAN(사설 IP)·이 PC에서만 받습니다. 켜려면 비상용 비밀번호가 20자 이상이어야 하며{status.emergencyPasswordLong ? "" : " (지금 비밀번호는 20자 미만이라 켤 수 없습니다)"}, 인터넷의 누구나 이 비밀번호로 로그인을 시도할 수 있게 됩니다.</span>
+              </span>
+            </label>
+          )}
+
+          {status && <UploadStorage status={status} busy={busy} run={run} />}
+
+          {status && <ProjectRoots status={status} busy={busy} run={run} />}
+
+          {!!status?.audit?.length && (
+            <details className="rounded-lg border p-3 text-[11.5px]" data-testid="remote-web-audit">
+              <summary className="cursor-pointer text-[12px] font-medium">최근 원격 변경 {status.audit.length}건</summary>
+              <ul className="mt-2 grid gap-1">
+                {status.audit.map((a, i) => (
+                  <li key={i} className="grid gap-0.5 rounded-md bg-muted/50 px-2 py-1.5">
+                    <div><span className="font-medium">{a.action}</span> · {a.target} · {a.user} · <span className="font-mono">{a.ip}</span> · {timeAgo(a.at)}</div>
+                    {a.detail && <div className="break-all text-muted-foreground">{a.detail}</div>}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
 
           {!!status?.loginFailures.length && (
             <details className="rounded-lg border p-3 text-[11.5px]" data-testid="remote-web-login-failures">

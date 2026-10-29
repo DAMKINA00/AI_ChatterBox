@@ -324,7 +324,7 @@ function ProjectNode({
       onSelect: () =>
         onConfirm({
           title: `"${project.name}" 프로젝트를 삭제할까요?`,
-          body: "앱에 저장된 채팅 기록이 모두 지워집니다. 작업 폴더의 파일과 CLI의 원본 기록은 그대로 남습니다.",
+          body: "앱에 저장된 채팅 기록이 모두 지워집니다. 원격 웹으로 올린 첨부 파일도 함께 지워집니다. 작업 폴더의 파일과 CLI의 원본 기록은 그대로 남습니다.",
           run: () => deleteProject(project.id),
         }),
     },
@@ -427,7 +427,7 @@ function ChatNode({
       onSelect: () =>
         onConfirm({
           title: `"${chat.title}" 채팅을 삭제할까요?`,
-          body: "앱에 저장된 기록과 첨부 파일 목록이 지워집니다. 작업 폴더의 파일은 그대로 남습니다.",
+          body: "앱에 저장된 기록과 첨부 파일 목록이 지워집니다. 원격 웹으로 올린 첨부 파일은 파일도 함께 지워집니다. 작업 폴더의 파일과 데스크톱에서 붙인 첨부 파일은 그대로 남습니다.",
           run: () => deleteChat(chat.id),
         }),
     },

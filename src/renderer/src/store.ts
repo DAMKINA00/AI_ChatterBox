@@ -152,6 +152,12 @@ export const useStore = create<State>((set, get) => ({
       }))).catch(() => undefined);
     }
     api.onSelectChat((chatId) => void get().select({ chatId }));
+    // Remote web changes the desktop did not make itself (chat delete, project create/update).
+    api.onChatDeleted((id) => {
+      chatTimelines.delete(id);
+      set((s) => ({ chats: s.chats.filter((c) => c.id !== id), selection: s.selection?.chatId === id ? null : s.selection }));
+    });
+    api.onProjectsUpdated(() => void api.listProjects().then((projects) => set({ projects })).catch(() => undefined));
     window.addEventListener("focus", () => {
       const sel = get().selection;
       if (sel && get().chats.find((c) => c.id === sel.chatId)?.unread) void api.markViewed(sel.chatId);
