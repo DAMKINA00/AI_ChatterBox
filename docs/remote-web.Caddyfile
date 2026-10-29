@@ -23,12 +23,12 @@ ai.damkina.net {
 		Strict-Transport-Security "max-age=31536000"
 	}
 
-	# 앞단 인증(공개 필수 조건): 페이지·API·SSE 모든 경로에 적용됩니다. 사용자명 chatterbox.
-	# 비밀번호 원문은 %APPDATA%\AI_ChatterBox\remote-web-basicauth.txt에만 보관하고, 여기에는 bcrypt 해시만 넣습니다.
-	# 해시 생성: D:\Photo\ComfyUI\tools\caddy.exe hash-password  (표준 입력으로 비밀번호를 두 번 입력)
-	basic_auth {
-		chatterbox <caddy hash-password 출력값>
-	}
+	# (선택) 앞단 인증 basic_auth — 현재 운영에서는 쓰지 않습니다(2026-10-29 사용자 결정: 앱의 NAS 계정 로그인만 사용).
+	# 다시 켜려면 주석을 풀고 해시를 넣으세요. 페이지·API·SSE 모든 경로에 적용됩니다. 휴대폰 입력이 쉬운 비밀번호(혼동 문자 제외)를 쓰고,
+	# 원문은 %APPDATA%\AI_ChatterBox\remote-web-basicauth.txt에만 둡니다. 해시: caddy.exe hash-password (표준 입력으로 두 번 입력)
+	# basic_auth {
+	# 	chatterbox <caddy hash-password 출력값>
+	# }
 
 	reverse_proxy 127.0.0.1:47821 {
 		# 앱은 이 헤더만 접속자 IP로 씁니다(X-Forwarded-For는 쓰지 않음). {client_ip}는 Caddy가 확인한 값이며

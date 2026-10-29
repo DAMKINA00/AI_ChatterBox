@@ -37,7 +37,7 @@ NAS 로그인 보안 규칙:
 - NAS 주소는 `https://`만 허용합니다. DSM 기본 자체서명 인증서는 **SHA-256 지문 고정**으로 신뢰하며, 전역 TLS 검증은 끄지 않습니다. TLS 핸드셰이크에서 지문을 확인한 뒤에만 요청 바이트를 보내므로, 지문이 다르면 비밀번호는 전송되지 않습니다. 지문을 비우면 일반 CA 검증을 합니다.
 - 브라우저에는 실패 이유와 관계없이 항상 같은 응답을 보냅니다: 401 "로그인 실패: 아이디·비밀번호·OTP를 확인하세요." 잘못된 아이디·비밀번호, OTP 필요·오류, 비활성 계정, 허용 목록 밖 아이디, NAS 연결 불가, NAS 보호 상한 도달이 모두 여기에 해당합니다.
 - 응답 시간은 고정 구간(1.5초, 6초, 12초, 20초)까지 늘려서 보냅니다. NAS가 정상적으로 답하면 허용 목록 밖 아이디(NAS를 거치지 않음)와 목록 안 아이디가 모두 1.5초에 응답합니다. DSM 요청 제한 시간은 요청당 2.5초이며, 로그인 1회는 API 조회와 로그인 두 요청이라 최대 약 5초입니다. 이 경우 6초 구간에 들어갑니다.
-- **남는 위험:** NAS가 느리거나 응답하지 않을 때는 목록 안 아이디만 6초 구간에 들어가서, 목록 밖 아이디(1.5초)와 응답 시간으로 구분될 수 있습니다. 대기열에서 기다린 시간도 응답 시간에 더해집니다. NAS를 정상 상태로 유지하고, 앞단 보호(Caddy `basic_auth`)를 두면 이 차이를 외부에서 관찰하기 어렵습니다.
+- **남는 위험:** NAS가 느리거나 응답하지 않을 때는 목록 안 아이디만 6초 구간에 들어가서, 목록 밖 아이디(1.5초)와 응답 시간으로 구분될 수 있습니다. 대기열에서 기다린 시간도 응답 시간에 더해집니다. NAS를 정상 상태로 유지하세요. 앞단 보호(Caddy `basic_auth`, 현재 미사용)를 두면 이 차이를 외부에서 관찰하기 어렵습니다.
 - 실제 원인은 앱의 원격 웹 접속 창 › **최근 로그인 실패**(최근 30건, 메모리)에만 보입니다. DSM 오류 코드도 여기에 표시됩니다: 400 잘못된 자격, 401 비활성 계정, 402 권한 없음, 403 OTP 필요, 404 OTP 오류, 406 2단계 인증 설정 필요, 407 IP 차단, 408~410 비밀번호 만료·변경 필요. 400~404는 로그인 실패 횟수(IP·계정 잠금)에 포함되고, NAS 연결 실패와 406·407·408~410은 포함하지 않습니다. NAS가 거부한 로그인은 오류 코드와 관계없이 아래 "NAS 보호 상한"에 집계됩니다.
 - **NAS 보호 상한에 넣는 기준**(`DsmProvider.verify`, `dsmRequest`의 `sent` 표시):
   - **포함:** NAS가 로그인을 거부한 응답(`success:false`). 그리고 로그인 요청(`SYNO.API.Auth` login)을 보낸 뒤 결과를 알 수 없는 경우(타임아웃, 응답 유실·연결 끊김, 응답 해석 실패). NAS가 실패로 처리했을 수 있으므로 보수적으로 셉니다.
@@ -63,8 +63,13 @@ NAS 로그인 보안 규칙:
   - 로컬 대기열까지 채우려면 IP마다 동시 1개 제한과 IP별 잠금(15분에 5회)을 넘어야 하므로 많은 IP가 필요합니다.
   - 전역 지연은 요청마다 따로 걸리므로, 병렬로 보내는 분산 공격의 전체 시도 속도를 직접 묶지는 못합니다.
 - **NAS 보호 상한 값 정하기:** DSM 자동 차단은 출발지 IP별로 셉니다. 같은 PC(192.168.0.144)에서 DSM에 접속하는 다른 로그인 시도도 같은 카운트에 더해집니다. 브라우저로 DSM에 직접 로그인할 때, Synology Drive·File Station·SMB 접속이 실패할 때 등이 해당합니다. 그래서 상한은 DSM 자동 차단 기준보다 **여유 있게 낮게** 두세요(기본 6은 DSM 기본 "5분 안에 10회" 기준). 이 PC에서 다른 DSM 로그인이 자주 실패한다면 더 낮추세요.
-- **공개 권장 조건(모두 지킬 것):**
-  1. 앞단 보호: Caddy `basic_auth`(예시 파일의 주석) 또는 접속 IP·국가 제한을 둡니다. 분산 로그인 시도와 로컬·NAS 대기열 포화를 앱까지 오기 전에 걸러 줍니다.
+- **현재 운영 결정(2026-10-29):** 앞단 `basic_auth`는 **쓰지 않고**(사용자 결정), 앱 로그인(Synology NAS 계정 + 비상용 로컬 비밀번호)만으로 보호합니다. 그래서 다음 위험이 남습니다.
+  - 인터넷 누구나 앱 로그인 화면과 `/api/login`에 바로 닿습니다. 무차별 시도는 IP·계정 잠금, NAS 보호 상한, 대기열 제한으로만 막습니다.
+  - 여러 IP를 가진 공격자는 NAS 보호 상한(5분 6회)을 반복해서 채워 NAS 로그인을 일시적으로 막거나 늦출 수 있습니다. 이때 정상 사용자는 비상용 로컬 비밀번호로 들어와야 합니다.
+  - NAS 계정 비밀번호가 유출되면 앱 전체(관리자 권한 명령 실행 포함)가 노출됩니다. 허용 NAS 계정에는 **2단계 인증(OTP)을 꼭 켜세요.** 비상용 로컬 비밀번호도 길고 고유하게 둡니다.
+  - 위험을 더 줄이려면 아래 1번(`basic_auth` 또는 IP 제한)을 다시 켭니다.
+- **공개 권장 조건:**
+  1. (선택, 현재 미사용) 앞단 보호: Caddy `basic_auth`(예시 파일의 주석) 또는 접속 IP·국가 제한을 둡니다. 분산 로그인 시도와 로컬·NAS 대기열 포화를 앱까지 오기 전에 걸러 줍니다.
   2. 사이트 블록의 `header_up X-ChatterBox-Client-IP {client_ip}` 줄을 유지합니다. 없으면 접속자 IP를 위조해 IP별 잠금을 피할 수 있습니다.
   3. Caddy 앞에 다른 프록시가 있다면 `trusted_proxies`를 설정하고, 앱의 최근 로그인 실패에 실제 접속자 IP가 찍히는지 확인합니다.
   4. NAS 로그인을 쓰는 경우 위 기준에 따라 NAS 보호 상한을 DSM 자동 차단 설정보다 낮게 둡니다.
@@ -96,7 +101,7 @@ NAS 로그인 보안 규칙:
   - `ai.damkina.net` 블록에 `tls internal`을 넣어 이 PC의 Let's Encrypt 재시도를 멈춥니다. NAS→이 PC 구간은 Caddy 내부 CA 인증서로 TLS 처리합니다(짧은 유효기간, Caddy가 자동 갱신).
   - 전역 `servers { trusted_proxies static 192.168.0.250/32 }`: NAS에서 온 요청만 `X-Forwarded-For`를 믿어 `{client_ip}`를 실제 접속자로 만듭니다. 다른 출처(127.0.0.1, 다른 LAN 기기)가 보낸 `X-Forwarded-For`와 위조한 `X-ChatterBox-Client-IP`는 무시되거나 덮어쓰입니다(임시 Caddy로 확인).
   - 기존 사이트 영향: relight 게이트웨이는 loopback에서 온 `CF-Connecting-IP`만 쓰고 `X-Forwarded-*`는 쓰지 않습니다(`gateway.py`의 `trusted_client_ip`). 접근 로그는 설정돼 있지 않습니다. 적용 전후 응답이 같음을 확인했습니다.
-  - `basic_auth`(사용자명 `chatterbox`)는 이 PC 블록에 둡니다. NAS에는 두지 않습니다(중복 인증 방지).
+  - `basic_auth`를 쓴다면 이 PC 블록에 둡니다(NAS에는 두지 않음, 중복 인증 방지). 현재는 쓰지 않습니다.
 - **NAS Caddy** (`docs/remote-web.Caddyfile` 하단 주석 블록)
   - relight와 같은 방식으로 `reverse_proxy https://192.168.0.144:443`에 `tls_server_name ai.damkina.net`을 둡니다. 이 PC 내부 CA 루트(`D:\Photo\ComfyUI\web_gateway\public\caddy-state\data\caddy\pki\authorities\local\root.crt`, 공개 인증서, 2036년 만료)를 NAS로 복사해 `tls_trust_pool file`(Caddy 2.8 미만은 `tls_trusted_ca_certs`)로 신뢰합니다. 전체 TLS 검증을 끄는 `tls_insecure_skip_verify`는 쓰지 않습니다.
   - `flush_interval -1`로 SSE를 바로 전달합니다.
@@ -116,7 +121,8 @@ NAS 로그인 보안 규칙:
 - **백업:** `/volume1/docker/caddy-gateway/Caddyfile.bak-20261029-ai`(블록 추가 전, 권한 유지).
 - **결과:**
   - Let's Encrypt 인증서가 reload 직후 발급됐습니다(YE1, 2027-01-27 만료).
-  - 공인 IP 경유로 인증 없이 401(`Basic realm="restricted"`)이고, basic_auth로 `/` 200, `/api/auth-info` 200입니다.
+  - 공인 IP 경유로 basic_auth 적용 당시에는 인증 없이 401, 자격 입력 시 `/` 200, `/api/auth-info` 200이었습니다.
+  - 같은 날 사용자 결정으로 basic_auth를 제거한 뒤에는 `/` 200(앱 로그인 화면), `/api/auth-info` 200, `/api/chats` 401(앱 로그인 필요)입니다. 제거 전 백업은 `Caddyfile.bak-20261029-2342-nobasicauth`입니다.
   - 기존 사이트 8개(relight·clapper·animated·filter·play.origaminis.com·git·play.damkina.net·fm)의 공인 응답은 적용 전과 같습니다. git 본문은 요청마다 CSP nonce가 바뀌므로 상태·형식으로 비교했습니다.
 - **접속자 IP:** NAS의 Docker는 외부 트래픽을 iptables DNAT로 컨테이너에 넘기므로 출발지 IP가 유지됩니다. NAS Caddy는 이를 `X-Forwarded-For`로 이 PC에 전달하고, 이 PC Caddy는 `trusted_proxies`로 받아 `X-ChatterBox-Client-IP`에 넣습니다. 외부(LTE) 접속 시 앱의 세션·최근 로그인 실패에 실제 공인 IP가 찍히는지 확인하세요. LAN에서 공인 IP로 되돌아오는 접속은 공유기 주소로 보일 수 있습니다.
 - **되돌리기:** NAS에서 백업을 같은 inode로 덮어씁니다(`cat Caddyfile.bak-20261029-ai > Caddyfile`). 그다음 `docker exec caddy-gateway caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`를 실행합니다.
@@ -137,7 +143,7 @@ NAS 로그인 보안 규칙:
 | XSS | Markdown은 react-markdown으로 렌더링하며 raw HTML은 렌더링하지 않음. 링크는 기본 URL 필터를 거치고 `noopener noreferrer`로 엶. 외부 이미지는 불러오지 않음. CSP는 `default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'` 등 |
 | 노출 정보 | 프로젝트는 id·이름만 보냄(폴더 경로·설정 제외). 첨부 파일 내용과 이미지 원본은 제공하지 않음 |
 
-> 원격 지시와 승인은 이 PC에서 관리자 권한 코어가 명령을 실행하게 할 수 있습니다. 긴 비밀번호를 쓰고, 공개할 때는 Caddy `basic_auth`(사용자명 `chatterbox`, 예시 파일 참고)를 반드시 앞단에 두세요.
+> 원격 지시와 승인은 이 PC에서 관리자 권한 코어가 명령을 실행하게 할 수 있습니다. 긴 비밀번호를 쓰고, 허용 NAS 계정에는 OTP를 켜세요. 앞단 Caddy `basic_auth`는 선택 사항이며 현재는 쓰지 않습니다(위 "현재 운영 결정" 참고).
 
 ## 적용 절차
 
@@ -186,17 +192,21 @@ Copy-Item "$dir\Caddyfile" "$dir\Caddyfile.bak-$(Get-Date -Format yyyyMMdd-HHmm)
 ```
 
 - 블록의 `header_up X-ChatterBox-Client-IP {client_ip}` 줄은 지우지 마세요. IP별 잠금이 이 값에 의존합니다(위 "접속자 IP와 프록시 전제").
-- **basic_auth(공개 필수 조건)**: 사용자명은 `chatterbox`입니다. 24자 이상 무작위 비밀번호를 만들어 원문은 `%APPDATA%\AI_ChatterBox\remote-web-basicauth.txt`에만 보관합니다. 해시는 `& $caddy hash-password`에 표준 입력으로 두 번 넣어 만듭니다(명령줄 인자로 넘기지 않음). Caddyfile에는 bcrypt 해시만 넣습니다. 운영 Caddyfile에는 2026-10-29에 적용했습니다.
+- **basic_auth(선택, 현재 미사용):**
+  - 2026-10-29에 적용했다가 같은 날 사용자 결정으로 제거했습니다. 사용하던 비밀번호 파일도 삭제했습니다.
+  - 제거 이유: 휴대폰 브라우저 인증창에서 입력이 어려웠습니다(대소문자·혼동 문자가 섞인 32자). 서버 쪽 자격은 정상이었습니다.
+  - 다시 켜려면 사용자명 `chatterbox`와 휴대폰 입력이 쉬운 무작위 비밀번호(혼동 문자 0/O/1/l/I 제외, 소문자·숫자 24자 이상)를 씁니다. 해시는 `& $caddy hash-password`에 표준 입력으로 넣어 만들고, 원문은 `%APPDATA%\AI_ChatterBox\remote-web-basicauth.txt`에만 둡니다.
 - `reload`는 관리 API(localhost:2019)를 사용합니다. 현재 Caddyfile에는 `admin off`가 없으므로 그대로 동작합니다. 파일 내용이 그대로인데 인증서 재시도를 바로 시작하려면 `reload --force`를 씁니다.
 - 공인 인증서는 **NAS Caddy가** 발급합니다(위 "NAS Caddy가 앞단인 구성"). NAS에 블록을 추가하고 NAS Caddy를 다시 불러오면 DNS가 반영된 상태에서 자동으로 발급됩니다.
 
 ### 4. 확인
 ```powershell
 Resolve-DnsName ai.damkina.net
-curl.exe -sI https://ai.damkina.net/            # 401 + WWW-Authenticate: Basic (basic_auth), 유효한 공인 인증서
-# basic_auth 자격으로: / → 200(로그인 화면), /api/auth-info → 200, /api/chats → 401(앱 로그인 필요)
+curl.exe -sI https://ai.damkina.net/            # 200(앱 로그인 화면), 유효한 공인 인증서 (basic_auth를 켜면 401)
+curl.exe -s  https://ai.damkina.net/api/auth-info  # {"provider":"synology-dsm"}
+curl.exe -s  https://ai.damkina.net/api/chats      # 401(앱 로그인 필요)
 ```
-휴대폰(LTE)에서 `https://ai.damkina.net`에 접속합니다. 브라우저 인증창에서 `chatterbox`와 비밀번호를 입력하고, 앱 로그인 → 채팅 목록 → 채팅 → 지시 전송까지 확인합니다. 앱의 원격 웹 접속 창에서 세션이 보이면 정상입니다.
+휴대폰(LTE)에서 `https://ai.damkina.net`에 접속합니다. 앱 로그인 화면에서 NAS 아이디·비밀번호·OTP로 로그인하고, 채팅 목록 → 채팅 → 지시 전송까지 확인합니다. 앱의 원격 웹 접속 창에서 세션이 보이면 정상입니다.
 
 ### 되돌리기
 - 앱: 원격 웹 접속 스위치를 끕니다. 서버가 즉시 닫히고 모든 세션이 끝납니다.
