@@ -103,6 +103,24 @@ NAS 로그인 보안 규칙:
   - NAS에는 `trusted_proxies`를 두지 마세요. 그래야 NAS가 받은 `X-Forwarded-For`를 실제 접속자 IP로 덮어씁니다.
   - 이 블록을 이 PC에서 NAS 역할로 띄운 임시 Caddy로 확인했습니다. 인증 없이 401, basic_auth로 `/` 200, `/api/auth-info` 200이었습니다.
 
+### NAS 실제 적용 (2026-10-29)
+- **NAS Caddy:**
+  - 컨테이너 `caddy-gateway`(이미지 `caddy:2-alpine`, Caddy v2.11.4), compose `/volume1/docker/caddy-gateway/compose.yaml`.
+  - 포트는 `192.168.0.250:8080→80`, `8443→443`입니다. 공유기가 공인 80/443을 여기로 넘깁니다.
+  - 마운트는 `./Caddyfile → /etc/caddy/Caddyfile`(읽기 전용 **단일 파일** 마운트), `./data → /data`, `./config → /config`입니다.
+- **기존 블록 형식:** relight·clapper·animated·filter·play.origaminis.com은 `reverse_proxy https://192.168.0.144:443 { header_up Host <호스트>; transport http { tls_server_name <호스트> } }`(일반 CA 검증)입니다. 해당 호스트의 HTTP-01 인증 요청은 `http://…` 블록이 이 PC의 80으로 넘깁니다. git·play.damkina.net·fm.damkina.net은 NAS 안의 컨테이너가 처리합니다.
+- **추가한 블록:** 같은 형식에 `tls_trust_pool file /data/chatterbox-pc-root.crt`와 `flush_interval -1`을 더했습니다(`docs/remote-web.Caddyfile` 하단과 같음). 이 PC의 루트 인증서는 `/volume1/docker/caddy-gateway/data/chatterbox-pc-root.crt`(root:root 0644)로 복사했습니다.
+- **적용 방법:** 단일 파일 마운트라서 파일을 바꿔치기하면(새 inode) 컨테이너가 이전 내용을 계속 봅니다. 그래서 **같은 inode에 이어 붙였습니다**(`cat 블록 >> Caddyfile`, inode 1038 유지).
+  - 먼저 후보 파일을 `/data`에 두고 `docker exec caddy-gateway caddy validate`를 통과시킨 뒤 반영했고, `docker exec caddy-gateway caddy reload`로 불러왔습니다. 컨테이너는 재시작하지 않았습니다.
+  - "not formatted" 경고는 기존 4칸 들여쓰기에서 나오는 것으로, 동작과는 관계없습니다.
+- **백업:** `/volume1/docker/caddy-gateway/Caddyfile.bak-20261029-ai`(블록 추가 전, 권한 유지).
+- **결과:**
+  - Let's Encrypt 인증서가 reload 직후 발급됐습니다(YE1, 2027-01-27 만료).
+  - 공인 IP 경유로 인증 없이 401(`Basic realm="restricted"`)이고, basic_auth로 `/` 200, `/api/auth-info` 200입니다.
+  - 기존 사이트 8개(relight·clapper·animated·filter·play.origaminis.com·git·play.damkina.net·fm)의 공인 응답은 적용 전과 같습니다. git 본문은 요청마다 CSP nonce가 바뀌므로 상태·형식으로 비교했습니다.
+- **접속자 IP:** NAS의 Docker는 외부 트래픽을 iptables DNAT로 컨테이너에 넘기므로 출발지 IP가 유지됩니다. NAS Caddy는 이를 `X-Forwarded-For`로 이 PC에 전달하고, 이 PC Caddy는 `trusted_proxies`로 받아 `X-ChatterBox-Client-IP`에 넣습니다. 외부(LTE) 접속 시 앱의 세션·최근 로그인 실패에 실제 공인 IP가 찍히는지 확인하세요. LAN에서 공인 IP로 되돌아오는 접속은 공유기 주소로 보일 수 있습니다.
+- **되돌리기:** NAS에서 백업을 같은 inode로 덮어씁니다(`cat Caddyfile.bak-20261029-ai > Caddyfile`). 그다음 `docker exec caddy-gateway caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`를 실행합니다.
+
 ## 보안 설계
 
 | 항목 | 동작 |
@@ -182,7 +200,7 @@ curl.exe -sI https://ai.damkina.net/            # 401 + WWW-Authenticate: Basic 
 
 ### 되돌리기
 - 앱: 원격 웹 접속 스위치를 끕니다. 서버가 즉시 닫히고 모든 세션이 끝납니다.
-- Caddy: 백업한 Caddyfile을 복원한 뒤 `reload`합니다. 운영 백업은 `Caddyfile.bak-20261029-remoteweb`(블록 추가 전)과 `Caddyfile.bak-20261029-2304-nasproxy`(tls internal·trusted_proxies 적용 전)입니다. NAS 블록을 넣었다면 NAS Caddy에서도 제거합니다.
+- Caddy: 백업한 Caddyfile을 복원한 뒤 `reload`합니다. 운영 백업은 `Caddyfile.bak-20261029-remoteweb`(블록 추가 전)과 `Caddyfile.bak-20261029-2304-nasproxy`(tls internal·trusted_proxies 적용 전)입니다. NAS Caddy의 블록은 `/volume1/docker/caddy-gateway/Caddyfile.bak-20261029-ai`로 되돌립니다(위 "NAS 실제 적용"의 되돌리기 참고).
 - DNS: `ai` CNAME을 삭제합니다.
 
 ## 개발·검증
