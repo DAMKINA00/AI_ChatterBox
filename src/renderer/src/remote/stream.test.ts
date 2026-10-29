@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Chat, Consult, TimelineEvent } from "../../../shared/types";
 import { buildItems } from "../timeline";
+import { withoutDeleted } from "./logic";
 import { applyChatUpdate, applyMessage, mergeChats, mergeSnapshot, type StreamMessage } from "./stream";
 
 const ev = (id: number, event: TimelineEvent["event"], chatId = 1): TimelineEvent => ({ id, chatId, node: "orch", role: "orch", at: id, event });
@@ -78,4 +79,19 @@ test("live messages after the snapshot keep streaming previews", () => {
   let detail = { events: [] as TimelineEvent[], agents: [], consults: [] };
   for (const text of ["작", "성"]) detail = applyMessage(detail, 1, msg(1, "chat:event", { id: 0, chatId: 1, node: "orch", role: "orch", at: 1, event: { type: "text_delta", text } }));
   assert.deepEqual(detail.events.map(e => e.event), [{ type: "text_delta", text: "작성" }]);
+});
+
+test("a chat list snapshot read before chat:deleted does not bring the chat back", () => {
+  const versions = new Map<number, number>();
+  const chat = (id: number) => ({ id, projectId: 1, title: `c${id}`, status: "idle" } as Chat);
+  const deleted = new Set<number>();
+  let chats = mergeChats([], versions, [chat(1), chat(2)], 3);
+  // chat:deleted [2] arrives (seq 5), then a /api/chats snapshot read at seq 4 still lists it.
+  deleted.add(2);
+  chats = withoutDeleted(chats, deleted);
+  chats = withoutDeleted(mergeChats(chats, versions, [chat(1), chat(2)], 4), deleted);
+  assert.deepEqual(chats.map(c => c.id), [1]);
+  // A late single-chat snapshot (partial merge) is filtered the same way.
+  chats = withoutDeleted(mergeChats(chats, versions, [chat(2)], 4, true), deleted);
+  assert.deepEqual(chats.map(c => c.id), [1]);
 });

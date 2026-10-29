@@ -1,16 +1,24 @@
-// Remote web UI served by src/main/remote-web.ts: chat list, live timeline, extra instructions, approvals.
+// Remote web UI served by src/main/remote-web.ts: chats (create, rename, archive, delete, search), live
+// timeline, instructions and commands, approvals, uploads, projects, usage and the page theme.
 // Reuses the desktop timeline fold (buildItems/planOf/appendEvent); Markdown is rendered without raw HTML.
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import { ArrowLeft, Circle, CircleCheck, CircleDot, LoaderCircle, LogOut, Send, Square, Users } from "lucide-react";
-import { CONSULT_KIND_LABEL, roleName, type Chat, type ChatAgent, type ChatStatus, type Consult, type ConsultStatus } from "../../../shared/types";
-import { buildItems, planOf, type Item } from "../timeline";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  ArrowLeft, BarChart3, Circle, CircleCheck, CircleDot, Flag, FolderKanban, LoaderCircle, LogOut, Monitor, Moon, Pause, Play,
+  Plus, Search, Settings2, Square, Sun, Users, X,
+} from "lucide-react";
+import { REMOTE_EVENTS, REMOTE_LIMITS, type RemoteChatResponse, type RemoteSearchResponse } from "../../../shared/remote-web";
+import { CONSULT_KIND_LABEL, roleName, type AttachmentRef, type Chat, type ChatAgent, type ChatStatus, type Consult, type ConsultStatus } from "../../../shared/types";
+import { buildItems, normalizePlanStepTitle, planOf, type Item } from "../timeline";
 import { cn } from "../lib/utils";
-import { AuthError, request, setCsrf } from "./api";
+import { AuthError, request, setCsrf, url } from "./api";
+import { ChatSettings } from "./ChatSettings";
+import { Composer } from "./Composer";
+import { chatGroups, formatBytes, INLINE_IMAGE, nextTheme, THEME_LABEL, withoutDeleted, type ProjectRef } from "./logic";
+import { ProjectsSheet, useProjects } from "./Projects";
 import { applyChatUpdate, applyMessage, mergeChats, mergeSnapshot, type Detail, type StreamMessage } from "./stream";
-
-interface ProjectRef { id: number; name: string; archived: boolean }
+import { useTheme } from "./theme";
+import { Btn, Card, Clip, ConfirmHost, errorText, FIELD, Md } from "./ui";
+import { UsageSheet } from "./Usage";
 
 const STATUS_LABEL: Record<ChatStatus, string> = {
   idle: "대기", working: "작업 중", approval: "승인 대기", pausing: "일시정지 중", paused: "일시정지", done: "완료", error: "오류", interrupted: "중단됨",
@@ -18,35 +26,8 @@ const STATUS_LABEL: Record<ChatStatus, string> = {
 const CONSULT_STATUS_LABEL: Record<ConsultStatus, string> = { running: "진행 중", done: "완료", error: "오류", stopped: "중지", limited: "한도 도달" };
 const DECISION_LABEL: Record<string, string> = { once: "한 번 허용함", chat: "이 채팅에서 허용함", deny: "거부함", auto: "자동 처리됨", expired: "만료됨" };
 const busyStatus = (s: ChatStatus) => s === "working" || s === "approval" || s === "pausing" || s === "paused";
-const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-function Btn({ className, variant = "default", ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "default" | "outline" | "destructive" | "ghost" }) {
-  return <button type="button" className={cn(
-    "inline-flex min-h-9 items-center justify-center gap-1.5 rounded-md px-3 text-[13px] font-medium transition-colors disabled:opacity-45 [&_svg]:size-4",
-    variant === "default" && "bg-primary text-primary-foreground hover:bg-primary/90",
-    variant === "outline" && "border hover:bg-accent",
-    variant === "destructive" && "bg-destructive text-white hover:bg-destructive/90",
-    variant === "ghost" && "hover:bg-accent",
-    className,
-  )} {...props} />;
-}
 
-function Md({ text }: { text: string }) {
-  return (
-    <div className="prose-chat break-words text-[14px]">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
-          // External images would leak the page to third parties; show the alt text instead.
-          img: ({ alt, src }) => <span className="text-muted-foreground">[이미지: {alt || src}]</span>,
-          table: ({ children }) => <div className="overflow-x-auto"><table>{children}</table></div>,
-          pre: ({ children }) => <pre className="overflow-x-auto rounded-lg border bg-code-bg p-3 font-mono text-[12.5px]">{children}</pre>,
-        }}
-      >{text}</ReactMarkdown>
-    </div>
-  );
-}
 
 export function RemoteApp() {
   const [auth, setAuth] = useState<"checking" | "login" | "ok">("checking");
@@ -57,8 +38,6 @@ export function RemoteApp() {
   if (auth === "login") return <Login onDone={() => setAuth("ok")} />;
   return <Workspace onLoggedOut={() => { setCsrf(""); setAuth("login"); }} />;
 }
-
-const FIELD = "h-10 rounded-md border border-input bg-transparent px-3 text-[14px] outline-none focus-visible:ring-2 focus-visible:ring-ring/40";
 
 function Login({ onDone }: { onDone: () => void }) {
   const [configured, setConfigured] = useState<"local" | "synology-dsm">();
@@ -117,13 +96,19 @@ function Workspace({ onLoggedOut }: { onLoggedOut: () => void }) {
   const [selected, setSelected] = useState<number | null>(() => Number(/^#chat=(\d+)$/.exec(location.hash)?.[1]) || null);
   const [detail, setDetail] = useState<Detail>();
   const [error, setError] = useState<string>();
+  const [sheet, setSheet] = useState<"projects" | "usage" | "chat" | null>(null);
+  const [theme, setTheme] = useTheme();
   // seq each held chat object came from; older snapshots never undo newer chat:updated messages.
   const versions = useRef(new Map<number, number>()).current;
+  // Chats the server deleted; ids are never reused, so older snapshots cannot bring them back.
+  const deleted = useRef(new Set<number>()).current;
   const fail = useCallback((e: unknown) => { if (e instanceof AuthError) onLoggedOut(); else setError(errorText(e)); }, [onLoggedOut]);
-  const loadChats = useCallback(() => request<{ seq: number; chats: Chat[]; projects: ProjectRef[] }>("/api/chats").then(r => {
-    setChats(list => mergeChats(list, versions, r.chats, r.seq));
+  const projectData = useProjects(fail);
+  const reloadProjects = projectData.reload;
+  const loadChats = useCallback(() => request<{ seq: number; chats: Chat[]; projects: ProjectRef[] }>(url("/api/chats")).then(r => {
+    setChats(list => withoutDeleted(mergeChats(list, versions, r.chats, r.seq), deleted));
     setProjects(r.projects);
-  }).catch(fail), [fail, versions]);
+  }).catch(fail), [fail, versions, deleted]);
 
   useEffect(() => { void loadChats(); }, [loadChats]);
   useEffect(() => {
@@ -136,102 +121,173 @@ function Workspace({ onLoggedOut }: { onLoggedOut: () => void }) {
     const loadDetail = (id: number) => {
       buffer = [];
       const attempt = ++latest;
-      request<Detail & { seq: number; chat: Chat }>(`/api/chats/${id}`).then(r => {
+      request<Detail & { seq: number; chat: Chat }>(url("/api/chats/:id", id)).then(r => {
         // A reconnect started a newer snapshot; that one owns the buffer.
         if (closed || attempt !== latest) return;
         setDetail(mergeSnapshot(r, buffer ?? [], id));
         buffer = null;
-        setChats(list => mergeChats(list, versions, [r.chat], r.seq, true));
+        setChats(list => withoutDeleted(mergeChats(list, versions, [r.chat], r.seq, true), deleted));
       }).catch(e => { if (attempt === latest) buffer = null; fail(e); });
     };
-    const source = new EventSource(selected ? `/api/stream?chat=${selected}` : "/api/stream");
-    // Every (re)connect reloads the snapshot so nothing missed while offline stays missing.
-    source.onopen = () => { setError(undefined); void loadChats(); if (selected) loadDetail(selected); };
-    source.onerror = () => { void request("/api/session").catch(fail); };
-    source.addEventListener("chat:updated", e => {
+    const source = new EventSource(selected ? `${url("/api/stream")}?chat=${selected}` : url("/api/stream"));
+    // Every (re)connect reloads the snapshots so nothing missed while offline stays missing.
+    source.onopen = () => { setError(undefined); void loadChats(); void reloadProjects(); if (selected) loadDetail(selected); };
+    source.onerror = () => { void request(url("/api/session")).catch(fail); };
+    source.addEventListener(REMOTE_EVENTS.chatUpdated, e => {
       const [chat] = JSON.parse((e as MessageEvent).data) as [Chat];
+      if (deleted.has(chat.id)) return;
       setChats(list => applyChatUpdate(list, versions, chat, Number((e as MessageEvent).lastEventId)));
     });
-    for (const channel of ["chat:event", "agents:updated", "consult:updated"]) source.addEventListener(channel, e => {
+    source.addEventListener(REMOTE_EVENTS.chatDeleted, e => {
+      const [id] = JSON.parse((e as MessageEvent).data) as [number];
+      deleted.add(id);
+      setChats(list => withoutDeleted(list, deleted));
+      if (id === selected) { setSelected(null); setSheet(s => (s === "chat" ? null : s)); }
+    });
+    source.addEventListener(REMOTE_EVENTS.projectsUpdated, () => { void reloadProjects(); void loadChats(); });
+    for (const channel of [REMOTE_EVENTS.chatEvent, REMOTE_EVENTS.agentsUpdated, REMOTE_EVENTS.consultUpdated]) source.addEventListener(channel, e => {
       const message: StreamMessage = { seq: Number((e as MessageEvent).lastEventId), channel, args: JSON.parse((e as MessageEvent).data) };
       if (buffer) buffer.push(message);
       else if (selected) setDetail(d => (d ? applyMessage(d, selected, message) : d));
     });
     return () => { closed = true; source.close(); };
-  }, [selected, loadChats, fail, versions]);
+  }, [selected, loadChats, reloadProjects, fail, versions, deleted]);
+
+  const chat = chats.find(c => c.id === selected);
+  // Opening a chat marks it read (the desktop does the same on select); replies that arrive while it is open too.
+  useEffect(() => {
+    if (chat?.unread) void request(url("/api/chats/:id/viewed", chat.id), {}).catch(fail);
+  }, [chat?.id, chat?.unread, fail]);
 
   const logout = async () => {
-    await request("/api/logout", {}).catch(() => undefined);
+    await request(url("/api/logout"), {}).catch(() => undefined);
     onLoggedOut();
   };
-  const chat = chats.find(c => c.id === selected);
+  const newChat = async (projectId: number) => {
+    try { const r = await request<RemoteChatResponse>(url("/api/chats"), { projectId }); setSelected(r.chat.id); void loadChats(); }
+    catch (e) { fail(e); }
+  };
+  const ThemeIcon = theme === "dark" ? Moon : theme === "light" ? Sun : Monitor;
   return (
     <div className="flex h-dvh bg-background text-foreground">
-      <aside className={cn("flex w-full flex-col border-r bg-sidebar md:w-[300px] md:shrink-0", selected && "hidden md:flex")}>
-        <div className="flex items-center justify-between border-b px-4 py-3">
-          <div className="font-semibold">AI ChatterBox</div>
-          <Btn variant="ghost" onClick={() => void logout()} aria-label="로그아웃"><LogOut /> 로그아웃</Btn>
+      <aside className={cn("flex w-full flex-col border-r bg-sidebar md:w-[320px] md:shrink-0", selected && "hidden md:flex")}>
+        <div className="flex items-center gap-1 border-b px-3 py-2">
+          <div className="min-w-0 flex-1 truncate font-semibold">AI ChatterBox</div>
+          <Btn variant="ghost" onClick={() => setTheme(nextTheme(theme))} aria-label={`테마: ${THEME_LABEL[theme]} (눌러서 변경)`} title={`테마: ${THEME_LABEL[theme]}`}><ThemeIcon /></Btn>
+          <Btn variant="ghost" onClick={() => setSheet("projects")} aria-label="프로젝트" title="프로젝트"><FolderKanban /></Btn>
+          <Btn variant="ghost" onClick={() => setSheet("usage")} aria-label="사용량" title="사용량"><BarChart3 /></Btn>
+          <Btn variant="ghost" onClick={() => void logout()} aria-label="로그아웃" title="로그아웃"><LogOut /></Btn>
         </div>
-        {error && <div role="alert" className="border-b px-4 py-2 text-[12.5px] text-destructive">{error}</div>}
-        <ChatList chats={chats} projects={projects} selected={selected} onSelect={setSelected} />
+        {error && <div role="alert" className="flex items-start gap-2 border-b px-4 py-2 text-[12.5px] text-destructive"><span className="flex-1">{error}</span><button type="button" aria-label="오류 닫기" onClick={() => setError(undefined)}><X className="size-3.5" /></button></div>}
+        <ChatList chats={chats} projects={projects} selected={selected} onSelect={setSelected} onNewChat={id => void newChat(id)} onError={fail} />
       </aside>
       <main className={cn("min-w-0 flex-1", !selected && "hidden md:block")}>
-        {chat ? <ChatPane key={chat.id} chat={chat} detail={detail} onBack={() => setSelected(null)} onError={fail} />
+        {chat ? <ChatPane key={chat.id} chat={chat} detail={detail} onBack={() => setSelected(null)} onSettings={() => setSheet("chat")} onError={fail} />
           : <div className="flex h-full items-center justify-center text-muted-foreground">채팅을 선택하세요.</div>}
       </main>
+      {sheet === "chat" && chat && <ChatSettings chat={chat} project={projectData.projects.find(p => p.id === chat.projectId)} onClose={() => setSheet(null)}
+        onDeleted={() => { deleted.add(chat.id); setChats(list => withoutDeleted(list, deleted)); setSheet(null); setSelected(null); }} onAuthError={fail} />}
+      {sheet === "projects" && <ProjectsSheet data={projectData} onClose={() => setSheet(null)} onChanged={() => { void reloadProjects(); void loadChats(); }}
+        onOpenChat={id => { setSheet(null); setSelected(id); void loadChats(); }} onAuthError={fail} />}
+      {sheet === "usage" && <UsageSheet onClose={() => setSheet(null)} onAuthError={fail} />}
+      <ConfirmHost />
     </div>
   );
 }
 
-function ChatList({ chats, projects, selected, onSelect }: { chats: Chat[]; projects: ProjectRef[]; selected: number | null; onSelect: (id: number) => void }) {
-  const groups = projects.filter(p => !p.archived).map(p => ({ project: p, chats: chats.filter(c => c.projectId === p.id && !c.archived) })).filter(g => g.chats.length);
-  if (!groups.length) return <div className="p-4 text-[13px] text-muted-foreground">표시할 채팅이 없습니다.</div>;
+function ChatList({ chats, projects, selected, onSelect, onNewChat, onError }: {
+  chats: Chat[]; projects: ProjectRef[]; selected: number | null; onSelect: (id: number) => void; onNewChat: (projectId: number) => void; onError: (e: unknown) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [matches, setMatches] = useState<Set<number> | null>(null);
+  const [showArchived, setShowArchived] = useState(false);
+  useEffect(() => {
+    const q = query.trim();
+    if (!q) { setMatches(null); return; }
+    let alive = true;
+    const timer = setTimeout(() => {
+      request<RemoteSearchResponse>(url("/api/search", undefined, { q: q.slice(0, REMOTE_LIMITS.search) }))
+        .then(r => { if (alive) setMatches(new Set(r.chatIds)); }).catch(onError);
+    }, 300);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [query, onError]);
+  // Search covers archived chats too, so their matches are listed.
+  const groups = chatGroups(chats, projects, showArchived || !!matches, matches);
   return (
-    <nav className="flex-1 overflow-y-auto p-2" aria-label="채팅 목록">
-      {groups.map(({ project, chats }) => (
-        <section key={project.id} className="mb-3">
-          <h2 className="px-2 py-1 text-[11.5px] font-medium text-muted-foreground">{project.name}</h2>
-          {chats.map(c => (
-            <button key={c.id} type="button" onClick={() => onSelect(c.id)} aria-current={c.id === selected}
-              className={cn("flex w-full items-center gap-2 rounded-md px-2 py-2.5 text-left text-[13.5px] hover:bg-accent", c.id === selected && "bg-accent")}>
-              <span className="min-w-0 flex-1 truncate">{c.title}</span>
-              <StatusBadge status={c.status} />
-            </button>
+    <>
+      <div className="grid gap-1.5 border-b px-3 py-2">
+        <div className="relative">
+          <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+          <input type="search" value={query} maxLength={REMOTE_LIMITS.search} onChange={e => setQuery(e.target.value)} placeholder="채팅 검색 (제목·내용)" aria-label="채팅 검색" className={cn(FIELD, "h-9 pl-8 text-[13.5px]")} />
+        </div>
+        <label className="flex items-center gap-2 text-[12px] text-muted-foreground"><input type="checkbox" checked={showArchived} onChange={e => setShowArchived(e.target.checked)} /> 보관된 채팅 보기</label>
+      </div>
+      {!groups.length ? <div className="p-4 text-[13px] text-muted-foreground">{matches ? "검색 결과가 없습니다." : "표시할 채팅이 없습니다."}</div> : (
+        <nav className="flex-1 overflow-y-auto p-2" aria-label="채팅 목록">
+          {groups.map(({ project, chats }) => (
+            <section key={project.id} className="mb-3">
+              <div className="flex items-center gap-1 px-2">
+                <h2 className="min-w-0 flex-1 truncate py-1 text-[11.5px] font-medium text-muted-foreground">{project.name}{project.archived ? " (보관됨)" : ""}</h2>
+                {!project.archived && <button type="button" onClick={() => onNewChat(project.id)} aria-label={`${project.name}에 새 채팅`} title="새 채팅" className="rounded p-1.5 text-muted-foreground hover:bg-accent"><Plus className="size-4" /></button>}
+              </div>
+              {chats.map(c => (
+                <button key={c.id} type="button" onClick={() => onSelect(c.id)} aria-current={c.id === selected}
+                  className={cn("flex w-full items-center gap-2 rounded-md px-2 py-2.5 text-left text-[13.5px] hover:bg-accent", c.id === selected && "bg-accent", c.archived && "opacity-60")}>
+                  {c.unread ? <span className="size-2 shrink-0 rounded-full bg-primary" role="img" aria-label="읽지 않음" /> : <span className="size-2 shrink-0" />}
+                  <span className={cn("min-w-0 flex-1 truncate", c.unread && "font-semibold")}>{c.title}</span>
+                  <StatusBadge status={c.status} />
+                </button>
+              ))}
+              {!chats.length && <div className="px-2 py-1.5 text-[12px] text-muted-foreground">채팅 없음</div>}
+            </section>
           ))}
-        </section>
-      ))}
-    </nav>
+        </nav>
+      )}
+    </>
   );
 }
 
 function StatusBadge({ status }: { status: ChatStatus }) {
   return <span className={cn("shrink-0 rounded-md border px-1.5 py-0.5 text-[11px]",
-    status === "working" && "border-primary/50 text-primary", status === "approval" && "border-warning/60 text-warning",
+    status === "working" && "border-primary/50 text-primary", (status === "approval" || status === "interrupted") && "border-warning/60 text-warning",
     status === "error" && "border-destructive/50 text-destructive", status === "done" && "text-success")}>{STATUS_LABEL[status]}</span>;
 }
 
-function ChatPane({ chat, detail, onBack, onError }: { chat: Chat; detail?: Detail; onBack: () => void; onError: (e: unknown) => void }) {
+function ChatPane({ chat, detail, onBack, onSettings, onError }: { chat: Chat; detail?: Detail; onBack: () => void; onSettings: () => void; onError: (e: unknown) => void }) {
   const live = chat.status === "working" || chat.status === "approval";
   const items = useMemo(() => (detail ? buildItems(detail.events, undefined, live) : []), [detail, live]);
   const plan = useMemo(() => (detail ? planOf(detail.events) : null), [detail]);
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   useEffect(() => { if (stick.current) scroller.current?.scrollTo({ top: scroller.current.scrollHeight }); }, [items]);
-  const [stopping, setStopping] = useState(false);
-  const stop = async () => {
-    setStopping(true);
-    try { await request(`/api/chats/${chat.id}/stop`, {}); } catch (e) { onError(e); } finally { setStopping(false); }
+  const [pending, setPending] = useState(false);
+  const act = async (path: string, body: unknown = {}) => {
+    setPending(true);
+    try { await request(path, body); } catch (e) { onError(e); } finally { setPending(false); }
   };
+  const command = (name: string, arg = "") => act(url("/api/chats/:id/command", chat.id), { name, arg });
   const agents = detail?.agents ?? [];
   return (
     <div className="flex h-full flex-col">
-      <header className="flex items-center gap-2 border-b px-3 py-2.5">
+      <header className="flex items-center gap-1.5 border-b px-2 py-2 md:px-3">
         <Btn variant="ghost" className="md:hidden" onClick={onBack} aria-label="채팅 목록"><ArrowLeft /></Btn>
-        <h1 className="min-w-0 flex-1 truncate font-semibold">{chat.title}</h1>
+        <h1 className="min-w-0 flex-1 truncate font-semibold">{chat.title}{chat.archived && <span className="ml-1.5 text-[11.5px] font-normal text-muted-foreground">(보관됨)</span>}</h1>
         <StatusBadge status={chat.status} />
-        {busyStatus(chat.status) && <Btn variant="destructive" disabled={stopping} onClick={() => void stop()}><Square /> 중지</Btn>}
+        {live && <Btn variant="ghost" disabled={pending} onClick={() => void act(url("/api/chats/:id/pause", chat.id))} aria-label="일시정지" title="일시정지"><Pause /></Btn>}
+        {chat.status === "pausing" && <Btn variant="ghost" disabled aria-label="일시정지하는 중"><LoaderCircle className="animate-spin" /></Btn>}
+        {chat.status === "paused" && <Btn variant="ghost" disabled={pending} onClick={() => void act(url("/api/chats/:id/resume", chat.id))} aria-label="재개" title="재개"><Play /></Btn>}
+        {busyStatus(chat.status) && <Btn variant="destructive" disabled={pending} onClick={() => void act(url("/api/chats/:id/stop", chat.id))} aria-label="중지"><Square /><span className="hidden sm:inline">중지</span></Btn>}
+        <Btn variant="ghost" onClick={onSettings} aria-label="채팅 설정" title="채팅 설정"><Settings2 /></Btn>
       </header>
-      <TeamPanel chat={chat} agents={agents} consults={detail?.consults ?? []} plan={plan} />
+      {chat.status === "interrupted" && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-warning/50 bg-warning/10 px-3 py-2 text-[13px] md:px-6">
+          <span className="min-w-0 flex-1">앱이 종료되어 작업이 중단되었습니다.</span>
+          <Btn disabled={pending} onClick={() => void act(url("/api/chats/:id/resume", chat.id))}><Play /> 이어서 진행</Btn>
+          <Btn variant="ghost" disabled={pending} onClick={() => void act(url("/api/chats/:id/dismiss-interrupted", chat.id))} aria-label="중단 알림 닫기"><X /></Btn>
+        </div>
+      )}
+      <GoalBar chat={chat} pending={pending} onClear={() => void command("goal", "clear")} />
+      <TeamPanel chat={chat} agents={agents} consults={detail?.consults ?? []} plan={plan} pending={pending} onPlan={name => void command(name)} />
       <div ref={scroller} onScroll={e => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; }} className="flex-1 overflow-y-auto px-3 py-4 md:px-6">
         {!detail ? <div className="flex justify-center p-6 text-muted-foreground"><LoaderCircle className="size-5 animate-spin" /></div>
           : <div className="mx-auto grid max-w-3xl gap-3">{items.map(item => <ItemView key={item.key} item={item} chat={chat} agents={agents} live={live} onError={onError} />)}</div>}
@@ -241,42 +297,76 @@ function ChatPane({ chat, detail, onBack, onError }: { chat: Chat; detail?: Deta
   );
 }
 
-function TeamPanel({ chat, agents, consults, plan }: { chat: Chat; agents: ChatAgent[]; consults: Consult[]; plan: ReturnType<typeof planOf> }) {
+const GOAL_LABEL = { active: "진행 중", complete: "완료", blocked: "막힘", paused: "멈춤" } as const;
+
+function GoalBar({ chat, pending, onClear }: { chat: Chat; pending: boolean; onClear: () => void }) {
+  const g = chat.goal;
+  if (!g) return null;
+  return (
+    <div className="flex items-start gap-2 border-b bg-primary/5 px-3 py-2 text-[12.5px] md:px-6">
+      <Flag className="mt-0.5 size-4 shrink-0 text-primary" />
+      <div className="min-w-0 flex-1">
+        <div><span className="font-medium">목표</span> · {GOAL_LABEL[g.status]} · {g.turns}번째 진행</div>
+        <div className="break-words">{g.objective}</div>
+        {g.progress && <div className="text-muted-foreground">{g.progress}</div>}
+      </div>
+      <Btn variant="ghost" disabled={pending} onClick={onClear} aria-label="목표 지우기" title="목표 지우기"><X /></Btn>
+    </div>
+  );
+}
+
+/** Attachments of a sent instruction: images inline, other files as downloads (served by the remote server). */
+function AttachmentLinks({ chatId, attachments }: { chatId: number; attachments: Pick<AttachmentRef, "id" | "name" | "mime" | "size">[] }) {
+  return (
+    <div className="mt-1.5 grid gap-1.5">
+      {attachments.map(a => {
+        // ?chat= lets the server check the attachment belongs to this chat.
+        const href = url("/api/attachments/:id", a.id, { chat: String(chatId) });
+        return INLINE_IMAGE.test(a.mime)
+          ? <a key={a.id} href={href} target="_blank" rel="noopener noreferrer"><img src={href} alt={a.name} loading="lazy" className="max-h-48 max-w-full rounded-md border bg-background object-contain" /></a>
+          : <a key={a.id} href={href} download={a.name} className="text-[12px] underline underline-offset-2">{a.name} ({formatBytes(a.size)})</a>;
+      })}
+    </div>
+  );
+}
+
+function TeamPanel({ chat, agents, consults, plan, pending, onPlan }: {
+  chat: Chat; agents: ChatAgent[]; consults: Consult[]; plan: ReturnType<typeof planOf>; pending: boolean; onPlan: (name: "plan-run" | "plan-cancel") => void;
+}) {
   const active = agents.filter(a => a.status === "active");
   const running = consults.filter(c => c.status === "running");
-  if (!active.length && !plan && !chat.goal) return null;
+  const shownPlan = plan?.state === "cancelled" ? null : plan;
+  const proposed = shownPlan?.state === "proposed";
+  if (!active.length && !shownPlan) return null;
   return (
-    <details className="border-b bg-muted/30 px-3 py-2 text-[12.5px] md:px-6" open={!!plan && busyStatus(chat.status)}>
+    <details className="border-b bg-muted/30 px-3 py-2 text-[12.5px] md:px-6" open={proposed || (!!shownPlan && busyStatus(chat.status))}>
       <summary className="flex cursor-pointer items-center gap-2 font-medium">
-        <Users className="size-4" /> 작업자 {active.length}명{running.length ? ` · ${running.length}건 진행 중` : ""}{plan ? ` · 체크리스트 ${plan.steps.filter(s => s.status === "completed").length}/${plan.steps.length}` : ""}
+        <Users className="size-4" /> 작업자 {active.length}명{running.length ? ` · ${running.length}건 진행 중` : ""}{shownPlan ? ` · ${proposed ? "계획 승인 대기" : "체크리스트"} ${shownPlan.steps.filter(s => s.status === "completed").length}/${shownPlan.steps.length}` : ""}
       </summary>
       <div className="mt-2 grid gap-2">
-        {chat.goal && <div><span className="font-medium">목표</span> · {chat.goal.objective} <span className="text-muted-foreground">({chat.goal.status})</span></div>}
         {active.length > 0 && <ul className="grid gap-1">
           {active.map(a => {
             const work = running.find(c => c.toRole === a.key);
             return <li key={a.id} className="flex gap-2"><span className="font-medium">{a.nickname}</span><span className="min-w-0 truncate text-muted-foreground">{work ? `${CONSULT_KIND_LABEL[work.kind]} 진행 중 · ${work.request.slice(0, 80)}` : `대기 · ${a.job}`}</span></li>;
           })}
         </ul>}
-        {plan && <ol className="grid gap-1" aria-label="체크리스트">
-          {plan.steps.map((s, i) => (
+        {shownPlan?.explanation && <div className="text-muted-foreground">{shownPlan.explanation}</div>}
+        {shownPlan && <ol className="grid gap-1" aria-label="체크리스트">
+          {shownPlan.steps.map((s, i) => (
             <li key={i} className="flex items-start gap-1.5">
               {s.status === "completed" ? <CircleCheck className="mt-0.5 size-3.5 shrink-0 text-success" /> : s.status === "inProgress" ? <CircleDot className="mt-0.5 size-3.5 shrink-0 text-primary" /> : <Circle className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />}
-              <span className={cn(s.status === "completed" && "text-muted-foreground line-through")}>{s.title}</span>
+              <span className={cn(s.status === "completed" && "text-muted-foreground line-through")}>{normalizePlanStepTitle(s.title)}</span>
             </li>
           ))}
         </ol>}
+        {proposed && <div className="flex flex-wrap gap-2">
+          <Btn disabled={pending} onClick={() => onPlan("plan-run")}><Play /> 계획 실행</Btn>
+          <Btn variant="outline" disabled={pending} onClick={() => onPlan("plan-cancel")}><X /> 계획 취소</Btn>
+          <span className="self-center text-[12px] text-muted-foreground">수정하려면 아래에 지시를 보내세요.</span>
+        </div>}
       </div>
     </details>
   );
-}
-
-function Card({ children, className }: { children: ReactNode; className?: string }) {
-  return <div className={cn("rounded-lg border bg-card p-3", className)}>{children}</div>;
-}
-
-function Clip({ text, limit = 4000 }: { text: string; limit?: number }) {
-  return <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-md bg-code-bg p-2 font-mono text-[11.5px]">{text.length > limit ? `${text.slice(0, limit)}\n… (${text.length - limit}자 생략)` : text}</pre>;
 }
 
 function ItemView({ item, chat, agents, live, onError }: { item: Item; chat: Chat; agents: ChatAgent[]; live: boolean; onError: (e: unknown) => void }) {
@@ -286,7 +376,7 @@ function ItemView({ item, chat, agents, live, onError }: { item: Item; chat: Cha
         <div className="ml-auto max-w-[85%] rounded-2xl bg-user-bubble px-3.5 py-2 text-[14px] whitespace-pre-wrap text-primary-foreground">
           {item.queued && <div className="mb-1 text-[11px] opacity-80">{item.delivery === "next" ? "다음 순서 예약" : "작업 중 추가 지시"}</div>}
           {item.text}
-          {item.attachments.length > 0 && <div className="mt-1 text-[11px] opacity-80">첨부 {item.attachments.map(a => a.name).join(", ")}</div>}
+          {item.attachments.length > 0 && <AttachmentLinks chatId={chat.id} attachments={item.attachments} />}
         </div>
       );
     case "message":
@@ -399,37 +489,5 @@ function Ask({ item, chat, live, onError }: { item: Extract<Item, { kind: "ask" 
         ) : <div className="mt-2 text-[12px] text-muted-foreground">답변하지 않은 채 종료됨</div>}
       {error && <div role="alert" className="mt-1.5 text-[12px] text-destructive">{error}</div>}
     </Card>
-  );
-}
-
-function Composer({ chat, onError }: { chat: Chat; onError: (e: unknown) => void }) {
-  const [text, setText] = useState("");
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string>();
-  const busy = busyStatus(chat.status);
-  const send = async (delivery: "now" | "next") => {
-    if (!text.trim()) return;
-    setPending(true);
-    setError(undefined);
-    try { await request(`/api/chats/${chat.id}/send`, { text, delivery }); setText(""); }
-    catch (e) { if (e instanceof AuthError) onError(e); else setError(errorText(e)); }
-    finally { setPending(false); }
-  };
-  return (
-    <div className="border-t bg-background px-3 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] md:px-6">
-      <div className="mx-auto grid max-w-3xl gap-2">
-        {error && <div role="alert" className="text-[12.5px] text-destructive">{error}</div>}
-        <textarea value={text} onChange={e => setText(e.target.value)} rows={3} aria-label="지시 입력"
-          placeholder={busy ? "작업 중 추가 지시 (Ctrl+Enter 즉시 전달)" : "새 지시 (Ctrl+Enter 보내기)"}
-          onKeyDown={e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void send("now"); } }}
-          className="w-full resize-none rounded-lg border border-input bg-transparent px-3 py-2 text-[14px] outline-none focus-visible:ring-2 focus-visible:ring-ring/40" />
-        <div className="flex flex-wrap justify-end gap-2">
-          {busy ? <>
-            <Btn variant="outline" disabled={pending || !text.trim()} onClick={() => void send("next")}>다음 순서 예약</Btn>
-            <Btn disabled={pending || !text.trim()} onClick={() => void send("now")}><Send /> 즉시 전달</Btn>
-          </> : <Btn disabled={pending || !text.trim()} onClick={() => void send("now")}><Send /> 보내기</Btn>}
-        </div>
-      </div>
-    </div>
   );
 }
