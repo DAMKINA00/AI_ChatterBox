@@ -11,6 +11,8 @@
 {
 	servers {
 		trusted_proxies static 192.168.0.250/32
+		# NAS가 XFF를 실제 접속자 하나로 교체하므로 오른쪽부터 해석해도 결과는 같다(앞쪽 위조 값을 더 확실히 무시).
+		trusted_proxies_strict
 	}
 }
 

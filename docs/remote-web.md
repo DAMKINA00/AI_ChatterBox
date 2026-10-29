@@ -28,7 +28,7 @@
 
 | 공급자 | 동작 |
 |---|---|
-| `local` | 앱에 저장한 scrypt 비밀번호. NAS 로그인을 쓸 때도 **비상용 로그인**으로 항상 유지됩니다(로그인 화면의 "비상용 로컬 비밀번호로 로그인"). |
+| `local` | 앱에 저장한 scrypt 비밀번호. NAS 로그인을 쓸 때도 **비상용 로그인**으로 항상 유지됩니다(로그인 화면의 "비상용 로컬 비밀번호로 로그인"). OTP가 없으므로 **기본값은 LAN·이 PC(사설·루프백 IP)에서만 허용**하고 인터넷 IP에서는 통일 실패 응답을 보냅니다. 원격 웹 접속 창의 "인터넷에서도 비상용 로그인 허용"은 기본 꺼짐이며, 비밀번호가 20자 이상일 때만 켤 수 있습니다. 현재 운영 결정(NAS 계정만 사용)에서는 꺼 둡니다. |
 | `synology-dsm` | 이 PC가 LAN에서 DSM Web API로 확인합니다. `SYNO.API.Info`로 로그인 API 경로를 조회한 뒤, `SYNO.API.Auth` login(version 6, `account`·`passwd`·`otp_code`, POST 본문)을 보냅니다. 성공하면 바로 `logout`합니다. NAS 비밀번호와 sid는 저장하거나 로그에 남기지 않습니다. |
 | OIDC (Synology SSO Server 등) | 아직 구현하지 않았습니다. `AuthProvider` 인터페이스(`verify`)에 맞춰 공급자를 추가하면 됩니다. Authorization Code + PKCE처럼 리디렉션이 필요한 흐름은 콜백 경로를 함께 추가해야 합니다. |
 
@@ -99,7 +99,7 @@ NAS 로그인 보안 규칙:
 - 이 구성에서는 Let's Encrypt 확인 요청이 NAS로 가므로, **공인 인증서는 NAS Caddy가 발급**해야 합니다. 이 PC Caddy만 설정하면 발급이 계속 실패합니다(인증 확인 요청이 HTTPS로 넘겨지거나 `tls: internal error`).
 - **이 PC Caddy** (`docs/remote-web.Caddyfile` 상단 블록)
   - `ai.damkina.net` 블록에 `tls internal`을 넣어 이 PC의 Let's Encrypt 재시도를 멈춥니다. NAS→이 PC 구간은 Caddy 내부 CA 인증서로 TLS 처리합니다(짧은 유효기간, Caddy가 자동 갱신).
-  - 전역 `servers { trusted_proxies static 192.168.0.250/32 }`: NAS에서 온 요청만 `X-Forwarded-For`를 믿어 `{client_ip}`를 실제 접속자로 만듭니다. 다른 출처(127.0.0.1, 다른 LAN 기기)가 보낸 `X-Forwarded-For`와 위조한 `X-ChatterBox-Client-IP`는 무시되거나 덮어쓰입니다(임시 Caddy로 확인).
+  - 전역 `servers { trusted_proxies static 192.168.0.250/32; trusted_proxies_strict }`(2026-10-30 strict 추가, 백업 `Caddyfile.bak-20261030-0044-strict`). NAS가 XFF를 실제 접속자 하나로 교체하므로 오른쪽부터 해석해도 결과는 같습니다. NAS에서 온 요청만 `X-Forwarded-For`를 믿어 `{client_ip}`를 실제 접속자로 만듭니다. 다른 출처(127.0.0.1, 다른 LAN 기기)가 보낸 `X-Forwarded-For`와 위조한 `X-ChatterBox-Client-IP`는 무시되거나 덮어쓰입니다(임시 Caddy로 확인).
   - 기존 사이트 영향: relight 게이트웨이는 loopback에서 온 `CF-Connecting-IP`만 쓰고 `X-Forwarded-*`는 쓰지 않습니다(`gateway.py`의 `trusted_client_ip`). 접근 로그는 설정돼 있지 않습니다. 적용 전후 응답이 같음을 확인했습니다.
   - `basic_auth`를 쓴다면 이 PC 블록에 둡니다(NAS에는 두지 않음, 중복 인증 방지). 현재는 쓰지 않습니다.
 - **NAS Caddy** (`docs/remote-web.Caddyfile` 하단 주석 블록)
@@ -141,7 +141,7 @@ NAS 로그인 보안 규칙:
 | DNS rebinding | `Host` 헤더가 공개 주소 호스트나 127.0.0.1/localhost:포트가 아니면 421 |
 | 인증 없는 경로 | `POST /api/login`, 로그인 화면용 `GET /api/auth-info`(설정된 로그인 방식 이름만 응답), 정적 페이지(`/`, `/assets/*`)뿐. 정적 파일에는 사용자 데이터가 없음 |
 | XSS | Markdown은 react-markdown으로 렌더링하며 raw HTML은 렌더링하지 않음. 링크는 기본 URL 필터를 거치고 `noopener noreferrer`로 엶. 외부 이미지는 불러오지 않음. CSP는 `default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'` 등 |
-| 노출 정보 | 프로젝트는 id·이름만 보냄(폴더 경로·설정 제외). 첨부 파일 내용과 이미지 원본은 제공하지 않음 |
+| 노출 정보 | 프로젝트는 id·이름만 보냄(폴더 경로·설정 제외). 첨부 파일은 소유 채팅을 지정한 다운로드로만 제공하고 로컬 경로는 보내지 않음. 원격 업로드·정리 규칙(채팅 삭제 시 원격 업로드 파일도 삭제)은 `docs/remote-web-features.md`의 5차 리뷰 절 참고 |
 
 > 원격 지시와 승인은 이 PC에서 관리자 권한 코어가 명령을 실행하게 할 수 있습니다. 긴 비밀번호를 쓰고, 허용 NAS 계정에는 OTP를 켜세요. 앞단 Caddy `basic_auth`는 선택 사항이며 현재는 쓰지 않습니다(위 "현재 운영 결정" 참고).
 
