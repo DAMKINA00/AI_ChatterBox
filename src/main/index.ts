@@ -156,7 +156,7 @@ function createWindow() {
 }
 
 function registerUi(channels: string[], rpc: CoreRpc) {
-  const internal = new Set(["attachment:info", "window:save", "files:resolve-link"]);
+  const internal = new Set(["attachment:info", "window:save", "files:resolve-link", "remote:chat-patch", "remote:project-patch", "remote:chat-delete", "remote:attachment-remove", "remote:att-bytes", "remote:uploads", "remote:send"]);
   const local = new Set(["theme:set", "aistudio"]);
   for (const channel of channels.filter(channel => !internal.has(channel) && !local.has(channel))) {
     ipcMain.handle(channel, async (_event, ...args) => {
@@ -186,7 +186,13 @@ function registerUi(channels: string[], rpc: CoreRpc) {
     return rpc.call("aistudio", [action, input]);
   });
   // Remote web settings stay in the UI process (the server lives here); the core never sees the password hash.
-  remote = new RemoteWeb({ file: join(dataDir, "remote-web.json"), staticDir: join(import.meta.dirname, "../renderer"), call: (channel, args) => rpc.call(channel, args) });
+  remote = new RemoteWeb({
+    file: join(dataDir, "remote-web.json"), staticDir: join(import.meta.dirname, "../renderer"), call: (channel, args) => rpc.call(channel, args),
+    notifyDesktop: (channel, args) => {
+      if (channel === "chat:deleted") chatCache = chatCache.filter(chat => chat.id !== args[0]);
+      win?.webContents.send(channel, ...args);
+    },
+  });
   void remote.apply();
   ipcMain.handle("remote-web", (_event, action: RemoteWebAction, input?: RemoteWebInput) => remote!.action(action, input));
   ipcMain.handle("shell:openPath", async (_event, path: string) => {

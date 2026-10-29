@@ -574,4 +574,8 @@ export interface ChatterBoxApi {
   onGeminiWebLogin(cb: (status: GeminiWebStatus) => void): () => void;
   /** Main asks to show a chat (tray notification clicked). */
   onSelectChat(cb: (chatId: number) => void): () => void;
+  /** A chat was deleted from the remote web. */
+  onChatDeleted(cb: (chatId: number) => void): () => void;
+  /** Projects were created or changed from the remote web. */
+  onProjectsUpdated(cb: () => void): () => void;
 }

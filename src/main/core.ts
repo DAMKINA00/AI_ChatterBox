@@ -1,6 +1,8 @@
 import { app } from "electron";
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { BUSY_STATUSES, chatApprovalChange, checkRemoteSend, listRemoteUploads, mergeProjectSettings, remoteError, removeRemoteUpload, saveRemoteUpload } from "./remote-core";
+import type { RemoteUploadKey } from "../shared/remote-web";
 import { connect } from "node:net";
 import { execFileSync } from "node:child_process";
 import { CLI_ACCOUNT_KINDS, type AgentKind, type ApprovalDecision, type CliAccountId, type CliAccountKind, type CliAccountPolicies, type ProjectSettings, type Theme, type GeminiWebAccountId } from "../shared/types";
@@ -18,6 +20,8 @@ let chats: ChatManager;
 let attachments: AttachmentStore;
 let orchestrator: Orchestrator;
 let preparingUpdate = false;
+/** Chats being deleted from the remote web; no new work may start on them. */
+const remoteDeleting = new Set<number>();
 let pendingCalls = 0;
 
 function withAccountPolicy(settings: ProjectSettings): ProjectSettings {
@@ -58,9 +62,15 @@ function registerHandlers(rpc: CoreRpc) {
       for (const c of store.listChats().filter((c) => c.projectId === id)) await chats.resetDrivers(c.id);
     return p;
   });
+  // Remote-upload files live as long as a record references them: deleting chats drops their records,
+  // so their remote uploads (sent or not) are collected right after. Desktop attachment files are kept.
+  const remoteUploadsOf = (chatIds: number[]) => chatIds.flatMap((c) => store.attachmentPaths(c)).filter((p) => attachments.isRemoteUpload(p));
   ipcMain.handle("projects:delete", async (_e, id: number) => {
-    for (const c of store.listChats().filter((c) => c.projectId === id)) await chats.resetDrivers(c.id);
+    const ids = store.listChats().filter((c) => c.projectId === id).map((c) => c.id);
+    for (const c of ids) await chats.resetDrivers(c);
+    const released = remoteUploadsOf(ids);
     store.deleteProject(id);
+    attachments.gcRemoteUploads({ released });
   });
 
   // chats
@@ -70,7 +80,9 @@ function registerHandlers(rpc: CoreRpc) {
   ipcMain.handle("chats:delete", async (_e, id: number) => {
     await orchestrator.stop(id);
     orchestrator.forget(id);
+    const released = remoteUploadsOf([id]);
     await chats.deleteChat(id);
+    attachments.gcRemoteUploads({ released });
   });
   ipcMain.handle("chats:viewed", (_e, id: number) => {
     if (store.chat(id)?.unread) chats.updateChat(id, { unread: false });
@@ -79,16 +91,62 @@ function registerHandlers(rpc: CoreRpc) {
   ipcMain.handle("chats:agents", (_e, id: number) => store.listAgents(id));
   ipcMain.handle("chats:events", (_e, id: number) => store.events(id));
   ipcMain.handle("chats:search", (_e, q: string) => (q.trim() ? store.searchChats(q.trim()) : []));
-  ipcMain.handle("chats:send", (_e, id: number, text: string, attachmentIds: number[], delivery?: "now" | "next") => chats.send(id, text, attachmentIds, delivery));
+  const notDeleting = (id: number) => { if (remoteDeleting.has(id)) throw new Error("채팅을 삭제하는 중입니다."); };
+  ipcMain.handle("chats:send", (_e, id: number, text: string, attachmentIds: number[], delivery?: "now" | "next") => { notDeleting(id); return chats.send(id, text, attachmentIds, delivery); });
   ipcMain.handle("chats:stop", (_e, id: number) => orchestrator.stop(id));
   ipcMain.handle("chats:pause", (_e, id: number) => orchestrator.pause(id));
-  ipcMain.handle("chats:resume", (_e, id: number) => orchestrator.resume(id));
-  ipcMain.handle("chats:command", (_e, id: number, name: string, arg: string) => orchestrator.command(id, name, arg));
+  ipcMain.handle("chats:resume", (_e, id: number) => { notDeleting(id); return orchestrator.resume(id); });
+  ipcMain.handle("chats:command", (_e, id: number, name: string, arg: string) => { notDeleting(id); return orchestrator.command(id, name, arg); });
   ipcMain.handle("chats:dismissInterrupted", (_e, id: number) => orchestrator.dismissInterrupted(id));
   ipcMain.handle("chats:approve", (_e, id: number, approvalId: string, decision: ApprovalDecision) =>
     chats.answerApproval(id, approvalId, decision),
   );
   ipcMain.handle("chats:answerAsk", (_e, id: number, askId: string, answer: string) => orchestrator.answerAsk(id, askId, answer));
+
+  // ---- remote web: check-and-change in one synchronous step (no await between reading and writing),
+  // so a desktop change in between cannot be overwritten or bypassed. Errors carry "HTTP<status>:".
+  ipcMain.handle("remote:chat-patch", (_e, id: number, patch: Record<string, unknown>, confirm: boolean) => {
+    const chat = store.chat(id);
+    if (!chat) throw remoteError(404, "채팅이 없습니다.");
+    const approvalChange = chatApprovalChange(chat, store.project(chat.projectId)!.settings, patch, confirm === true);
+    return { chat: chats.updateChat(id, patch), approvalChange };
+  });
+  ipcMain.handle("remote:project-patch", (_e, id: number, patch: { name?: string; archived?: boolean; settings?: Record<string, unknown> }, confirm: boolean) => {
+    const project = store.project(id);
+    if (!project) throw remoteError(404, "프로젝트가 없습니다.");
+    const merged = patch.settings ? mergeProjectSettings(project.settings, patch.settings, confirm === true) : undefined;
+    const settings = merged?.settings, approvalChange = merged?.approvalChange;
+    const updated = store.updateProject(id, { name: patch.name, archived: patch.archived, settings });
+    if (settings) for (const c of store.listChats().filter((c) => c.projectId === id)) chats.approvals.invalidate(c.id);
+    return { project: updated, approvalChange };
+  });
+  ipcMain.handle("remote:chat-delete", async (_e, id: number, title: string) => {
+    const chat = store.chat(id);
+    if (!chat) throw remoteError(404, "채팅이 없습니다.");
+    if (chat.title !== title) throw remoteError(400, "삭제하려면 채팅 제목을 정확히 입력하세요.");
+    // Never stops work: a busy chat is refused, and no new work may start while the delete runs.
+    if (BUSY_STATUSES.includes(chat.status) || chats.isBusy(id)) throw remoteError(409, "작업 중인 채팅은 삭제할 수 없습니다. 먼저 중지하세요.");
+    remoteDeleting.add(id);
+    const released = remoteUploadsOf([id]); // no remote upload can be added while it is marked deleting
+    try {
+      orchestrator.forget(id);
+      await chats.deleteChat(id);
+    } finally { remoteDeleting.delete(id); }
+    // As on the desktop, the chat folder is kept; the chat's remote-upload files (sent or not) go.
+    attachments.gcRemoteUploads({ released });
+  });
+  // Remote uploads: remote-pending/<UUID><ext>, sent or not; the only file cleanup is gcRemoteUploads()
+  // (no tracking state). Remove and send name an upload by {id, uuid}.
+  ipcMain.handle("remote:att-bytes", (_e, chatId: number, name: string, mime: string, bytes: Uint8Array, storageBytes: number) => {
+    notDeleting(chatId);
+    return saveRemoteUpload(store, attachments, chatId, name, mime, bytes, storageBytes);
+  });
+  ipcMain.handle("remote:uploads", (_e, chatId?: number) => listRemoteUploads(store, attachments, chatId));
+  ipcMain.handle("remote:attachment-remove", (_e, chatId: number, key: RemoteUploadKey) => removeRemoteUpload(store, attachments, chatId, key));
+  ipcMain.handle("remote:send", (_e, chatId: number, text: string, keys: RemoteUploadKey[], delivery?: "now" | "next") => {
+    notDeleting(chatId);
+    return chats.send(chatId, text, checkRemoteSend(store, attachments, chatId, keys), delivery);
+  });
 
   // attachments
   ipcMain.handle("artifacts:previewImage", (_e, chatId: number, href: string) => previewImage(store, attachments, chatId, href));
@@ -204,6 +262,9 @@ export async function runCore(dataDir: string, pipe: string, token: string, test
     if (process.platform === "win32" && !test && !elevated) throw new Error("코어는 관리자 권한으로 실행해야 합니다.");
     store = new Store(join(dataDir, "chatterbox.db"));
     attachments = new AttachmentStore(join(dataDir, "attachments"), store);
+    // Remote-upload collection at start and every 10 minutes (unref: never keeps the core alive).
+    attachments.gcRemoteUploads();
+    setInterval(() => attachments.gcRemoteUploads(), 10 * 60_000).unref();
     chats = new ChatManager(store, {
       agents: (id, list) => rpc.emit("agents:updated", id, list),
       event: event => rpc.emit("chat:event", event),

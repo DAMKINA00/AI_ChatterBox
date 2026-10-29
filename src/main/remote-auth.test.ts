@@ -156,7 +156,8 @@ async function dsmRemote(t: { after(fn: () => unknown): void }, dsm: { url: stri
   t.after(async () => { await remote.stop(); rmSync(dir, { recursive: true, force: true }); });
   await remote.action("set-password", { password: "local emergency pass" });
   await assert.rejects(remote.action("update", { provider: "synology-dsm" }), /허용 계정/);
-  await remote.action("update", { enabled: true, port, publicOrigin: `http://127.0.0.1:${port}`, provider: "synology-dsm", dsmUrl: dsm.url, dsmCertSha256: FINGERPRINT, dsmAllowedUsers: ["Admin"] });
+  // The emergency login is used from public test IPs here, so allow it from the internet (20-char password).
+  await remote.action("update", { enabled: true, port, publicOrigin: `http://127.0.0.1:${port}`, provider: "synology-dsm", dsmUrl: dsm.url, dsmCertSha256: FINGERPRINT, dsmAllowedUsers: ["Admin"], allowInternetEmergency: true });
   const base = `http://127.0.0.1:${port}`;
   const login = (body: unknown, ip = "203.0.113.10") => fetch(`${base}/api/login`, { method: "POST", headers: { "content-type": "application/json", origin: base, "x-chatterbox-client-ip": ip }, body: JSON.stringify(body) });
   /** Resolves once `n` NAS logins are running or waiting in the NAS queue. */

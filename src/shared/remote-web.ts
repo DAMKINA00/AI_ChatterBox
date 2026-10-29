@@ -69,6 +69,12 @@ export interface RemoteWebStatus {
   projectRoots?: RemoteProjectRoot[];
   /** Recent remote state changes, newest first (filled by the server once the features API lands). */
   audit?: RemoteAuditEntry[];
+  /** Local emergency password accepted from internet client IPs (default off: LAN/loopback only). */
+  allowInternetEmergency?: boolean;
+  /** The local emergency password is at least 20 characters (required to allow it from the internet). */
+  emergencyPasswordLong?: boolean;
+  /** Cap on the disk use of all remote uploads, sent or not (REMOTE_UPLOAD_STORAGE range). */
+  uploadStorageGb?: number;
 }
 
 export type RemoteWebAction = "status" | "update" | "set-password" | "logout-all" | "revoke" | "dsm-probe";
@@ -87,7 +93,20 @@ export interface RemoteWebInput {
   dsmFailureLimit?: number;
   /** D1: folders under which remote users may create project folders (desktop-only setting). */
   projectRoots?: RemoteProjectRoot[];
+  /** Allow the local emergency password from internet (non-private) client IPs. Default off. */
+  allowInternetEmergency?: boolean;
+  /** REMOTE_UPLOAD_STORAGE.minGb..maxGb. */
+  uploadStorageGb?: number;
 }
+
+/**
+ * Disk use of remote uploads, checked by the core right before an upload is written (else 507):
+ * the total of all remote uploads, sent or not (every record with a uuid), stays within the cap set in
+ * the desktop remote web dialog, and the disk keeps at least minFreeBytes free afterwards.
+ */
+export const REMOTE_UPLOAD_STORAGE = { defaultGb: 2, minGb: 0.1, maxGb: 20, minFreeBytes: 5 * 1024 ** 3 } as const;
+export const clampUploadStorageGb = (gb: unknown): number =>
+  typeof gb === "number" && Number.isFinite(gb) ? Math.min(REMOTE_UPLOAD_STORAGE.maxGb, Math.max(REMOTE_UPLOAD_STORAGE.minGb, gb)) : REMOTE_UPLOAD_STORAGE.defaultGb;
 
 // =====================================================================================
 // 원격 웹 기능 확장 API (docs/remote-web-features.md, D1~D8 승인 2026-10-29)
@@ -104,7 +123,7 @@ export interface RemoteApiError { error: string }
  * Status codes the extended API uses (in addition to 401/403/415/421 of the base rules).
  * 428 = the change raises autonomy (D3) and needs `confirm: true`.
  */
-export type RemoteApiStatus = 200 | 201 | 400 | 404 | 409 | 413 | 428 | 429 | 503;
+export type RemoteApiStatus = 200 | 201 | 400 | 404 | 409 | 413 | 428 | 429 | 503 | 507;
 
 /** Paths. `:id` segments are filled with `remotePath()`. */
 export const REMOTE_API = {
@@ -116,7 +135,7 @@ export const REMOTE_API = {
   stream: "/api/stream",
   chats: "/api/chats",                              // GET list (existing) · POST create (A)
   chat: "/api/chats/:id",                           // GET snapshot (existing)
-  chatSend: "/api/chats/:id/send",                  // POST (existing; extended with attachmentIds)
+  chatSend: "/api/chats/:id/send",                  // POST RemoteSendRequest (existing; extended with attachments)
   chatStop: "/api/chats/:id/stop",
   chatApprove: "/api/chats/:id/approve",
   chatAnswer: "/api/chats/:id/answer",
@@ -133,9 +152,9 @@ export const REMOTE_API = {
   projectUpdate: "/api/projects/:id/update",        // POST RemoteProjectPatch (A name/archived, B settings)
   // B
   chatDelete: "/api/chats/:id/delete",              // POST RemoteChatDelete (D8)
-  chatAttachments: "/api/chats/:id/attachments",    // POST RemoteAttachmentUpload (D4)
-  attachment: "/api/attachments/:id",               // GET file bytes
-  attachmentRemove: "/api/attachments/:id/remove",  // POST {}
+  chatAttachments: "/api/chats/:id/attachments",    // POST RemoteAttachmentUpload (D4); GET RemoteAttachmentList = unsent remote uploads (the truth for the composer)
+  attachment: "/api/attachments/:id",               // GET file bytes, ?chat=<chatId> required (ownership check; 404 otherwise); an unsent upload also needs &uuid=
+  attachmentRemove: "/api/attachments/:id/remove",  // POST RemoteAttachmentRemove → drops the record of an unsent remote upload, then collection deletes the file (later if locked)
   usage: "/api/usage",                              // GET ?refresh=0|1 (read-only, D5)
   aiStudioUsage: "/api/aistudio/usage",             // GET ?range=
 } as const;
@@ -157,15 +176,49 @@ export const REMOTE_LIMITS = {
   usageRefreshSeconds: 60,
 } as const;
 
-/** D4: accepted upload types (others → 415). Executable/script types are never accepted. */
-export const REMOTE_ATTACHMENT_MIME_PREFIXES = ["image/", "text/"] as const;
-export const REMOTE_ATTACHMENT_MIME_TYPES = [
-  "application/pdf", "application/json", "application/zip", "application/x-zip-compressed",
-  "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "application/vnd.ms-powerpoint", "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-] as const;
-export const REMOTE_ATTACHMENT_BLOCKED_EXTENSIONS = [".exe", ".msi", ".bat", ".cmd", ".com", ".scr", ".ps1", ".vbs", ".js", ".jse", ".wsf", ".lnk", ".dll", ".reg", ".hta"] as const;
+/**
+ * D4 allow-list: extension → the MIME type the server stores (the browser's type is ignored). Anything
+ * else — scripts (.py .ps1 .psm1 .bat .cmd .vbs .js .sh …), executables, SVG — is refused (415).
+ * Content must also match the type (magic bytes; text must contain no NUL byte).
+ */
+export const REMOTE_ATTACHMENT_TYPES: Readonly<Record<string, string>> = {
+  ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
+  ".txt": "text/plain", ".md": "text/markdown", ".csv": "text/csv", ".tsv": "text/tab-separated-values", ".log": "text/plain",
+  ".json": "application/json", ".yaml": "text/yaml", ".yml": "text/yaml", ".xml": "application/xml",
+  ".pdf": "application/pdf", ".zip": "application/zip",
+  ".doc": "application/msword", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".xls": "application/vnd.ms-excel", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".ppt": "application/vnd.ms-powerpoint", ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+};
+
+/**
+ * Windows-safe upload name: trailing dots/spaces removed (Windows drops them), and names with path or
+ * stream separators (`\ / :`), control characters or reserved device names refused. Returns the name
+ * and its lower-case extension, or null when the name cannot be used.
+ */
+export function normalizeRemoteFileName(raw: string): { name: string; ext: string } | null {
+  const name = raw.replace(/[. ]+$/, "").trim();
+  if (!name || name.length > 200 || /[\\/:*?"<>|\x00-\x1f]/.test(name)) return null;
+  if (/^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])(\.|$)/i.test(name)) return null;
+  const i = name.lastIndexOf(".");
+  return { name, ext: i > 0 ? name.slice(i).toLowerCase() : "" };
+}
+
+/**
+ * Remote upload budget. perChatBytes/totalBytes: unsent remote uploads as stored (pending = uploaded but
+ * not yet sent). inFlight*: uploads being received, reserved from Content-Length before the body is read.
+ * inFlightBytes is below 4 × the largest body (~14 MB of base64 JSON), so it limits large uploads to 2 at once.
+ */
+export const REMOTE_UPLOAD_BUDGET = {
+  perChatBytes: 30 * 1024 * 1024, totalBytes: 200 * 1024 * 1024,
+  inFlightUploads: 4, inFlightPerSession: 2, inFlightBytes: 40 * 1024 * 1024,
+} as const;
+
+/** Existing numeric project settings and their ranges (same as the desktop project dialog). */
+export const REMOTE_NUMBER_SETTINGS = {
+  maxClaudeWorkers: [1, 6], maxGptWorkers: [1, 6], maxGeminiWorkers: [0, 6], maxGrokWorkers: [0, 6], maxDeepseekWorkers: [0, 6],
+  maxConsults: [1, 999], maxReviews: [0, 99],
+} as const;
 
 // ---------- chats (A / B)
 
@@ -204,8 +257,11 @@ export const REMOTE_COMMANDS = ["plan", "plan-run", "plan-cancel", "goal", "revi
 export type RemoteCommandName = (typeof REMOTE_COMMANDS)[number];
 export interface RemoteCommandRequest { name: RemoteCommandName; arg: string }
 
-/** POST /api/chats/:id/send (existing, extended). attachmentIds: only this chat's remote uploads not yet sent. */
-export interface RemoteSendRequest { text: string; delivery?: "now" | "next"; attachmentIds?: number[] }
+/**
+ * POST /api/chats/:id/send (existing, extended). attachments: only this chat's remote uploads not yet sent,
+ * each as {id, uuid}; one that is gone or whose uuid differs (stale list) → 409.
+ */
+export interface RemoteSendRequest { text: string; delivery?: "now" | "next"; attachments?: RemoteUploadKey[] }
 
 /** GET /api/search?q= */
 export interface RemoteSearchResponse { chatIds: number[] }
@@ -221,9 +277,26 @@ export interface RemoteOk { ok: true }
 /** Attachment without its local path. */
 export interface RemoteAttachment { id: number; name: string; mime: string; size: number }
 
-/** POST /api/chats/:id/attachments. `data` is base64 of at most REMOTE_LIMITS.attachmentBytes bytes. */
+/**
+ * A remote upload is named by its id and its UUID together. SQLite may give a removed upload's id to a
+ * new one; the UUID (its file name in remote-pending) is never reused, so a stale pair is refused (409).
+ */
+export interface RemoteUploadKey { id: number; uuid: string }
+export const REMOTE_UPLOAD_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** An unsent remote upload. */
+export interface RemoteUpload extends RemoteAttachment { uuid: string }
+
+/**
+ * POST /api/chats/:id/attachments. `data` is base64 of at most REMOTE_LIMITS.attachmentBytes bytes.
+ * Admitted before the body is read (REMOTE_UPLOAD_BUDGET in-flight limits): too many at once → 429,
+ * body over the limit → 413. Remote-upload storage full or the PC disk low (REMOTE_UPLOAD_STORAGE) → 507.
+ */
 export interface RemoteAttachmentUpload { name: string; mime: string; data: string }
-export interface RemoteAttachmentResponse { attachment: RemoteAttachment }
+export interface RemoteAttachmentResponse { attachment: RemoteUpload }
+/** GET /api/chats/:id/attachments. The chat's unsent remote uploads: kept until removed, sent, or the chat is deleted. */
+export interface RemoteAttachmentList { attachments: RemoteUpload[] }
+/** POST /api/attachments/:id/remove. uuid must match the upload with that id (else 409). */
+export interface RemoteAttachmentRemove { uuid: string }
 
 // ---------- projects (A / B, D1 / D2)
 
@@ -243,8 +316,11 @@ export type RemoteProjectSettings = Pick<ProjectSettings, RemoteProjectSettingKe
 /** Project without its folder path. */
 export interface RemoteProject { id: number; name: string; archived: boolean; createdAt: number; settings: RemoteProjectSettings }
 
-/** D1: an allowed root for new remote projects; the path itself stays on the desktop. */
-export interface RemoteProjectRoot { id: string; label: string; path: string }
+/**
+ * D1: an allowed root for new remote projects; the path itself stays on the desktop.
+ * `real`/`fileId` pin the folder registered on the desktop: a later junction/symlink swap is refused.
+ */
+export interface RemoteProjectRoot { id: string; label: string; path: string; real?: string; fileId?: string }
 export type RemoteProjectRootRef = Omit<RemoteProjectRoot, "path">;
 
 /** GET /api/projects. roots is empty when no allowed root is configured (create disabled). */

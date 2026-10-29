@@ -1133,8 +1133,7 @@ export class ChatManager {
     if (chat.status === "pausing") throw new Error("마스터와 작업자의 중지 확인을 기다리고 있습니다.");
     if (chat.status === "working" || chat.status === "approval" || chat.status === "paused" || this.isBusy(chatId)) {
       if (!this.busySend) throw new Error("작업이 진행 중입니다. 끝나거나 중지한 뒤 보내 주세요.");
-      const ev = this.store.addEvent(chatId, "orch", null, { type: "user", text, attachments, queued: true, delivery });
-      this.store.linkAttachments(attachmentIds, ev.id);
+      const ev = this.store.addUserEvent(chatId, { type: "user", text, attachments, queued: true, delivery }, attachmentIds);
       this.sink.event(ev);
       this.updateChat(chatId, { touch: true });
       await this.busySend(chat, { text, attachments }, delivery);
@@ -1150,8 +1149,7 @@ export class ChatManager {
   async startTurn(chatId: number, display: string, attachmentIds: number[], run: () => Promise<void>) {
     const attachments = this.store.attachmentsFor(attachmentIds);
     const isFirst = !this.store.hasUserEvent(chatId);
-    const userEvent = this.store.addEvent(chatId, "orch", null, { type: "user", text: display, attachments });
-    this.store.linkAttachments(attachmentIds, userEvent.id);
+    const userEvent = this.store.addUserEvent(chatId, { type: "user", text: display, attachments }, attachmentIds);
     this.sink.event(userEvent);
     this.updateChat(chatId, {
       status: "working",

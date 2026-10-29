@@ -4,20 +4,30 @@
 // and extra instructions go through the existing (duplicate-safe) handlers.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, randomBytes, scrypt, timingSafeEqual, type ScryptOptions } from "node:crypto";
-import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { extname, join, resolve, sep } from "node:path";
+import { existsSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { extname, isAbsolute, join, resolve, sep } from "node:path";
 import { isIP } from "node:net";
 import {
-  REMOTE_WEB_DEFAULT_ORIGIN, REMOTE_WEB_DEFAULT_PORT, REMOTE_WEB_MIN_PASSWORD,
-  type RemoteAuthProvider, type RemoteWebAction, type RemoteWebInput, type RemoteWebLoginFailure, type RemoteWebSession, type RemoteWebStatus,
+  REMOTE_UPLOAD_STORAGE, REMOTE_WEB_DEFAULT_ORIGIN, REMOTE_WEB_DEFAULT_PORT, REMOTE_WEB_MIN_PASSWORD, clampUploadStorageGb,
+  type RemoteAuditEntry, type RemoteAuthProvider, type RemoteProjectRoot, type RemoteWebAction, type RemoteWebInput, type RemoteWebLoginFailure, type RemoteWebSession, type RemoteWebStatus,
 } from "../shared/remote-web";
+import { HttpError, RemoteFeatures, folderId, stripLocalPaths } from "./remote-features";
 import { DSM_DEFAULT_URL, DsmProvider, normalizeDsmUrl, normalizeFingerprint, probeDsm, type AuthProvider, type DsmSettings, type LoginResult } from "./remote-auth";
 
 export type CoreCall = (channel: string, args: unknown[]) => Promise<any>;
 
 interface PasswordHash { salt: string; hash: string; N: number; r: number; p: number }
-interface Config { enabled: boolean; port: number; publicOrigin: string; password?: PasswordHash; provider: RemoteAuthProvider; dsm: DsmSettings; trustProxy: boolean; dsmFailureLimit: number }
-interface Session extends RemoteWebSession { key: string; csrf: string }
+interface Config { enabled: boolean; port: number; publicOrigin: string; password?: PasswordHash; provider: RemoteAuthProvider; dsm: DsmSettings; trustProxy: boolean; dsmFailureLimit: number; projectRoots: RemoteProjectRoot[];
+  /** Local emergency password from internet client IPs (default off: private/loopback IPs only). */
+  allowInternetEmergency: boolean;
+  /** The local password was at least 20 characters when set (length only, never the password). */
+  passwordLong: boolean;
+  /** Cap on all remote uploads' disk use (REMOTE_UPLOAD_STORAGE). */
+  uploadStorageGb: number;
+}
+type ClientKind = "local" | "lan" | "internet" | "unknown";
+/** provider/clientKind: an internet session made with the local password ends when that permission is withdrawn. */
+interface Session extends RemoteWebSession { key: string; csrf: string; provider: RemoteAuthProvider; clientKind: ClientKind }
 interface Stream { res: ServerResponse; sessionKey: string; chatId: number | null }
 interface Failures { count: number; first: number; lockedUntil: number }
 
@@ -80,9 +90,18 @@ const token = (bytes: number) => randomBytes(bytes).toString("base64url");
 const scryptAsync = (password: string, salt: Buffer, opts: ScryptOptions) => new Promise<Buffer>((ok, fail) =>
   scrypt(password, salt, 32, { ...opts, maxmem: 128 * opts.N! * opts.r! * 2 }, (error, key) => error ? fail(error) : ok(key)));
 
-class HttpError extends Error {
-  constructor(readonly status: number, message: string, readonly headers: Record<string, string> = {}) { super(message); }
+/** Loopback, RFC 1918, CGNAT-free private ranges and IPv6 ULA/link-local (IPv4-mapped forms included). */
+export function isPrivateIp(ip: string): boolean {
+  const v4 = ip.startsWith("::ffff:") ? ip.slice(7) : ip;
+  if (isIP(v4) === 4) {
+    const [a, b] = v4.split(".").map(Number);
+    return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  }
+  const v6 = ip.toLowerCase();
+  return isIP(v6) === 6 && (v6 === "::1" || /^f[cd][0-9a-f]{2}:/.test(v6) || /^fe[89ab][0-9a-f]:/.test(v6));
 }
+
+const projectRootId =(path: string) => createHash("sha256").update(resolve(path).toLowerCase()).digest("hex").slice(0, 12);
 
 /**
  * Runs tasks with bounded concurrency. A task still waiting is dropped when it waits too long or its
@@ -168,20 +187,39 @@ export class RemoteWeb {
   private authGeneration = 0;
   /** Detailed reasons of recent failed logins, for the app's settings screen only. */
   private loginLog: RemoteWebLoginFailure[] = [];
+  /** Remote state changes (desktop dialog only), newest first. */
+  private auditLog: RemoteAuditEntry[] = [];
+  private readonly features: RemoteFeatures;
   /** SSE message counter; snapshots carry the value at their start so clients replay only newer messages. */
   private seq = 0;
   private heartbeat?: ReturnType<typeof setInterval>;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
 
-  constructor(private opts: { file: string; staticDir: string; call: CoreCall; now?: () => number; sleep?: (ms: number) => Promise<void> }) {
+  constructor(private opts: {
+    file: string; staticDir: string; call: CoreCall; now?: () => number; sleep?: (ms: number) => Promise<void>;
+    /** Tell the desktop window about remote changes the core does not announce (chat:deleted, projects:updated). */
+    notifyDesktop?: (channel: string, args: unknown[]) => void;
+  }) {
     this.now = opts.now ?? Date.now;
     this.sleep = opts.sleep ?? (ms => new Promise(ok => setTimeout(ok, ms)));
     this.config = this.load();
+    this.features = new RemoteFeatures({
+      call: opts.call,
+      body: (req, maxBytes) => this.body(req, maxBytes),
+      send: (res, status, body, headers) => this.send(res, status, body, headers),
+      publish: (channel, args) => { this.publish(channel, args); opts.notifyDesktop?.(channel, args); },
+      audit: (session, action, target, detail) => {
+        this.auditLog = [{ at: this.now(), user: session.user, ip: session.ip, action, target, detail: detail?.slice(0, 300) }, ...this.auditLog].slice(0, 50);
+      },
+      roots: () => this.config.projectRoots,
+      uploadStorageBytes: () => Math.round(this.config.uploadStorageGb * 1024 ** 3),
+      now: () => this.now(),
+    });
   }
 
   private load(): Config {
-    const fallback: Config = { enabled: false, port: REMOTE_WEB_DEFAULT_PORT, publicOrigin: REMOTE_WEB_DEFAULT_ORIGIN, provider: "local", dsm: { url: DSM_DEFAULT_URL, allowedUsers: [] }, trustProxy: true, dsmFailureLimit: DSM_FAILURE_LIMIT_DEFAULT };
+    const fallback: Config = { enabled: false, port: REMOTE_WEB_DEFAULT_PORT, publicOrigin: REMOTE_WEB_DEFAULT_ORIGIN, provider: "local", dsm: { url: DSM_DEFAULT_URL, allowedUsers: [] }, trustProxy: true, dsmFailureLimit: DSM_FAILURE_LIMIT_DEFAULT, projectRoots: [], allowInternetEmergency: false, passwordLong: false, uploadStorageGb: REMOTE_UPLOAD_STORAGE.defaultGb };
     try {
       const raw = JSON.parse(readFileSync(this.opts.file, "utf8"));
       const password = raw.password && typeof raw.password.salt === "string" && typeof raw.password.hash === "string" ? raw.password : undefined;
@@ -199,6 +237,13 @@ export class RemoteWeb {
         dsm,
         trustProxy: raw.trustProxy !== false,
         dsmFailureLimit: Number.isInteger(raw.dsmFailureLimit) && raw.dsmFailureLimit >= 1 && raw.dsmFailureLimit <= 9 ? raw.dsmFailureLimit : DSM_FAILURE_LIMIT_DEFAULT,
+        projectRoots: Array.isArray(raw.projectRoots)
+          ? raw.projectRoots.filter((r: any) => r && typeof r.path === "string" && isAbsolute(r.path) && typeof r.label === "string")
+            .map((r: any) => ({ id: projectRootId(r.path), label: r.label.slice(0, 60), path: resolve(r.path), real: typeof r.real === "string" ? r.real : undefined, fileId: typeof r.fileId === "string" ? r.fileId : undefined }))
+          : [],
+        allowInternetEmergency: raw.allowInternetEmergency === true && raw.passwordLong === true,
+        passwordLong: raw.passwordLong === true,
+        uploadStorageGb: clampUploadStorageGb(raw.uploadStorageGb),
       };
     } catch { return fallback; }
   }
@@ -235,6 +280,11 @@ export class RemoteWeb {
       trustProxy: this.config.trustProxy,
       dsmFailureLimit: this.config.dsmFailureLimit,
       loginFailures: this.loginLog,
+      projectRoots: this.config.projectRoots,
+      audit: this.auditLog,
+      allowInternetEmergency: this.config.allowInternetEmergency,
+      emergencyPasswordLong: this.config.passwordLong,
+      uploadStorageGb: this.config.uploadStorageGb,
       sessions: [...this.sessions.values()].map(({ id, user, createdAt, lastSeenAt, ip, userAgent }) => ({ id, user, createdAt, lastSeenAt, ip, userAgent }))
         .sort((a, b) => b.lastSeenAt - a.lastSeenAt),
     };
@@ -245,7 +295,10 @@ export class RemoteWeb {
       const password = input.password ?? "";
       if (typeof password !== "string" || password.length < REMOTE_WEB_MIN_PASSWORD) throw new Error(`비밀번호는 ${REMOTE_WEB_MIN_PASSWORD}자 이상이어야 합니다.`);
       if (password.length > 1024) throw new Error("비밀번호가 너무 깁니다.");
-      this.config = { ...this.config, password: await hashPassword(password) };
+      const passwordLong = password.length >= 20;
+      // A shorter password cannot stay open to the internet.
+      this.config = { ...this.config, password: await hashPassword(password), passwordLong, allowInternetEmergency: this.config.allowInternetEmergency && passwordLong };
+      if (!this.config.allowInternetEmergency) this.endInternetEmergencySessions();
       this.save();
       this.logoutAll();
     } else if (action === "update") {
@@ -269,6 +322,29 @@ export class RemoteWeb {
       }
       if (next.provider === "synology-dsm" && !next.dsm.allowedUsers.length) throw new Error("NAS 로그인을 쓰려면 허용 계정을 한 개 이상 입력하세요.");
       if (input.trustProxy !== undefined) next.trustProxy = input.trustProxy === true;
+      if (input.projectRoots !== undefined) {
+        // D1: desktop-only list of folders under which remote users may create one new project folder.
+        if (!Array.isArray(input.projectRoots) || input.projectRoots.length > 10) throw new Error("허용 위치 목록이 올바르지 않습니다.");
+        next.projectRoots = input.projectRoots.map(r => {
+          if (!r || typeof r.path !== "string" || !isAbsolute(r.path) || !existsSync(r.path) || !statSync(r.path).isDirectory()) throw new Error(`폴더를 찾을 수 없습니다: ${r?.path ?? ""}`);
+          const label = typeof r.label === "string" && r.label.trim() ? r.label.trim().slice(0, 60) : resolve(r.path).split(sep).pop() || r.path;
+          // Keep an already registered root's pin; a new root is pinned to what it resolves to now.
+          const known = this.config.projectRoots.find(x => x.path === resolve(r.path));
+          const real = known?.real ?? realpathSync(r.path);
+          return { id: projectRootId(r.path), label, path: resolve(r.path), real, fileId: known?.fileId ?? folderId(real) };
+        });
+      }
+      if (input.allowInternetEmergency !== undefined) {
+        if (input.allowInternetEmergency === true && !next.passwordLong) throw new Error("인터넷에서 비상용 로그인을 허용하려면 먼저 20자 이상의 비상용 비밀번호를 설정하세요.");
+        next.allowInternetEmergency = input.allowInternetEmergency === true;
+        if (!next.allowInternetEmergency) this.endInternetEmergencySessions();
+      }
+      if (input.uploadStorageGb !== undefined) {
+        const gb = input.uploadStorageGb;
+        if (typeof gb !== "number" || !Number.isFinite(gb) || gb < REMOTE_UPLOAD_STORAGE.minGb || gb > REMOTE_UPLOAD_STORAGE.maxGb)
+          throw new Error(`원격 첨부 저장 한도는 ${REMOTE_UPLOAD_STORAGE.minGb}~${REMOTE_UPLOAD_STORAGE.maxGb}GB 사이여야 합니다.`);
+        next.uploadStorageGb = gb;
+      }
       if (input.dsmFailureLimit !== undefined) {
         if (!Number.isInteger(input.dsmFailureLimit) || input.dsmFailureLimit < 1 || input.dsmFailureLimit > 9) throw new Error("NAS 실패 상한은 1~9 사이의 정수여야 합니다.");
         next.dsmFailureLimit = input.dsmFailureLimit;
@@ -343,6 +419,12 @@ export class RemoteWeb {
     for (const key of [...this.sessions.keys()]) this.endSession(key);
   }
 
+  /** Internet use of the emergency password was withdrawn: end those sessions and void logins in flight. */
+  private endInternetEmergencySessions() {
+    this.authGeneration++;
+    for (const s of [...this.sessions.values()]) if (s.provider === "local" && (s.clientKind === "internet" || s.clientKind === "unknown")) this.endSession(s.key);
+  }
+
   private endSession(key: string) {
     this.sessions.delete(key);
     for (const stream of this.streams) if (stream.sessionKey === key) { stream.res.end(); this.streams.delete(stream); }
@@ -362,9 +444,11 @@ export class RemoteWeb {
       : channel === "agents:updated" ? args[0] as number
       : channel === "consult:updated" ? (args[0] as { chatId?: number })?.chatId
       : undefined;
-    if (channel !== "chat:updated" && chatId === undefined) return;
-    const data = `id: ${seq}\nevent: ${channel}\ndata: ${JSON.stringify(args)}\n\n`;
-    for (const stream of this.streams) if (chatId === undefined || stream.chatId === chatId) stream.res.write(data);
+    // chat:updated, chat:deleted and projects:updated go to every stream; other events only to their chat.
+    const broadcast = channel === "chat:updated" || channel === "chat:deleted" || channel === "projects:updated";
+    if (!broadcast && chatId === undefined) return;
+    const data = `id: ${seq}\nevent: ${channel}\ndata: ${JSON.stringify(channel === "chat:event" ? stripLocalPaths(args) : args)}\n\n`;
+    for (const stream of this.streams) if (broadcast || stream.chatId === chatId) stream.res.write(data);
   }
 
   // ---------- HTTP
@@ -383,10 +467,26 @@ export class RemoteWeb {
    * setting says Caddy sits in front and the peer really is loopback; X-Forwarded-For is never used.
    */
   clientIp(req: Pick<IncomingMessage, "headers" | "socket">): string {
-    const peer = req.socket.remoteAddress ?? "unknown";
+    return this.client(req).ip;
+  }
+
+  /**
+   * Where a request comes from. Fails closed: anything that is not clearly this PC or a known client
+   * IP is "unknown" (one shared lock bucket, never treated as LAN).
+   * - local: direct loopback access to 127.0.0.1/localhost:port without the proxy header (this PC)
+   * - lan / internet: the Caddy header, trusted only with trustProxy and a loopback peer
+   * - unknown: the header is missing (e.g. a public Host without it), invalid, or not trusted
+   */
+  client(req: Pick<IncomingMessage, "headers" | "socket">): { ip: string; kind: ClientKind } {
+    const peer = req.socket.remoteAddress ?? "";
     const header = req.headers[CLIENT_IP_HEADER];
-    const forwarded = this.config.trustProxy && LOOPBACK.has(peer) && typeof header === "string" && isIP(header.trim()) ? header.trim() : undefined;
-    return (forwarded ?? peer).slice(0, 64);
+    const host = String(req.headers.host ?? "").toLowerCase();
+    if (!LOOPBACK.has(peer)) return { ip: peer.slice(0, 64) || "unknown", kind: isPrivateIp(peer) ? "lan" : "internet" };
+    if (header === undefined)
+      return host === `127.0.0.1:${this.port}` || host === `localhost:${this.port}` ? { ip: peer, kind: "local" } : { ip: "unknown", kind: "unknown" };
+    const value = typeof header === "string" ? header.trim() : "";
+    if (!this.config.trustProxy || !isIP(value)) return { ip: "unknown", kind: "unknown" };
+    return { ip: value, kind: isPrivateIp(value) ? "lan" : "internet" };
   }
 
   private send(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
@@ -439,12 +539,12 @@ export class RemoteWeb {
     return session;
   }
 
-  private async body(req: IncomingMessage): Promise<any> {
+  private async body(req: IncomingMessage, maxBytes = MAX_BODY): Promise<any> {
     let size = 0;
     const chunks: Buffer[] = [];
     for await (const chunk of req) {
       size += (chunk as Buffer).length;
-      if (size > MAX_BODY) throw new HttpError(413, "요청이 너무 큽니다.");
+      if (size > maxBytes) throw new HttpError(413, "요청이 너무 큽니다.");
       chunks.push(chunk as Buffer);
     }
     try {
@@ -472,14 +572,14 @@ export class RemoteWeb {
     // request, whether it is still waiting in a queue, being verified, or about to get its session.
     const generation = this.authGeneration;
     const body = await this.body(req);
-    const ip = this.clientIp(req);
+    const { ip, kind } = this.client(req);
     if (this.pendingLogins.has(ip)) throw new HttpError(429, "이전 로그인 확인이 끝난 뒤 다시 시도하세요.");
     this.pendingLogins.add(ip);
     const left = new AbortController();
     res.once("close", () => { if (!res.writableEnded) left.abort(); });
     let user: string | undefined;
     let failure: unknown;
-    try { user = await this.verifyLogin(ip, body, generation, left.signal); }
+    try { user = await this.verifyLogin(ip, kind, body, generation, left.signal); }
     catch (error) { failure = error; }
     finally { this.pendingLogins.delete(ip); }
     if (left.signal.aborted) return void res.destroy();
@@ -492,6 +592,7 @@ export class RemoteWeb {
     const session: Session = {
       key: sha256(secret), csrf: token(24), id: token(9), user, createdAt: now, lastSeenAt: now, ip,
       userAgent: String(req.headers["user-agent"] ?? "").slice(0, 200),
+      provider: body.provider === "local" || this.config.provider === "local" ? "local" : this.config.provider, clientKind: kind,
     };
     this.sessions.set(session.key, session);
     this.send(res, 200, { csrf: session.csrf }, {
@@ -499,7 +600,7 @@ export class RemoteWeb {
     });
   }
 
-  private async verifyLogin(ip: string, body: Record<string, unknown>, generation: number, signal: AbortSignal): Promise<string> {
+  private async verifyLogin(ip: string, kind: ClientKind, body: Record<string, unknown>, generation: number, signal: AbortSignal): Promise<string> {
     // The configured provider, or the local password as the emergency login.
     const id = body.provider === undefined ? this.config.provider : body.provider;
     if (id !== "local" && id !== this.config.provider) throw new HttpError(400, "지원하지 않는 로그인 방식입니다.");
@@ -524,7 +625,12 @@ export class RemoteWeb {
       checkLocks();
       const now = this.now();
       this.dsmFailures = this.dsmFailures.filter(at => now - at < DSM_FAILURE_WINDOW_MS);
-      const result: LoginResult = typeof password !== "string" || !password || password.length > 1024
+      // The emergency password has no OTP: by default only this PC or LAN clients may use it, and never
+      // a client whose IP is unknown (fail closed).
+      const emergencyBlocked = id === "local" && (kind === "unknown" || (kind === "internet" && !this.config.allowInternetEmergency));
+      const result: LoginResult = emergencyBlocked
+        ? { ok: false, detail: kind === "unknown" ? "접속자 IP를 확인할 수 없어 비상용 로그인을 거부했습니다(프록시 헤더 누락·설정 확인)." : "비상용 로컬 비밀번호는 LAN에서만 사용할 수 있습니다(인터넷 접속 차단).", failure: true }
+        : typeof password !== "string" || !password || password.length > 1024
         || (username !== undefined && typeof username !== "string") || (otp !== undefined && otp !== "" && typeof otp !== "string")
         ? { ok: false, detail: "요청 형식 오류(비밀번호 없음 등)", failure: true }
         // NAS-wide cap below DSM's auto-block, across all allowed accounts; the NAS is not contacted.
@@ -582,7 +688,9 @@ export class RemoteWeb {
       req.on("close", () => this.streams.delete(stream));
       return;
     }
-    const m = /^\/api\/chats\/([^/]+)(?:\/(send|stop|approve|answer))?$/.exec(path);
+    // Extended API (docs/remote-web-features.md); same session/CSRF/Origin/Host checks already passed.
+    if (await this.features.handle(method, url, req, res, { key: session.key, user: session.user, ip: session.ip })) return;
+    const m = /^\/api\/chats\/([^/]+)(?:\/(stop|approve|answer))?$/.exec(path);
     if (!m) throw new HttpError(404, "없는 주소입니다.");
     const id = this.chatId(m[1]);
     if (method === "GET" && !m[2]) {
@@ -593,15 +701,11 @@ export class RemoteWeb {
       if (!chat) throw new HttpError(404, "채팅이 없습니다.");
       // shortcut: the whole history is sent at once (as the desktop window loads it); paginate if chats grow very large.
       const [events, agents, consults] = await Promise.all([call("chats:events", [id]), call("chats:agents", [id]), call("chats:consults", [id])]);
-      return this.send(res, 200, { seq, chat, events, agents, consults });
+      return this.send(res, 200, { seq, chat, events: stripLocalPaths(events), agents, consults });
     }
     if (method !== "POST" || !m[2]) throw new HttpError(405, "지원하지 않는 요청입니다.");
     const body = await this.body(req);
-    if (m[2] === "send") {
-      const delivery = body.delivery ?? "now";
-      if (delivery !== "now" && delivery !== "next") throw new HttpError(400, "지원하지 않는 전달 방식입니다.");
-      await call("chats:send", [id, this.text(body.text, "지시"), [], delivery]);
-    } else if (m[2] === "stop") await call("chats:stop", [id]);
+    if (m[2] === "stop") await call("chats:stop", [id]);
     else if (m[2] === "approve") {
       if (typeof body.approvalId !== "string" || !["once", "chat", "deny"].includes(body.decision)) throw new HttpError(400, "승인 응답 형식이 올바르지 않습니다.");
       const decision = await call("chats:approve", [id, body.approvalId, body.decision]);

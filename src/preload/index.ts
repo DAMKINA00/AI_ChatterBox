@@ -73,6 +73,8 @@ const api: ChatterBoxApi = {
   onUsage: (cb) => on("usage", cb),
   onGeminiWebLogin: (cb) => on("gemini:web-login", cb),
   onSelectChat: (cb) => on("select-chat", cb),
+  onChatDeleted: (cb) => on("chat:deleted", cb),
+  onProjectsUpdated: (cb) => on("projects:updated", cb),
 };
 
 contextBridge.exposeInMainWorld("chatterbox", api);

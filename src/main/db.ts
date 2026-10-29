@@ -449,6 +449,7 @@ export class Store {
     add("consults", "effort", "effort TEXT");
     add("approvals", "decided_by", "decided_by TEXT NOT NULL DEFAULT 'user'");
     add("approvals", "reason", "reason TEXT");
+    add("attachments", "uuid", "uuid TEXT"); // remote uploads only; NULL for desktop attachments
   }
 
   /**
@@ -709,8 +710,9 @@ export class Store {
   }
 
   // ---- attachments
-  addAttachment(chatId: number, name: string, path: string, mime: string, size: number): AttachmentRef {
-    const r = this.db.prepare("INSERT INTO attachments (chat_id, name, path, mime, size) VALUES (?, ?, ?, ?, ?)").run(chatId, name, path, mime, size);
+  /** `uuid`: set once for a remote upload (its file name); unlike the id it is never reused. */
+  addAttachment(chatId: number, name: string, path: string, mime: string, size: number, uuid: string | null = null): AttachmentRef {
+    const r = this.db.prepare("INSERT INTO attachments (chat_id, name, path, mime, size, uuid) VALUES (?, ?, ?, ?, ?, ?)").run(chatId, name, path, mime, size, uuid);
     return this.attachment(Number(r.lastInsertRowid))!;
   }
   attachment(id: number): AttachmentRef | undefined {
@@ -720,11 +722,45 @@ export class Store {
   attachmentsFor(ids: number[]): AttachmentRef[] {
     return ids.map((id) => this.attachment(id)).filter((a): a is AttachmentRef => !!a);
   }
+  /**
+   * A user message and the link of its attachments in one transaction (a savepoint, so it also nests):
+   * a crash or error in between leaves neither, so the record never shows attachments that stay unsent.
+   */
+  addUserEvent(chatId: number, event: AgentEvent, attachmentIds: number[]): TimelineEvent {
+    this.db.exec("SAVEPOINT user_event");
+    try {
+      const ev = this.addEvent(chatId, "orch", null, event);
+      this.linkAttachments(attachmentIds, ev.id);
+      this.db.exec("RELEASE user_event");
+      return ev;
+    } catch (error) {
+      this.db.exec("ROLLBACK TO user_event; RELEASE user_event");
+      throw error;
+    }
+  }
   linkAttachments(ids: number[], eventId: number) {
     for (const id of ids) this.db.prepare("UPDATE attachments SET event_id = ? WHERE id = ?").run(eventId, id);
   }
   deleteAttachment(id: number) {
     this.db.prepare("DELETE FROM attachments WHERE id = ? AND event_id IS NULL").run(id);
+  }
+  /** Attachment records not yet sent with a message (remote uploads are among them, with their uuid). */
+  unsentAttachments(chatId?: number): (AttachmentRef & { chatId: number; uuid: string | null })[] {
+    const rows = chatId === undefined
+      ? this.db.prepare("SELECT * FROM attachments WHERE event_id IS NULL").all()
+      : this.db.prepare("SELECT * FROM attachments WHERE event_id IS NULL AND chat_id = ?").all(chatId);
+    return rows.map((r: Row) => ({ id: r.id, chatId: r.chat_id, name: r.name, mime: r.mime, size: r.size, path: r.path, uuid: r.uuid ?? null }));
+  }
+  /** Bytes of all remote uploads, sent or not (every record with a uuid). */
+  remoteUploadBytes(): number {
+    return Number((this.db.prepare("SELECT COALESCE(SUM(size), 0) AS n FROM attachments WHERE uuid IS NOT NULL").get() as Row).n);
+  }
+  /** Paths of every attachment record (sent or not, any chat): the references the remote-upload cleanup keeps. */
+  attachmentPaths(chatId?: number): string[] {
+    const rows = chatId === undefined
+      ? this.db.prepare("SELECT path FROM attachments").all()
+      : this.db.prepare("SELECT path FROM attachments WHERE chat_id = ?").all(chatId);
+    return rows.map((r: Row) => r.path as string);
   }
 
   // ---- approvals log

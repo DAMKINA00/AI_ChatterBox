@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { get as httpGet } from "node:http";
+import { get as httpGet, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { COOKIE, FAIL_LIMIT_IP, GLOBAL_DELAY_AFTER, LOGIN_FAILED, LOGIN_TIME_BUCKETS_MS, Limiter, RemoteWeb, SESSION_IDLE_MS, globalDelayMs, loginPaddingMs, normalizeOrigin } from "./remote-web";
@@ -42,7 +42,8 @@ async function setup(t: { after(fn: () => unknown): void }, results: Record<stri
   });
   const port = await freePort();
   await remote.action("set-password", { password: PASSWORD });
-  await remote.action("update", { enabled: true, port, publicOrigin: "https://ai.example.test" });
+  // These tests log in with the local password from public test IPs, so allow it from the internet.
+  await remote.action("update", { enabled: true, port, publicOrigin: "https://ai.example.test", allowInternetEmergency: true });
   t.after(async () => { await remote.stop(); rmSync(dir, { recursive: true, force: true }); });
   const base = `http://127.0.0.1:${port}`;
   const origin = "https://ai.example.test";
@@ -153,16 +154,71 @@ test("every login answer is uniform and padded to a fixed time bucket; the real 
   assert.equal(loginPaddingMs(30_000), 0);
 });
 
+test("the local emergency password is LAN-only by default; internet use needs a 20+ character password", async (t) => {
+  const s = await setup(t);
+  await s.remote.action("update", { allowInternetEmergency: false });
+  const internet = await s.login(PASSWORD, "203.0.113.50");
+  assert.equal(internet.res.status, 401);
+  assert.equal(internet.body.error, LOGIN_FAILED, "same answer as a wrong password");
+  assert.match(s.remote.status().loginFailures[0].detail, /LAN/);
+  assert.equal((await s.login(PASSWORD, "192.168.0.10")).res.status, 200);
+  assert.equal((await s.login(PASSWORD)).res.status, 200, "loopback (this PC) works");
+  await s.remote.action("set-password", { password: "short but ok 1" });
+  await assert.rejects(s.remote.action("update", { allowInternetEmergency: true }), /20자/);
+  assert.equal(s.remote.status().allowInternetEmergency, false);
+  await s.remote.action("set-password", { password: "a much longer emergency password" });
+  await s.remote.action("update", { allowInternetEmergency: true });
+  assert.equal((await s.login("a much longer emergency password", "203.0.113.51")).res.status, 200);
+  await s.remote.action("set-password", { password: "short again 12" });
+  assert.equal(s.remote.status().allowInternetEmergency, false, "a shorter password turns internet use off");
+});
+
 test("the client IP comes only from the Caddy-set header behind a trusted loopback proxy; X-Forwarded-For is ignored", async (t) => {
   const s = await setup(t);
-  const req = (remoteAddress: string, headers: Record<string, string> = {}) => ({ headers, socket: { remoteAddress } }) as any;
-  assert.equal(s.remote.clientIp(req("127.0.0.1", { "x-chatterbox-client-ip": "203.0.113.9" })), "203.0.113.9");
-  assert.equal(s.remote.clientIp(req("::ffff:127.0.0.1", { "x-chatterbox-client-ip": "2001:db8::1" })), "2001:db8::1");
-  assert.equal(s.remote.clientIp(req("127.0.0.1", { "x-forwarded-for": "203.0.113.9" })), "127.0.0.1");
-  assert.equal(s.remote.clientIp(req("127.0.0.1", { "x-chatterbox-client-ip": "not-an-ip" })), "127.0.0.1");
-  assert.equal(s.remote.clientIp(req("192.168.0.5", { "x-chatterbox-client-ip": "203.0.113.9" })), "192.168.0.5");
+  const local = `127.0.0.1:${s.port}`;
+  const req = (remoteAddress: string, headers: Record<string, string> = {}) => ({ headers: { host: "ai.example.test", ...headers }, socket: { remoteAddress } }) as any;
+  const kind = (r: any) => s.remote.client(r);
+  assert.deepEqual(kind(req("127.0.0.1", { "x-chatterbox-client-ip": "203.0.113.9" })), { ip: "203.0.113.9", kind: "internet" });
+  assert.deepEqual(kind(req("::ffff:127.0.0.1", { "x-chatterbox-client-ip": "2001:db8::1" })), { ip: "2001:db8::1", kind: "internet" });
+  assert.deepEqual(kind(req("127.0.0.1", { "x-chatterbox-client-ip": "192.168.0.7" })), { ip: "192.168.0.7", kind: "lan" });
+  // Fail closed: a proxied request (public Host) without the header, or with a bad one, is "unknown" — never this PC.
+  assert.deepEqual(kind(req("127.0.0.1", { "x-forwarded-for": "192.168.0.5" })), { ip: "unknown", kind: "unknown" });
+  assert.deepEqual(kind(req("127.0.0.1", { "x-chatterbox-client-ip": "not-an-ip" })), { ip: "unknown", kind: "unknown" });
+  // Direct access on this PC: loopback peer, local Host, no proxy header.
+  assert.deepEqual(kind(req("127.0.0.1", { host: local })), { ip: "127.0.0.1", kind: "local" });
+  assert.deepEqual(kind(req("192.168.0.5", { "x-chatterbox-client-ip": "203.0.113.9" })), { ip: "192.168.0.5", kind: "lan" });
   await s.remote.action("update", { trustProxy: false });
-  assert.equal(s.remote.clientIp(req("127.0.0.1", { "x-chatterbox-client-ip": "203.0.113.9" })), "127.0.0.1");
+  // Without proxy trust the header is ignored and the loopback peer is not taken for LAN.
+  assert.deepEqual(kind(req("127.0.0.1", { "x-chatterbox-client-ip": "192.168.0.7" })), { ip: "unknown", kind: "unknown" });
+  assert.deepEqual(kind(req("127.0.0.1", { host: local })), { ip: "127.0.0.1", kind: "local" });
+});
+
+test("#1 emergency login fails closed for unknown client IPs; #5 withdrawing internet use ends those sessions", async (t) => {
+  const s = await setup(t);
+  // Proxied (public Host) request without the client-IP header: refused like a wrong password.
+  const raw = (headers: Record<string, string>) => new Promise<number>((ok, fail) => {
+    const body = JSON.stringify({ password: PASSWORD });
+    const r = httpRequest({ host: "127.0.0.1", port: s.port, path: "/api/login", method: "POST", headers: { "content-type": "application/json", origin: "https://ai.example.test", "content-length": Buffer.byteLength(body), ...headers } }, res => { res.resume(); ok(res.statusCode!); });
+    r.on("error", fail);
+    r.end(body);
+  });
+  assert.equal(await raw({ host: "ai.example.test" }), 401);
+  assert.match(s.remote.status().loginFailures[0].detail, /IP를 확인할 수 없어/);
+  assert.equal(await raw({ host: "ai.example.test", "x-chatterbox-client-ip": "garbage" }), 401);
+  assert.equal(await raw({ host: "ai.example.test", "x-chatterbox-client-ip": "192.168.0.20" }), 200, "a real LAN client works");
+  // Sessions: internet emergency session ends when internet use is turned off; the LAN one stays.
+  const internet = await s.login(PASSWORD, "203.0.113.70");
+  const lan = await s.login(PASSWORD, "192.168.0.21");
+  assert.equal((await s.request("/api/session", { cookie: internet.cookie })).status, 200);
+  await s.remote.action("update", { allowInternetEmergency: false });
+  assert.equal((await s.request("/api/session", { cookie: internet.cookie })).status, 401);
+  assert.equal((await s.request("/api/session", { cookie: lan.cookie })).status, 200);
+  // Same when a shorter password switches it off automatically.
+  await s.remote.action("set-password", { password: "a much longer emergency password" });
+  await s.remote.action("update", { allowInternetEmergency: true });
+  const again = await s.login("a much longer emergency password", "203.0.113.71");
+  await s.remote.action("set-password", { password: "short one 1234" });
+  assert.equal((await s.request("/api/session", { cookie: again.cookie })).status, 401);
 });
 
 test("the login limiter drops waiting tasks on timeout or disconnect and caps its queue", async () => {
@@ -194,9 +250,9 @@ test("state changes need the session CSRF token and an allowed origin", async (t
   assert.equal((await send({ csrf: body.csrf, origin: "https://evil.example" })).status, 403);
   assert.equal((await send({ csrf: body.csrf, origin: null })).status, 403);
   assert.equal((await send({ csrf: body.csrf, contentType: "text/plain" })).status, 415);
-  assert.equal(s.calls.filter(([c]) => c === "chats:send").length, 0);
+  assert.equal(s.calls.filter(([c]) => c === "remote:send").length, 0);
   assert.equal((await send({ csrf: body.csrf })).status, 200);
-  assert.deepEqual(s.calls.find(([c]) => c === "chats:send"), ["chats:send", [1, "추가 지시", [], "next"]]);
+  assert.deepEqual(s.calls.find(([c]) => c === "remote:send"), ["remote:send", [1, "추가 지시", [], "next"]]);
 });
 
 test("reads chats/history and forwards instructions, stop, approvals and answers to the core", async (t) => {
@@ -215,7 +271,7 @@ test("reads chats/history and forwards instructions, stop, approvals and answers
   assert.equal((await post("/api/chats/1/approve", { approvalId: "a1", decision: "always" })).status, 400);
   assert.equal((await post("/api/chats/1/answer", { askId: "q1", answer: "A안" })).status, 200);
   assert.deepEqual(s.calls.filter(([c]) => !["chats:list", "projects:list", "chats:events", "chats:agents", "chats:consults"].includes(c)), [
-    ["chats:send", [1, "새 지시", [], "now"]],
+    ["remote:send", [1, "새 지시", [], "now"]],
     ["chats:stop", [1]],
     ["chats:approve", [1, "a1", "deny"]],
     ["chats:answerAsk", [1, "q1", "A안"]],
