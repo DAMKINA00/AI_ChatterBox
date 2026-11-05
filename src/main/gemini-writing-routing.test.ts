@@ -29,7 +29,6 @@ function fixture(options: { geminiModel?: string; geminiStrengths?: string } = {
   chats.cliInfo = () => [
     { agent: "claude", path: null, error: "stub" },
     { agent: "codex", path: null, error: "stub" },
-    { agent: "gemini", path: geminiModel === GEMINI_WEB_MODEL ? null : "agy.exe" },
   ];
   chats.models = async (agent) => [{
     id: agent === "claude" ? "opus" : agent === "codex" ? "gpt-6-astra" : geminiModel,

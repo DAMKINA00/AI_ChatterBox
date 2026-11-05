@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "./db";
 import { ChatManager } from "./chats";
+import { Orchestrator } from "./orchestrator";
 import { AttachmentStore } from "./attachments";
 import { GrokDriver } from "./drivers/grok";
 import { AIStudioDriver } from "./drivers/aistudio";
@@ -117,3 +118,48 @@ test("legacy Gemini CLI selections resolve to AIS while Web, AIS and Grok settin
     assert.equal(store.events(chat.id).at(-1)?.event.type, "text");
   } finally { await chats.dispose(); store.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+for (const selection of ["project", "chat", "legacy"] as const) {
+  test(`AI Studio worker spawns without Gemini CLI via ${selection} selection`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "cbx-studio-spawn-"));
+    const store = new Store(join(root, "app.db"));
+    const chats = new ChatManager(store, { agents() {}, chat() {}, consult() {}, usage() {}, event() {} }, root, "unused");
+    const engine = new Orchestrator(chats) as any;
+    let cliChecks = 0;
+    chats.cliInfo = () => { cliChecks++; return []; };
+    try {
+      const project = store.createProject("studio", root, { ...DEFAULT_SETTINGS, maxGeminiWorkers: 1,
+        geminiModel: selection === "chat" ? GEMINI_WEB_MODEL : selection === "legacy" ? "gemini-pro" : AISTUDIO_MODEL });
+      const created = store.createChat(project.id, "studio");
+      const chat = selection === "chat" ? store.updateChat(created.id, { geminiModelOverride: "aistudio:custom-argon" }) : created;
+      const spawned = await engine.call(chat.id, "orch", "spawn", { kind: "gemini", job: "문서 문장 다듬기" });
+      assert.equal(spawned.isError, false, JSON.stringify(spawned));
+      assert.equal(cliChecks, 0, "AI Studio must not inspect CLI executables");
+      const worker = store.listAgents(chat.id)[0];
+      assert.ok(await chats.driver(chat.id, worker.key, "medium") instanceof AIStudioDriver);
+      assert.equal(chats.roleConfig(chat, project, worker.key).model, selection === "chat" ? "aistudio:custom-argon" : AISTUDIO_MODEL);
+      const blocked = await engine.call(chat.id, "orch", "spawn", { kind: "gemini", job: "second" });
+      assert.equal(blocked.isError, true);
+      assert.match(JSON.stringify(blocked), /동시에 1명/);
+      assert.equal(store.listAgents(chat.id).length, 1);
+    } finally { await engine.judge.dispose(); await chats.dispose(); store.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+}
+
+for (const kind of ["claude", "gpt", "grok"] as const) {
+  test(`${kind} worker still requires its CLI executable`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "cbx-cli-spawn-"));
+    const store = new Store(join(root, "app.db"));
+    const chats = new ChatManager(store, { agents() {}, chat() {}, consult() {}, usage() {}, event() {} }, root, "unused");
+    const engine = new Orchestrator(chats) as any;
+    chats.cliInfo = () => [];
+    try {
+      const project = store.createProject("CLI", root, DEFAULT_SETTINGS);
+      const chat = store.createChat(project.id, "CLI");
+      const spawned = await engine.call(chat.id, "orch", "spawn", { kind, job: "test" });
+      assert.equal(spawned.isError, true);
+      assert.match(JSON.stringify(spawned), /CLI가 설치되지 않았습니다/);
+      assert.equal(store.listAgents(chat.id).length, 0);
+    } finally { await engine.judge.dispose(); await chats.dispose(); store.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+}
