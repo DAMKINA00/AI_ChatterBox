@@ -744,12 +744,13 @@ export class Orchestrator {
     const project = this.chats.store.project(chat.projectId)!;
     if (this.planning.has(chatId)) return textResult("지금은 계획 모드입니다. 작업자를 만들지 말고 계획만 세우세요.", true);
     const web = kind === "gemini" && this.chats.usesGeminiWeb(chat);
+    const studio = kind === "gemini" && isAIStudioModel(chat.geminiModelOverride ?? project.settings.geminiModel);
     if (!web && requestedAccount !== undefined) return textResult("webAccountId는 Gemini 웹 작업자에게만 지정할 수 있습니다.", true);
     const accountId = web ? this.selectedWebAccount(requestedAccount) : undefined;
     const cliKind = cliAccountKindForAgent(WORKER_AGENT[kind]);
     if ((requestedCliAccount !== undefined || clearCliAccount !== undefined) && !cliKind) return textResult("accountId는 Claude/Codex/Grok CLI 작업자에게만 지정할 수 있습니다.", true);
     const cliAccount = cliKind ? this.selectedCliAccount(chatId, cliKind, requestedCliAccount, clearCliAccount) : undefined;
-    if (!web && !this.chats.cliInfo().find((c) => c.agent === WORKER_AGENT[kind])?.path)
+    if (!web && !studio && !this.chats.cliInfo().find((c) => c.agent === WORKER_AGENT[kind])?.path)
       return textResult(`${WORKER_KIND_LABEL[kind]} CLI가 설치되지 않았습니다. 사용 가능한 작업자를 선택하거나 미완료 사유를 보고하세요.`, true);
     const max = kind === "claude" ? project.settings.maxClaudeWorkers : kind === "gpt" ? project.settings.maxGptWorkers : kind === "grok" ? project.settings.maxGrokWorkers : kind === "deepseek" ? project.settings.maxDeepseekWorkers : project.settings.maxGeminiWorkers;
     const active = this.agents(chatId).filter((a) => a.kind === kind && a.status === "active").length;
