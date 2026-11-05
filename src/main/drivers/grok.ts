@@ -182,7 +182,7 @@ export class GrokDriver implements AgentDriver {
 
   private async incoming(message: any) {
     const p = message.params;
-    if (message.method === "x.ai/hooks/run") {
+    if (message.method === "_x.ai/hooks/run" || message.method === "x.ai/hooks/run") {
       try { return await this.hook(p); }
       catch (error) { return { decision: "deny", reason: String(error) }; }
     }

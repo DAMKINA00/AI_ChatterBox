@@ -60,6 +60,34 @@ test("Grok permission cannot execute without its approved tool and session", asy
   assert.equal((await request()).outcome.optionId, "no");
 });
 
+for (const method of ["_x.ai/hooks/run", "x.ai/hooks/run"]) {
+  test(`Grok routes ${method} through approval before granting permission`, async () => {
+    const f = fixture();
+    const callback = (patch = {}) => (f.driver as any).incoming({ id: "hook-request", method, params: {
+      sessionId: "s1", hookCallbackId: "chatterbox-approval", hookEventName: "pre_tool_use",
+      toolUseId: "write-1", toolName: "write", toolInput: { file_path: "probe.txt", content: "probe" }, ...patch,
+    } });
+    const permission = () => (f.driver as any).incoming({ method: "session/request_permission", params: {
+      sessionId: "s1", toolCall: { toolCallId: "write-1" },
+      options: [{ kind: "allow_once", optionId: "yes" }, { kind: "reject_once", optionId: "no" }],
+    } });
+    try {
+      assert.equal((await permission()).outcome.optionId, "no");
+      assert.equal((await callback()).decision, "continue");
+      assert.equal(f.approvals.length, 1);
+      assert.equal(f.approvals[0].writes, true);
+      assert.equal((await permission()).outcome.optionId, "yes");
+      f.driver.onUpdate({ sessionId: "s1", update: { sessionUpdate: "tool_call_update", toolCallId: "write-1", status: "completed" } });
+      f.host.approve = async () => ({ verdict: "deny" as any });
+      assert.equal((await callback()).decision, "deny");
+      assert.equal((await permission()).outcome.optionId, "no");
+      assert.equal((await callback({ sessionId: "another" })).decision, "deny");
+      assert.equal((await callback({ toolInputTruncated: true })).decision, "deny");
+      assert.equal((await callback({ hookCallbackId: "unknown" })).decision, "deny");
+    } finally { await f.driver.dispose(); }
+  });
+}
+
 test("Grok rejects failed, malformed and stale approval callbacks", async () => {
   const f = fixture();
   f.host.approve = async () => { throw new Error("approval unavailable"); };
