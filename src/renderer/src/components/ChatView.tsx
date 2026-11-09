@@ -1,5 +1,5 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ArrowDown, Check, ChevronDown, CircleAlert, History, ImagePlus, Loader2, Paperclip, Pause, Play, RotateCcw, Search, SendHorizontal, ShieldCheck, Workflow, X } from "lucide-react";
+import { ArrowDown, BarChart3, Check, ChevronDown, CircleAlert, History, ImagePlus, Loader2, Paperclip, Pause, Play, RotateCcw, Search, SendHorizontal, ShieldCheck, Workflow, X } from "lucide-react";
 import {
   APPROVAL_MODE_LABEL,
   AGENT_LABEL,
@@ -45,6 +45,9 @@ import {
 import { StatusIcon } from "./Sidebar";
 import { WorkingIndicator } from "./WorkingIndicator";
 import { ChatSearch, ChatSearchQuery } from "./ChatSearch";
+import { ForkOrigin } from "./Fork";
+import { ReviewTotalsBar } from "./ReviewResult";
+import { RunStatsDialog } from "./RunStats";
 
 export function ChatView({ chat, project, node }: { chat: Chat; project: Project; node?: NodeId }) {
   const events = useStore((s) => s.events[chat.id]);
@@ -106,8 +109,10 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
     >
       <ChatHeader chat={chat} project={project} nodeLabel={nodeLabel} masterExpression={latestExpression(events ?? [], "orch")} onSearch={() => setSearchOpen(true)} />
       <TeamChips chat={chat} />
+      {!node && <ForkOrigin chat={chat} />}
       {!node && <GoalBar chat={chat} />}
       {!node && plan && <PlanPanel chat={chat} plan={plan} onRevise={() => composer.current?.setText("/plan 수정: ")} />}
+      {!node && <ReviewTotalsBar chatId={chat.id} />}
       <Timeline key={node ?? "all"} items={items} chatId={chat.id} role={streamRole} busy={busy} instructionAt={instructionAt} empty={!events?.length} loading={!events} masterView={!node || node === "orch"}
         searchOpen={searchOpen} searchQuery={searchQuery} onSearchQuery={setSearchQuery} onCloseSearch={() => { setSearchOpen(false); setSearchQuery(""); }} />
       {chat.status === "interrupted" && <InterruptedBanner chat={chat} />}
@@ -151,6 +156,7 @@ function ProviderControls({ agent, web = false, apiProvider = agent === "deepsee
 
 function ChatHeader({ chat, project, nodeLabel, masterExpression, onSearch }: { chat: Chat; project: Project; nodeLabel: string | null; masterExpression: AgentExpression; onSearch: () => void }) {
   const updateChat = useStore((s) => s.updateChat);
+  const [statsOpen, setStatsOpen] = useState(false);
   const models = useStore((s) => s.models);
   const label = useModelLabel();
   const orch = parseOrchestrator(chat.orchestratorModelOverride ?? project.settings.orchestratorModel);
@@ -179,6 +185,10 @@ function ChatHeader({ chat, project, nodeLabel, masterExpression, onSearch }: { 
         <Tooltip content="대화 내용 검색 (Ctrl+F)">
           <Button variant="ghost" size="icon-sm" aria-label="대화 내용 검색" onClick={onSearch}><Search /></Button>
         </Tooltip>
+        <Tooltip content="실행 통계 (기록 구간·도구·승인 대기)">
+          <Button variant="ghost" size="icon-sm" aria-label="실행 통계" data-testid="run-stats-open" onClick={() => setStatsOpen(true)}><BarChart3 /></Button>
+        </Tooltip>
+        {statsOpen && <RunStatsDialog chat={chat} open={statsOpen} onOpenChange={setStatsOpen} />}
       </div>
       <div className="flex w-full min-w-0 max-w-full items-center gap-2 overflow-x-auto whitespace-nowrap" data-testid="chat-header-master-row">
         <ProviderControls agent={orch.agent} master>

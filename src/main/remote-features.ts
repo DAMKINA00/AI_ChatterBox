@@ -226,7 +226,7 @@ export class RemoteFeatures {
       throw new HttpError(405, "지원하지 않는 요청입니다.");
     }
 
-    m = /^\/api\/chats\/(\d{1,12})\/(update|delete|viewed|pause|resume|dismiss-interrupted|command|attachments|send)$/.exec(path);
+    m = /^\/api\/chats\/(\d{1,12})\/(update|delete|viewed|pause|resume|dismiss-interrupted|command|attachments|send|fork)$/.exec(path);
     if (!m) return false;
     const id = Number(m[1]);
     const action = m[2];
@@ -266,6 +266,15 @@ export class RemoteFeatures {
       this.ctx.audit(session, "chat.delete", `채팅 ${id}`, body.confirm);
       this.stream(REMOTE_EVENTS.chatDeleted, [id]);
       send(res, 200, { ok: true });
+      return true;
+    }
+    if (action === "fork") {
+      const unknown = Object.keys(body).find(k => !["eventId", "range", "includeAttachments"].includes(k));
+      if (unknown) throw new HttpError(400, `지정할 수 없는 항목입니다: ${unknown}`);
+      // The core checks the chat, the message, and the attachments' size and disk space in one step.
+      const chat = await core<Chat>(call, "remote:chat-fork", [id, { eventId: body.eventId, range: body.range, includeAttachments: body.includeAttachments }]);
+      this.ctx.audit(session, "chat.fork", `채팅 ${id}`, `새 채팅 ${chat.id}`);
+      send(res, 201, { chat });
       return true;
     }
     if (action === "send") {

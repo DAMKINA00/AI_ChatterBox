@@ -58,6 +58,10 @@ import { conversationAccount, webAccountId } from "./drivers/gemini-web-protocol
 import { WEB_LOW_REMAINING } from "./drivers/gemini-web-accounts";
 import { isAIStudioModel } from "../shared/aistudio";
 import { cliRemaining, CLI_LOW_REMAINING } from "./cli-accounts";
+import { planStepBlockers, validatePlanSteps } from "../shared/plan-steps";
+import { validateReviewResult } from "../shared/review-result";
+import { forkContextPrompt } from "./chat-fork";
+import { buildResumeContext, instructionToResume, parseInstructionSnapshot, type InstructionSnapshot } from "./resume-context";
 
 const KINDS: ConsultKind[] = ["implement", "review", "opinion", "writing"];
 const MAX_DEPTH = 3;
@@ -193,7 +197,7 @@ const CHECK_AGENT_TOOL: ToolDef = {
 const CHECKLIST_TOOL: ToolDef = {
   name: "checklist",
   description:
-    "작업 체크리스트를 등록·갱신합니다 (화면 상단 카드). 전체 단계 목록을 매번 보내세요. 각 단계 제목 앞에 담당을 붙이세요 (예: \"[클로드 1호] 로그인 화면 수정\"). status: pending | inProgress | completed.",
+    "작업 체크리스트를 등록·갱신합니다 (화면 상단 카드). 전체 단계 목록을 매번 보내세요. owner에 담당 닉네임을 적으세요. 선행이 있는 단계에는 id를 붙이고 dependsOn에 선행 단계 id를 적으세요. 협의가 시작되면 consultIds에 협의 id를 연결하세요. 앱은 이 정보로 작업을 배정하거나 완료 처리하지 않으며 status는 직접 갱신합니다. status: pending | inProgress | completed.",
   inputSchema: {
     type: "object",
     properties: {
@@ -201,12 +205,35 @@ const CHECKLIST_TOOL: ToolDef = {
         type: "array",
         items: {
           type: "object",
-          properties: { title: { type: "string" }, status: { type: "string", enum: ["pending", "inProgress", "completed"] } },
+          properties: {
+            title: { type: "string" },
+            status: { type: "string", enum: ["pending", "inProgress", "completed"] },
+            id: { type: "string", description: "다른 단계가 선행으로 지정할 고유 id" },
+            owner: { type: "string", description: "담당 닉네임 (예: 클로드 1호, 마스터)" },
+            dependsOn: { type: "array", items: { type: "string" }, description: "먼저 완료되어야 하는 단계 id" },
+            consultIds: { type: "array", items: { type: "integer" }, description: "이 단계와 연결된 협의 id" },
+          },
           required: ["title", "status"],
         },
       },
     },
     required: ["steps"],
+  },
+};
+const REPORT_REVIEW_TOOL: ToolDef = {
+  name: "report_review",
+  description: "지금 맡은 review 협의의 구조화 결과를 제출합니다. 협의는 앱이 정하며 자신의 실행 중인 리뷰에만 적용됩니다. 다시 호출하면 최신 결과로 바뀝니다. 실행하지 않은 테스트는 not_run으로, 판단 근거가 부족하면 inconclusive로 적으세요. 파일이나 patch를 적용하지 않습니다.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      verdict: { type: "string", enum: ["pass", "changes_requested", "inconclusive"] },
+      revision: { type: "string", description: "리뷰한 기준 (커밋 또는 작업 트리 설명)" },
+      summary: { type: "string" },
+      findings: { type: "array", items: { type: "object", properties: { severity: { type: "string", enum: ["high", "medium", "low"] }, message: { type: "string" }, path: { type: "string" }, line: { type: "integer" } }, required: ["severity", "message"], additionalProperties: false } },
+      tests: { type: "array", items: { type: "object", properties: { name: { type: "string" }, status: { type: "string", enum: ["passed", "failed", "not_run"] }, detail: { type: "string" } }, required: ["name", "status"], additionalProperties: false } },
+    },
+    required: ["verdict", "revision", "summary", "findings", "tests"],
+    additionalProperties: false,
   },
 };
 const GOAL_TOOL: ToolDef = {
@@ -270,7 +297,7 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     "- 작업자는 이 대화를 보지 못한다. message에 목표, 관련 파일 경로, 제약, 완료 기준을 빠짐없이 적는다. 사용자가 첨부한 파일이 필요하면 attach로 경로를 넘긴다.",
     `- 작업 중 사용자의 즉시 추가 지시를 받으면 기존 작업자를 유지한다. CLI가 ask 응답 수신을 중단해도 작업자는 계속 실행될 수 있다. ${t("agents")}로 상태와 저장된 최근 결과를 확인하고, 이미 완료한 작업을 응답 재수신만을 위해 다시 배정하지 않는다.`,
     "- 즉시 추가 질문·수정 요청에는 작업자의 완료를 기다리지 말고 먼저 사용자에게 한국어로 직접 답한다. 이미 아는 내용은 바로 설명하고 수정 요청은 이해한 내용과 반영 방법을 먼저 말한다. 기존 지시의 위임·교차 검증 요건은 그대로 유지하며, 추가 질문에 답하려고 기존 지시를 direct로 변경하지 않는다. 답변하기 전에 작업 배정이나 체크리스트 갱신으로 넘어가지 않는다.",
-    `- 여러 단계 작업은 ${t("checklist")}로 단계와 담당(닉네임)을 등록하고, 단계를 시작·완료할 때마다 갱신한다.`,
+    `- 여러 단계 작업은 ${t("checklist")}로 단계와 담당(owner에 닉네임)을 등록하고, 선행 관계는 id·dependsOn으로, 배정한 협의는 consultIds로 연결한다. 단계를 시작·완료할 때마다 갱신한다.`,
     `- 채팅에 목표(/goal)가 있으면 그 목표를 향해 일하고, 한 단계를 마칠 때마다 ${t("update_goal")}로 진행을 보고한다. 다 이루면 status=complete.`,
     `- 꼭 필요한 결정만 ${t("ask_user")}로 묻는다.`,
     `- 사용자에게 대사를 쓰기 전에 ${t("set_expression")}(expression=감정)으로 표정을 지정한다. 감정: ${AGENT_EXPRESSIONS.join(", ")}. 기술적 내용과 말투를 억지로 바꾸지 않는다.`,
@@ -531,7 +558,7 @@ export class Orchestrator {
         {
           tools: master
             ? [ROUTE_TOOL, WEB_ACCOUNTS_TOOL, CLI_ACCOUNTS_TOOL, SPAWN_TOOL, ASK_TOOL(true), ASK_PARALLEL_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, RELEASE_TOOL, AGENTS_TOOL, CHECK_AGENT_TOOL, CHECKLIST_TOOL, GOAL_TOOL, ASK_USER_TOOL, EXPRESSION_TOOL]
-            : [ASK_TOOL(false), ASK_PARALLEL_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, AGENTS_TOOL, CHECK_AGENT_TOOL, EXPRESSION_TOOL],
+            : [ASK_TOOL(false), ASK_PARALLEL_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, AGENTS_TOOL, CHECK_AGENT_TOOL, REPORT_REVIEW_TOOL, EXPRESSION_TOOL],
           call: (name, args) => this.call(chatId, role, name, args),
         },
         id,
@@ -650,6 +677,7 @@ export class Orchestrator {
           if (inst.mode === "delegated" && args.mode === "direct") return textResult("위임할 본 작업을 직접 처리로 바꿀 수 없습니다. 가능한 작업자에게 맡기거나 미완료 사유를 보고하세요.", true);
           inst.mode = args.mode;
           inst.dualInvestigation = dualInvestigation;
+          this.saveInstruction(chatId);
           this.chats.emit(chatId, "orch", "orch", { type: "dispatch", instructionId: inst.id, mode: args.mode, reason: String(args.reason).trim(), dualInvestigation });
           const capabilities = await this.chats.teamCapabilities(this.chats.store.chat(chatId)!);
           if (this.instructions.get(chatId) !== inst || this.stopped.has(chatId) || ["pausing", "paused"].includes(this.chats.store.chat(chatId)?.status ?? "")) return textResult("작업이 중지되거나 새 지시로 변경되었습니다.", true);
@@ -705,6 +733,18 @@ export class Orchestrator {
             checks.delete(controller);
             if (!checks.size) this.webChecks.delete(chatId);
           }
+        }
+        case "report_review": {
+          if (master) break;
+          // The bridge is bound to the caller's role, so the consult can only be the caller's own.
+          const running = this.running.get(chatId)?.get(caller);
+          if (!running || running.kind !== "review") return textResult("현재 실행 중인 자신의 review 협의에만 결과를 제출할 수 있습니다.", true);
+          const review = validateReviewResult(args);
+          const saved = this.chats.store.setConsultReview(running.consultId, review);
+          if (!saved) return textResult("이미 끝난 리뷰 협의의 결과는 바꿀 수 없습니다.", true);
+          this.chats.sink.consult(saved);
+          this.chats.emit(chatId, this.chats.route(chatId, caller), caller, { type: "review_result", consultId: running.consultId, review });
+          return textResult(`협의 ${running.consultId}의 리뷰 결과(${review.verdict})를 저장했습니다. 파일이나 patch는 적용하지 않았습니다.`);
         }
         case "agents":
           return textResult(this.agentsText(chatId, true));
@@ -862,15 +902,28 @@ export class Orchestrator {
   }
 
   private checklist(chatId: number, raw: unknown): ToolResult {
-    const steps: PlanStep[] = (Array.isArray(raw) ? raw : [])
-      .map((s: any) => ({
-        title: String(s?.title ?? "").trim(),
-        status: (s?.status === "completed" || s?.status === "inProgress" ? s.status : "pending") as PlanStep["status"],
-      }))
-      .filter((s) => s.title);
+    const steps = validatePlanSteps(raw);
     if (!steps.length) return textResult("steps가 비었습니다.", true);
+    const consults = new Map(this.chats.store.listConsults(chatId).map((c) => [c.id, c]));
+    const unknown = steps.flatMap((s) => s.consultIds ?? []).filter((id) => !consults.has(id));
+    if (unknown.length) return textResult(`이 채팅에 없는 협의 id입니다: ${[...new Set(unknown)].join(", ")}`, true);
     this.chats.emit(chatId, "orch", "orch", { type: "plan_update", steps });
-    return textResult(`체크리스트를 갱신했습니다 (${steps.filter((s) => s.status === "completed").length}/${steps.length} 완료).`);
+    const head = `체크리스트를 갱신했습니다 (${steps.filter((s) => s.status === "completed").length}/${steps.length} 완료).`;
+    if (!steps.some((s) => s.dependsOn?.length || s.consultIds?.length)) return textResult(head);
+    const label = (s: PlanStep) => s.id ? `${s.id}(${s.title})` : s.title;
+    const open = steps.filter((s) => s.status !== "completed");
+    const waiting = open.filter((s) => planStepBlockers(s, steps).length);
+    const ready = open.filter((s) => s.status === "pending" && !planStepBlockers(s, steps).length);
+    const early = waiting.filter((s) => s.status === "inProgress");
+    const failed = steps.flatMap((s) => (s.consultIds ?? []).map((id) => ({ s, c: consults.get(id)! }))).filter(({ c }) => ["error", "limited", "stopped"].includes(c.status));
+    return textResult([
+      head,
+      `시작 가능: ${ready.map(label).join(", ") || "없음"}`,
+      `선행 대기: ${waiting.map((s) => `${label(s)} ← ${planStepBlockers(s, steps).map(label).join(", ")}`).join(" / ") || "없음"}`,
+      ...(early.length ? [`주의: 선행이 끝나지 않았는데 진행 중으로 표시됨: ${early.map(label).join(", ")}`] : []),
+      ...(failed.length ? [`연결 협의 미완료: ${failed.map(({ s, c }) => `협의 ${c.id}(${c.status}) · ${label(s)}`).join(" / ")}`] : []),
+      "완료 상태는 앱이 바꾸지 않습니다. 실제 결과를 확인하고 status를 갱신하세요.",
+    ].join("\n"));
   }
 
   // ---------- ask (consult)
@@ -1069,7 +1122,13 @@ export class Orchestrator {
       assignment.effort = reasoning.effort || reasoning.requestedEffort;
       if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch) return textResult("사용자가 작업을 중지했습니다.", true);
       const attachments = this.attachmentsFor(chatId, attach);
-      const consult = this.chats.store.createConsult(chatId, caller, target.key, kind, message, scope, inst?.id, reason, supersedes, reasoning);
+      const consult = this.chats.store.createConsult(chatId, caller, target.key, kind, message, scope, inst?.id, reason, supersedes, reasoning, {
+        attach,
+        ...(assignmentModel ? { model: assignmentModel } : {}),
+        ...(cliSelection?.accountId ? { accountId: cliSelection.accountId } : {}),
+        ...(target.kind === "gemini" && target.webAccountId ? { webAccountId: target.webAccountId } : {}),
+        ...(discussion ? { discussion: { topic: discussion.topic, peers: discussion.peers.map((p) => p.nickname) } } : {}),
+      });
       assignment.consultId = consult.id;
       this.chats.sink.consult(consult);
       const node = `consult:${consult.id}` as NodeId;
@@ -1141,10 +1200,14 @@ export class Orchestrator {
         })();
       });
 
+      // Quitting: leave it running so the next launch records that the app exit cut it off.
+      if (this.chats.quitting) return textResult("앱 종료로 중단되었습니다.", true);
       this.chats.setRoute(chatId, target.key, undefined);
       this.releaseScope(chatId, consult.id);
       this.chats.agentsChanged(chatId);
-      const hasResult = !!result.text.trim() || result.files.length > 0;
+      // A stored report is a result of a review; it never outranks a failed or stopped run below.
+      const report = kind === "review" ? this.chats.store.consult(consult.id)?.review : undefined;
+      const hasResult = !!result.text.trim() || result.files.length > 0 || !!report;
       const status = this.stopped.has(chatId) ? "stopped" : result.ok && hasResult ? "done" : result.interrupted ? "stopped" : "error";
       const cliInfo = this.cliAccountText(chatId, cliSelection, result.cliAccountId, false, cliPolicy);
       const accountInfo = target.kind === "gemini" && this.chats.usesGeminiWeb(chat)
@@ -1153,7 +1216,7 @@ export class Orchestrator {
         && /rate[ _-]?limit|usage[ _-]?limit|quota|\btoo many requests\b|\byou(?:'ve|’ve| have) (?:hit|reached) your (?:usage )?limit\b|(?:계정|사용량|요청|구독|이용|잔여)\s*한도.{0,12}(?:소진|초과|부족)|^한도\s*(?:소진|초과|부족)|\b429\b/i.test(result.error ?? "");
       const quotaNotice = quotaFailure ? "[CLI 한도 소진 — 자동 계정 전환·재시도 없음. fixed는 실패를 보고하고, auto는 마스터가 cli_accounts 조회 후 다른 계정에 supersedes로 재배정하세요.]\n" : "";
       const summary = accountInfo + quotaNotice + [!result.ok ? result.error : undefined, result.text.trim()].filter(Boolean).join("\n")
-        + (!result.text.trim() && !result.error ? (result.files.length ? `산출물 ${result.files.length}개를 생성·수정했습니다.` : "작업자의 응답과 산출물이 없습니다.") : "");
+        + (!result.text.trim() && !result.error ? (status === "done" && report ? `구조화 리뷰 제출(${report.verdict}): ${report.summary}` : result.files.length ? `산출물 ${result.files.length}개를 생성·수정했습니다.` : "작업자의 응답과 산출물이 없습니다.") : "");
       const finished = this.chats.store.finishConsult(consult.id, status, summary, result.files);
       this.chats.sink.consult(finished);
       this.chats.emit(chatId, this.chats.route(chatId, caller), caller, { type: "consult_end", consultId: consult.id, status, summary, files: result.files });
@@ -1171,7 +1234,10 @@ export class Orchestrator {
             : `[${target.nickname}: 오류 — ${result.error ?? "실패"}]`;
       const files = result.files.length ? `\n\n변경된 파일:\n${result.files.map((f) => `- ${f}`).join("\n")}` : "\n\n변경된 파일: 없음";
       const effortLabel = target.kind === "gemini" && this.chats.usesGeminiWeb(chat) ? "웹 모델 설정" : reasoning.effort || "CLI 기본";
-      return textResult(`${head} 협의 id=${consult.id} · 추론 ${effortLabel}\n${summary}${files}${caller === "orch" ? this.takeQueued(chatId) : ""}`, status !== "done");
+      const reviewNote = kind !== "review" ? "" : finished.review
+        ? `\n\n구조화 리뷰: ${finished.review.verdict} · 기준 ${finished.review.revision} · 지적 ${finished.review.findings.length}건`
+        : "\n\n구조화 리뷰 결과가 제출되지 않았습니다. 통과로 간주하지 마세요.";
+      return textResult(`${head} 협의 id=${consult.id} · 추론 ${effortLabel}\n${summary}${reviewNote}${files}${caller === "orch" ? this.takeQueued(chatId) : ""}`, status !== "done");
     } finally {
       assignments.delete(assignmentKey);
       removeWait(this.graph(chatId), caller, target.key);
@@ -1231,6 +1297,7 @@ export class Orchestrator {
       if (event.ok && !event.interrupted) this.publishArtifacts(chatId);
       this.reviewing.delete(chatId);
       this.afterMasterTurn(chatId, event);
+      this.saveInstruction(chatId); // The plan and review restrictions end with the turn.
       // Extra instructions that arrived after the master's last ask become the next turn.
       const inst = this.instructions.get(chatId);
       if (inst?.queued.length && !event.interrupted && !this.stopped.has(chatId)) {
@@ -1294,9 +1361,22 @@ export class Orchestrator {
   // ---------- user instructions
   private newInstruction(chatId: number, text: string, restore = false): Instruction {
     const events = this.chats.store.events(chatId);
-    const id = events.findLast((e) => e.event.type === "user")?.id ?? 0;
+    let id = events.findLast((e) => e.event.type === "user" && !(restore && e.event.queued))?.id ?? 0;
+    if (restore) {
+      // A follow-up that became its own turn owns the id its route_request recorded.
+      const dispatched = events.findLast((e) => e.event.type === "dispatch")?.event;
+      if (dispatched?.type === "dispatch" && dispatched.instructionId >= id) id = dispatched.instructionId;
+    }
     const previous = restore ? events.findLast((e) => e.event.type === "dispatch" && e.event.instructionId === id)?.event : undefined;
     return { id, mode: previous?.type === "dispatch" ? previous.mode : undefined, dualInvestigation: previous?.type === "dispatch" ? previous.dualInvestigation : undefined, text, asks: 0, reviews: 0, requests: new Map(), queued: [], pinned: [] };
+  }
+
+  /** Keeps the running instruction exact across a crash; call whenever its text, mode or restrictions change. */
+  private saveInstruction(chatId: number) {
+    const inst = this.instructions.get(chatId);
+    if (!inst) return;
+    const snapshot: InstructionSnapshot = { id: inst.id, text: inst.text, mode: inst.mode, dualInvestigation: inst.dualInvestigation, planning: this.planning.has(chatId), reviewing: this.reviewing.has(chatId) };
+    this.chats.store.setSetting(`runInstruction:${chatId}:current`, JSON.stringify(snapshot));
   }
 
   private investigationIssue(chatId: number): string | null {
@@ -1404,13 +1484,23 @@ export class Orchestrator {
     const prefix = this.handover(chat);
     if (prefix) input = { ...input, text: prefix + input.text };
     this.instructions.set(chat.id, this.newInstruction(chat.id, input.text));
+    this.saveInstruction(chat.id);
+    // Added only to what the model reads: the approval judge's instruction text must not include old transcript.
+    const forkContext = this.forkContext(chat);
     try {
       const driver = await this.chats.driver(chat.id, "orch");
       if (this.stopped.has(chat.id) || this.epochs.get(chat.id) !== epoch) return;
-      await driver.send({ ...input, text: input.text + attachmentNote(input.attachments) + (this.planning.has(chat.id) ? "" : "\n\n[앱 협업 규칙] 먼저 route_request로 처리 방식을 기록하세요. 본 작업은 앱 spawn/ask로 배정하고 reason에 담당 선택 이유를 적으세요. CLI 내부 에이전트는 사용하지 마세요."), noWrites: false });
+      await driver.send({ ...input, text: forkContext + input.text + attachmentNote(input.attachments) + (this.planning.has(chat.id) ? "" : "\n\n[앱 협업 규칙] 먼저 route_request로 처리 방식을 기록하세요. 본 작업은 앱 spawn/ask로 배정하고 reason에 담당 선택 이유를 적으세요. CLI 내부 에이전트는 사용하지 마세요."), noWrites: false });
     } catch (error) {
       if (!this.stopped.has(chat.id) && this.epochs.get(chat.id) === epoch) throw error;
     }
+  }
+
+  /** A branched chat's snapshot, for a native conversation that has not received it yet. */
+  private forkContext(chat: Chat): string {
+    if (!chat.fork || !this.chats.startsFreshSession(chat.id, "orch")) return "";
+    const event = this.chats.store.events(chat.id).find((e) => e.event.type === "fork_context")?.event;
+    return event?.type === "fork_context" ? forkContextPrompt(chat.fork.sourceTitle, event) : "";
   }
 
   /** Start a master turn with prepared text (same bookkeeping as a normal instruction). */
@@ -1418,6 +1508,7 @@ export class Orchestrator {
     await this.instruct(chat, { text, attachments: [] });
     const inst = this.instructions.get(chat.id);
     if (inst) inst.text = contextText;
+    this.saveInstruction(chat.id);
   }
 
   /**
@@ -1429,26 +1520,40 @@ export class Orchestrator {
     if (chat?.status === "paused") return this.resumePaused(chat);
     if (!chat || chat.status !== "interrupted") return;
     const epoch = this.nextEpoch(chatId);
-    const last = [...this.chats.store.events(chatId)].reverse().find((e) => e.event.type === "user" && !e.event.queued)?.event as { text: string } | undefined;
-    const original = last?.text ?? "";
-    // Runtime mode sets are empty after restart; restore the interrupted command's restriction.
-    if (/^\/plan(?:\s|$)/.test(original)) this.planning.add(chatId);
-    if (/^\/review(?:\s|$)/.test(original)) this.reviewing.add(chatId);
-    this.chats.emit(chatId, "orch", null, { type: "notice", text: "중단된 작업을 이어서 진행합니다" });
+    const events = this.chats.store.events(chatId);
+    const current = instructionToResume(events, parseInstructionSnapshot(this.chats.store.getSetting(`runInstruction:${chatId}:current`)));
+    if (!current) {
+      this.chats.emit(chatId, "orch", null, { type: "notice", text: "중단 당시 어떤 지시를 실행 중이었는지 기록으로 확인할 수 없어 자동으로 이어가지 않았습니다. 대화 내용을 확인한 뒤 이어서 할 일을 새 지시로 보내 주세요." });
+      this.chats.updateChat(chatId, { status: "idle", touch: true });
+      return;
+    }
+    // Runtime mode sets are empty after restart; the restrictions come with the instruction they belonged to.
+    if (current.planning) this.planning.add(chatId); else this.planning.delete(chatId);
+    if (current.reviewing) this.reviewing.add(chatId); else this.reviewing.delete(chatId);
+    const inst: Instruction = { id: current.id, mode: current.mode, dualInvestigation: current.dualInvestigation, text: current.text, asks: 0, reviews: 0, requests: new Map(), queued: [], pinned: [] };
+    const direct = events.findLast((e) => e.event.type === "user" && !e.event.queued);
+    const earlier = direct?.event.type === "user" && direct.id !== inst.id ? direct.event.text : "";
+    const recovery = buildResumeContext({ instructionId: inst.id, instructionText: inst.text, consults: this.chats.store.listConsults(chatId), events: this.chats.store.events(chatId), agents: this.agents(chatId), assignment: (id) => this.chats.store.consultAssignment(id), goal: chat.goal });
+    const counts = [recovery.done && `완료 ${recovery.done}`, recovery.interrupted && `중단 ${recovery.interrupted}`, recovery.unconfirmedTools && `결과 미확인 도구 ${recovery.unconfirmedTools}`, recovery.followUps && `추가 지시 ${recovery.followUps}`].filter(Boolean).join(" · ");
+    this.chats.emit(chatId, "orch", null, { type: "notice", text: `중단된 작업을 이어서 진행합니다${counts ? ` (${counts})` : ""}` });
     this.chats.updateChat(chatId, { status: "working", touch: true });
     this.stopped.delete(chatId);
-    this.instructions.set(chatId, this.newInstruction(chatId, original, true));
+    this.instructions.set(chatId, inst);
+    this.saveInstruction(chatId);
     const team = this.agents(chatId).filter((a) => a.status === "active").map((a) => a.nickname).join(", ");
     const note =
       "[AI_ChatterBox] 이전 실행이 앱 종료로 중단됐습니다. 작업 폴더의 현재 상태(git status, git diff, 파일 내용)를 확인하고, " +
-      `아래 원래 지시의 남은 작업을 이어서 끝낸 뒤 결과를 보고하세요. 이미 끝난 부분은 다시 하지 마세요.${team ? ` 팀(${team})은 그대로 남아 있습니다.` : ""}\n\n원래 지시:\n` +
-      (original || "(기록 없음)");
+      `아래 현재 지시의 남은 작업을 이어서 끝낸 뒤 결과를 보고하세요. 이미 끝난 부분은 다시 하지 마세요.${team ? ` 팀(${team})은 그대로 남아 있습니다.` : ""}\n\n현재 지시:\n` +
+      (inst.text || "(기록 없음)") +
+      (current.planning ? "\n\n[계획 모드] 계획만 세워 보고하세요. 작업자 배정은 실행 단계에서 합니다." : "") +
+      (earlier ? `\n\n이전 지시(참고용 — 현재 지시가 우선하며 다시 수행하라는 뜻이 아닙니다):\n${clipText(earlier, 2000)}` : "") +
+      (recovery.text ? `\n\n${recovery.text}` : "");
     if (!this.agents(chatId).length && (chat.orchCodexThreadId || chat.orchClaudeSessionId))
       this.chats.emit(chatId, "orch", null, { type: "notice", text: "이전 버전의 CLI 내부 작업자 대화는 앱에 저장되지 않았을 수 있습니다. 새 배정부터 앱 작업자 기록으로 표시합니다." });
     try {
       const driver = await this.chats.driver(chatId, "orch");
       if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch) return;
-      await driver.send({ text: this.handover(chat) + note, attachments: [], noWrites: false });
+      await driver.send({ text: this.forkContext(chat) + this.handover(chat) + note, attachments: [], noWrites: false });
     } catch (e) {
       if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch) return;
       const message = e instanceof Error ? e.message : String(e);
@@ -1487,6 +1592,7 @@ export class Orchestrator {
       inst.text += "\n\n[사용자 추가 지시]\n" + text;
       inst.pinned.push(text);
       inst.pendingImmediate = true;
+      this.saveInstruction(chat.id);
     };
     let accepted = false;
     try { accepted = !!(await driver?.steer?.({ ...input, text: prompt })); }
@@ -1540,7 +1646,7 @@ export class Orchestrator {
         this.planning.add(chatId);
         const text =
           "[계획 모드] 아래 지시에 대한 계획만 세워라. 작업자 배정은 실행 단계에서 하라. 계획에 필요한 파일 수정·명령 실행은 사용자 지시 범위와 승인 절차를 따라 수행할 수 있다. 필요한 만큼 코드를 읽고 조사한 뒤, " +
-          "checklist 도구로 단계를 등록하라(각 단계 제목 앞에 담당 예정 [클로드 1호] / [지피티 1호] / [마스터], 몇 명이 필요한지도 계획에 넣어라). 마지막에 계획을 짧게 요약해 답하라. " +
+          "checklist 도구로 단계를 등록하라(각 단계의 owner에 담당 예정 닉네임(클로드 1호 / 지피티 1호 / 마스터)을 적고, 선행 관계가 있으면 id와 dependsOn을 지정하고, 몇 명이 필요한지도 계획에 넣어라). 마지막에 계획을 짧게 요약해 답하라. " +
           "사용자가 '실행'을 누르면 그때 이 계획대로 진행한다.\n\n지시: " +
           arg;
         await this.chats.startTurn(chatId, `/plan ${arg}`, [], () => this.instructWith(chat, text, arg));
@@ -1560,6 +1666,7 @@ export class Orchestrator {
       case "plan-cancel":
         this.planning.delete(chatId);
         this.planRunning.delete(chatId);
+        this.saveInstruction(chatId); // Otherwise a crash brings the cancelled plan restriction back.
         this.chats.emit(chatId, "orch", null, { type: "plan_state", state: "cancelled" });
         return;
       case "goal": {
@@ -1595,6 +1702,8 @@ export class Orchestrator {
       }
       case "compact": {
         needIdle();
+        // Compacting first would open a session that never received the branch snapshot.
+        if (chat.fork && this.chats.startsFreshSession(chatId, "orch")) throw new Error("아직 압축할 대화가 없습니다.");
         const project = this.chats.store.project(chat.projectId)!;
         const { agent } = chatOrchestrator(chat, project);
         if (agent === "codex") {
@@ -1823,7 +1932,8 @@ function clipText(s: string, n: number) {
 }
 
 function kindPrefix(kind: ConsultKind, from: string, scope: string[]): string {
-  return `[${from}의 ${CONSULT_KIND_LABEL[kind]} 요청${scope.length ? ` · 고칠 수 있는 범위: ${scope.join(", ")}` : ""} — 필요한 수정은 지정 범위와 승인 절차를 따르세요]\n`;
+  const review = kind === "review" ? "\n[리뷰 결과 제출] 마치기 전에 report_review 도구(Claude: mcp__chatterbox_bridge__report_review)로 결론을 제출하세요. 도구를 쓸 수 없으면 문장으로 보고하세요." : "";
+  return `[${from}의 ${CONSULT_KIND_LABEL[kind]} 요청${scope.length ? ` · 고칠 수 있는 범위: ${scope.join(", ")}` : ""} — 필요한 수정은 지정 범위와 승인 절차를 따르세요]${review}\n`;
 }
 
 /** The master sees images inline but needs paths to hand files to workers. */

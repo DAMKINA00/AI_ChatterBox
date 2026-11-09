@@ -1,7 +1,7 @@
 // Owns the live drivers per chat (one per role: orchestrator, Claude worker, GPT worker),
 // persists normalized events, tracks chat status, and forwards everything to the renderer.
 // The Orchestrator (orchestrator.ts) plugs in through the hooks at the bottom.
-import { mkdirSync } from "node:fs";
+import { mkdirSync, statSync } from "node:fs";
 import { execFile, spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { safeStorage } from "electron";
@@ -23,8 +23,10 @@ import {
   type AgentKind,
   type ApprovalDecision,
   type ApprovalRequest,
+  type AttachmentRef,
   type Chat,
   type ChatAgent,
+  type ChatForkOptions,
   type CliInfo,
   type Consult,
   type NodeId,
@@ -51,6 +53,7 @@ import { resolveEffort, workerEffort } from "./effort";
 import { parseClaudeUsageText } from "../shared/usage";
 import { CodexDriver, CodexServer } from "./drivers/codex";
 import { AttachmentStore } from "./attachments";
+import { ForkError, buildForkSnapshot, parseForkOptions } from "./chat-fork";
 import type { AgentDriver, AgentInput, DriverHost } from "./drivers/types";
 import { AIStudioService } from "./aistudio";
 import { ChatCompletionDriver, type StudioMessage } from "./drivers/aistudio";
@@ -815,6 +818,34 @@ export class ChatManager {
     return { accountId: agentRow.sessionAccountId, ...(agentRow.sessionAccountGeneration !== undefined ? { generation: agentRow.sessionAccountGeneration } : {}) };
   }
 
+  /** The stored session unless it belongs to another account; then sessionAccount says whose it was. */
+  private sessionForAccount(chat: Chat, role: Role, agent: AgentKind, accountId: CliAccountId | undefined, account: { createdAt: number } | undefined): { nativeId: string | null; sessionAccount?: CliAccountId; staleGeneration?: boolean } {
+    const nativeId = this.nativeIdOf(chat, role, agent);
+    if (!accountId || !nativeId) return { nativeId };
+    const owner = this.sessionAccountOf(chat, role, agent);
+    const sessionAccount = owner?.accountId ?? defaultCliAccountId(cliAccountKindOf(accountId));
+    const staleGeneration = owner?.generation !== undefined && owner.generation !== account?.createdAt;
+    return sessionAccount === accountId && !staleGeneration ? { nativeId } : { nativeId: null, sessionAccount, staleGeneration };
+  }
+
+  private completionContextKey(chatId: number, role: Role, agent: AgentKind, model: string) {
+    return `${agent === "deepseek" ? "deepseek" : "aistudio"}-context:${chatId}:${role}:${model}`;
+  }
+
+  /** True when the role's next turn opens a conversation with none of this chat's earlier turns. */
+  startsFreshSession(chatId: number, role: Role): boolean {
+    const chat = this.store.chat(chatId)!;
+    const cfg = this.roleConfig(chat, this.store.project(chat.projectId)!, role);
+    if (cfg.agent === "deepseek" || (cfg.agent === "gemini" && isAIStudioModel(cfg.model))) {
+      try {
+        const saved = JSON.parse(this.store.getSetting(this.completionContextKey(chatId, role, cfg.agent, cfg.model)) ?? "[]");
+        return !Array.isArray(saved) || !saved.length;
+      } catch { return true; }
+    }
+    const accountId = this.roleAccount(chatId, role)?.accountId;
+    return this.sessionForAccount(chat, role, cfg.agent, accountId, accountId ? this.cliAccounts().get(accountId) : undefined).nativeId === null;
+  }
+
   /** Context for a new session on another account: recent requests and answers, no CLI transcript copy. */
   private handoffText(chatId: number, role: Role, from: string, to: CliAccountId): string {
     const clip = (text: string, n: number) => text.length > n ? `${text.slice(0, n)}…` : text;
@@ -838,6 +869,7 @@ export class ChatManager {
   judge?: (chatId: number, request: ApprovalRequest, input: ApprovalInput) => Promise<JudgeAnswer | null>;
   /** Quitting: processes are being torn down; don't record their exits as errors. */
   private disposing = false;
+  get quitting() { return this.disposing; }
 
   // ---------- events and status
   emit(chatId: number, node: NodeId, role: Role | null, event: AgentEvent): void {
@@ -993,15 +1025,9 @@ export class ChatManager {
     };
     // A session belongs to the account incarnation that created it (legacy sessions: the default
     // account). Another account, or a removed and re-created one, starts fresh with a handoff.
-    let nativeId = this.nativeIdOf(chat, role, cfg.agent);
-    let handoff: string | undefined;
-    const owner = accountId ? this.sessionAccountOf(chat, role, cfg.agent) : undefined;
-    const sessionAccount = accountId ? owner?.accountId ?? defaultCliAccountId(cliAccountKindOf(accountId)) : undefined;
-    const staleGeneration = owner?.generation !== undefined && owner.generation !== account?.createdAt;
-    if (accountId && nativeId && (sessionAccount !== accountId || staleGeneration)) {
-      handoff = this.handoffText(chatId, role, staleGeneration && sessionAccount === accountId ? `${sessionAccount}(삭제된 이전 계정)` : sessionAccount!, accountId);
-      nativeId = null;
-    }
+    const stored = this.sessionForAccount(chat, role, cfg.agent, accountId, account);
+    const nativeId = stored.nativeId, sessionAccount = stored.sessionAccount;
+    const handoff = sessionAccount ? this.handoffText(chatId, role, stored.staleGeneration && sessionAccount === accountId ? `${sessionAccount}(삭제된 이전 계정)` : sessionAccount, accountId!) : undefined;
     const opts = {
       cwd: project.folder,
       nativeId,
@@ -1057,7 +1083,7 @@ export class ChatManager {
         save: context => this.store.setSetting(contextKey, JSON.stringify(context)),
       });
     } else if (cfg.agent === "deepseek" || (cfg.agent === "gemini" && isAIStudioModel(cfg.model))) {
-      const key = `${cfg.agent === "deepseek" ? "deepseek" : "aistudio"}-context:${chatId}:${role}:${cfg.model}`;
+      const key = this.completionContextKey(chatId, role, cfg.agent, cfg.model);
       driver = new ChatCompletionDriver(driverOpts, {
         provider: cfg.agent,
         service: cfg.agent === "deepseek" ? this.deepSeek() : this.aiStudio(),
@@ -1122,6 +1148,57 @@ export class ChatManager {
   }
 
   // ---------- user actions
+  /**
+   * Branch the conversation into a new idle chat of the same project. Synchronous from the first read to
+   * the last write. On any failure no chat remains and the files this attempt copied are removed.
+   */
+  forkChat(chatId: number, raw: ChatForkOptions, limits: { maxBytes?: number; minFreeBytes?: number } = {}): Chat {
+    const source = this.store.chat(chatId);
+    if (!source) throw new ForkError(404, "채팅이 없습니다.");
+    if (this.store.project(source.projectId)?.archived) throw new ForkError(409, "보관된 프로젝트에는 채팅을 만들 수 없습니다.");
+    const options = parseForkOptions(raw);
+    const snapshot = buildForkSnapshot(this.store.events(chatId), this.store.listAgents(chatId), options);
+    const failure = (name: string) => new ForkError(409, `첨부 "${name}"을(를) 복사하지 못해 분기를 만들지 않았습니다. 첨부를 제외하고 다시 시도하세요.`);
+    const sources = snapshot.attachments.map(a => {
+      const record = this.store.chatAttachment(chatId, a.id);
+      if (!record) throw failure(a.name);
+      try { return { record, size: statSync(record.path).size }; }
+      catch { throw failure(a.name); }
+    });
+    const bytes = sources.reduce((sum, s) => sum + s.size, 0);
+    if (limits.maxBytes !== undefined && bytes > limits.maxBytes) throw new ForkError(507, "복사할 첨부 용량이 너무 큽니다. 첨부를 제외하고 다시 시도하세요.");
+    if (limits.minFreeBytes !== undefined && sources.length) {
+      let free: number;
+      try { free = this.attachments.diskFree(); }
+      catch { throw new ForkError(507, "PC 디스크 여유 공간을 확인할 수 없어 분기를 만들지 않았습니다."); }
+      if (free - bytes < limits.minFreeBytes) throw new ForkError(507, "PC 디스크 여유 공간이 부족해 분기를 만들지 않았습니다. 첨부를 제외하고 다시 시도하세요.");
+    }
+    const written: string[] = [];
+    let chat: Chat;
+    try {
+      chat = this.store.createForkChat(source, `${source.title} (분기)`.slice(0, 200), {
+        sourceChatId: source.id, sourceEventId: options.eventId, sourceTitle: source.title, range: options.range, includeAttachments: options.includeAttachments,
+      }, newChatId => ({
+        type: "fork_context",
+        text: snapshot.text,
+        attachments: sources.map(({ record }) => {
+          let copy: AttachmentRef;
+          try { copy = this.attachments.copyForFork(newChatId, record); }
+          catch { throw failure(record.name); }
+          written.push(copy.path);
+          return copy;
+        }),
+      }));
+    } catch (error) {
+      this.attachments.discardForkCopies(written);
+      throw error;
+    }
+    // SQLite can reuse a deleted chat's id; grants remembered for it must not reach this chat.
+    this.approvals.invalidate(chat.id);
+    this.sink.chat(chat);
+    return chat;
+  }
+
   /** Replaced by the orchestrator; default: plain turn on the orchestrator conversation. */
   sendHandler: (chat: Chat, input: AgentInput) => Promise<void> = async (chat, input) => {
     await (await this.driver(chat.id, "orch")).send(input);
@@ -1153,7 +1230,7 @@ export class ChatManager {
    */
   async startTurn(chatId: number, display: string, attachmentIds: number[], run: () => Promise<void>) {
     const attachments = this.store.attachmentsFor(attachmentIds);
-    const isFirst = !this.store.hasUserEvent(chatId);
+    const isFirst = !this.store.hasUserEvent(chatId) && !this.store.chat(chatId)?.fork;
     const userEvent = this.store.addUserEvent(chatId, { type: "user", text: display, attachments }, attachmentIds);
     this.sink.event(userEvent);
     this.updateChat(chatId, {

@@ -83,6 +83,14 @@ async function setup(t: { after(fn: () => unknown): void }) {
         state.chats = state.chats.filter(x => x.id !== args[0]);
         return;
       }
+      case "remote:chat-fork": {
+        const c = state.chats.find(x => x.id === args[0]);
+        if (!c) throw remoteError(404, "채팅이 없습니다.");
+        if (args[1].eventId === 409) throw remoteError(409, "첨부 복사 실패");
+        const fork = { id: state.nextId++, projectId: c.projectId, title: `${c.title} (분기)`, status: "idle", approvalModeOverride: c.approvalModeOverride, fork: { sourceChatId: c.id } };
+        state.chats.push(fork);
+        return fork;
+      }
       case "remote:uploads": return listRemoteUploads(store, files, args[0]);
       case "remote:attachment-remove": return removeRemoteUpload(store, files, args[0], args[1]);
       case "remote:send": {
@@ -137,7 +145,7 @@ async function setup(t: { after(fn: () => unknown): void }) {
 }
 
 const GETS = ["/api/search?q=a", "/api/models?agent=claude", "/api/projects", "/api/usage", "/api/aistudio/usage", "/api/attachments/50?chat=1"];
-const POSTS = ["/api/chats", "/api/chats/1/update", "/api/chats/1/delete", "/api/chats/1/viewed", "/api/chats/1/pause", "/api/chats/1/resume",
+const POSTS = ["/api/chats", "/api/chats/1/fork", "/api/chats/1/update", "/api/chats/1/delete", "/api/chats/1/viewed", "/api/chats/1/pause", "/api/chats/1/resume",
   "/api/chats/1/dismiss-interrupted", "/api/chats/1/command", "/api/chats/1/attachments", "/api/chats/1/send", "/api/attachments/50/remove", "/api/projects", "/api/projects/9/update"];
 
 test("every new endpoint needs a session, and every new POST needs the CSRF token", async (t) => {
@@ -146,6 +154,20 @@ test("every new endpoint needs a session, and every new POST needs the CSRF toke
   for (const p of POSTS) assert.equal(await s.status(s.post(p, {}, { auth: false })), 401, p);
   for (const p of POSTS) assert.equal(await s.status(s.post(p, {}, { csrf: false })), 403, p);
   assert.ok(!s.calls.some(([c]) => !["chats:list", "projects:list"].includes(c)), "nothing reached the core");
+});
+
+test("fork: only the three options reach the core, core errors keep their status, and the change is audited", async (t) => {
+  const s = await setup(t);
+  const options = { eventId: 7, range: "through", includeAttachments: false };
+  const r = await s.post("/api/chats/1/fork", options);
+  assert.equal(r.status, 201);
+  assert.equal((await r.json() as any).chat.fork.sourceChatId, 1);
+  assert.deepEqual(s.calls.find(([c]) => c === "remote:chat-fork")![1], [1, options]);
+  assert.ok(s.remote.status().audit!.some(a => a.action === "chat.fork" && a.target === "채팅 1"));
+  assert.equal(await s.status(s.post("/api/chats/1/fork", { ...options, approvalModeOverride: "orchestrator-all" })), 400);
+  assert.equal(await s.status(s.post("/api/chats/999/fork", options)), 404);
+  assert.equal(await s.status(s.post("/api/chats/1/fork", { ...options, eventId: 409 })), 409);
+  assert.equal(await s.status(s.get("/api/chats/1/fork")), 405);
 });
 
 test("chats: create, rename/archive, model and approval checks (D3), commands and simple actions", async (t) => {

@@ -2,10 +2,11 @@ import { app } from "electron";
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { BUSY_STATUSES, chatApprovalChange, checkRemoteSend, listRemoteUploads, mergeProjectSettings, remoteError, removeRemoteUpload, saveRemoteUpload } from "./remote-core";
-import type { RemoteUploadKey } from "../shared/remote-web";
+import { REMOTE_UPLOAD_BUDGET, REMOTE_UPLOAD_STORAGE, type RemoteUploadKey } from "../shared/remote-web";
+import { ForkError } from "./chat-fork";
 import { connect } from "node:net";
 import { execFileSync } from "node:child_process";
-import { CLI_ACCOUNT_KINDS, type AgentKind, type ApprovalDecision, type CliAccountId, type CliAccountKind, type CliAccountPolicies, type ProjectSettings, type Theme, type GeminiWebAccountId } from "../shared/types";
+import { CLI_ACCOUNT_KINDS, type AgentKind, type ApprovalDecision, type ChatForkOptions, type CliAccountId, type CliAccountKind, type CliAccountPolicies, type ProjectSettings, type Theme, type GeminiWebAccountId } from "../shared/types";
 import type { AIStudioAction, AIStudioInput } from "../shared/aistudio";
 import { Store } from "./db";
 import { ChatManager } from "./chats";
@@ -93,6 +94,7 @@ function registerHandlers(rpc: CoreRpc) {
   ipcMain.handle("chats:search", (_e, q: string) => (q.trim() ? store.searchChats(q.trim()) : []));
   const notDeleting = (id: number) => { if (remoteDeleting.has(id)) throw new Error("채팅을 삭제하는 중입니다."); };
   ipcMain.handle("chats:send", (_e, id: number, text: string, attachmentIds: number[], delivery?: "now" | "next") => { notDeleting(id); return chats.send(id, text, attachmentIds, delivery); });
+  ipcMain.handle("chats:fork", (_e, id: number, options: ChatForkOptions) => { notDeleting(id); return chats.forkChat(id, options); });
   ipcMain.handle("chats:stop", (_e, id: number) => orchestrator.stop(id));
   ipcMain.handle("chats:pause", (_e, id: number) => orchestrator.pause(id));
   ipcMain.handle("chats:resume", (_e, id: number) => { notDeleting(id); return orchestrator.resume(id); });
@@ -134,6 +136,14 @@ function registerHandlers(rpc: CoreRpc) {
     } finally { remoteDeleting.delete(id); }
     // As on the desktop, the chat folder is kept; the chat's remote-upload files (sent or not) go.
     attachments.gcRemoteUploads({ released });
+  });
+  ipcMain.handle("remote:chat-fork", (_e, id: number, options: ChatForkOptions) => {
+    if (remoteDeleting.has(id)) throw remoteError(409, "채팅을 삭제하는 중입니다.");
+    try { return chats.forkChat(id, options, { maxBytes: REMOTE_UPLOAD_BUDGET.totalBytes, minFreeBytes: REMOTE_UPLOAD_STORAGE.minFreeBytes }); }
+    catch (error) {
+      if (error instanceof ForkError) throw remoteError(error.status, error.message);
+      throw error;
+    }
   });
   // Remote uploads: remote-pending/<UUID><ext>, sent or not; the only file cleanup is gcRemoteUploads()
   // (no tracking state). Remove and send name an upload by {id, uuid}.

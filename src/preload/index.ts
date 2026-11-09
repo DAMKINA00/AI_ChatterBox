@@ -18,6 +18,7 @@ const api: ChatterBoxApi = {
 
   listChats: () => ipcRenderer.invoke("chats:list"),
   createChat: (projectId) => ipcRenderer.invoke("chats:create", projectId),
+  forkChat: (chatId, options) => ipcRenderer.invoke("chats:fork", chatId, options),
   updateChat: (id, patch) => ipcRenderer.invoke("chats:update", id, patch),
   deleteChat: (id) => ipcRenderer.invoke("chats:delete", id),
   markViewed: (id) => ipcRenderer.invoke("chats:viewed", id),

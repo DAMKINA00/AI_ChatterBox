@@ -1,8 +1,8 @@
 // Attachment files are copied into %APPDATA%\AI_ChatterBox\attachments\<chat id>\ so the CLIs
 // (and later turns) can always read them, whatever happens to the original.
-import { copyFileSync, mkdirSync, statSync, writeFileSync, existsSync, readFileSync, lstatSync, readdirSync, realpathSync, rmSync, statfsSync, type Dirent } from "node:fs";
+import { constants as fsConstants, copyFileSync, mkdirSync, statSync, writeFileSync, existsSync, readFileSync, lstatSync, readdirSync, realpathSync, rmdirSync, rmSync, statfsSync, type Dirent } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { basename, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { REMOTE_ATTACHMENT_TYPES } from "../shared/remote-web";
 import type { AttachmentRef } from "../shared/types";
 import type { Store } from "./db";
@@ -67,6 +67,27 @@ export class AttachmentStore {
     const dest = this.target(chatId, fixed);
     writeFileSync(dest, bytes);
     return this.store.addAttachment(chatId, fixed, dest, mime || mimeOf(fixed), bytes.byteLength);
+  }
+
+  /** An independent copy under the branched chat: deleting the source or its file leaves this one. */
+  copyForFork(chatId: number, source: AttachmentRef): AttachmentRef {
+    if (!lstatSync(source.path).isFile()) throw new Error("일반 파일이 아닙니다.");
+    const dest = this.target(chatId, source.name);
+    try {
+      copyFileSync(source.path, dest, fsConstants.COPYFILE_EXCL);
+      return this.store.addAttachment(chatId, source.name, dest, source.mime, statSync(dest).size);
+    } catch (error) {
+      rmSync(dest, { force: true });
+      throw error;
+    }
+  }
+
+  /** Only what this attempt wrote. A reused chat id can hold older kept files, so the folder goes only if empty. */
+  discardForkCopies(paths: string[]) {
+    for (const path of paths) {
+      try { rmSync(path, { force: true }); rmdirSync(dirname(path)); }
+      catch { /* a non-empty folder stays; a locked file is unreferenced and harmless */ }
+    }
   }
 
   // ---- remote web uploads

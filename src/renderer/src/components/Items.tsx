@@ -31,6 +31,10 @@ import { effortLabel } from "./EffortPicker";
 import { Badge, Button, Input } from "./ui";
 import { WorkingIndicator } from "./WorkingIndicator";
 import { ChatSearchQuery } from "./ChatSearch";
+import { ReviewResultView } from "./ReviewResult";
+import { ForkContextCard, ForkMessageButton } from "./Fork";
+import { forkEventId } from "../lib/fork";
+import { consultCardReview, consultCardStatus } from "../lib/review-summary";
 
 export type Tone = "orch" | "claude" | "gpt" | "gemini" | "grok" | "deepseek";
 const TONE_TEXT: Record<Tone, string> = { orch: "text-orch", claude: "text-claude", gpt: "text-gpt", gemini: "text-gemini", grok: "text-grok", deepseek: "text-deepseek" };
@@ -241,6 +245,7 @@ function ToolGroup({ items, chatId, nested }: { items: ToolItem[]; chatId: numbe
 
 const ItemView = memo(function ItemView({ item, chatId, nested }: { item: Item; chatId: number; nested: boolean }) {
   const agents = useStore((s) => s.agents[chatId]);
+  const forkId = nested ? undefined : forkEventId(item);
   switch (item.kind) {
     case "peer":
       return <div className="rounded-md border border-dashed px-3 py-2" data-testid="peer-message">
@@ -255,6 +260,7 @@ const ItemView = memo(function ItemView({ item, chatId, nested }: { item: Item; 
             <div className="mb-0.5 flex min-w-0 items-center gap-2">
               <span className="text-[12px] font-semibold text-foreground">관리자</span>
               {item.queued && <span className="text-[11px] text-muted-foreground">{item.delivery === "now" ? "즉시 전달 요청" : "다음 단계 추가 지시"}</span>}
+              {forkId && <ForkMessageButton chatId={chatId} eventId={forkId} preview={item.text} className={FORK_ACTION} />}
             </div>
             {item.attachments.length > 0 && (
               <div className="mb-1.5 flex flex-wrap gap-1.5">
@@ -273,7 +279,10 @@ const ItemView = memo(function ItemView({ item, chatId, nested }: { item: Item; 
         <div className="group grid grid-cols-[36px_minmax(0,1fr)_auto] items-start gap-x-3 rounded-md px-2 py-1.5 transition-colors hover:bg-accent/30" data-testid="agent-message" data-role={item.role} data-expression={item.expression}>
           <AgentAvatar kind={roleTone(item.role, agents) as Tone} expression={item.expression} size={36} alt={`${roleName(item.role, agents)} 캐릭터`} />
           <div className="min-w-0">
-            <RoleName chatId={chatId} role={item.role} expression={item.expression} avatar={false} />
+            <div className="flex min-w-0 items-center gap-2">
+              <RoleName chatId={chatId} role={item.role} expression={item.expression} avatar={false} />
+              {forkId && <ForkMessageButton chatId={chatId} eventId={forkId} preview={item.text} className={FORK_ACTION} />}
+            </div>
             <div className="group relative mt-0.5">
               <div data-chat-search-text><Markdown text={item.text} /></div>
               {item.streaming && <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse-dot rounded-sm bg-primary align-text-bottom" />}
@@ -311,8 +320,13 @@ const ItemView = memo(function ItemView({ item, chatId, nested }: { item: Item; 
       return <ArtifactCard item={item} nested={nested} />;
     case "notice":
       return <Notice tone={item.tone}><span data-chat-search-text>{item.text}</span></Notice>;
+    case "fork":
+      return <ForkContextCard item={item} />;
   }
 });
+
+/** Next to the speaker name (the copy button owns the top-right corner); shown on row hover or keyboard focus. */
+const FORK_ACTION = "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100";
 
 function ArtifactCard({ item, nested }: { item: ArtifactItem; nested: boolean }) {
   return (
@@ -568,15 +582,16 @@ function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }
   const searchQuery = useContext(ChatSearchQuery);
   const searching = !!searchQuery.trim();
   const showRequest = expanded || searching;
-  const [progressExpanded, setProgressExpanded] = useState(item.status === "running");
-  const attention = needsAttention(item, true);
   const select = useStore((s) => s.select);
   const consult = useStore((s) => s.consults[chatId]?.find((c) => c.id === item.consultId));
+  const status = consultCardStatus(item, consult);
+  const [progressExpanded, setProgressExpanded] = useState(status === "running");
+  const attention = needsAttention(status === item.status ? item : { ...item, status }, true);
   const requestBrief = item.request.split("\n").find((line) => line.trim())?.trim() ?? "(요청 내용 없음)";
   const actualEffort = consult?.effort;
   const effortTitle = `CLI에 전달한 설정입니다. 서비스 정책에 따라 조정될 수 있습니다.${consult?.requestedEffort && consult.requestedEffort !== actualEffort ? ` 마스터 요청: ${consult.requestedEffort}` : ""}`;
   return (
-    <div className="overflow-hidden rounded-xl border bg-card" data-testid="consult-card" data-status={item.status}>
+    <div className="overflow-hidden rounded-xl border bg-card" data-testid="consult-card" data-status={status}>
       <div className="flex items-center gap-2 px-3 py-2">
         <button
           type="button"
@@ -609,9 +624,9 @@ function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }
           {item.attachments.length > 0 && <span className="shrink-0 text-[11px] text-muted-foreground">첨부 {item.attachments.length}개</span>}
         </button>
         {item.files && item.files.length > 0 && <Badge>파일 {item.files.length}개</Badge>}
-        <span className={cn("flex items-center gap-1 text-[12px]", item.status === "done" ? "text-success" : item.status === "running" ? "text-primary" : "text-muted-foreground")}>
-          {item.status === "running" ? <WorkingIndicator chatId={chatId} role={item.to} /> : item.status === "done" ? <Check className="size-3.5" /> : <AlertTriangle className="size-3.5" />}
-          {STATUS_LABEL[item.status]}
+        <span data-testid="consult-status" className={cn("flex items-center gap-1 text-[12px]", status === "done" ? "text-success" : status === "running" ? "text-primary" : "text-muted-foreground")}>
+          {status === "running" ? <WorkingIndicator chatId={chatId} role={item.to} /> : status === "done" ? <Check className="size-3.5" /> : <AlertTriangle className="size-3.5" />}
+          {STATUS_LABEL[status]}
         </span>
         <Button variant="ghost" size="xs" onClick={() => select({ chatId, node: `consult:${item.consultId}` })}>
           열기
@@ -622,12 +637,13 @@ function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }
           배정 이유 · <span data-chat-search-text>{item.reason}</span>
         </div>
       )}
-      {item.status !== "running" && item.summary?.trim() && (
+      {status !== "running" && item.summary?.trim() && (
         <div className="border-t px-3 py-2 text-[12px]" data-testid="consult-summary">
           <div className="mb-1 text-[11px] font-medium text-muted-foreground">결과 요약</div>
           <div data-chat-search-text><Markdown text={item.summary} className="text-[12.5px]" /></div>
         </div>
       )}
+      {item.consultKind === "review" && <ReviewResultView {...consultCardReview(item, consult)} />}
       {showRequest && (
         <div className="border-t bg-background/40 p-3" data-testid="consult-request-details">
           <div className="rounded-lg border bg-card px-3 py-2">
@@ -650,10 +666,10 @@ function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }
           {!attention && !searching && <button type="button" className="mb-1 flex items-center gap-1 text-[12px] text-muted-foreground hover:text-foreground" data-testid="consult-progress-toggle" aria-expanded={progressExpanded} onClick={() => setProgressExpanded(!progressExpanded)}>
             <ChevronRight className={cn("size-3.5", progressExpanded && "rotate-90")} /> 작업 기록 {item.children.length}개 · {progressExpanded ? "접기" : "펼치기"}
           </button>}
-          {(attention || progressExpanded || searching) && <ItemList items={item.children} chatId={chatId} nested live={item.status === "running"} />}
+          {(attention || progressExpanded || searching) && <ItemList items={item.children} chatId={chatId} nested live={status === "running"} />}
         </div>
       ) : (
-        item.status === "running" && (
+        status === "running" && (
           <div className="flex items-center gap-2 border-t p-3 text-[12px] text-muted-foreground" data-testid="consult-progress">
             <WorkingIndicator chatId={chatId} role={item.to} /> <ConsultTargetName chatId={chatId} role={item.to} /> 작업 시작 중…
           </div>

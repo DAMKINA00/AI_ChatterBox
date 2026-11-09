@@ -24,6 +24,7 @@ import {
   type NodeId,
   type Project,
   type ProjectSettings,
+  type ReviewResult,
   type TimelineEvent,
 } from "../shared/types";
 
@@ -153,6 +154,15 @@ function convertV1Event(e: any): AgentEvent | null {
   }
 }
 
+/** What an assignment was started with, for recovery. Kept out of Consult: it holds local paths. */
+export interface ConsultAssignment {
+  model?: string;
+  accountId?: string;
+  webAccountId?: string;
+  attach: string[];
+  discussion?: { topic: string; peers: string[] };
+}
+
 export type ChatPatch = Partial<
   Pick<
     Chat,
@@ -241,6 +251,7 @@ const toChat = (r: Row): Chat => ({
   archived: !!r.archived,
   createdAt: r.created_at,
   lastActiveAt: r.last_active_at,
+  ...(r.fork_json ? { fork: JSON.parse(r.fork_json) } : {}),
 });
 const toConsult = (r: Row): Consult => ({
   requestedEffort: r.requested_effort ?? undefined,
@@ -261,6 +272,8 @@ const toConsult = (r: Row): Consult => ({
   status: r.status,
   startedAt: r.started_at,
   endedAt: r.ended_at,
+  ...(r.review_json ? { review: JSON.parse(r.review_json) } : {}),
+  ...(r.interrupted_by ? { interruptedBy: r.interrupted_by } : {}),
 });
 const toAgent = (r: Row): ChatAgent => ({
   id: r.id,
@@ -292,7 +305,7 @@ export class Store {
     this.db.exec("UPDATE chats SET status = 'paused' WHERE status = 'pausing'");
     // The app was quit or crashed mid-run: those chats can be resumed ("이어서 진행").
     this.db.exec("UPDATE chats SET status = 'interrupted' WHERE status IN ('working','approval')");
-    this.db.exec("UPDATE consults SET status = 'stopped', ended_at = COALESCE(ended_at, started_at) WHERE status = 'running'");
+    this.db.exec("UPDATE consults SET status = 'stopped', ended_at = COALESCE(ended_at, started_at), interrupted_by = 'app_exit' WHERE status = 'running'");
     this.migrateV1();
     this.migrateAgents();
     // Rename only generated defaults; keep custom names, IDs and conversation history.
@@ -447,6 +460,10 @@ export class Store {
     add("consults", "supersedes", "supersedes INTEGER");
     add("consults", "requested_effort", "requested_effort TEXT");
     add("consults", "effort", "effort TEXT");
+    add("consults", "review_json", "review_json TEXT");
+    add("consults", "assignment_json", "assignment_json TEXT");
+    add("consults", "interrupted_by", "interrupted_by TEXT");
+    add("chats", "fork_json", "fork_json TEXT");
     add("approvals", "decided_by", "decided_by TEXT NOT NULL DEFAULT 'user'");
     add("approvals", "reason", "reason TEXT");
     add("attachments", "uuid", "uuid TEXT"); // remote uploads only; NULL for desktop attachments
@@ -506,7 +523,7 @@ export class Store {
     const like = `%${q.replace(/[\\%_]/g, (c) => "\\" + c)}%`;
     return (
       this.db
-        .prepare("SELECT DISTINCT chat_id FROM chat_events WHERE type IN ('user','text','consult_start') AND payload_json LIKE ? ESCAPE '\\' LIMIT 500")
+        .prepare("SELECT DISTINCT chat_id FROM chat_events WHERE type IN ('user','text','consult_start','fork_context') AND payload_json LIKE ? ESCAPE '\\' LIMIT 500")
         .all(like) as Row[]
     ).map((r) => r.chat_id);
   }
@@ -603,6 +620,37 @@ export class Store {
       );
     return this.chat(id)!;
   }
+  /**
+   * A new idle chat carrying the source's chat settings and a read-only conversation snapshot. Sessions,
+   * workers, goal and approval grants stay behind. All one savepoint: `context` runs synchronously inside
+   * it, so a failure leaves no chat, and no other write can interleave.
+   */
+  createForkChat(source: Chat, title: string, fork: NonNullable<Chat["fork"]>, context: (chatId: number) => Extract<AgentEvent, { type: "fork_context" }>): Chat {
+    this.db.exec("SAVEPOINT fork_chat");
+    try {
+      const now = Date.now();
+      const r = this.db
+        .prepare(
+          `INSERT INTO chats (project_id, title, claude_model_override, codex_model_override, gemini_model_override, grok_model_override, deepseek_model_override,
+           orchestrator_effort_override, claude_effort_override, codex_effort_override, gemini_effort_override, grok_effort_override, deepseek_effort_override,
+           approval_mode_override, orchestrator_model_override, fork_json, created_at, last_active_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          source.projectId, title, source.claudeModelOverride, source.codexModelOverride, source.geminiModelOverride, source.grokModelOverride, source.deepseekModelOverride,
+          source.orchestratorEffortOverride, source.claudeEffortOverride, source.codexEffortOverride, source.geminiEffortOverride, source.grokEffortOverride, source.deepseekEffortOverride,
+          source.approvalModeOverride, source.orchestratorModelOverride, JSON.stringify(fork), now, now,
+        );
+      const chatId = Number(r.lastInsertRowid);
+      const event = context(chatId);
+      const stored = this.addEvent(chatId, "orch", null, event);
+      this.linkAttachments(event.attachments.map(a => a.id), stored.id);
+      this.db.exec("RELEASE fork_chat");
+      return this.chat(chatId)!;
+    } catch (error) {
+      this.db.exec("ROLLBACK TO fork_chat; RELEASE fork_chat");
+      throw error;
+    }
+  }
   deleteChat(id: number) {
     this.clearChatSettings(id);
     this.db.prepare("DELETE FROM chats WHERE id = ?").run(id);
@@ -640,7 +688,7 @@ export class Store {
   }
 
   private clearChatSettings(id: number) {
-    for (const prefix of ["orchSession", "teamMessages", "gemini-web-context", "aistudio-context", "deepseek-context"])
+    for (const prefix of ["orchSession", "teamMessages", "gemini-web-context", "aistudio-context", "deepseek-context", "runInstruction"])
       this.db.prepare("DELETE FROM settings WHERE key LIKE ?").run(`${prefix}:${id}:%`);
   }
 
@@ -663,10 +711,11 @@ export class Store {
     reason?: string,
     supersedes?: number,
     reasoning?: { requestedEffort?: string; effort?: string },
+    assignment?: ConsultAssignment,
   ): Consult {
     const seq = ((this.db.prepare("SELECT MAX(seq) m FROM consults WHERE chat_id = ?").get(chatId) as Row).m ?? 0) + 1;
     const r = this.db
-      .prepare("INSERT INTO consults (chat_id, seq, from_role, to_role, kind, request, requested_effort, effort, status, started_at, scope_json, instruction_id, reason, supersedes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)")
+      .prepare("INSERT INTO consults (chat_id, seq, from_role, to_role, kind, request, requested_effort, effort, status, started_at, scope_json, instruction_id, reason, supersedes, assignment_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)")
       .run(
         chatId,
         seq,
@@ -681,6 +730,7 @@ export class Store {
         instructionId ?? null,
         reason ?? null,
         supersedes ?? null,
+        assignment ? JSON.stringify(assignment) : null,
       );
     return this.consult(Number(r.lastInsertRowid))!;
   }
@@ -689,6 +739,16 @@ export class Store {
       .prepare("UPDATE consults SET status = ?, response_summary = ?, files_changed_json = ?, ended_at = ? WHERE id = ?")
       .run(status, summary, JSON.stringify(files), Date.now(), id);
     return this.consult(id)!;
+  }
+
+  consultAssignment(id: number): ConsultAssignment | undefined {
+    const r = this.db.prepare("SELECT assignment_json FROM consults WHERE id = ?").get(id) as Row | undefined;
+    return r?.assignment_json ? JSON.parse(r.assignment_json) : undefined;
+  }
+  /** Accepted only while the assignment runs; null once it has ended. */
+  setConsultReview(id: number, review: ReviewResult): Consult | null {
+    const { changes } = this.db.prepare("UPDATE consults SET review_json = ? WHERE id = ? AND status = 'running'").run(JSON.stringify(review), id);
+    return changes ? this.consult(id)! : null;
   }
 
   // ---- events
@@ -717,6 +777,11 @@ export class Store {
   }
   attachment(id: number): AttachmentRef | undefined {
     const r = this.db.prepare("SELECT * FROM attachments WHERE id = ?").get(id);
+    return r ? toAttachment(r) : undefined;
+  }
+  /** The record only if it belongs to this chat. */
+  chatAttachment(chatId: number, id: number): AttachmentRef | undefined {
+    const r = this.db.prepare("SELECT * FROM attachments WHERE id = ? AND chat_id = ?").get(id, chatId);
     return r ? toAttachment(r) : undefined;
   }
   attachmentsFor(ids: number[]): AttachmentRef[] {

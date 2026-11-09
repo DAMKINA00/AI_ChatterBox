@@ -143,6 +143,7 @@ export const REMOTE_API = {
   chatUpdate: "/api/chats/:id/update",              // POST RemoteChatPatch
   chatViewed: "/api/chats/:id/viewed",              // POST {}
   chatPause: "/api/chats/:id/pause",                // POST {}
+  chatFork: "/api/chats/:id/fork",                  // POST ChatForkOptions → RemoteChatResponse
   chatResume: "/api/chats/:id/resume",              // POST {} (pause resume and interrupted-run resume)
   chatDismissInterrupted: "/api/chats/:id/dismiss-interrupted", // POST {}
   chatCommand: "/api/chats/:id/command",            // POST RemoteCommandRequest
@@ -386,7 +387,7 @@ export interface RemoteEventArgs {
 
 /** Remote state changes shown in the desktop remote web dialog (memory, newest first, max 50). */
 export type RemoteAuditAction =
-  | "chat.create" | "chat.update" | "chat.delete" | "chat.approvalMode"
+  | "chat.create" | "chat.update" | "chat.delete" | "chat.approvalMode" | "chat.fork"
   | "project.create" | "project.update" | "project.approvalMode"
   | "attachment.upload";
 export interface RemoteAuditEntry { at: number; user: string; ip: string; action: RemoteAuditAction; target: string; detail?: string }

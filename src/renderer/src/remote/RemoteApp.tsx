@@ -3,12 +3,14 @@
 // Reuses the desktop timeline fold (buildItems/planOf/appendEvent); Markdown is rendered without raw HTML.
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
-  ArrowLeft, BarChart3, Circle, CircleCheck, CircleDot, Flag, FolderKanban, LoaderCircle, LogOut, Monitor, Moon, Pause, Play,
+  ArrowLeft, BarChart3, Flag, FolderKanban, LoaderCircle, LogOut, Monitor, Moon, Pause, Play,
   Plus, Search, Settings2, Square, Sun, Users, X,
 } from "lucide-react";
 import { REMOTE_EVENTS, REMOTE_LIMITS, type RemoteChatResponse, type RemoteSearchResponse } from "../../../shared/remote-web";
-import { CONSULT_KIND_LABEL, roleName, type AttachmentRef, type Chat, type ChatAgent, type ChatStatus, type Consult, type ConsultStatus } from "../../../shared/types";
-import { buildItems, normalizePlanStepTitle, planOf, type Item } from "../timeline";
+import { CONSULT_KIND_LABEL, roleName, type AttachmentRef, type Chat, type ChatAgent, type ChatStatus, type Consult, type ConsultStatus, type TimelineEvent } from "../../../shared/types";
+import { buildItems, planOf, type Item } from "../timeline";
+import { forkEventId } from "../lib/fork";
+import { consultCardReview, consultCardStatus } from "../lib/review-summary";
 import { cn } from "../lib/utils";
 import { AuthError, request, setCsrf, url } from "./api";
 import { ChatSettings } from "./ChatSettings";
@@ -19,6 +21,7 @@ import { applyChatUpdate, applyMessage, mergeChats, mergeSnapshot, type Detail, 
 import { useTheme } from "./theme";
 import { Btn, Card, Clip, ConfirmHost, errorText, FIELD, Md } from "./ui";
 import { UsageSheet } from "./Usage";
+import { consultCardDomId, ForkAction, ForkContext, ForkOriginBar, PlanSteps, ReviewBlock, ReviewTotalsLine, RunStatsSheet } from "./Improvements";
 
 const STATUS_LABEL: Record<ChatStatus, string> = {
   idle: "대기", working: "작업 중", approval: "승인 대기", pausing: "일시정지 중", paused: "일시정지", done: "완료", error: "오류", interrupted: "중단됨",
@@ -182,7 +185,8 @@ function Workspace({ onLoggedOut }: { onLoggedOut: () => void }) {
         <ChatList chats={chats} projects={projects} selected={selected} onSelect={setSelected} onNewChat={id => void newChat(id)} onError={fail} />
       </aside>
       <main className={cn("min-w-0 flex-1", !selected && "hidden md:block")}>
-        {chat ? <ChatPane key={chat.id} chat={chat} detail={detail} onBack={() => setSelected(null)} onSettings={() => setSheet("chat")} onError={fail} />
+        {chat ? <ChatPane key={chat.id} chat={chat} detail={detail} sourceExists={!!chat.fork && chats.some(c => c.id === chat.fork!.sourceChatId)}
+          onOpenChat={id => { setSelected(id); void loadChats(); }} onBack={() => setSelected(null)} onSettings={() => setSheet("chat")} onError={fail} />
           : <div className="flex h-full items-center justify-center text-muted-foreground">채팅을 선택하세요.</div>}
       </main>
       {sheet === "chat" && chat && <ChatSettings chat={chat} project={projectData.projects.find(p => p.id === chat.projectId)} onClose={() => setSheet(null)}
@@ -253,7 +257,8 @@ function StatusBadge({ status }: { status: ChatStatus }) {
     status === "error" && "border-destructive/50 text-destructive", status === "done" && "text-success")}>{STATUS_LABEL[status]}</span>;
 }
 
-function ChatPane({ chat, detail, onBack, onSettings, onError }: { chat: Chat; detail?: Detail; onBack: () => void; onSettings: () => void; onError: (e: unknown) => void }) {
+function ChatPane({ chat, detail, sourceExists, onOpenChat, onBack, onSettings, onError }: { chat: Chat; detail?: Detail; sourceExists: boolean; onOpenChat: (id: number) => void; onBack: () => void; onSettings: () => void; onError: (e: unknown) => void }) {
+  const [statsOpen, setStatsOpen] = useState(false);
   const live = chat.status === "working" || chat.status === "approval";
   const items = useMemo(() => (detail ? buildItems(detail.events, undefined, live) : []), [detail, live]);
   const plan = useMemo(() => (detail ? planOf(detail.events) : null), [detail]);
@@ -277,8 +282,11 @@ function ChatPane({ chat, detail, onBack, onSettings, onError }: { chat: Chat; d
         {chat.status === "pausing" && <Btn variant="ghost" disabled aria-label="일시정지하는 중"><LoaderCircle className="animate-spin" /></Btn>}
         {chat.status === "paused" && <Btn variant="ghost" disabled={pending} onClick={() => void act(url("/api/chats/:id/resume", chat.id))} aria-label="재개" title="재개"><Play /></Btn>}
         {busyStatus(chat.status) && <Btn variant="destructive" disabled={pending} onClick={() => void act(url("/api/chats/:id/stop", chat.id))} aria-label="중지"><Square /><span className="hidden sm:inline">중지</span></Btn>}
+        <Btn variant="ghost" disabled={!detail} onClick={() => setStatsOpen(true)} aria-label="실행 통계" title="실행 통계"><BarChart3 /></Btn>
         <Btn variant="ghost" onClick={onSettings} aria-label="채팅 설정" title="채팅 설정"><Settings2 /></Btn>
       </header>
+      {statsOpen && detail && <RunStatsSheet chat={chat} events={detail.events} agents={agents} consults={detail.consults} onClose={() => setStatsOpen(false)} />}
+      <ForkOriginBar chat={chat} exists={sourceExists} onOpen={onOpenChat} />
       {chat.status === "interrupted" && (
         <div className="flex flex-wrap items-center gap-2 border-b border-warning/50 bg-warning/10 px-3 py-2 text-[13px] md:px-6">
           <span className="min-w-0 flex-1">앱이 종료되어 작업이 중단되었습니다.</span>
@@ -287,10 +295,10 @@ function ChatPane({ chat, detail, onBack, onSettings, onError }: { chat: Chat; d
         </div>
       )}
       <GoalBar chat={chat} pending={pending} onClear={() => void command("goal", "clear")} />
-      <TeamPanel chat={chat} agents={agents} consults={detail?.consults ?? []} plan={plan} pending={pending} onPlan={name => void command(name)} />
+      <TeamPanel chat={chat} agents={agents} consults={detail?.consults ?? []} events={detail?.events ?? []} items={items} plan={plan} pending={pending} onPlan={name => void command(name)} />
       <div ref={scroller} onScroll={e => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; }} className="flex-1 overflow-y-auto px-3 py-4 md:px-6">
         {!detail ? <div className="flex justify-center p-6 text-muted-foreground"><LoaderCircle className="size-5 animate-spin" /></div>
-          : <div className="mx-auto grid max-w-3xl gap-3">{items.map(item => <ItemView key={item.key} item={item} chat={chat} agents={agents} live={live} onError={onError} />)}</div>}
+          : <div className="mx-auto grid max-w-3xl gap-3">{items.map(item => <ItemView key={item.key} item={item} chat={chat} agents={agents} consults={detail?.consults ?? []} live={live} onError={onError} onForked={c => onOpenChat(c.id)} />)}</div>}
       </div>
       <Composer chat={chat} onError={onError} />
     </div>
@@ -330,18 +338,19 @@ function AttachmentLinks({ chatId, attachments }: { chatId: number; attachments:
   );
 }
 
-function TeamPanel({ chat, agents, consults, plan, pending, onPlan }: {
-  chat: Chat; agents: ChatAgent[]; consults: Consult[]; plan: ReturnType<typeof planOf>; pending: boolean; onPlan: (name: "plan-run" | "plan-cancel") => void;
+function TeamPanel({ chat, agents, consults, events, items, plan, pending, onPlan }: {
+  chat: Chat; agents: ChatAgent[]; consults: Consult[]; events: TimelineEvent[]; items: Item[]; plan: ReturnType<typeof planOf>; pending: boolean; onPlan: (name: "plan-run" | "plan-cancel") => void;
 }) {
   const active = agents.filter(a => a.status === "active");
   const running = consults.filter(c => c.status === "running");
   const shownPlan = plan?.state === "cancelled" ? null : plan;
   const proposed = shownPlan?.state === "proposed";
-  if (!active.length && !shownPlan) return null;
+  const reviews = consults.filter(c => c.kind === "review").length;
+  if (!active.length && !shownPlan && !reviews) return null;
   return (
     <details className="border-b bg-muted/30 px-3 py-2 text-[12.5px] md:px-6" open={proposed || (!!shownPlan && busyStatus(chat.status))}>
       <summary className="flex cursor-pointer items-center gap-2 font-medium">
-        <Users className="size-4" /> 작업자 {active.length}명{running.length ? ` · ${running.length}건 진행 중` : ""}{shownPlan ? ` · ${proposed ? "계획 승인 대기" : "체크리스트"} ${shownPlan.steps.filter(s => s.status === "completed").length}/${shownPlan.steps.length}` : ""}
+        <Users className="size-4" /> 작업자 {active.length}명{running.length ? ` · ${running.length}건 진행 중` : ""}{reviews ? ` · 리뷰 ${reviews}건` : ""}{shownPlan ? ` · ${proposed ? "계획 승인 대기" : "체크리스트"} ${shownPlan.steps.filter(s => s.status === "completed").length}/${shownPlan.steps.length}` : ""}
       </summary>
       <div className="mt-2 grid gap-2">
         {active.length > 0 && <ul className="grid gap-1">
@@ -351,14 +360,8 @@ function TeamPanel({ chat, agents, consults, plan, pending, onPlan }: {
           })}
         </ul>}
         {shownPlan?.explanation && <div className="text-muted-foreground">{shownPlan.explanation}</div>}
-        {shownPlan && <ol className="grid gap-1" aria-label="체크리스트">
-          {shownPlan.steps.map((s, i) => (
-            <li key={i} className="flex items-start gap-1.5">
-              {s.status === "completed" ? <CircleCheck className="mt-0.5 size-3.5 shrink-0 text-success" /> : s.status === "inProgress" ? <CircleDot className="mt-0.5 size-3.5 shrink-0 text-primary" /> : <Circle className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />}
-              <span className={cn(s.status === "completed" && "text-muted-foreground line-through")}>{normalizePlanStepTitle(s.title)}</span>
-            </li>
-          ))}
-        </ol>}
+        {shownPlan && <PlanSteps plan={shownPlan} consults={consults} items={items} />}
+        <ReviewTotalsLine consults={consults} events={events} />
         {proposed && <div className="flex flex-wrap gap-2">
           <Btn disabled={pending} onClick={() => onPlan("plan-run")}><Play /> 계획 실행</Btn>
           <Btn variant="outline" disabled={pending} onClick={() => onPlan("plan-cancel")}><X /> 계획 취소</Btn>
@@ -369,18 +372,30 @@ function TeamPanel({ chat, agents, consults, plan, pending, onPlan }: {
   );
 }
 
-function ItemView({ item, chat, agents, live, onError }: { item: Item; chat: Chat; agents: ChatAgent[]; live: boolean; onError: (e: unknown) => void }) {
+function ItemView({ item, chat, agents, consults, live, onError, onForked, nested = false }: { item: Item; chat: Chat; agents: ChatAgent[]; consults: Consult[]; live: boolean; onError: (e: unknown) => void; onForked: (chat: Chat) => void; nested?: boolean }) {
+  const forkId = nested ? undefined : forkEventId(item);
   switch (item.kind) {
     case "user":
       return (
-        <div className="ml-auto max-w-[85%] rounded-2xl bg-user-bubble px-3.5 py-2 text-[14px] whitespace-pre-wrap text-primary-foreground">
-          {item.queued && <div className="mb-1 text-[11px] opacity-80">{item.delivery === "next" ? "다음 순서 예약" : "작업 중 추가 지시"}</div>}
-          {item.text}
-          {item.attachments.length > 0 && <AttachmentLinks chatId={chat.id} attachments={item.attachments} />}
+        <div className="ml-auto grid max-w-[85%] justify-items-end gap-1">
+          <div className="rounded-2xl bg-user-bubble px-3.5 py-2 text-[14px] whitespace-pre-wrap text-primary-foreground">
+            {item.queued && <div className="mb-1 text-[11px] opacity-80">{item.delivery === "next" ? "다음 순서 예약" : "작업 중 추가 지시"}</div>}
+            {item.text}
+            {item.attachments.length > 0 && <AttachmentLinks chatId={chat.id} attachments={item.attachments} />}
+          </div>
+          {forkId && <ForkAction chat={chat} eventId={forkId} preview={item.text} onForked={onForked} onError={onError} />}
         </div>
       );
     case "message":
-      return <div><div className="mb-1 text-[12px] font-medium text-muted-foreground">{roleName(item.role, agents)}{item.streaming ? " · 작성 중…" : ""}</div><Md text={item.text} /></div>;
+      return <div>
+        <div className="mb-1 flex flex-wrap items-center gap-2 text-[12px] font-medium text-muted-foreground">
+          <span>{roleName(item.role, agents)}{item.streaming ? " · 작성 중…" : ""}</span>
+          {forkId && <ForkAction chat={chat} eventId={forkId} preview={item.text} onForked={onForked} onError={onError} />}
+        </div>
+        <Md text={item.text} />
+      </div>;
+    case "fork":
+      return <ForkContext item={item} />;
     case "tool":
       return (
         <details className="rounded-md border px-2.5 py-1.5 text-[12.5px]">
@@ -394,24 +409,30 @@ function ItemView({ item, chat, agents, live, onError }: { item: Item; chat: Cha
       return <Approval item={item} chat={chat} agents={agents} live={live} onError={onError} />;
     case "auto":
       return <div className="text-[12px] text-muted-foreground">{roleName(item.request.role, agents)} · {item.request.title} → 마스터가 {item.decision === "allow" ? "허용" : "거부"}{item.reused ? " (기존 결정)" : ""} · {item.reason}</div>;
-    case "consult":
+    case "consult": {
+      const consult = consults.find(c => c.id === item.consultId);
+      const status = consultCardStatus(item, consult);
       return (
+        <div id={consultCardDomId(item.consultId)} tabIndex={-1} data-testid="remote-consult-card" data-status={status} className="rounded-lg outline-none focus:ring-2 focus:ring-primary">
         <Card>
           <div className="flex flex-wrap items-center gap-1.5 text-[12.5px]">
             <span className="font-medium">{roleName(item.from, agents)} → {roleName(item.to, agents)}</span>
             <span className="rounded border px-1.5 text-[11px]">{CONSULT_KIND_LABEL[item.consultKind]}</span>
-            <span className={cn("text-[11.5px]", item.status === "running" ? "text-primary" : item.status === "done" ? "text-success" : "text-destructive")}>{CONSULT_STATUS_LABEL[item.status]}</span>
+            <span data-testid="remote-consult-status" className={cn("text-[11.5px]", status === "running" ? "text-primary" : status === "done" ? "text-success" : "text-destructive")}>{CONSULT_STATUS_LABEL[status]}</span>
           </div>
           <details className="mt-1.5 text-[12.5px]"><summary className="cursor-pointer text-muted-foreground">요청 내용</summary><div className="mt-1.5"><Md text={item.request} /></div></details>
           {item.summary && <div className="mt-2 border-t pt-2"><Md text={item.summary} /></div>}
+          {item.consultKind === "review" && <ReviewBlock {...consultCardReview(item, consult)} />}
           {item.children.length > 0 && (
-            <details className="mt-2 text-[12.5px]" open={item.status === "running"}>
+            <details className="mt-2 text-[12.5px]" open={status === "running"}>
               <summary className="cursor-pointer text-muted-foreground">작업 과정 {item.children.length}개</summary>
-              <div className="mt-2 grid gap-2 border-l pl-3">{item.children.map(child => <ItemView key={child.key} item={child} chat={chat} agents={agents} live={live} onError={onError} />)}</div>
+              <div className="mt-2 grid gap-2 border-l pl-3">{item.children.map(child => <ItemView key={child.key} item={child} chat={chat} agents={agents} consults={consults} live={live} onError={onError} onForked={onForked} nested />)}</div>
             </details>
           )}
         </Card>
+        </div>
       );
+    }
     case "image":
       return <div className="text-[12.5px] text-muted-foreground">{roleName(item.role, agents)} · 이미지 생성 {item.status === "running" ? "중" : item.status === "done" ? "완료 (앱에서 확인)" : `실패 ${item.error ?? ""}`}</div>;
     case "ask":

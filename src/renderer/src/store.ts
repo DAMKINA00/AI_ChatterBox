@@ -3,6 +3,7 @@ import type {
   AgentKind,
   Chat,
   ChatAgent,
+  ChatForkOptions,
   CliInfo,
   CliAccountStatus,
   Consult,
@@ -63,6 +64,8 @@ interface State {
   createChat(projectId: number): Promise<Chat | null>;
   updateChat(id: number, patch: Parameters<typeof api.updateChat>[1]): Promise<void>;
   deleteChat(id: number): Promise<void>;
+  /** New idle chat holding a read-only transcript of the source; opens it. null on failure (toast shown). */
+  forkChat(sourceChatId: number, options: ChatForkOptions): Promise<Chat | null>;
 }
 
 let toastSeq = 0;
@@ -280,6 +283,18 @@ export const useStore = create<State>((set, get) => ({
       set((s) => ({ chats: s.chats.map((x) => (x.id === id ? c : x)) }));
     } catch (e) {
       get().toast(errorMessage(e));
+    }
+  },
+  async forkChat(sourceChatId, options) {
+    try {
+      const c = await api.forkChat(sourceChatId, options);
+      // onChatUpdated may already have added it; keep one entry.
+      set((s) => ({ chats: [c, ...s.chats.filter((x) => x.id !== c.id)] }));
+      await get().select({ chatId: c.id });
+      return c;
+    } catch (e) {
+      get().toast(errorMessage(e));
+      return null;
     }
   },
   async deleteChat(id) {

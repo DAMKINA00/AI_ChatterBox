@@ -3,12 +3,15 @@
 //  - "orch" / "claude" / "gpt": one conversation, flat
 //  - "consult:N": one consult
 import { isAgentExpression, isWorkerKey } from "../../shared/types";
-import type { AgentExpression, PlanStep, AgentEvent, ApprovalDecision, ApprovalRequest, AttachmentRef, ConsultKind, ConsultStatus, FileDiff, NodeId, Role, TimelineEvent } from "../../shared/types";
+import type { AgentExpression, PlanStep, AgentEvent, ApprovalDecision, ApprovalRequest, AttachmentRef, ConsultKind, ConsultStatus, FileDiff, NodeId, ReviewResult, Role, TimelineEvent } from "../../shared/types";
 
 export type Item =
   | { kind: "artifacts"; key: string; paths: string[] }
-  | { kind: "user"; key: string; text: string; attachments: AttachmentRef[]; at: number; queued?: boolean; delivery?: "now" | "next" }
-  | { kind: "message"; key: string; role: Role; node: NodeId; text: string; streaming: boolean; expression: AgentExpression; at: number }
+  /** eventId: the persisted event (fork point); absent for live previews. */
+  | { kind: "user"; key: string; text: string; attachments: AttachmentRef[]; at: number; queued?: boolean; delivery?: "now" | "next"; eventId?: number }
+  | { kind: "message"; key: string; role: Role; node: NodeId; text: string; streaming: boolean; expression: AgentExpression; at: number; eventId?: number }
+  /** Read-only transcript a forked chat started from. */
+  | { kind: "fork"; key: string; text: string; attachments: AttachmentRef[]; at: number }
   | { kind: "tool"; key: string; role: Role; id: string; name: string; input: string; diffs?: FileDiff[]; result?: { ok: boolean; output: string } }
   | { kind: "files"; key: string; role: Role; files: FileDiff[]; ok: boolean }
   | { kind: "approval"; key: string; request: ApprovalRequest; decision?: ApprovalDecision | "auto" | "expired" }
@@ -27,6 +30,8 @@ export type Item =
       reason?: string;
       summary?: string;
       files?: string[];
+      /** Structured report_review result; absent = none submitted (never treated as a pass). */
+      review?: ReviewResult;
       children: Item[];
       at: number;
     }
@@ -168,6 +173,22 @@ function applyInConsult(items: Item[], consultId: number, e: TimelineEvent, expr
   return changed ? next : items;
 }
 
+function attachReview(items: Item[], consultId: number, review: ReviewResult): Item[] {
+  let changed = false;
+  const next = items.map((item) => {
+    if (item.kind !== "consult") return item;
+    if (item.consultId === consultId) {
+      changed = true;
+      return { ...item, review };
+    }
+    const children = attachReview(item.children, consultId, review);
+    if (children === item.children) return item;
+    changed = true;
+    return { ...item, children };
+  });
+  return changed ? next : items;
+}
+
 interface FoldState {
   top: Item[];
   consultTargets: Map<number, Role>;
@@ -184,6 +205,11 @@ function foldEvents(events: TimelineEvent[], view: View, state: FoldState, start
   for (let index = start; index < events.length; index++) {
     if (beforeEvent) beforeEvent(index, { top, consultTargets, expressions, consultPaths });
     const e = events[index];
+    if (e.event.type === "review_result") {
+      // Reported from inside the consult; the result belongs on the consult card itself in every view.
+      top = attachReview(top, e.event.consultId, e.event.review);
+      continue;
+    }
     if (e.event.type === "consult_start") consultTarget(e, consultTargets);
     const where = belongs(e, view, consultTargets);
     if (!where) continue;
@@ -340,6 +366,7 @@ export function apply(items: Item[], e: TimelineEvent, expression?: AgentExpress
   const key = e.id ? `e${e.id}` : `live-${e.node}-${role}`;
   switch (ev.type) {
     case "room_message":
+      // No eventId: a group message is not a fork point, even when the master wrote it.
       return [...items, { kind: "message", key, role: ev.from, node: "orch", text: ev.text, streaming: false, expression: "neutral", at: e.at }];
     case "peer_message":
       return [...items, { kind: "peer", key, from: ev.from, to: ev.to, text: ev.text }];
@@ -348,7 +375,12 @@ export function apply(items: Item[], e: TimelineEvent, expression?: AgentExpress
     case "expression":
       return items;
     case "user":
-      return [...items, { kind: "user", key: key, text: ev.text, attachments: ev.attachments, at: e.at, queued: ev.queued, delivery: ev.delivery }];
+      return [...items, { kind: "user", key: key, text: ev.text, attachments: ev.attachments, at: e.at, queued: ev.queued, delivery: ev.delivery, eventId: e.id || undefined }];
+    case "fork_context":
+      return [...items, { kind: "fork", key, text: ev.text, attachments: ev.attachments ?? [], at: e.at }];
+    case "review_result":
+      // Folded onto the consult card by foldEvents; apply() alone has no card to attach it to.
+      return attachReview(items, ev.consultId, ev.review);
     case "artifacts":
       return [...items, { kind: "artifacts", key, paths: ev.paths }];
     case "text_delta": {
@@ -363,9 +395,9 @@ export function apply(items: Item[], e: TimelineEvent, expression?: AgentExpress
       const i = items.findLastIndex((x) => x.kind === "message" && x.streaming && x.role === role && x.node === node);
       if (i >= 0) {
         const message = items[i] as Extract<Item, { kind: "message" }>;
-        return [...items.slice(0, i), { ...message, text: ev.text, streaming: false }, ...items.slice(i + 1)];
+        return [...items.slice(0, i), { ...message, text: ev.text, streaming: false, eventId: e.id || undefined }, ...items.slice(i + 1)];
       }
-      return [...closeStream(items, role, node), { kind: "message", key: e.id ? key : nextLiveMessageKey(items, role, node), role, node, text: ev.text, streaming: false, expression: expression ?? "neutral", at: e.at }];
+      return [...closeStream(items, role, node), { kind: "message", key: e.id ? key : nextLiveMessageKey(items, role, node), role, node, text: ev.text, streaming: false, expression: expression ?? "neutral", at: e.at, eventId: e.id || undefined }];
     }
     case "tool_call":
       // The orchestrator's consult/ask tools and expression helper are not shown as timeline cards.

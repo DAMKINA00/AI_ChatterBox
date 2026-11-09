@@ -156,12 +156,12 @@ function createWindow() {
 }
 
 function registerUi(channels: string[], rpc: CoreRpc) {
-  const internal = new Set(["attachment:info", "window:save", "files:resolve-link", "remote:chat-patch", "remote:project-patch", "remote:chat-delete", "remote:attachment-remove", "remote:att-bytes", "remote:uploads", "remote:send"]);
+  const internal = new Set(["attachment:info", "window:save", "files:resolve-link", "remote:chat-patch", "remote:project-patch", "remote:chat-delete", "remote:chat-fork", "remote:attachment-remove", "remote:att-bytes", "remote:uploads", "remote:send"]);
   const local = new Set(["theme:set", "aistudio"]);
   for (const channel of channels.filter(channel => !internal.has(channel) && !local.has(channel))) {
     ipcMain.handle(channel, async (_event, ...args) => {
       const result = await rpc.call(channel, args);
-      if (["chats:create", "chats:delete", "projects:delete"].includes(channel)) chatCache = await rpc.call("chats:list");
+      if (["chats:create", "chats:fork", "chats:delete", "projects:delete"].includes(channel)) chatCache = await rpc.call("chats:list");
       return result;
     });
   }

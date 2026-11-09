@@ -318,6 +318,24 @@ export interface Chat {
   archived: boolean;
   createdAt: number;
   lastActiveAt: number;
+  /** Set on a chat branched from another conversation; stays valid after the source is deleted. */
+  fork?: { sourceChatId: number; sourceEventId: number; sourceTitle: string; range: "through" | "from"; includeAttachments: boolean };
+}
+
+/** through = the conversation up to and including the message; from = that message onward. */
+export interface ChatForkOptions {
+  eventId: number;
+  range: "through" | "from";
+  includeAttachments: boolean;
+}
+
+export interface ReviewResult {
+  verdict: "pass" | "changes_requested" | "inconclusive";
+  /** What was reviewed (commit, working-tree description), as reported by the reviewer. */
+  revision: string;
+  summary: string;
+  findings: Array<{ severity: "high" | "medium" | "low"; message: string; path?: string; line?: number }>;
+  tests: Array<{ name: string; status: "passed" | "failed" | "not_run"; detail?: string }>;
 }
 
 export type ConsultKind = "implement" | "review" | "opinion" | "writing";
@@ -348,6 +366,10 @@ export interface Consult {
   status: ConsultStatus;
   startedAt: number;
   endedAt: number | null;
+  /** Structured result the reviewer itself submitted; absent = none submitted (never read as a pass). */
+  review?: ReviewResult;
+  /** Set when the app quit or crashed while this assignment ran (unlike a user stop). */
+  interruptedBy?: "app_exit";
 }
 
 /** Which conversation an event belongs to; worker turns run on behalf of a consult carry its node. */
@@ -410,6 +432,9 @@ export type AgentEvent =
   | { type: "approval_auto"; request: ApprovalRequest; decision: "allow" | "deny"; reason: string; reused?: boolean }
   | { type: "consult_start"; consultId: number; kind: ConsultKind; from: Role; to: Role; request: string; attachments: AttachmentRef[]; scope?: string[]; instructionId?: number; reason?: string }
   | { type: "consult_end"; consultId: number; status: ConsultStatus; summary: string; files: string[] }
+  | { type: "review_result"; consultId: number; review: ReviewResult }
+  /** Read-only transcript a branched chat starts from; the first native session receives it as reference. */
+  | { type: "fork_context"; text: string; attachments: AttachmentRef[] }
   | { type: "ask_user"; id: string; question: string; options: string[] }
   | { type: "ask_user_answer"; id: string; answer: string }
   | { type: "notice"; text: string; webAccountId?: GeminiWebAccountId; cliAccountId?: CliAccountId }
@@ -424,6 +449,14 @@ export type AgentEvent =
 export interface PlanStep {
   title: string;
   status: "pending" | "inProgress" | "completed";
+  /** Needed only by steps that others depend on; unique within one checklist. */
+  id?: string;
+  /** Display nickname of the assignee. Recorded as given; the app never assigns work from it. */
+  owner?: string;
+  /** Ids of steps that must be completed first. */
+  dependsOn?: string[];
+  /** Assignments connected to this step, shown with their current status. */
+  consultIds?: number[];
 }
 
 export type GoalStatus = "active" | "complete" | "blocked" | "paused";
@@ -510,6 +543,8 @@ export interface ChatterBoxApi {
   // chats
   listChats(): Promise<Chat[]>;
   createChat(projectId: number): Promise<Chat>;
+  /** New idle chat in the same project holding a read-only copy of the conversation; files are shared. */
+  forkChat(chatId: number, options: ChatForkOptions): Promise<Chat>;
   updateChat(
     id: number,
     patch: {

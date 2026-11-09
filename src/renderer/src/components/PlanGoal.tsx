@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Check, ChevronDown, Circle, Flag, ListChecks, Play, Pencil, X } from "lucide-react";
 import type { Chat } from "../../../shared/types";
 import { api, cn, errorMessage } from "../lib/utils";
 import { useStore } from "../store";
 import { normalizePlanStepTitle, type planOf } from "../timeline";
+import { planConsultLinks, planStepName, planStepViews } from "../lib/plan-view";
 import { Badge, Button } from "./ui";
 import { WorkingIndicator } from "./WorkingIndicator";
 
@@ -14,6 +15,9 @@ export function PlanPanel({ chat, plan, onRevise }: { chat: Chat; plan: Plan; on
   const [open, setOpen] = useState(true);
   const toast = useStore((s) => s.toast);
   const agents = useStore(s => s.agents[chat.id]);
+  const consults = useStore(s => s.consults[chat.id]);
+  const select = useStore(s => s.select);
+  const views = useMemo(() => planStepViews(plan.steps), [plan.steps]);
   const done = plan.steps.filter((s) => s.status === "completed").length;
   const total = plan.steps.length;
   const run = (name: string) => api.command(chat.id, name, "").catch((e) => toast(errorMessage(e)));
@@ -35,18 +39,42 @@ export function PlanPanel({ chat, plan, onRevise }: { chat: Chat; plan: Plan; on
         <div className="space-y-2 border-t px-3.5 py-2.5">
           {plan.explanation && <div className="text-[12.5px] text-muted-foreground">{plan.explanation}</div>}
           <ol className="space-y-1">
-            {plan.steps.map((s, i) => (
-              <li key={i} className="flex items-start gap-2 text-[13px]" data-testid="plan-step" data-status={s.status}>
-                {s.status === "completed" ? (
-                  <Check className="mt-0.5 size-4 shrink-0 text-success" />
-                ) : s.status === "inProgress" ? (
-                  <WorkingIndicator chatId={chat.id} role={agents?.find(a => normalizePlanStepTitle(s.title).startsWith(`[${a.nickname}]`))?.key} className="mt-0.5 size-4" />
-                ) : (
-                  <Circle className="mt-0.5 size-4 shrink-0 text-muted-foreground/60" />
-                )}
-                <span className={cn(s.status === "completed" && "text-muted-foreground line-through decoration-muted-foreground/40")}>{normalizePlanStepTitle(s.title)}</span>
-              </li>
-            ))}
+            {views.map(({ step: s, key, blockers, ready }) => {
+              const title = normalizePlanStepTitle(s.title);
+              const ownerRole = agents?.find(a => (s.owner ? a.nickname === s.owner : title.startsWith(`[${a.nickname}]`)))?.key;
+              const links = planConsultLinks(s, consults);
+              return (
+                <li key={key} className="flex items-start gap-2 text-[13px]" data-testid="plan-step" data-status={s.status} data-blocked={blockers.length > 0} data-ready={ready}>
+                  {s.status === "completed" ? (
+                    <Check className="mt-0.5 size-4 shrink-0 text-success" />
+                  ) : s.status === "inProgress" ? (
+                    <WorkingIndicator chatId={chat.id} role={ownerRole} className="mt-0.5 size-4" />
+                  ) : (
+                    <Circle className="mt-0.5 size-4 shrink-0 text-muted-foreground/60" />
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-baseline gap-x-1.5">
+                      {s.owner && <span className="shrink-0 text-[11.5px] font-medium text-orch" data-testid="plan-step-owner">[{s.owner}]</span>}
+                      <span className={cn("break-words", s.status === "completed" && "text-muted-foreground line-through decoration-muted-foreground/40")}>{title}</span>
+                    </div>
+                    {(blockers.length > 0 || ready || links.length > 0) && (
+                      <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11.5px]">
+                        {blockers.length > 0 && <span className="text-warning" data-testid="plan-step-blockers">대기 · 선행 미완료: {blockers.map(planStepName).join(", ")}</span>}
+                        {ready && <span className="text-success" data-testid="plan-step-ready">시작 가능</span>}
+                        {links.map(({ consultId, consult }) => (
+                          <button key={consultId} type="button" data-testid="plan-step-consult"
+                            className={cn("rounded border px-1.5 py-px hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none", consult && consult.status !== "done" && consult.status !== "running" ? "border-destructive/40 text-destructive" : "text-muted-foreground")}
+                            aria-label={`협의 ${consult?.seq ?? consultId} 기록 열기`}
+                            onClick={() => void select({ chatId: chat.id, node: `consult:${consultId}` })}>
+                            협의 {consult?.seq ?? `#${consultId}`}{consult ? ` · ${CONSULT_STATUS[consult.status]}` : ""}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
           </ol>
           {plan.state === "proposed" && (
             <div className="flex gap-2 pt-1">
@@ -66,6 +94,8 @@ export function PlanPanel({ chat, plan, onRevise }: { chat: Chat; plan: Plan; on
     </div>
   );
 }
+
+const CONSULT_STATUS = { running: "진행 중", done: "완료", error: "오류", stopped: "중지됨", limited: "한도 도달" } as const;
 
 const GOAL_LABEL = { active: "진행 중", complete: "완료", blocked: "막힘", paused: "멈춤" } as const;
 
