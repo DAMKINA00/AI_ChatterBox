@@ -40,8 +40,6 @@ export const raisesAutonomy = (from: ApprovalMode, to: ApprovalMode) => RANK[to]
 
 export const MODEL_AGENTS: AgentKind[] = ["claude", "codex", "gemini", "grok", "deepseek"];
 const EFFORT_ORDER = ["low", "medium", "high", "xhigh"];
-const WORKER_EFFORTS = new Set(["medium", "high", "xhigh"]);
-const DEEPSEEK_WORKER_EFFORTS = new Set(["medium", "high", "xhigh", "max"]);
 
 export function findModel(models: Partial<Record<AgentKind, ModelOption[]>>, agent: AgentKind, model: string): ModelOption | undefined {
   const list = models[agent] ?? [];
@@ -51,8 +49,7 @@ export function findModel(models: Partial<Record<AgentKind, ModelOption[]>>, age
 export function effortChoices(models: Partial<Record<AgentKind, ModelOption[]>>, agent: AgentKind, model: string, worker: boolean): string[] {
   const unique = [...new Set((findModel(models, agent, model)?.reasoningEfforts ?? []).filter(v => typeof v === "string" && v.length > 0))];
   const ordered = [...EFFORT_ORDER.filter(v => unique.includes(v)), ...unique.filter(v => !EFFORT_ORDER.includes(v))];
-  const allowed = agent === "deepseek" ? DEEPSEEK_WORKER_EFFORTS : WORKER_EFFORTS;
-  return ["auto", ...(worker ? ordered.filter(v => allowed.has(v)) : ordered)];
+  return ["auto", ...ordered];
 }
 export const effortText = (value: string | null | undefined) => (!value ? "CLI 기본값" : value === "auto" ? "자동 배정" : value);
 

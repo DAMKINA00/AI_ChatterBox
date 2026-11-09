@@ -27,10 +27,10 @@ test("approval: raising autonomy is detected, project delegateHighRisk counts as
   assert.equal(projectApprovalMode({ approvalMode: "user", delegateHighRisk: true }), "user");
 });
 
-test("effort choices follow the model's efforts; workers get the medium..xhigh subset", () => {
+test("effort choices follow the model's efforts; workers get every model-supported level", () => {
   const models = { claude: [{ id: "opus", label: "Opus", reasoningEfforts: ["xhigh", "low", "high", "medium", "max"] }] };
   assert.deepEqual(effortChoices(models, "claude", "opus", false), ["auto", "low", "medium", "high", "xhigh", "max"]);
-  assert.deepEqual(effortChoices(models, "claude", "opus", true), ["auto", "medium", "high", "xhigh"]);
+  assert.deepEqual(effortChoices(models, "claude", "opus", true), ["auto", "low", "medium", "high", "xhigh", "max"]);
   assert.deepEqual(effortChoices(models, "claude", "unknown", false), ["auto"]);
   const deepseek = { deepseek: [{ id: "deepseek-flash", label: "Flash", isDefault: true, reasoningEfforts: ["high", "max"] }] };
   assert.deepEqual(effortChoices(deepseek, "deepseek", "", true), ["auto", "high", "max"]);

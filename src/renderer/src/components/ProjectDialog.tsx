@@ -376,17 +376,17 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
               <Switch checked={settings.reviewGate} onChange={(v) => set("reviewGate", v)} label="교차 리뷰" />
             </div>
             <div className="grid grid-cols-3 gap-3">
-              <NumberField label="동시 클로드 작업자" suffix="명" value={settings.maxClaudeWorkers} onChange={(v) => set("maxClaudeWorkers", v)} min={1} max={6} />
-              <NumberField label="동시 지피티 작업자" suffix="명" value={settings.maxGptWorkers} onChange={(v) => set("maxGptWorkers", v)} min={1} max={6} />
-              <NumberField label="동시 제미나이 작업자 (0=사용 안 함)" suffix="명" value={settings.maxGeminiWorkers} onChange={(v) => set("maxGeminiWorkers", v)} min={0} max={6} />
-              <NumberField label="동시 그록 작업자 (0=사용 안 함)" suffix="명" value={settings.maxGrokWorkers} onChange={(v) => set("maxGrokWorkers", v)} min={0} max={6} />
-              <NumberField label="동시 딥시크 작업자 (0=사용 안 함)" suffix="명" value={settings.maxDeepseekWorkers} onChange={(v) => set("maxDeepseekWorkers", v)} min={0} max={6} />
+              <NumberField label="권장 클로드 작업자" suffix="명" value={settings.maxClaudeWorkers} onChange={(v) => set("maxClaudeWorkers", v)} min={1} max={6} />
+              <NumberField label="권장 지피티 작업자" suffix="명" value={settings.maxGptWorkers} onChange={(v) => set("maxGptWorkers", v)} min={1} max={6} />
+              <NumberField label="권장 제미나이 작업자 (0=사용 안 함)" suffix="명" value={settings.maxGeminiWorkers} onChange={(v) => set("maxGeminiWorkers", v)} min={0} max={6} />
+              <NumberField label="권장 그록 작업자 (0=사용 안 함)" suffix="명" value={settings.maxGrokWorkers} onChange={(v) => set("maxGrokWorkers", v)} min={0} max={6} />
+              <NumberField label="권장 딥시크 작업자 (0=사용 안 함)" suffix="명" value={settings.maxDeepseekWorkers} onChange={(v) => set("maxDeepseekWorkers", v)} min={0} max={6} />
             </div>
             <div className="grid grid-cols-2 gap-3">
-              <NumberField label="지시당 배정 한도" suffix="회" value={settings.maxConsults} onChange={(v) => set("maxConsults", v)} min={1} max={MAX_CONSULTS} />
-              <NumberField label="리뷰 왕복" suffix="회" value={settings.maxReviews} onChange={(v) => set("maxReviews", v)} min={0} max={MAX_REVIEWS} />
+              <NumberField label="권장 배정 횟수" suffix="회" value={settings.maxConsults} onChange={(v) => set("maxConsults", v)} min={1} max={MAX_CONSULTS} />
+              <NumberField label="권장 리뷰 횟수" suffix="회" value={settings.maxReviews} onChange={(v) => set("maxReviews", v)} min={0} max={MAX_REVIEWS} />
             </div>
-            <div className="text-[12px] text-muted-foreground">작업 시간은 무제한입니다. 필요하면 중지 버튼으로 멈출 수 있습니다.</div>
+            <div className="text-[12px] text-muted-foreground">인원·배정·리뷰 숫자는 계획 참고값입니다. 진행 중인 작업을 횟수로 차단하지 않으며 중지 버튼으로 멈출 수 있습니다.</div>
           </div>
 
           <DialogFooter>

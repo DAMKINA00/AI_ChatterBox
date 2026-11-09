@@ -49,10 +49,10 @@ const REQUESTS = {
   worker: {
     id: "e2e-worker-bottom-approval",
     role: "w1",
-    title: "작업자 선행 승인",
-    detail: "Write worker-fixture.txt",
+    title: "Computer Use · 앱 접근",
+    detail: "computer-use\nAllow Codex to use Test App?",
     reason: "작업자 요청도 원래 요청 순서를 유지해야 합니다.",
-    risk: "low",
+    risk: "high",
   },
   other: {
     id: "e2e-other-chat-approval",
@@ -199,7 +199,7 @@ async function openNode(page, chatId, label) {
   const chat = page.locator(`[data-testid="chat-node"][data-chat-id="${chatId}"]`);
   const toggle = chat.getByRole("button", { name: "펼치기", exact: true });
   if (await toggle.count()) await toggle.click();
-  await chat.getByRole("button", { name: label, exact: true }).click();
+  await chat.getByTestId("tree-node").filter({ has: page.getByText(label, { exact: true }) }).click();
   await page.waitForFunction((value) => document.querySelector('[data-testid="chat-title"]')?.parentElement?.textContent?.includes(value), label);
 }
 
@@ -261,6 +261,11 @@ try {
   );
   check("many later messages remain before the pending worker card", (await lateMessage.count()) === 1 && ((await cardPosition(page, REQUESTS.worker.title))?.cardTop ?? 0) > ((await cardPosition(page, REQUESTS.worker.title))?.lateTop ?? Number.MAX_SAFE_INTEGER));
   check("streaming deltas remain visible above the pending section", (await streamMessage.count()) === 1 && (await streamMessage.locator(".animate-pulse-dot").count()) === 1);
+  await publishEvent(app, 1, "orch", "w1", { type: "room_message", from: "w1", text: "그룹 토의: 이 근거로 설계를 보완하겠습니다." }, eventId++);
+  const roomMessage = page.locator('[data-testid="agent-message"]').filter({ hasText: "그룹 토의:" });
+  await roomMessage.waitFor();
+  check("group message is visible outside nested consult cards", await roomMessage.evaluate(el => !el.closest('[data-testid="consult-card"]')));
+  check("native app access disables persistent chat grants", await pending.locator('[data-testid="approval"]').filter({ hasText: REQUESTS.worker.title }).getByTestId("approve-chat").isDisabled());
   await page.screenshot({ path: join(screenshots, "pending-dark-unified.png"), fullPage: true });
 
   await publishEvent(app, 1, "orch", "orch", { type: "text_delta", text: "즉시 수신한 추가 스트림" }, eventId++);
@@ -285,6 +290,7 @@ try {
   await page.waitForFunction(() => document.documentElement.classList.contains("dark"));
 
   await openNode(page, 1, "클로드 1호");
+  check("worker view retains shared group discussion", await page.locator('[data-testid="agent-message"]').filter({ hasText: "그룹 토의:" }).count() === 1);
   const workerPendingCard = page.locator('[data-testid="approval"]').filter({ hasText: REQUESTS.worker.title });
   check("pending worker history is readonly and links to master", (await page.locator('[data-testid="pending-approvals"]').count()) === 0 &&
     (await workerPendingCard.locator('[data-testid="approve-once"], [data-testid="approve-chat"], [data-testid="approve-deny"]').count()) === 0 &&

@@ -18,6 +18,37 @@ function fixture() {
 }
 const tick = () => new Promise<void>((r) => setImmediate(r));
 
+test("native app access follows full approval, otherwise always asks a person without memo reuse", async () => {
+  for (const mode of ["user", "orchestrator", "orchestrator-all"] as const) {
+    const f = fixture();
+    f.setMode(mode);
+    f.setJudge(async () => { throw new Error("app access must not ask a judge"); });
+    const input = { ...write, title: "Computer Use", key: "app:test", paths: [], writes: false, readOnly: true, userOnly: true };
+    for (let n = 0; n < 2; n++) {
+      const pending = f.service.request(1, folder, input);
+      await tick();
+      if (mode !== "orchestrator-all") {
+        const ev = f.events.findLast(e => e.type === "approval_request");
+        assert.ok(ev?.type === "approval_request");
+        assert.equal(f.service.pendingCount(1), 1);
+        assert.equal(f.service.answer(1, ev.request.id, "chat"), "once");
+      }
+      assert.equal((await pending).verdict, "allow");
+      assert.equal(f.calls, 0);
+    }
+    f.setGuard("user stopped");
+    assert.equal((await f.service.request(1, folder, input)).verdict, "deny");
+  }
+});
+
+test("cancelled native app approval carries cancellation to the driver", async () => {
+  const f = fixture();
+  const pending = f.service.request(1, folder, { ...write, userOnly: true });
+  await tick();
+  f.service.cancelChat(1);
+  assert.equal((await pending).cancelled, true);
+});
+
 test("approval mode presets control critical delegation without the legacy flag", async () => {
   const critical: ApprovalInput = { ...write, writes: false, paths: [], command: "git push", detail: "git push" };
   for (const [mode, delegates] of [["orchestrator-all", true], ["orchestrator", false], ["user", false]] as const) {

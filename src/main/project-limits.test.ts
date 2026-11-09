@@ -116,36 +116,36 @@ test("legacy 8/3 project limits migrate once, preserve other pairs, and retain a
   }
 });
 
-test("limitCheck honors exact configured consult limits without the old cap or worker bonus", async () => {
+test("consult reference counts never stop unfinished work", async () => {
   const f = fixture({ ...DEFAULT_SETTINGS, maxConsults: 100, maxReviews: 20 });
   try {
     f.store.createAgent(f.chat.id, "claude", "one");
     f.store.createAgent(f.chat.id, "claude", "two");
     f.store.createAgent(f.chat.id, "gpt", "three");
     assert.equal(checkLimit(f, "opinion", 99, 0, "consult boundary 99"), null);
-    assert.match(checkLimit(f, "opinion", 100, 0, "consult boundary 100") ?? "", /100/);
+    assert.equal(checkLimit(f, "opinion", 100, 0, "consult boundary 100"), null);
 
     f.store.updateProject(f.project.id, { settings: { ...DEFAULT_SETTINGS, maxConsults: 999, maxReviews: 20 } });
     assert.equal(checkLimit(f, "opinion", 998, 0, "consult boundary 998"), null);
-    assert.match(checkLimit(f, "opinion", 999, 0, "consult boundary 999") ?? "", /999/);
+    assert.equal(checkLimit(f, "opinion", 999, 0, "consult boundary 999"), null);
 
     f.store.updateProject(f.project.id, { settings: { ...DEFAULT_SETTINGS, maxConsults: 4, maxReviews: 20 } });
     assert.equal(checkLimit(f, "opinion", 3, 0, "consult custom 3"), null);
-    assert.match(checkLimit(f, "opinion", 4, 0, "consult custom 4") ?? "", /4/);
+    assert.equal(checkLimit(f, "opinion", 4, 0, "consult custom 4"), null);
   } finally {
     await f.close();
   }
 });
 
-test("limitCheck honors exact review limits and keeps stop, plan, and duplicate guards", async () => {
+test("review reference counts preserve stop, plan, and duplicate guards", async () => {
   const f = fixture({ ...DEFAULT_SETTINGS, maxConsults: 100, maxReviews: 20 });
   try {
     assert.equal(checkLimit(f, "review", 0, 19, "review boundary 19"), null);
-    assert.match(checkLimit(f, "review", 0, 20, "review boundary 20") ?? "", /20/);
+    assert.equal(checkLimit(f, "review", 0, 20, "review boundary 20"), null);
 
     f.store.updateProject(f.project.id, { settings: { ...DEFAULT_SETTINGS, maxConsults: 100, maxReviews: 99 } });
     assert.equal(checkLimit(f, "review", 0, 98, "review boundary 98"), null);
-    assert.match(checkLimit(f, "review", 0, 99, "review boundary 99") ?? "", /99/);
+    assert.equal(checkLimit(f, "review", 0, 99, "review boundary 99"), null);
 
     f.engine.stopped.add(f.chat.id);
     assert.match(checkLimit(f, "opinion", 0, 0, "stop policy"), /중지/);

@@ -167,7 +167,7 @@ test("DeepSeek context is removed with its chat or project while unrelated AI St
   } finally { closeRoot(store, root); }
 });
 
-test("Orchestrator enforces maxDeepseekWorkers without contacting the API", async () => {
+test("Orchestrator treats DeepSeek count as advice and preserves explicit provider disable", async () => {
   const root = mkdtempSync(join(tmpdir(), "cbx-deepseek-limit-"));
   let store: Store | undefined;
   let chats: ChatManager | undefined;
@@ -183,13 +183,14 @@ test("Orchestrator enforces maxDeepseekWorkers without contacting the API", asyn
     assert.equal(first.isError, false);
     const worker = store.listAgents(chat.id)[0];
     const blocked = await (engine as any).call(chat.id, "orch", "spawn", { kind: "deepseek", job: "second" });
-    assert.equal(blocked.isError, true);
-    assert.match(body(blocked), /동시에 1명/);
-    assert.equal(store.listAgents(chat.id).length, 1);
+    assert.equal(blocked.isError, false);
+    assert.equal(store.listAgents(chat.id).length, 2);
     assert.equal((await (engine as any).call(chat.id, "orch", "release", { nickname: worker.nickname })).isError, false);
     const reused = await (engine as any).call(chat.id, "orch", "spawn", { kind: "deepseek", job: "third" });
     assert.equal(reused.isError, false);
-    assert.deepEqual(store.listAgents(chat.id).map(agent => [agent.id, agent.number, agent.status, agent.job]), [[worker.id, 1, "active", "third"]]);
+    assert.deepEqual(store.listAgents(chat.id).map(agent => [agent.id, agent.number, agent.status, agent.job]).find(row => row[0] === worker.id), [worker.id, 1, "active", "third"]);
+    store.updateProject(project.id, { settings: { ...project.settings, maxDeepseekWorkers: 0 } });
+    assert.equal((await (engine as any).call(chat.id, "orch", "spawn", { kind: "deepseek", job: "disabled" })).isError, true);
   } finally {
     await engine?.judge.dispose();
     await chats?.dispose();

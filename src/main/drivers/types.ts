@@ -34,6 +34,8 @@ export interface AgentDriver {
   stop(): Promise<void>;
   /** Ends the backing process (stdin EOF, then kill the tree). */
   dispose(): Promise<void>;
+  /** Stop only this role and confirm it is idle before releasing its write scope. */
+  recover?(): Promise<void>;
   /** Hide a finished worker's native conversation while preserving it for resume. */
   archive?(): Promise<void>;
 }

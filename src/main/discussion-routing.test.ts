@@ -116,6 +116,51 @@ function textOf(result: any): string {
   return result.content.map((part: { text: string }) => part.text).join("\n");
 }
 
+test("group messages and peer results reach every inbox and remain visible without nested cards", async () => {
+  const f = fixture();
+  try {
+    const a = f.store.createAgent(f.chat.id, "claude", "writer");
+    const b = f.store.createAgent(f.chat.id, "gpt", "reviewer");
+    assert.equal((await f.engine.call(f.chat.id, "orch", "send_message", { to: "all", message: "공통 쟁점과 근거" })).isError, false);
+    assert.match(textOf(await f.engine.call(f.chat.id, a.key, "read_messages", {})), /공통 쟁점과 근거/);
+    assert.match(textOf(await f.engine.call(f.chat.id, b.key, "read_messages", {})), /공통 쟁점과 근거/);
+    assert.doesNotMatch(textOf(await f.engine.call(f.chat.id, b.key, "read_messages", {})), /공통 쟁점과 근거/);
+    f.behavior.set(a.key, async (_input, role) => {
+      const sent = await f.engine.call(f.chat.id, role, "send_message", { to: "all", message: "반론: 실제 자료를 확인했습니다." });
+      assert.equal(sent.isError, false);
+      f.finish(role, "근거를 반영한 제안");
+    });
+    await ask(f, "orch", a, "opinion");
+    const inbox = textOf(await f.engine.call(f.chat.id, b.key, "read_messages", {}));
+    assert.match(inbox, /반론:/);
+    assert.match(inbox, /근거를 반영한 제안/);
+    assert.equal(f.store.events(f.chat.id).filter(e => e.event.type === "room_message").length, 3);
+  } finally { await f.close(); }
+});
+
+test("busy peer receives a live message; a failed steer leaves its inbox unread", async () => {
+  const f = fixture();
+  try {
+    const peer = f.store.createAgent(f.chat.id, "gpt", "busy peer");
+    const steers: string[] = [];
+    let accept = false;
+    f.chats.liveDriver = () => ({ running: true, steer: async (input: AgentInput) => { steers.push(input.text); return accept; } }) as any;
+    await f.engine.call(f.chat.id, "orch", "send_message", { to: peer.nickname, message: "first" });
+    await new Promise(r => setImmediate(r));
+    assert.match(f.engine.readMessages(f.chat.id, peer.key, false), /first/);
+    accept = true;
+    await f.engine.call(f.chat.id, "orch", "send_message", { to: peer.nickname, message: "second" });
+    await new Promise(r => setImmediate(r));
+    assert.match(steers.at(-1)!, /first[\s\S]*second/);
+    assert.equal(f.engine.readMessages(f.chat.id, peer.key, false), "");
+    f.engine.graph(f.chat.id).set(peer.key, new Set(["w99"]));
+    await f.engine.call(f.chat.id, "orch", "send_message", { to: peer.nickname, message: "keep the pending peer call alive" });
+    await new Promise(r => setImmediate(r));
+    assert.equal(steers.length, 2);
+    assert.match(f.engine.readMessages(f.chat.id, peer.key, false), /keep the pending peer call alive/);
+  } finally { await f.close(); }
+});
+
 function consultStarts(f: ReturnType<typeof fixture>) {
   return f.store.events(f.chat.id).filter((event) => event.event.type === "consult_start");
 }
@@ -198,7 +243,7 @@ test("invalid discussion groups dispatch no worker and never create a consult", 
   }
 });
 
-test("a coordinator may request writes but cannot expand its group or skip required peers", async () => {
+test("a coordinator may choose work kinds but must still obtain promised peer replies", async () => {
   const f = fixture();
   try {
     const leader = f.store.createAgent(f.chat.id, "claude", "leader");
@@ -247,9 +292,9 @@ test("a coordinator may request writes but cannot expand its group or skip requi
     assert.match(textOf(result), new RegExp(missing.nickname));
     assert.equal(f.writeGuardError, null);
     assert.equal(expansion.isError, true);
-    assert.match(textOf(expansion), /토의 그룹 구성은 마스터가 지정/);
+    assert.match(textOf(expansion), /진행자와 다른/);
     assert.equal(implementation.isError, true);
-    assert.match(textOf(implementation), /(같은 opinion\/writing 종류로만|구현을 맡길 수 없습니다)/);
+    assert.match(textOf(implementation), /겹치지 않는 별도 범위/);
 
     const records = f.store.listConsults(f.chat.id);
     assert.equal(records.length, 2);
@@ -477,7 +522,8 @@ test("AI Studio and Grok can lead a discussion and collect actual peer results",
         assert.equal((await f.engine.call(f.chat.id, role, "ask", { to: peer.nickname, kind: "opinion", message: `verify ${kind} design` })).isError, false);
         f.finish(role, "peer evidence incorporated");
       });
-      assert.equal((await ask(f, "orch", leader, "opinion", { discussion: { topic: `design ${kind}`, peers: [peer.nickname] } })).isError, false);
+      const result = await ask(f, "orch", leader, "opinion", { discussion: { topic: `design ${kind}`, peers: [peer.nickname] } });
+      assert.equal(result.isError, false, JSON.stringify(result));
     }
     assert.equal(f.store.listConsults(f.chat.id).length, 4);
   } finally { await f.close(); }

@@ -16,6 +16,19 @@ function liveEvent(node: NodeId, role: Role | null, payload: AgentEvent, at: num
 
 const emptyAttachments = [];
 
+test("group chat shows each speaker at top level in every view", () => {
+  const events = [event("orch", "w1", { type: "room_message", from: "w1", text: "반론과 근거" })];
+  for (const view of [undefined, "orch", "w1", "w2", "consult:1"] as const) {
+    const items = buildItems(events, view);
+    assert.equal(items.length, 1);
+    assert.equal(items[0].kind, "message");
+    if (items[0].kind === "message") {
+      assert.equal(items[0].role, "w1");
+      assert.equal(items[0].text, "반론과 근거");
+    }
+  }
+});
+
 test("chat timeline cache survives switches, isolates views, and applies background updates", () => {
   const cache = createTimelineCache();
   const a = [event("orch", "orch", { type: "text_delta", text: "draft" })];

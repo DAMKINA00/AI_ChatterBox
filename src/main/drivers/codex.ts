@@ -530,6 +530,36 @@ export class CodexDriver implements AgentDriver {
         this.server.respond(req.id, { permissions: {}, scope: "turn" });
         this.host.emit({ type: "notice", text: "권한 일괄 부여 대신 실제 파일 변경·명령별로 승인합니다." });
         return true;
+      case "mcpServer/elicitation/request": {
+        const p = req.params;
+        const reply = (action: "accept" | "decline" | "cancel", content: Record<string, string> | null = null) =>
+          this.server.respond(req.id, { action, content, _meta: null });
+        // This approval UI cannot collect credentials, arbitrary forms or URL authentication.
+        const schema = p.mode === "form" ? p.requestedSchema : null;
+        const content: Record<string, string> = {};
+        let supported = !!schema && schema.type === "object" && !!schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties)
+          && (schema.required === undefined || Array.isArray(schema.required) && schema.required.every(k => typeof k === "string"));
+        for (const key of supported ? schema?.required ?? [] : []) {
+          const field = schema?.properties?.[key];
+          const choices = field && typeof field === "object" && "enum" in field && Array.isArray(field.enum) ? field.enum : [];
+          const once = choices?.find((value: unknown) => typeof value === "string" && /^(once|allow_once|approve_once|accept_once)$/.test(value));
+          if (typeof once !== "string") { supported = false; break; }
+          Object.defineProperty(content, key, { value: once, enumerable: true });
+        }
+        if (!supported || this.opts.readOnly || this.noWrites) {
+          reply("decline");
+          this.host.emit({ type: "notice", text: `앱 접근 요청을 처리할 수 없습니다 (${p.serverName}, ${p.mode}). 읽기 전용 여부와 요청 양식을 확인하세요.` });
+          return true;
+        }
+        void Promise.resolve().then(() => this.host.approve({
+          title: "Computer Use · 앱 접근",
+          detail: `${p.serverName}\n${p.message}`,
+          key: `elicitation:${p.serverName}:${p.message}`,
+          userOnly: true,
+        })).then(result => reply(result.cancelled ? "cancel" : result.verdict === "deny" ? "decline" : "accept", result.verdict === "deny" || !Object.keys(content).length ? null : content))
+          .catch(() => reply("cancel"));
+        return true;
+      }
       default:
         return false;
     }
@@ -691,6 +721,25 @@ export class CodexDriver implements AgentDriver {
         this.server.loaded.delete(this.threadId);
       }
     }
+  }
+
+  async recover(): Promise<void> {
+    if (this._running) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let ended!: (result: CodexTurnResult) => void;
+      const end = new Promise<void>(resolve => { ended = () => resolve(); this.turnWaiters.push(ended); });
+      try {
+        // This app-server is shared: a silent sibling must never terminate the other threads.
+        await Promise.race([
+          this.stop().then(() => end),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Codex 작업 중지 완료를 확인하지 못했습니다. 공유 서버와 기존 쓰기 범위를 유지합니다.")), CODEX_DISPOSE_TIMEOUT_MS); }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+        this.turnWaiters = this.turnWaiters.filter(waiter => waiter !== ended);
+      }
+    }
+    // Keep the idle native session attached; the next assignment can resume it safely.
   }
 
   async archive(): Promise<void> {

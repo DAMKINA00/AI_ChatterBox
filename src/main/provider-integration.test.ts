@@ -139,9 +139,8 @@ for (const selection of ["project", "chat", "legacy"] as const) {
       assert.ok(await chats.driver(chat.id, worker.key, "medium") instanceof AIStudioDriver);
       assert.equal(chats.roleConfig(chat, project, worker.key).model, selection === "chat" ? "aistudio:custom-argon" : AISTUDIO_MODEL);
       const blocked = await engine.call(chat.id, "orch", "spawn", { kind: "gemini", job: "second" });
-      assert.equal(blocked.isError, true);
-      assert.match(JSON.stringify(blocked), /동시에 1명/);
-      assert.equal(store.listAgents(chat.id).length, 1);
+      assert.equal(blocked.isError, false);
+      assert.equal(store.listAgents(chat.id).length, 2);
     } finally { await engine.judge.dispose(); await chats.dispose(); store.close(); rmSync(root, { recursive: true, force: true }); }
   });
 }

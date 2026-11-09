@@ -44,11 +44,30 @@ test("master defaults to auto; parallel assignments keep separate effort and lea
   } finally { await f.close(); }
 });
 
-test("missing/out-of-range master effort dispatches nothing; project setting retains master's request", async () => {
+test("per-assignment model uses its supported effort without changing project defaults", async () => {
+  const f = fixture();
+  try {
+    const worker = f.store.createAgent(f.chat.id, "claude", "choose best model");
+    f.chats.models = async () => [{ id: "small", label: "Small", reasoningEfforts: ["low", "max"] }];
+    let selected: string | undefined;
+    const driver = f.chats.driver;
+    f.chats.driver = async (chatId, role, effort, model) => { selected = model; return driver(chatId, role, effort); };
+    const result = await f.engine.call(f.chat.id, "orch", "ask", { to: worker.nickname, kind: "opinion", message: "quick check", reason: "low latency", model: "small", effort: "low" });
+    assert.equal(result.isError, false, JSON.stringify(result));
+    assert.equal(selected, "small");
+    assert.equal(f.sent[0].effort, "low");
+    assert.equal(f.store.project(f.project.id)!.settings.claudeModel, "opus");
+    assert.equal((await f.engine.call(f.chat.id, "orch", "ask", { to: worker.nickname, kind: "opinion", message: "unknown model", reason: "test", model: "unknown", effort: "low" })).isError, true);
+    assert.equal(f.sent.length, 1);
+    assert.deepEqual(await f.chats.assignmentEffort(f.chat.id, worker.key), { requestedEffort: "", effort: "" });
+  } finally { await f.close(); }
+});
+
+test("invalid effort is rejected; default and manual settings remain available", async () => {
   const f = fixture();
   try {
     const worker = f.store.createAgent(f.chat.id, "claude", "analyze");
-    for (const effort of [undefined, "low", "max", 1]) {
+    for (const effort of ["unsupported", 1]) {
       assert.equal((await f.engine.call(f.chat.id, "orch", "ask", { to: worker.nickname, kind: "opinion", message: "read", reason: "test", effort })).isError, true);
     }
     assert.equal(f.sent.length, 0);

@@ -4,6 +4,41 @@ import { CodexDriver } from "./codex";
 import { ClaudeDriver, NATIVE_AGENT_TOOLS } from "./claude";
 
 const opts = { cwd: process.cwd(), nativeId: null, exePath: "unused" };
+
+test("Codex app elicitation routes allow, deny, cancel and failures without persistent grants", async () => {
+  for (const result of [{ verdict: "allow_chat" }, { verdict: "deny" }, { verdict: "deny", cancelled: true }, new Error("closed")]) {
+    const replies: any[] = [], inputs: any[] = [];
+    const server: any = { respond: (id: unknown, value: unknown) => replies.push({ id, value }) };
+    const driver = new CodexDriver(opts, server, { emit() {}, nativeId() {}, approve: async input => { inputs.push(input); if (result instanceof Error) throw result; return result as any; } });
+    assert.equal(driver.onServerRequest({ id: 99, method: "mcpServer/elicitation/request", params: { threadId: "test", turnId: null, serverName: "computer-use", mode: "form", message: "Allow Codex to use Test App?", _meta: null, requestedSchema: { type: "object", properties: {} } } }), true);
+    await new Promise(r => setImmediate(r));
+    assert.equal(inputs[0].userOnly, true);
+    assert.match(inputs[0].detail, /Test App/);
+    const action = result instanceof Error || "cancelled" in result ? "cancel" : result.verdict === "deny" ? "decline" : "accept";
+    assert.deepEqual(replies, [{ id: 99, value: { action, content: null, _meta: null } }]);
+  }
+});
+
+test("Codex declines unsupported elicitation and readonly app access, and selects only a schema-backed once grant", async () => {
+  const f = codex();
+  const base = { threadId: "thread", turnId: null, serverName: "computer-use", _meta: null, message: "Allow Codex to use Test App?" };
+  for (const params of [
+    { mode: "url", url: "https://example.com", elicitationId: "url" },
+    { mode: "openai/form", requestedSchema: {} },
+    { mode: "form", requestedSchema: { type: "object", properties: { password: { type: "string" } }, required: ["password"] } },
+    { mode: "form", requestedSchema: { type: "object", properties: {}, required: "invalid" } },
+  ]) assert.equal(f.driver.onServerRequest({ id: 1, method: "mcpServer/elicitation/request", params: { ...base, ...params } } as any), true);
+  assert.equal(f.approvals, 0);
+  assert.ok(f.replies.every(r => r.value.action === "decline"));
+  const schema = { type: "object", properties: { permission: { type: "string", enum: ["always", "once"] } }, required: ["permission"] };
+  f.driver.onServerRequest({ id: 2, method: "mcpServer/elicitation/request", params: { ...base, mode: "form", requestedSchema: schema } } as any);
+  await new Promise(r => setImmediate(r));
+  assert.deepEqual(f.replies.at(-1).value, { action: "accept", content: { permission: "once" }, _meta: null });
+  const readonly = codex(true);
+  readonly.driver.onServerRequest({ id: 3, method: "mcpServer/elicitation/request", params: { ...base, mode: "form", requestedSchema: schema } } as any);
+  assert.equal(readonly.approvals, 0);
+  assert.equal(readonly.replies[0].value.action, "decline");
+});
 function codex(readOnly = false) {
   const calls: { method: string; params: any }[] = [], replies: any[] = [], events: any[] = [], inputs: any[] = [];
   let approvals = 0;
@@ -14,6 +49,26 @@ function codex(readOnly = false) {
   const driver = new CodexDriver({ ...opts, readOnly }, server, { nativeId() {}, emit: (e) => events.push(e), approve: async (input) => { inputs.push(input); approvals++; return { verdict: "allow_chat" }; } });
   return { driver, calls, replies, events, inputs, get approvals() { return approvals; } };
 }
+
+test("Codex worker recovery waits for its terminal event and leaves the shared server attached", async () => {
+  const f = codex();
+  await f.driver.send({ text: "long task", attachments: [] });
+  const server = (f.driver as any).server;
+  const request = server.request;
+  let detaches = 0;
+  server.detach = () => { detaches++; };
+  server.dispose = () => { throw new Error("must not stop the shared server"); };
+  server.request = async (method: string, params: any) => {
+    const result = await request(method, params);
+    if (method === "turn/interrupt") f.driver.onNotification({ method: "turn/completed", params: { threadId: "thread", turn: { id: "turn", status: "interrupted" } } } as any);
+    return result;
+  };
+  await f.driver.recover();
+  assert.equal(f.driver.running, false);
+  assert.equal(detaches, 0);
+  assert.equal(f.calls.filter(c => c.method === "turn/interrupt").length, 1);
+  assert.equal(f.calls.some(c => c.method === "thread/unsubscribe"), false);
+});
 
 test("Codex every execution role can request approval; explicit read-only restriction resets on next ordinary turn", async () => {
   const f = codex();

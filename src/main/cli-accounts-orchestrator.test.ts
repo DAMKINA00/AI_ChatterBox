@@ -337,17 +337,13 @@ test("clearAccountId clears through spawn, ask and parallel; release and legacy 
   } finally { await f.close(); }
 });
 
-test("consult, review, planning and duplicate limits never persist refused account changes or clears", async () => {
+test("planning and duplicate guards never persist refused account changes or clears", async () => {
   const f = fixture();
   try {
     f.add("gpt");
     await f.call("spawn", { kind: "gpt", job: "bound", accountId: "gpt-2" });
     const worker = f.store.listAgents(f.chat.id)[0], inst = f.engine.instructions.get(f.chat.id);
     for (const change of [{ accountId: "gpt-1" }, { clearAccountId: true }]) {
-      inst.asks = f.project.settings.maxConsults;
-      assert.equal((await f.ask(worker.nickname, change)).isError, true);
-      inst.asks = 0; inst.reviews = f.project.settings.maxReviews;
-      assert.equal((await f.ask(worker.nickname, { kind: "review", ...change })).isError, true);
       inst.reviews = 0; f.engine.planning.add(f.chat.id);
       assert.equal((await f.ask(worker.nickname, change)).isError, true);
       f.engine.planning.clear();

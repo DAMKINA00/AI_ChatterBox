@@ -28,7 +28,7 @@ void app.whenReady().then(async()=>{
   events.push(e);
   if(e.event.type==='approval_request'){
    const request=e.event.request;
-   const safe=request.risk==='low'&&/^mcp__chatterbox_bridge__(set_expression|ask|agents)$/.test(request.title);
+   const safe=request.risk==='low'&&/^mcp__chatterbox_bridge__(set_expression|ask|agents|send_message|read_messages|check_agent)$/.test(request.title);
    queueMicrotask(()=>chats.approvals.answer(e.chatId,request.id,safe?'once':'deny'));
   }
  }},base,join(base,'bridge-mcp.cjs'));
@@ -40,7 +40,7 @@ void app.whenReady().then(async()=>{
   const project=store.createProject('Synthetic peer discussion',work,{...DEFAULT_SETTINGS,orchestratorModel:'claude:opus',orchestratorEffort:'xhigh',claudeModel:'sonnet',codexModel:'gpt-6.1-sol',reviewGate:false,approvalMode:'user',maxGeminiWorkers:0});
   const chat=store.createChat(project.id,'Native peer discussion smoke');
   timer=setTimeout(()=>void engine.stop(chat.id),180000);
-  await chats.send(chat.id,'앱의 주제별 직접 토의 기능을 검증하자. 클로드 작업자 한 명과 지피티 작업자 한 명만 만들고, 클로드를 진행자로 ask(kind=opinion, effort=medium, discussion={topic:"로그인 완료 안내 문구",peers:[지피티 닉네임]})로 맡겨라. 논의할 가정은 로그인 성공이 확인되면 창이 자동으로 닫히고 앱에 완료 안내가 보인다는 것이다. 진행자는 짧은 안내 문구 초안을 제시한 뒤 참여자에게 앱 ask로 직접 의견을 받아, 합의한 두 문장과 선택 이유를 마스터에게 돌려줘야 한다. 마스터는 그룹 최종 결과만 짧게 취합하라. 파일 읽기·수정·명령 실행·이미지·웹 호출은 하지 말고 이 메시지의 가정만 사용한다. 중요한 오류의 독립 조사는 이번 텍스트 토의에는 필요 없다.',[]);
+  await chats.send(chat.id,'앱의 주제별 직접 토의 기능을 검증하자. 클로드 작업자 한 명과 지피티 작업자 한 명만 만들고, 클로드를 진행자로 ask(kind=opinion, effort=medium, discussion={topic:"로그인 완료 안내 문구",peers:[지피티 닉네임]})로 맡겨라. 논의할 가정은 로그인 성공이 확인되면 창이 자동으로 닫히고 앱에 완료 안내가 보인다는 것이다. 진행자는 send_message(to=all)로 초안을 공개하고 참여자에게 앱 ask로 직접 의견을 받아, 합의한 두 문장과 선택 이유를 마스터에게 돌려줘야 한다. 참여자도 자신의 반론이나 동의 근거를 send_message(to=all)로 공유하도록 요청하라. 마스터는 그룹 최종 결과만 짧게 취합하라. 파일 읽기·수정·명령 실행·이미지·웹 호출은 하지 말고 이 메시지의 가정만 사용한다. 중요한 오류의 독립 조사는 이번 텍스트 토의에는 필요 없다.',[]);
   const deadline=Date.now()+180000;
   while(['working','approval'].includes(store.chat(chat.id)!.status)&&Date.now()<deadline)await new Promise(r=>setTimeout(r,250));
   if(['working','approval'].includes(store.chat(chat.id)!.status))await engine.stop(chat.id);
@@ -52,9 +52,10 @@ void app.whenReady().then(async()=>{
   check('master assigned a grouped discussion to the coordinator',group?.status==='done');
   check('coordinator directly received a nonempty peer answer',peer&&peer.toRole!==group!.toRole&&!!peer.responseSummary?.trim());
   check('worker request appears under coordinator consult in the timeline',group&&events.some(e=>e.node==='consult:'+group.id&&e.event.type==='consult_start'&&e.event.from===group.toRole));
-  check('peer reasoning inherits the master assignment',peer&&peer.effort===group!.effort);
+  check('peer reasoning uses a supported assignment',peer&&['medium','high','xhigh'].includes(peer.effort||''));
+  check('both peers shared public group messages',group&&peer&&[group.toRole,peer.toRole].every(role=>events.some(e=>e.event.type==='room_message'&&e.event.from===role)));
   check('discussion did not change files',consults.every(c=>c.filesChanged.length===0));
-  check('only harmless app-bridge permissions were approved',events.filter(e=>e.event.type==='approval_request').every(e=>e.event.request.risk==='low'&&/^mcp__chatterbox_bridge__(set_expression|ask|agents)$/.test(e.event.request.title)));
+  check('only harmless app-bridge permissions were approved',events.filter(e=>e.event.type==='approval_request').every(e=>e.event.request.risk==='low'&&/^mcp__chatterbox_bridge__(set_expression|ask|agents|send_message|read_messages|check_agent)$/.test(e.event.request.title)));
   check('master produced final synthesis after peer response',peer&&events.some(e=>e.role==='orch'&&e.event.type==='text'&&e.at>=peer.endedAt!&&e.event.text.trim()));
   writeFileSync(join(base,'results.json'),JSON.stringify({checks,workers:workers.map(a=>({kind:a.kind,nickname:a.nickname})),consults:consults.map(c=>({id:c.id,from:c.fromRole,to:c.toRole,status:c.status,request:c.request,result:c.responseSummary,effort:c.effort})),status:store.chat(chat.id)!.status},null,2));
  }catch(e){error=String(e);writeFileSync(join(base,'results.json'),JSON.stringify({checks,error},null,2));}

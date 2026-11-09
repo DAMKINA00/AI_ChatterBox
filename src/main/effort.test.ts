@@ -12,13 +12,17 @@ test("resolveEffort falls back downward within the model support list and never 
   assert.throws(() => resolveEffort("xhigh", model("unsupported-model", [])), /unsupported-model에서 추론 수준 xhigh/);
 });
 
-test("workerEffort requires a master request for auto and keeps manual settings authoritative", () => {
+test("workerEffort allows all model levels and defaults while manual settings stay authoritative", () => {
   assert.equal(workerEffort("high", "medium"), "high");
   assert.equal(workerEffort("medium", "xhigh"), "medium");
   assert.equal(workerEffort("auto", "high"), "high");
   assert.equal(workerEffort("", "high"), "high");
-  assert.throws(() => workerEffort("auto"), /자동 배정/);
+  assert.equal(workerEffort("auto"), "");
 
-  for (const setting of ["low", "max"]) assert.throws(() => workerEffort(setting), /작업자 추론 설정/);
-  for (const requested of ["low", "max"]) assert.throws(() => workerEffort("auto", requested), /작업자 effort/);
+  for (const setting of ["none", "minimal", "low", "max"]) assert.equal(workerEffort(setting), setting);
+  for (const requested of ["none", "minimal", "low", "max"]) assert.equal(workerEffort("auto", requested), requested);
+  assert.equal(workerEffort("auto", "provider-new-level"), "provider-new-level");
+  assert.equal(resolveEffort("provider-new-level", model("future", ["provider-new-level"])), "provider-new-level");
+  assert.throws(() => workerEffort("auto", ""), /effort/);
+  assert.throws(() => resolveEffort("unsupported", model("current", ["low", "high"])), /지원하지 않습니다/);
 });

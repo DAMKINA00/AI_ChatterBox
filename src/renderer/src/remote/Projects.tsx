@@ -123,10 +123,10 @@ const TEXT_FIELDS = [
   ["deepseekStrengths", "딥시크 강점"], ["deepseekCautions", "딥시크 주의"],
 ] as const satisfies readonly (readonly [keyof RemoteProjectSettings, string])[];
 const NUMBER_FIELDS = [
-  ["maxClaudeWorkers", "동시 클로드 작업자", 1, 6], ["maxGptWorkers", "동시 지피티 작업자", 1, 6],
-  ["maxGeminiWorkers", "동시 제미나이 작업자 (0=사용 안 함)", 0, 6], ["maxGrokWorkers", "동시 그록 작업자 (0=사용 안 함)", 0, 6],
-  ["maxDeepseekWorkers", "동시 딥시크 작업자 (0=사용 안 함)", 0, 6],
-  ["maxConsults", "지시당 배정 한도", 1, MAX_CONSULTS], ["maxReviews", "리뷰 왕복", 0, MAX_REVIEWS],
+  ["maxClaudeWorkers", "권장 클로드 작업자", 1, 6], ["maxGptWorkers", "권장 지피티 작업자", 1, 6],
+  ["maxGeminiWorkers", "권장 제미나이 작업자 (0=사용 안 함)", 0, 6], ["maxGrokWorkers", "권장 그록 작업자 (0=사용 안 함)", 0, 6],
+  ["maxDeepseekWorkers", "권장 딥시크 작업자 (0=사용 안 함)", 0, 6],
+  ["maxConsults", "권장 배정 횟수", 1, MAX_CONSULTS], ["maxReviews", "권장 리뷰 횟수", 0, MAX_REVIEWS],
 ] as const satisfies readonly (readonly [keyof RemoteProjectSettings, string, number, number])[];
 
 /** Only changed fields are sent; raising approval autonomy asks for confirmation (server 428). */

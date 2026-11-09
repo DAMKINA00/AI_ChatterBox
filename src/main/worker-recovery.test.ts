@@ -108,3 +108,46 @@ test("quiet healthy worker is left alone; explicit orphaned error settles after 
     assert.equal(resolved, 1);
   } finally { await f.close(); }
 });
+
+test("silent work prompts a master check without killing long tools or spending retry attempts", async () => {
+  const f = fixture();
+  try {
+    f.store.finishConsult(f.failed.id, "done", "previous work", []);
+    let disposals = 0;
+    const driver = { running: true, dispose: async () => { disposals++; } };
+    f.chats.liveDriver = (_chatId, role) => role === "orch" ? f.master as any : driver as any;
+    f.engine.running.set(f.chat.id, new Map([[f.worker.key, { lastEventAt: 1, kind: "implement", scope: ["src/**"], tools: new Set(["long tool"]), resolve() {} }]]));
+    await f.engine.sweepWorkerRecovery(300_001);
+    assert.equal(disposals, 0);
+    assert.equal(f.sent.length, 1);
+    assert.match(f.sent[0].text, /check_agent/);
+    assert.equal(f.instruction.recoveryAttempts, undefined);
+    await f.engine.sweepWorkerRecovery(310_000);
+    assert.equal(f.sent.length, 1);
+    f.store.updateChat(f.chat.id, { status: "approval" });
+    await f.engine.sweepWorkerRecovery(700_000);
+    assert.equal(f.sent.length, 1);
+  } finally { await f.close(); }
+});
+
+test("master can inspect existing work and recover only after its execution has stopped", async () => {
+  const f = fixture();
+  try {
+    const results: any[] = [];
+    let shouldStop = false;
+    const driver = { running: true, dispose: async () => { if (shouldStop) driver.running = false; } };
+    f.chats.liveDriver = () => driver as any;
+    f.chats.disposeRole = async () => {};
+    const r = { lastEventAt: Date.now() - 400_000, consultId: f.failed.id, kind: "implement", scope: ["src/**"], tools: new Set(), resolve: (result: any) => { assert.equal(driver.running, false); results.push(result); } };
+    f.engine.running.set(f.chat.id, new Map([[f.worker.key, r]]));
+    const status = await f.engine.call(f.chat.id, "orch", "check_agent", { to: f.worker.nickname });
+    assert.match(status.content[0].text, /quietSeconds/);
+    assert.equal(f.sent.length, 0);
+    assert.equal((await f.engine.call(f.chat.id, "orch", "check_agent", { to: f.worker.nickname, recover: true })).isError, true);
+    assert.equal(results.length, 0);
+    shouldStop = true;
+    assert.equal((await f.engine.call(f.chat.id, "orch", "check_agent", { to: f.worker.nickname, recover: true })).isError, false);
+    assert.equal(results.length, 1);
+    assert.equal(f.sent.length, 0);
+  } finally { await f.close(); }
+});

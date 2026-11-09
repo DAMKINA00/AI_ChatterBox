@@ -47,7 +47,7 @@ import { GeminiWebAccounts } from "./drivers/gemini-web-accounts";
 import { conversationAccount } from "./drivers/gemini-web-protocol";
 import type { GeminiWebAccountId } from "../shared/types";
 import { ClaudeDriver, claudeUsageText, listClaudeModels } from "./drivers/claude";
-import { resolveEffort, workerEffort, WORKER_EFFORTS } from "./effort";
+import { resolveEffort, workerEffort } from "./effort";
 import { parseClaudeUsageText } from "../shared/usage";
 import { CodexDriver, CodexServer } from "./drivers/codex";
 import { AttachmentStore } from "./attachments";
@@ -314,9 +314,10 @@ export class ChatManager {
     catch (error) { if (this.modelLists.get(key)?.promise === promise) this.modelLists.delete(key); throw error; }
   }
 
-  async assignmentEffort(chatId: number, role: Role, requested?: string): Promise<{ requestedEffort: string; effort: string }> {
+  async assignmentEffort(chatId: number, role: Role, requested?: string, assignmentModel?: string): Promise<{ requestedEffort: string; effort: string }> {
     const chat = this.store.chat(chatId)!;
     const cfg = this.roleConfig(chat, this.store.project(chat.projectId)!, role);
+    if (assignmentModel) cfg.model = assignmentModel;
     if (cfg.agent === "gemini" && (cfg.model === GEMINI_WEB_MODEL || isAIStudioModel(cfg.model))) {
       if (role !== "orch") workerEffort("auto", requested); // Workers still record the master's assignment; this transport uses default thinking.
       return { requestedEffort: requested ?? "", effort: "" };
@@ -372,15 +373,18 @@ export class ChatManager {
       finally { if (timer) clearTimeout(timer); }
     }
     const effortLevels: Partial<Record<AgentKind, string[]>> = {};
+    const availableModels: Partial<Record<AgentKind, ModelOption[]>> = {};
     await Promise.all(installed.filter((c) => c.path).map(async ({ agent }) => {
       try {
         const models = await this.models(agent);
+        availableModels[agent] = models.filter(m => !m.hidden && !m.deprecated);
         const id = agent === "claude" ? chat.claudeModelOverride ?? project.settings.claudeModel : agent === "codex" ? gptModel : agent === "grok" ? chat.grokModelOverride ?? project.settings.grokModel : agent === "deepseek" ? chat.deepseekModelOverride ?? project.settings.deepseekModel : chat.geminiModelOverride ?? project.settings.geminiModel;
         const model = id ? models.find((m) => m.id === id) : models.find((m) => m.isDefault);
-        effortLevels[agent] = WORKER_EFFORTS.filter((level) => model?.reasoningEfforts?.includes(level));
+        effortLevels[agent] = model?.reasoningEfforts ?? [];
       } catch { /* Unknown levels remain unavailable, never invent support. */ }
     }));
     return {
+      availableModels,
       deepseek: { installed: this.deepSeek().status().apiKeySet, model: chat.deepseekModelOverride ?? project.settings.deepseekModel, reasoningEfforts: effortLevels.deepseek, effortSetting: project.settings.deepseekEffort, imageGeneration: false, videoGeneration: false, authentication: this.deepSeek().status(), localTools: true, fileWrites: true, enabled: project.settings.maxDeepseekWorkers > 0 },
       claude: { installed: !!installed.find((c) => c.agent === "claude")?.path, model: chat.claudeModelOverride ?? project.settings.claudeModel, reasoningEfforts: effortLevels.claude, effortSetting: project.settings.claudeEffort, imageGeneration: false, authentication: "실행 시 확인", usage: this.usageState.claude },
       gpt: { installed: !!installed.find((c) => c.agent === "codex")?.path, model: gptModel, reasoningEfforts: effortLevels.codex, effortSetting: project.settings.codexEffort, imageGeneration, authenticated: codexAuthenticated, usage: this.usageState.codex },
@@ -934,10 +938,11 @@ export class ChatManager {
    * Driver for a role, created on demand. If the role's CLI or model changed since the driver was
    * made (project/chat settings), the old one is replaced; the CLI session is resumed, so context stays.
    */
-  async driver(chatId: number, role: Role, assignmentEffort?: string): Promise<AgentDriver> {
+  async driver(chatId: number, role: Role, assignmentEffort?: string, assignmentModel?: string): Promise<AgentDriver> {
     const chat = this.store.chat(chatId)!;
     const project = this.store.project(chat.projectId)!;
     const cfg = this.roleConfig(chat, project, role);
+    if (assignmentModel) cfg.model = assignmentModel;
     if (role === "orch" && cfg.agent === "gemini" && cfg.model === GEMINI_WEB_MODEL) throw new Error("마스터는 AI Studio 모델을 선택하세요. Gemini 웹은 작업자로 사용할 수 있습니다.");
     const effort = assignmentEffort ?? (await this.assignmentEffort(chatId, role)).effort;
     const instructions = this.instructionsFor?.(chat, project, role, cfg.agent);

@@ -44,6 +44,7 @@ function consultOf(node: NodeId): number | null {
 /** Should this event appear in the view, and where. */
 function belongs(e: TimelineEvent, view: View, consultTargets: Map<number, Role>): "top" | "child" | false {
   const ev = e.event;
+  if (ev.type === "room_message") return "top";
   const cId = consultOf(e.node);
   if (view === undefined) {
     if (ev.type === "approval_request" || ev.type === "approval_resolved") return "top";
@@ -338,6 +339,8 @@ export function apply(items: Item[], e: TimelineEvent, expression?: AgentExpress
   // Stable keys keep React state (open cards) across rebuilds; live deltas have no id yet.
   const key = e.id ? `e${e.id}` : `live-${e.node}-${role}`;
   switch (ev.type) {
+    case "room_message":
+      return [...items, { kind: "message", key, role: ev.from, node: "orch", text: ev.text, streaming: false, expression: "neutral", at: e.at }];
     case "peer_message":
       return [...items, { kind: "peer", key, from: ev.from, to: ev.to, text: ev.text }];
     case "agent_usage":

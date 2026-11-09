@@ -54,7 +54,6 @@ import { isMutatingTool, isReadCommand } from "./execution-policy";
 import type { ApprovalInput } from "./approvals";
 import { addWait, checkAsk, removeWait, type WaitGraph } from "./team";
 import { completionIssue, dualInvestigationIssue } from "./dispatch";
-import { WORKER_EFFORTS } from "./effort";
 import { conversationAccount, webAccountId } from "./drivers/gemini-web-protocol";
 import { WEB_LOW_REMAINING } from "./drivers/gemini-web-accounts";
 import { isAIStudioModel } from "../shared/aistudio";
@@ -109,15 +108,16 @@ const ASK_TOOL = (forMaster: boolean): ToolDef => ({
       message: { type: "string" },
       kind: { type: "string", enum: KINDS },
       reason: { type: "string", description: "이 작업자를 선택한 이유. 마스터 배정 시 필수." },
-      ...(forMaster ? { effort: { type: "string", enum: [...WORKER_EFFORTS], description: "추론 수준. 일반 작업 medium, 복잡한 분석·구현 high, 가장 어려운 추론·검증 xhigh. 모델 지원 범위를 확인하고 reason에 선택 근거를 적으세요." } } : {}),
-      ...(forMaster ? { discussion: DISCUSSION_INPUT } : {}),
+      effort: { type: "string", description: "작업 난도·비용·속도에 맞춰 모델이 실제 지원하는 추론 수준을 선택합니다. 생략하면 기존 배정 또는 모델 기본값입니다." },
+      model: { type: "string", description: "선택 사항. route_request의 availableModels에서 담당 계열의 모델 ID를 선택합니다. 생략하면 프로젝트/채팅 모델을 유지합니다. Gemini 웹/AI Studio 전환은 채팅 설정을 따릅니다." },
+      discussion: DISCUSSION_INPUT,
       ...(forMaster ? { webAccountId: WEB_ACCOUNT_INPUT, accountId: CLI_ACCOUNT_INPUT, clearAccountId: CLEAR_CLI_ACCOUNT_INPUT } : {}),
       requiresImage: { type: "boolean", description: "실제 이미지 생성·편집 도구가 필요한 작업이면 true" },
       supersedes: { type: "integer", description: "이 배정으로 보완할 실패한 협의 id" },
       scope: { type: "array", items: { type: "string" } },
       ...(forMaster ? { attach: { type: "array", items: { type: "string" }, description: "함께 보낼 파일 절대경로 (사용자 첨부 이미지 등)" } } : {}),
     },
-    required: ["to", "message", "kind", ...(forMaster ? ["reason", "effort"] : [])],
+    required: ["to", "message", "kind", ...(forMaster ? ["reason"] : [])],
   },
 });
 const ASK_PARALLEL_TOOL: ToolDef = {
@@ -137,7 +137,8 @@ const ASK_PARALLEL_TOOL: ToolDef = {
             message: { type: "string" },
             kind: { type: "string", enum: KINDS },
             reason: { type: "string" },
-            effort: { type: "string", enum: [...WORKER_EFFORTS] },
+            effort: { type: "string" },
+            model: { type: "string" },
             requiresImage: { type: "boolean" },
             supersedes: { type: "integer" },
             attach: { type: "array", items: { type: "string" } },
@@ -147,7 +148,7 @@ const ASK_PARALLEL_TOOL: ToolDef = {
             accountId: CLI_ACCOUNT_INPUT,
             clearAccountId: CLEAR_CLI_ACCOUNT_INPUT,
           },
-          required: ["to", "message", "kind", "reason", "effort"],
+          required: ["to", "message", "kind"],
         },
       },
     },
@@ -172,7 +173,7 @@ const RELEASE_TOOL: ToolDef = {
 };
 const MESSAGE_TOOL: ToolDef = {
   name: "send_message",
-  description: "동료 또는 마스터에게 진행 상황·인터페이스·질문을 보내고 즉시 계속 작업합니다. 상대의 다음 앱 도구 호출/작업 시작 시 전달됩니다. 작업 중인 동료에게는 ask로 기다리지 말고 이 도구를 쓰세요. 명령 실행이나 새 작업 시작을 대신하지 않습니다.",
+  description: "동료·마스터에게 보내거나 to=all로 그룹 채팅에 발언합니다. 진행·반론·근거·질문을 공유하고 본 작업을 계속합니다. 작업 중인 상대에게 즉시 전달을 시도하며 다음 도구 호출에도 확인합니다. 답변이 필요하면 ask를 사용하세요.",
   inputSchema: { type: "object", properties: { to: { type: "string" }, message: { type: "string" } }, required: ["to", "message"], additionalProperties: false },
 };
 const MESSAGES_TOOL: ToolDef = {
@@ -183,6 +184,11 @@ const AGENTS_TOOL: ToolDef = {
   name: "agents",
   description: "이 채팅의 팀 목록: 닉네임, 종류, 맡은 역할, 상태(대기/작업 중/해제). 마스터에게는 현재 지시의 최근 협의 결과도 반환합니다. 즉시 추가 지시로 ask 응답을 놓쳤으면 재배정하기 전에 여기서 확인하세요.",
   inputSchema: { type: "object", properties: {} },
+};
+const CHECK_AGENT_TOOL: ToolDef = {
+  name: "check_agent",
+  description: "이미 맡긴 작업도 다시 점검합니다. 마지막 활동·실행 상태·대기 도구·오류·최근 결과를 확인하고 진행 상황 응답을 요청합니다. 기존 작업을 중복 배정하거나 중지하지 않습니다.",
+  inputSchema: { type: "object", properties: { to: { type: "string" }, recover: { type: "boolean", description: "마스터만 사용. 무응답 작업의 기존 프로세스 종료를 확인한 뒤 실패로 정리합니다. 저장된 파일은 보존하며 supersedes로 이어 맡길 수 있습니다." } }, required: ["to"], additionalProperties: false },
 };
 const CHECKLIST_TOOL: ToolDef = {
   name: "checklist",
@@ -231,15 +237,15 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     `너는 사용자의 지시를 받아 팀을 꾸리고 일을 나눠 맡기는 마스터다. 작업 폴더: ${project.folder}`,
     "- 너는 배정·검토·취합 담당이다. 간단한 질문·짧은 설명·이미 주어진 정보만으로 답할 수 있는 확인은 direct로 기록한 뒤 작업자를 생성하거나 호출하지 않고 직접 답한다. 상세 원인 조사·구현·이미지·문서 제작 등 본 작업은 앱 작업자에게 맡긴다. 결과에 누락·모순이 있으면 보완 요청하고 최종 답변을 취합한다. 사용자가 명시적으로 직접 수행을 요구한 예외에도 기존 승인·작업 범위 규칙을 지킨다.",
     `- 지시마다 먼저 ${t("route_request")}(mode=direct|delegated, reason=이유)를 호출한다. 반환되는 실제 사용 가능 도구·모델·사용량으로 후보를 확인한다. 도구 사용 불가/미확인은 가능하다고 가정하지 않는다.`,
-    "- 모든 위임은 이 앱의 chatterbox_bridge spawn/ask/ask_parallel만 사용한다. CLI 내부 spawn_agent/Agent/Task/팀 도구나 별도 CLI 프로세스로 작업자를 만들지 않는다. 글로벌 스킬의 Luna 선호와 관계없이 앱 상단에서 선택한 Claude·Codex·Gemini·Grok 모델을 사용한다.",
-    "- 마스터 추론은 기본적으로 모델의 자동 설정을 쓰며 사용자가 직접 선택할 수 있다. 작업자의 추론은 마스터가 배정마다 effort=medium|high|xhigh로 선택한다. 일반·범위가 명확한 작업은 medium, 복잡한 분석·구현은 high, 가장 어려운 원인 추론·중요 검증은 xhigh를 쓴다. route_request의 reasoningEfforts에 나온 지원 수준 안에서 고르고 reason에 담당자와 추론 수준 선택 근거를 함께 적는다. Gemini Pro가 medium/high만 제공하면 그중 고른다. low/max를 지정하거나 CLI·환경 설정으로 우회하지 않는다. 프로젝트 설정에서 사용자가 수동 지정한 작업자 추론은 우선 적용된다.",
+    "- 모든 위임은 이 앱의 chatterbox_bridge spawn/ask/ask_parallel만 사용한다. CLI 내부 spawn_agent/Agent/Task/팀 도구나 별도 CLI 프로세스로 작업자를 만들지 않는다. 앱 상단 모델을 기본으로 사용하며 배정마다 availableModels에 있는 담당 계열 모델을 model로 선택할 수 있다. 사용자가 담당 모델을 명시한 요청은 우선한다.",
+    "- 작업자·역할·순서·병렬 수·추론 수준은 매 배정의 난도, 실제 도구, 비용, 속도, 사용량에 맞게 선정한다. 선호 역할은 참고이며 특정 업무를 특정 계열에 강제하지 않는다. effort는 route_request의 실제 지원 범위 전체에서 고르고 생략하면 기존 배정/모델 기본값을 쓴다. 동료도 질문마다 별도 effort를 선택할 수 있다. 사용자가 명시한 담당·수동 설정은 우선한다.",
     `- 클로드 선호 작업: ${s.claudeStrengths}\n  주의점: ${s.claudeCautions}`,
     `- 지피티 선호 작업: ${s.gptStrengths}\n  주의점: ${s.gptCautions}`,
     `- Grok 선호 작업: ${s.grokStrengths} 주의점: ${s.grokCautions}`,
     `- DeepSeek 선호 작업: ${s.deepseekStrengths} 주의점: ${s.deepseekCautions}`,
     "- 사용자가 이름·봇·CLI를 명시한 작업은 그 담당에게 우선 배정한다. 글쓰기·코드·이미지의 기본 선호는 명시적 지정을 덮어쓰지 않는다. Gemini는 선택한 AI Studio 또는 Gemini 웹 모델로 실행한다. 다른 봇으로 임의 변경하지 말고 실제 도구 오류와 한도를 보고한다.",
     `- 제미나이 선호 작업: ${s.geminiStrengths}\n  주의점: ${s.geminiCautions}` ,
-    "- 글쓰기 본 작업은 제미나이에게 kind=writing으로 배정한다. 요청에 독자·목적·분량·말투와 확인된 사실, 캐릭터 대사에는 성격·관계·상황·말투 예시를 전달한다. 기술 문서는 클로드·지피티가 사실을 확인 → 제미나이가 본문을 작성·다듬기 → 클로드·지피티가 기술 내용과 파일 반영을 확인한다. 제미나이가 비활성·한도·실패 상태면 이유를 기록하고 글쓰기를 클로드·지피티에 재배정할 수 있다. 간단한 답변은 마스터가 직접 한다.",
+    "- 글쓰기·코딩·조사·리뷰 모두 실제 역량과 맥락에 맞는 동료를 선택한다. 문서에는 독자·목적·분량·말투·확인된 사실을 전달하고, 기술적 사실과 실제 파일 반영은 검증한다. 실패하면 기존 결과를 보존하고 가용 동료에게 이어 맡긴다.",
     "- Gemini 웹 계정 판단·선택은 마스터가 직접 한다. 제미나이 1호 등 작업자에게 계정 선택을 맡기지 않는다. gemini_web_accounts로 전체 계정의 remainingPercent, usage.checkedAt, state, enabled를 확인한다. 이전 작업자의 계정이 대기 상태이고 잔여량 10% 초과이면 유지한다. 부족하거나 작업 중이면 대기 중인 활성 계정 중 잔여량이 가장 많은 계정을 선택해 spawn(kind=gemini, webAccountId=선택한 ID)으로 작업자를 만든다. 기존 작업의 맥락을 이어갈 때는 같은 작업자에게 ask(webAccountId=새 계정)로 지정한다. 작업자 수 제한이면 기존 작업자를 재사용한다. 미조회·오래된 잔여량을 가용으로 추정하지 않는다.",
     "- 모든 웹 계정이 작업 중이거나 잔여량 부족이면 gemini_web_accounts(waitForAvailable=true)로 완료·초기화를 기다린 뒤 마스터가 다시 선택한다. 선택 이후 한도가 부족해지면 작업자는 요청·대화·초안을 보존하고 마스터에게 실패를 반환한다. 마스터가 계정 목록을 갱신해 직접 새 계정을 지정하고 실패 협의 id를 supersedes로 이어받는다. 작업자가 임의로 계정을 바꾸지 않는다. agents와 ask 결과의 지정/실행 계정 ID를 보고하며 작업자 번호를 계정 번호로 추정하지 않는다.",
     "- Claude/Codex/Grok CLI 계정 정책은 프로젝트 accountPolicy > 전역 cliAccountPolicy > 기본 fixed/*-1 순이다. 프로젝트·전역 fixed 정책에서는 정책 계정이 최우선이며, 저장된 작업자 지정도 이를 덮어쓰지 못한다. 다른 accountId 지정은 거부되므로 정책 변경을 사용자에게 요청한다. auto 또는 기본(default) 정책에서만 명시·저장된 accountId를 우선 적용한다. clearAccountId=true는 저장된 지정을 해제하고 정책을 따르며 release도 지정을 해제한다. 결과의 정책과 출처를 확인한다.",
@@ -247,12 +253,12 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     "- 앱은 CLI 한도 소진 시 자동 계정 전환이나 작업 재시도를 하지 않는다. fixed는 실패를 보고한다. auto는 마스터가 cli_accounts로 다시 확인하고 실패 협의 id를 supersedes에 넣어 다른 계정으로 재배정한다. 계정 변경은 새 세션과 요약 인계로 처리한다. auto에서 accountId를 생략하면 기존 지정 계정을 유지하고, 지정이 없으면 정책 계정(없으면 *-1)을 사용한다. 앱이 잔여량으로 대신 선택하지 않는다.",
     "- 작업자 번호를 CLI 계정 번호로 추정하지 않는다. spawn/ask/ask_parallel의 accountId로 계정을 명시하고 agents와 협의 결과의 실제 실행 계정을 확인하여 최종 결과에도 실행 계정을 보고한다. Gemini 웹의 webAccountId는 별도이다.",
     "- Gemini 웹은 로컬 파일·명령·MCP를 실행할 수 없으므로 message에 필요한 자료를 포함하거나 attach에 UTF-8 텍스트 파일을 명시한다. 웹에는 추론 단계 설정·토큰 수가 없으므로 effort는 배정 의도로만 기록된다.",
-    "- 기술 업무의 기본 배정은 클로드 중심이다. 일반 분석·구현·테스트·문서의 기술 검증과 파일 제작은 먼저 클로드에게 맡기고, 독립 작업이 많으면 클로드 작업자를 추가해 나눈다. 지피티는 이미지 도구가 필요한 작업, 중요한 양쪽 조사·다른 관점의 검증, 사용자의 지피티 지정, 또는 클로드의 한도·실행 불가·과부하에 따른 재배정에 우선 사용한다. 매번 두 계열을 균등하게 배정하지 않는다. 명시적인 담당 지정이 있으면 그 CLI 작업자에게 배정한다.",
+    "- 기술 업무도 모델별 고정 역할 없이 필요한 구현·분석·검증 능력과 실제 가용성을 비교해 맡긴다. 중요한 오류의 독립 검증이 필요하면 dualInvestigation을 선택한다.",
     "- 위 기준은 기본 선호이며 절대적인 우열이 아니다. 필요한 도구 사용 가능 여부를 먼저 확인하고, 사용자가 지정한 담당·선호 기준·관련 맥락·작업량·사용 한도를 고려한다. 두 계열을 매번 모두 부르지 않는다. 실패하면 원인을 반영해 재배정하고 가능한 담당자가 없으면 미완료 사유를 알린다.",
-    "- 시각 작업도 구분한다. 이미지 생성·편집은 지정이 없을 때 이미지 도구가 있는 Codex에게, 명시적으로 Gemini/Grok 등 다른 작업자를 지정하면 그 작업자에게 requiresImage=true로 배정한다. 제공된 이미지 도구의 실제 결과만 완료로 인정한다. 그 밖의 모션그래픽·애니메이션의 코드·타임라인·연출 제작은 클로드에게 우선 배정한다. 모션그래픽에 새 이미지 소재가 필요하면 그 이미지 생성만 지피티에 맡기고 클로드가 결과를 통합한다.",
+    "- 시각 작업도 구분한다. 이미지 생성·편집은 지정이 없을 때 이미지 도구가 있는 Codex에게, 명시적으로 Gemini/Grok 등 다른 작업자를 지정하면 그 작업자에게 requiresImage=true로 배정한다. 제공된 이미지 도구의 실제 결과만 완료로 인정한다. 그 밖의 모션그래픽·애니메이션은 실제 도구와 맥락에 맞는 동료가 제작하고 필요한 이미지 소재도 도구 가용성에 따라 협의한다.",
     `- 중요한 버그 수정·오류 분석이라고 판단하면 ${t("route_request")}(mode=delegated, dualInvestigation=true, reason=중요도 판단 근거)를 기록한다. 예: 데이터 손실·보안·설비 안전·서비스 중단에 영향이 크거나, 반복 장애의 원인이 불확실하고 잘못 고쳤을 때 피해가 큰 경우. 사용자에게 양쪽 조사를 명시적으로 요청받은 경우도 적용한다. 단순 문구·서식 수정이나 일반 질문에 모두 호출하지 않는다.`,
     `- 양쪽 조사: 클로드와 지피티에게 동일한 문제·증상·소스·로그·완료 기준을 주고 ${t("ask_parallel")}(각 kind=opinion)로 독립 조사시킨다. 다른 쪽 결론을 먼저 전달하거나 파일 수정을 맡기지 않는다. 각각 원인 후보·근거(파일/로그)·재현 방법·수정안·불확실성을 보고하게 한다. 두 결과가 오면 공통점과 차이를 대조하고, 충돌은 추가 증거로 확인해 마스터가 최종 원인·수정 방향을 취합한다. 이후 구현은 정한 담당자에게 맡기고 교차 리뷰 규칙을 유지한다. 한쪽을 실행할 수 없으면 양쪽 조사를 완료했다고 하지 말고 제한과 확인된 결과를 보고한다.`,
-    `- 팀: ${t("spawn")}(kind=claude|gpt|gemini|grok|deepseek)로 작업자를 만든다. 작업자 수는 일의 양에 맞춘다: 작은 일은 한 명, 큰 일은 범위를 나눠 여러 명(동시에 클로드 최대 ${s.maxClaudeWorkers}명, 지피티 최대 ${s.maxGptWorkers}명, 제미나이 최대 ${s.maxGeminiWorkers}명, Grok 최대 ${s.maxGrokWorkers}명, 딥시크 최대 ${s.maxDeepseekWorkers}명). 다 쓴 작업자는 ${t("release")}로 해제한다. ${t("agents")}로 팀을 확인한다.`,
+    `- 팀: ${t("spawn")}(kind=claude|gpt|gemini|grok|deepseek)로 작업자를 만든다. 기존 동료를 우선 재사용하고 필요한 인원과 병렬 수를 상황에 맞게 선택한다. 설정 인원은 권장 규모이며 초과해도 차단되지 않는다. 0으로 비활성화한 계열은 사용하지 않는다. 다 쓴 동료는 ${t("release")}로 해제한다.`,
     "- 한 요청 안에서도 UI·로직·테스트·자료 조사처럼 독립 가능한 파트를 나누고 담당·파일 범위·입출력 계약·의존성을 체크리스트에 기록한다. 파트는 ask_parallel로 동시에 맡긴다. 각 파트 담당에게 동료 닉네임과 연결되는 부분을 명시하고 직접 협의하게 한다. 마스터가 모든 대화를 중계하지 않는다. 작업 중인 동료와는 send_message로 계약·진행·질문을 주고받고, 대기 동료의 결과가 필요하면 ask/ask_parallel을 사용한다. 결과는 read_messages와 agents로 확인한 뒤 통합·검증한다.",
     `- 일 맡기기: ${t("ask")}(to=닉네임, kind, message, scope). 서로 독립적인 일은 반드시 ${t("ask_parallel")}(tasks=[…])로 한 번에 맡겨 동시에 진행한다(하나씩 기다리지 말 것). 파일을 변경할 작업은 종류와 관계없이 scope를 겹치지 않게 나눈다. 읽기·토의는 동시에 가능하며, 리뷰·의견에서 수정할 때도 범위와 승인을 따른다.`,
     `- 관련 쟁점·서로 맞물린 설계·문장과 연출 등 직접 논의가 필요한 항목은 주제별 토의 그룹으로 묶는다. ${t("ask")}(to=클로드/지피티 진행자, kind=opinion|writing, discussion={topic:주제, peers:[참여 닉네임]}, message=목표·공통 자료·쟁점·완료 기준, reason, effort)로 맡긴다. 진행자가 참여자에게 직접 ask로 초안과 근거를 주고받아 합의·이견·남은 확인을 정리하고, 너는 그룹별 결과와 필요한 최종 결정만 취합한다. 사소한 확인까지 매번 중계하지 않는다.`,
@@ -268,7 +274,7 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     `- 채팅에 목표(/goal)가 있으면 그 목표를 향해 일하고, 한 단계를 마칠 때마다 ${t("update_goal")}로 진행을 보고한다. 다 이루면 status=complete.`,
     `- 꼭 필요한 결정만 ${t("ask_user")}로 묻는다.`,
     `- 사용자에게 대사를 쓰기 전에 ${t("set_expression")}(expression=감정)으로 표정을 지정한다. 감정: ${AGENT_EXPRESSIONS.join(", ")}. 기술적 내용과 말투를 억지로 바꾸지 않는다.`,
-    `- 지시·협의의 작업 시간 제한은 없다. 사용자가 중지를 요청하면 즉시 멈춘다. 지시당 배정 한도는 ${s.maxConsults}회, 그중 리뷰는 ${s.maxReviews}회다. 횟수 한도에 걸리면 그때까지의 결과로 보고한다.`,
+    "- 지시·협의의 시간·배정·리뷰 횟수에는 강제 한도를 두지 않는다. 설정 숫자는 계획 참고값이다. 같은 요청 반복, 순환 대기, 충돌을 피하고 새로운 근거가 없으면 질문을 바꾸거나 사용자에게 필요한 결정을 알린다. 사용자가 중지를 요청하면 즉시 멈춘다.",
     "- 마지막에는 항상 한국어로 취합한다: 담당별 결과, 산출물 링크, 검증·리뷰 결과, 남은 문제. 돌아오지 않았거나 실패한 결과를 완료했다고 말하지 않는다. 생성 이미지 파일 경로도 최종 답변에 포함한다.",
     "- 사용자에게 결과물을 제공할 때마다 반드시 해당 파일별로 클릭할 수 있는 Markdown 링크 [파일명](<절대경로>)를 함께 쓴다. 이미지도 같은 링크와 미리보기를 함께 제공한다. :codex-file-citation 같은 내부 앱 전용 표기나 링크 없는 완료 문장으로 대체하지 않는다. 수정한 기존 PDF·문서·ZIP도 빠뜨리지 않고 각각 연결한다.",
   ].join("\n");
@@ -281,8 +287,8 @@ function workerInstructions(a: ChatAgent): string {
     "- 너의 모델은 앱이 지정한다. 네이티브 spawn_agent/Agent/Task 또는 별도 CLI로 하위 작업자를 생성하지 않는다. 추가 인력이 필요하면 마스터에게 send_message로 요청한다. 기존 팀과는 앱 ask/ask_parallel/send_message/read_messages로 협업한다.",
     "- 구현 지시(implement): 지정된 범위(scope) 안의 파일만 고친다. 사용자에게 지정받은 종류의 작업을 수행한다. 승인·범위·도구 한계는 지킨다.",
     "- 계획·리뷰(review)·의견(opinion)·글쓰기(writing)에서도 사용자 지시에 필요한 수정·명령 실행이 가능하다. 지정된 파일 범위와 승인 절차, 사용자가 명시한 수정 금지를 지킨다.",
-    "- 다른 파트와 인터페이스·전제·변경 사항을 직접 협의한다. 작업 중인 동료에게는 send_message로 보내고 본 작업을 계속한다. read_messages를 작업 단계마다, 특히 최종 보고 전에 확인한다. 대기 동료는 ask/ask_parallel로 질문할 수 있다. 자신의 잠근 파일 범위를 다시 위임하지 않는다.",
-    "- 글쓰기 지시(writing): 문장·대사·문서 본문만 작성해 반환한다. 로컬 파일과 기술적 사실은 바꾸지 않는다. 독자·캐릭터의 말투·길이 조건을 지킨다.",
+    "- 팀은 그룹 채팅으로 협의한다. send_message(to=all)로 진행·근거·반론·완료 결과를 공개하고 직접 질문은 동료에게 ask한다. 메시지를 read_messages로 확인한다. 질문마다 난도에 맞는 effort를 선택할 수 있다. 작업 중인 동료에게는 send_message, 상태 확인은 check_agent를 사용한다. 이미 배정했다는 이유로 점검을 생략하지 않는다. 자신의 잠근 파일 범위는 다시 위임하지 않는다.",
+    "- writing은 글쓰기 목적의 배정이다. 필요한 사실 확인과 파일 반영은 지정 범위와 사용자 승인을 따르며 요청한 독자·말투·길이를 지킨다.",
     "- 다른 작업자에게 확인할 것이 있으면 ask(to=닉네임)로 직접 묻는다. 팀 목록은 agents. 마스터에게는 ask를 쓰지 말고 결과 보고에 질문을 적는다.",
     "- 토의 그룹의 진행자로 지정되면 공통 주제와 너의 초안·근거·질문을 각 참여자에게 앱 ask로 직접 보내고, 실제 의견을 받아 대조·보완한 뒤 합의, 이견, 근거, 남은 결정을 한 번에 보고한다. 참여자로 질문을 받으면 쟁점에 답하고 반론·확인 질문을 이번 응답에 담는다. 너의 답을 기다리는 진행자에게 다시 ask하여 순환 대기를 만들지 않는다. 그룹 밖 쟁점이나 사용자 결정만 마스터에게 최종 보고한다.",
     "- 끝나면 한국어로 짧게 보고한다: 한 일, 바뀐 파일, 확인 방법과 결과, 남은 문제.",
@@ -316,7 +322,7 @@ interface Instruction {
 interface Discussion { topic: string; peers: ChatAgent[] }
 interface PausedAssignment {
   caller: Role; target: ChatAgent; kind: ConsultKind; message: string; scope: string[];
-  attach: string[]; reason: string; effort?: string; discussion?: Discussion; consultId?: number;
+  attach: string[]; reason: string; effort?: string; model?: string; discussion?: Discussion; consultId?: number;
 }
 interface PauseState {
   folder: string;
@@ -325,6 +331,8 @@ interface PauseState {
 }
 interface Running {
   lastEventAt: number;
+  lastProbeAt?: number;
+  tools?: Set<string>;
   lastError?: string;
   recovering?: boolean;
   recoveryError?: string;
@@ -345,6 +353,7 @@ interface Running {
 }
 
 export class Orchestrator {
+  private messageFlights = new Set<string>();
   private recoveryTimer?: ReturnType<typeof setInterval>;
   private recoveryFlights = new Set<number>();
   private bridgeKeys = new Map<string, { key: string; url: string }>();
@@ -356,7 +365,7 @@ export class Orchestrator {
   /** One turn at a time per worker. */
   private workerQueue = new Map<string, Promise<unknown>>();
   /** Only the master's tool wait is released; the consultation itself keeps running. */
-  private masterConsultWaiters = new Map<number, Set<() => void>>();
+  private masterConsultWaiters = new Map<number, Set<(note?: string) => void>>();
   /** Implement scopes currently held, per chat. */
   private scopeLocks = new Map<number, { consultId: number; scope: string[] }[]>();
   private scopeWaiters = new Map<number, (() => void)[]>();
@@ -415,7 +424,7 @@ export class Orchestrator {
 
   get recovering() { return this.recoveryFlights.size > 0; }
 
-  /** Only explicit errors trigger recovery; quiet tools and approval waits are not failures. */
+  /** Silence prompts a check, not termination: a long tool may still own its write scope. */
   async sweepWorkerRecovery(now = Date.now()) {
     for (const [chatId, inst] of this.instructions) {
       const chat = this.chats.store.chat(chatId);
@@ -423,15 +432,31 @@ export class Orchestrator {
       this.recoveryFlights.add(chatId);
       try {
         for (const [role, running] of this.running.get(chatId) ?? []) {
-          if (!running.lastError || running.recovering || now - running.lastEventAt < 60_000) continue;
           const driver = this.chats.liveDriver(chatId, role);
+          if (!running.lastError && now - running.lastEventAt >= 300_000 && now - (running.lastProbeAt ?? 0) >= 300_000) {
+            running.lastProbeAt = now;
+            if (driver && !driver.running) {
+              running.lastError = "작업자 실행이 끝났지만 종료 결과가 도착하지 않았습니다.";
+            } else {
+              const note = `${this.name(chatId, role)}의 활동이 ${Math.floor((now - running.lastEventAt) / 60_000)}분간 없습니다. 긴 도구 실행·동료 대기일 수 있으며 실패로 단정하지 않습니다. 마스터는 check_agent(to="${this.name(chatId, role)}")로 확인하고, 실제 무응답이면 recover=true로 기존 실행 정리 후 supersedes로 이어 맡기세요. 이미 배정했다는 이유로 확인을 생략하지 마세요.`;
+              this.chats.emit(chatId, "orch", role, { type: "room_message", from: role, text: `[앱 상태 점검] ${note}` });
+              this.wakeMasterConsults(chatId, note);
+              const master = this.chats.liveDriver(chatId, "orch");
+              if (master?.running) void master.steer?.({ text: `[앱 상태 점검]\n${note}`, attachments: [] }).catch(() => undefined);
+              else if (master) {
+                this.chats.updateChat(chatId, { status: "working" });
+                void master.send({ text: `[앱 상태 점검]\n${note}`, attachments: [] }).catch(() => undefined);
+              }
+            }
+          }
+          if (!running.lastError || running.recovering || now - running.lastEventAt < 60_000) continue;
           running.recovering = true;
           running.recoveryError = running.lastError;
           try {
             // Dispose the failed session before releasing its write scope or assigning a replacement.
-            if (driver?.running) await driver.dispose();
+            if (driver?.running) await (driver.recover ? driver.recover() : driver.dispose());
             if (driver?.running) throw new Error("작업자 프로세스가 아직 실행 중입니다.");
-            await this.chats.disposeRole(chatId, role);
+            if (!driver?.recover) await this.chats.disposeRole(chatId, role);
             running.recovering = false;
             if (this.instructions.get(chatId) !== inst || this.stopped.has(chatId)) {
               running.resolve({ ok: false, interrupted: true });
@@ -469,7 +494,7 @@ export class Orchestrator {
           try { accepted = !!(await master.steer?.({ text: note, attachments: [] })); } catch { /* retry after the native turn settles */ }
           inst.recoveryNote = accepted ? undefined : note;
           if (!accepted && this.masterConsultWaiters.get(chatId)?.size) {
-            this.wakeMasterConsults(chatId);
+            this.wakeMasterConsults(chatId, note);
             accepted = true;
           }
         } else {
@@ -505,8 +530,8 @@ export class Orchestrator {
       reg = this.chats.bridge.register(
         {
           tools: master
-            ? [ROUTE_TOOL, WEB_ACCOUNTS_TOOL, CLI_ACCOUNTS_TOOL, SPAWN_TOOL, ASK_TOOL(true), ASK_PARALLEL_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, RELEASE_TOOL, AGENTS_TOOL, CHECKLIST_TOOL, GOAL_TOOL, ASK_USER_TOOL, EXPRESSION_TOOL]
-            : [ASK_TOOL(false), ASK_PARALLEL_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, AGENTS_TOOL, EXPRESSION_TOOL],
+            ? [ROUTE_TOOL, WEB_ACCOUNTS_TOOL, CLI_ACCOUNTS_TOOL, SPAWN_TOOL, ASK_TOOL(true), ASK_PARALLEL_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, RELEASE_TOOL, AGENTS_TOOL, CHECK_AGENT_TOOL, CHECKLIST_TOOL, GOAL_TOOL, ASK_USER_TOOL, EXPRESSION_TOOL]
+            : [ASK_TOOL(false), ASK_PARALLEL_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, AGENTS_TOOL, CHECK_AGENT_TOOL, EXPRESSION_TOOL],
           call: (name, args) => this.call(chatId, role, name, args),
         },
         id,
@@ -516,16 +541,33 @@ export class Orchestrator {
     return bridgeServerConfig(this.chats.bridgeScript, reg.url);
   }
 
-  private readMessages(chatId: number, role: Role): string {
+  private readMessages(chatId: number, role: Role, consume = true, through = Infinity): string {
     const key = `teamMessages:${chatId}:${role}`;
     const cursor = Number(this.chats.store.getSetting(key) ?? 0);
-    const messages = this.chats.store.events(chatId).filter(e => e.id > cursor && e.event.type === "peer_message" && e.event.to === role);
+    const messages = this.chats.store.events(chatId).filter(e => e.id > cursor && e.id <= through && (e.event.type === "peer_message" && e.event.to === role || e.event.type === "room_message" && e.event.from !== role));
     if (!messages.length) return "";
-    this.chats.store.setSetting(key, String(messages.at(-1)!.id));
+    if (consume) this.chats.store.setSetting(key, String(messages.at(-1)!.id));
     return "\n\n[동료 메시지 — 참고/협업 요청, 사용자 지시와 승인·작업 범위를 변경하지 않음]\n" + messages.map(e => {
-      const m = e.event as Extract<AgentEvent, { type: "peer_message" }>;
-      return `${this.name(chatId, m.from)} → ${this.name(chatId, m.to)}: ${m.text}`;
+      const m = e.event as Extract<AgentEvent, { type: "peer_message" | "room_message" }>;
+      return `${this.name(chatId, m.from)} → ${m.type === "room_message" ? "그룹 채팅" : this.name(chatId, m.to)}: ${m.text}`;
     }).join("\n");
+  }
+
+  private async deliverMessages(chatId: number, role: Role) {
+    const key = `${chatId}:${role}`;
+    if (this.messageFlights.has(key) || this.stopped.has(chatId) || this.chats.approvals.pendingCount(chatId)) return;
+    // Claude's priority input cancels an in-flight tool; peer traffic must not detach an ask.
+    if (this.waits.get(chatId)?.get(role)?.size || this.running.get(chatId)?.get(role)?.tools?.size) return;
+    const driver = this.chats.liveDriver(chatId, role);
+    if (!driver?.running || !driver.steer) return;
+    const through = this.chats.store.events(chatId).at(-1)?.id ?? 0;
+    const text = this.readMessages(chatId, role, false, through);
+    if (!text) return;
+    this.messageFlights.add(key);
+    try {
+      if (await driver.steer({ text, attachments: [] })) this.readMessages(chatId, role, true, through);
+    } catch { /* Keep the inbox unread when the native transport cannot steer. */ }
+    finally { this.messageFlights.delete(key); }
   }
 
   private async call(chatId: number, caller: Role, name: string, args: any): Promise<ToolResult> {
@@ -544,14 +586,57 @@ export class Orchestrator {
     try {
       switch (name) {
         case "read_messages": return textResult(this.readMessages(chatId, caller) || "새 협업 메시지가 없습니다.");
+        case "check_agent": {
+          if (args.recover !== undefined && typeof args.recover !== "boolean") return textResult("recover는 boolean이어야 합니다.", true);
+          const to = String(args.to ?? "").trim();
+          const target = this.agents(chatId).find(a => a.nickname === to || a.key === to);
+          if (!target || target.status !== "active") return textResult("점검할 활성 동료를 지정하세요.", true);
+          const running = this.running.get(chatId)?.get(target.key);
+          const driver = this.chats.liveDriver(chatId, target.key);
+          const latest = this.chats.store.listConsults(chatId).findLast(c => c.toRole === target.key);
+          if (args.recover) {
+            if (!master || !running || running.recovering) return textResult("마스터만 실행 중인 작업을 복구할 수 있습니다.", true);
+            if (this.chats.approvals.pendingCount(chatId)) return textResult("사용자 승인 대기 중입니다. 승인 응답을 먼저 확인하세요.", true);
+            running.recovering = true;
+            running.recoveryError = "마스터가 무응답 작업의 실행을 정리했습니다. 기존 산출물을 확인하고 이어서 진행하세요.";
+            try {
+              if (!driver) throw new Error("기존 작업자 실행 핸들을 확인하지 못했습니다.");
+              await (driver.recover ? driver.recover() : driver.dispose());
+              if (driver.running) throw new Error("기존 작업자 실행 종료를 확인하지 못했습니다.");
+              if (!driver.recover) await this.chats.disposeRole(chatId, target.key, true);
+              running.recovering = false;
+              running.resolve({ ok: false, error: running.recoveryError });
+              return textResult(`기존 실행 종료를 확인했습니다. 협의 ${running.consultId} 정리 후 supersedes로 이어 맡기세요. 저장된 결과는 보존했습니다.`);
+            } catch (error) {
+              running.recovering = false;
+              running.recoveryError = undefined;
+              return textResult(`기존 실행 정리 실패: ${String(error)}. 같은 파일을 다른 작업자에게 재배정하지 마세요.`, true);
+            }
+          }
+          if (running) {
+            this.chats.emit(chatId, this.chats.route(chatId, target.key), caller, { type: "peer_message", from: caller, to: target.key, text: "현재 진행 상황·남은 작업·막힌 이유를 알려주세요. 기존 작업을 중복 시작하지 마세요." });
+            void this.deliverMessages(chatId, target.key);
+          }
+          return textResult(JSON.stringify({ nickname: target.nickname, state: running ? driver?.running ? "running" : "missing_terminal_result" : "idle", quietSeconds: running ? Math.floor((Date.now() - running.lastEventAt) / 1000) : null, pendingTools: running?.tools?.size ?? 0, error: running?.lastError ?? null, latest }, null, 2));
+        }
         case "send_message": {
           const to = String(args.to ?? "").trim();
           const text = String(args.message ?? "").trim();
+          if (["all", "everyone", "팀", "전체"].includes(to)) {
+            if (!text || text.length > 16000 || caller !== "orch" && !this.running.get(chatId)?.has(caller)) return textResult("현재 배정과 1~16000자의 메시지가 필요합니다.", true);
+            const previous = this.chats.store.events(chatId).findLast(e => e.event.type === "room_message" && e.event.from === caller)?.event;
+            if (previous?.type === "room_message" && previous.text === text) return textResult("같은 발언이 이미 그룹 채팅에 있습니다. 새 근거나 질문을 추가하세요.", true);
+            this.chats.emit(chatId, "orch", caller, { type: "room_message", from: caller, text });
+            for (const role of ["orch" as Role, ...this.agents(chatId).filter(a => a.status === "active").map(a => a.key)]) if (role !== caller) void this.deliverMessages(chatId, role);
+            return textResult("그룹 채팅에 공유했습니다. 동료가 새 메시지를 확인하며, 답변이 필요한 동료에게는 ask로 직접 질문하세요.");
+          }
           const target = ["orch", "master", "마스터"].includes(to) ? "orch" : this.agents(chatId).find(a => (a.nickname === to || a.key === to) && a.status === "active")?.key;
           if (!target || target === caller || !text || text.length > 16000) return textResult("활성 동료/마스터와 1~16000자의 메시지를 지정하세요. 자신에게는 보낼 수 없습니다.", true);
           if (caller !== "orch" && !this.running.get(chatId)?.has(caller)) return textResult("현재 배정받은 작업이 없습니다.", true);
           this.chats.emit(chatId, this.chats.route(chatId, target), caller, { type: "peer_message", from: caller, to: target, text });
-          return textResult(`${this.name(chatId, target)}에게 메시지를 저장했습니다. 다음 앱 도구 호출 또는 작업 시작 시 전달됩니다. 답을 기다리지 않고 맡은 작업을 계속하세요.`);
+          void this.deliverMessages(chatId, target);
+          if (target === "orch") this.wakeMasterConsults(chatId, `${this.name(chatId, caller)}의 새 메시지: ${text}`);
+          return textResult(`${this.name(chatId, target)}에게 메시지를 저장하고 즉시 전달을 시도했습니다. 다음 앱 도구 호출에도 확인합니다. 답을 기다리지 않고 맡은 작업을 계속하세요.`);
         }
         case "route_request": {
           if (!master) break;
@@ -647,13 +732,13 @@ export class Orchestrator {
   }
 
   private async waitForMasterConsult(chatId: number, result: Promise<ToolResult>): Promise<ToolResult> {
-    const waiters = this.masterConsultWaiters.get(chatId) ?? new Set<() => void>();
+    const waiters = this.masterConsultWaiters.get(chatId) ?? new Set<(note?: string) => void>();
     this.masterConsultWaiters.set(chatId, waiters);
-    let wake!: () => void;
+    let wake!: (note?: string) => void;
     const followup = new Promise<ToolResult>((resolve) => {
-      wake = () => resolve(textResult(this.stopped.has(chatId)
+      wake = (note) => resolve(textResult(this.stopped.has(chatId)
         ? "사용자가 작업을 중지했습니다. 멈추세요."
-        : "사용자의 즉시 추가 요청을 처리하도록 협의 결과 대기만 해제했습니다. 기존 작업자는 중지하지 않았으며 결과는 저장됩니다. 먼저 사용자 질문에 직접 답하고, 수정 요청에는 반영 방법을 먼저 말하세요. 완료한 작업을 중복 배정하지 말고 이후 agents로 결과를 확인하세요." + this.takeQueued(chatId)));
+        : (note ? `[그룹 채팅·상태 점검으로 대기 해제]\n${note}\n기존 작업자는 계속 실행 중입니다. check_agent와 read_messages로 확인하고 기존 작업을 중복 배정하지 마세요.` : "사용자의 즉시 추가 요청을 처리하도록 협의 결과 대기만 해제했습니다. 기존 작업자는 중지하지 않았으며 결과는 저장됩니다. 먼저 사용자 질문에 직접 답하고, 수정 요청에는 반영 방법을 먼저 말하세요. 완료한 작업을 중복 배정하지 말고 이후 agents로 결과를 확인하세요.") + this.takeQueued(chatId)));
       waiters.add(wake);
     });
     try { return await Promise.race([result, followup]); }
@@ -663,9 +748,9 @@ export class Orchestrator {
     }
   }
 
-  private wakeMasterConsults(chatId: number) {
-    for (const controller of this.webChecks.get(chatId) ?? []) controller.abort(new Error("계정 조회 대기를 해제했습니다. 사용자의 추가 지시 또는 중지를 먼저 처리하세요."));
-    for (const wake of this.masterConsultWaiters.get(chatId) ?? []) wake();
+  private wakeMasterConsults(chatId: number, note?: string) {
+    if (!note) for (const controller of this.webChecks.get(chatId) ?? []) controller.abort(new Error("계정 조회 대기를 해제했습니다. 사용자의 추가 지시 또는 중지를 먼저 처리하세요."));
+    for (const wake of this.masterConsultWaiters.get(chatId) ?? []) wake(note);
   }
 
   // ---------- team
@@ -679,7 +764,7 @@ export class Orchestrator {
     return list
       .map((a) => {
         const r = busy?.get(a.key);
-        const state = a.status === "released" ? "해제됨" : r ? `작업 중 (${CONSULT_KIND_LABEL[r.kind]}${r.scope.length ? ` · ${r.scope.join(", ")}` : ""})` : "대기";
+        const state = a.status === "released" ? "해제됨" : r ? `작업 중 (${CONSULT_KIND_LABEL[r.kind]}${r.scope.length ? ` · ${r.scope.join(", ")}` : ""}) · 마지막 활동 ${Math.floor((Date.now() - r.lastEventAt) / 1000)}초 전 · 도구 ${r.tools?.size ?? 0}개${r.lastError ? ` · 오류=${r.lastError}` : ""} · check_agent로 언제든 재점검 가능` : "대기";
         const latest = consults.findLast((c) => c.toRole === a.key);
         const result = latest ? `\n  최근 협의 id=${latest.id} · ${latest.status}${latest.responseSummary ? `\n${latest.responseSummary}` : ""}${latest.filesChanged.length ? `\n산출물:\n${latest.filesChanged.join("\n")}` : ""}` : "";
         const account = a.kind === "gemini" && this.chats.usesGeminiWeb(this.chats.store.chat(chatId)!)
@@ -753,9 +838,7 @@ export class Orchestrator {
     if (!web && !studio && !this.chats.cliInfo().find((c) => c.agent === WORKER_AGENT[kind])?.path)
       return textResult(`${WORKER_KIND_LABEL[kind]} CLI가 설치되지 않았습니다. 사용 가능한 작업자를 선택하거나 미완료 사유를 보고하세요.`, true);
     const max = kind === "claude" ? project.settings.maxClaudeWorkers : kind === "gpt" ? project.settings.maxGptWorkers : kind === "grok" ? project.settings.maxGrokWorkers : kind === "deepseek" ? project.settings.maxDeepseekWorkers : project.settings.maxGeminiWorkers;
-    const active = this.agents(chatId).filter((a) => a.kind === kind && a.status === "active").length;
-    if (active >= max)
-      return textResult(`${WORKER_KIND_LABEL[kind]}는 동시에 ${max}명까지입니다. 기존 작업자에게 맡기거나 다 쓴 작업자를 release 하세요.`, true);
+    if (max === 0) return textResult(`${WORKER_KIND_LABEL[kind]}는 사용자가 비활성화했습니다.`, true);
     const a = this.chats.store.createAgent(chatId, kind, job);
     if (accountId) this.chats.store.updateAgent(a.id, { webAccountId: accountId });
     if (cliAccount !== undefined) this.chats.setWorkerAccount(chatId, a.key, cliAccount);
@@ -806,7 +889,7 @@ export class Orchestrator {
     const callerName = this.name(chatId, caller);
     const reason = String(args.reason ?? "").trim();
     if (caller === "orch" && !reason) return textResult("작업자를 선택한 이유(reason)를 적으세요.", true);
-    if (caller === "orch" && !(WORKER_EFFORTS as readonly unknown[]).includes(args.effort)) return textResult("effort는 medium, high, xhigh 중에서 선택하고 reason에 추론 수준 선택 이유를 적으세요.", true);
+    if (args.effort !== undefined && (typeof args.effort !== "string" || !args.effort.trim())) return textResult("effort는 모델이 지원하는 추론 수준을 지정하세요.", true);
 
     if (to === MASTER_LABEL || to === "마스터" || to.toLowerCase() === "master")
       return textResult("마스터는 지금 팀의 결과를 기다리고 있어 바로 답할 수 없습니다(교착 방지). 질문은 결과 보고에 적어 주세요.", true);
@@ -818,7 +901,7 @@ export class Orchestrator {
     if (target.status === "released") return textResult(`${target.nickname}은(는) 해제되었습니다.`, true);
     let discussion: Discussion | undefined;
     if (args.discussion !== undefined) {
-      if (caller !== "orch") return textResult("토의 그룹 구성은 마스터가 지정합니다.", true);
+      if (caller !== "orch" && !this.running.get(chatId)?.has(caller)) return textResult("현재 배정받은 작업이 없습니다.", true);
       if (!["opinion", "writing"].includes(kind) || (target.kind === "gemini" && this.chats.usesGeminiWeb(this.chats.store.chat(chatId)!)))
         return textResult("토의 진행자는 MCP를 사용하는 CLI 작업자이며 opinion 또는 writing으로 파일 변경 없이 맡기세요.", true);
       const raw = args.discussion;
@@ -837,8 +920,6 @@ export class Orchestrator {
     }
     const parent = this.running.get(chatId)?.get(caller);
     if (parent?.discussion) {
-      if (kind !== parent.kind || !parent.discussion.peers.some(p => p.key === target.key))
-        return textResult("마스터가 지정한 토의 참여자에게 같은 opinion/writing 종류로만 직접 질문하세요. 그룹 확장은 마스터에게 보고하고 필요한 파일 변경은 지정 범위와 승인을 따르세요.", true);
       message = `[토의 주제: ${parent.discussion.topic}]\n${callerName}이(가) 토의를 진행하며 너의 의견을 기다린다. 이번 응답에 반론·근거·확인 질문을 담고 진행자에게 다시 ask하지 마라.\n\n${message}`;
     }
     if (target.kind === "gemini" && this.chats.usesGeminiWeb(this.chats.store.chat(chatId)!) && kind === "implement" && !args.requiresImage)
@@ -899,8 +980,9 @@ export class Orchestrator {
       this.chats.agentsChanged(chatId);
     }
     if (web && !target.webAccountId) return textResult("기존 Gemini 웹 작업자의 계정이 지정되지 않았습니다. 마스터가 gemini_web_accounts 조회 후 ask의 webAccountId를 직접 지정하세요.", true);
-    const inherited = caller === "orch" ? args.effort : this.chats.store.consult(this.running.get(chatId)?.get(caller)?.consultId ?? -1)?.effort || "medium";
-    const response = await this.consult(chatId, caller, target, kind, message, scope, attach, reason || (parent?.discussion ? `토의 ${parent.discussion.topic} · ${callerName} → ${target.nickname}` : ""), supersedes, inherited, discussion, false, cliAccount);
+    const inherited = args.effort ?? (caller === "orch" ? undefined : this.chats.store.consult(this.running.get(chatId)?.get(caller)?.consultId ?? -1)?.effort || undefined);
+    if (args.model !== undefined && (typeof args.model !== "string" || !args.model.trim())) return textResult("model은 실제 모델 ID를 지정하세요.", true);
+    const response = await this.consult(chatId, caller, target, kind, message, scope, attach, reason || (parent?.discussion ? `토의 ${parent.discussion.topic} · ${callerName} → ${target.nickname}` : ""), supersedes, inherited, discussion, false, cliAccount, args.model);
     if (parent?.discussion && !response.isError) parent.discussionReplies!.add(target.key);
     return response;
   }
@@ -908,12 +990,8 @@ export class Orchestrator {
   private limitCheck(chatId: number, project: Project, target: Role, kind: ConsultKind, message: string, accountId?: GeminiWebAccountId | CliAccountId): string | null {
     const inst = this.instructions.get(chatId);
     if (!inst) return null;
-    const s = project.settings;
     if (this.stopped.has(chatId)) return "사용자가 작업을 중지했습니다. 더 이상 맡기지 말고 멈추세요.";
     if (this.planning.has(chatId)) return "지금은 계획 모드입니다. 작업자에게 맡기지 말고 계획(체크리스트)만 세워 보고하세요.";
-    const maxAsks = s.maxConsults;
-    if (inst.asks >= maxAsks) return `한도 도달: 이번 지시에서 ${maxAsks}번 맡겼습니다. 더 맡기지 말고 지금까지의 결과를 보고하세요.`;
-    if (kind === "review" && inst.reviews >= s.maxReviews) return `한도 도달: 리뷰를 ${s.maxReviews}회 했습니다. 지금까지의 결과와 남은 지적 사항을 보고하세요.`;
     const h = createHash("sha1").update(`${target}|${kind}|${accountId ?? ""}|${message.trim()}`).digest("hex");
     const n = (inst.requests.get(h) ?? 0) + 1;
     inst.requests.set(h, n);
@@ -940,7 +1018,7 @@ export class Orchestrator {
     for (const f of w) f();
   }
 
-  private async consult(chatId: number, caller: Role, target: ChatAgent, kind: ConsultKind, message: string, scope: string[], attach: string[], reason: string, supersedes?: number, requestedEffort?: string, discussion?: Discussion, resuming = false, accountChange?: CliAccountId | null): Promise<ToolResult> {
+  private async consult(chatId: number, caller: Role, target: ChatAgent, kind: ConsultKind, message: string, scope: string[], attach: string[], reason: string, supersedes?: number, requestedEffort?: string, discussion?: Discussion, resuming = false, accountChange?: CliAccountId | null, assignmentModel?: string): Promise<ToolResult> {
     const epoch = this.epochs.get(chatId);
     const chat = this.chats.store.chat(chatId)!;
     const project = this.chats.store.project(chat.projectId)!;
@@ -974,13 +1052,19 @@ export class Orchestrator {
     const mine = new Promise<void>((r) => (done = r));
     this.workerQueue.set(queueKey, prev.then(() => mine));
     const assignmentKey = randomUUID();
-    const assignment: PausedAssignment = { caller, target, kind, message, scope, attach, reason, effort: requestedEffort, discussion };
+    const assignment: PausedAssignment = { caller, target, kind, message, scope, attach, reason, effort: requestedEffort, model: assignmentModel, discussion };
     const assignments = this.assignments.get(chatId) ?? new Map();
     assignments.set(assignmentKey, assignment);
     this.assignments.set(chatId, assignments);
     try {
       await prev; // the target finishes its current turn first
-      const reasoning = await this.chats.assignmentEffort(chatId, target.key, requestedEffort);
+      if (assignmentModel) {
+        const cfg = this.chats.roleConfig(chat, project, target.key);
+        if (cfg.agent === "gemini" && cfg.model !== assignmentModel) return textResult("Gemini 웹/AI Studio 모델은 채팅 설정에서 전환하세요.", true);
+        const models = await this.chats.models(cfg.agent, this.chats.roleAccount(chatId, target.key)?.accountId);
+        if (!models.some(m => m.id === assignmentModel && !m.deprecated)) return textResult("선택한 작업자 계열과 계정에서 모델을 확인하지 못했습니다.", true);
+      }
+      const reasoning = await this.chats.assignmentEffort(chatId, target.key, requestedEffort, assignmentModel);
       // Web models have no effective effort; retain the master's valid intent for resume.
       assignment.effort = reasoning.effort || reasoning.requestedEffort;
       if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch) return textResult("사용자가 작업을 중지했습니다.", true);
@@ -1009,6 +1093,7 @@ export class Orchestrator {
         let settled = false;
         const r: Running = {
           lastEventAt: Date.now(),
+          tools: new Set(),
           consultId: consult.id,
           caller,
           target: target.key,
@@ -1040,7 +1125,7 @@ export class Orchestrator {
             cliSelection = this.chats.roleAccount(chatId, target.key);
             cliPolicy = cliSelection ? this.chats.resolveAccountPolicy(cliSelection.kind, this.chats.store.project(chat.projectId)!.settings) : undefined;
             if (cliSelection) this.chats.assertCliAccount(cliSelection.accountId, cliSelection.kind);
-            const driver = await this.chats.driver(chatId, target.key, reasoning.effort);
+            const driver = await this.chats.driver(chatId, target.key, reasoning.effort, assignmentModel);
             r.cliAccountId = this.chats.runningAccount(chatId, target.key);
             if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch || settled) return r.resolve({ ok: false, interrupted: true });
             await driver.send({
@@ -1072,6 +1157,7 @@ export class Orchestrator {
       const finished = this.chats.store.finishConsult(consult.id, status, summary, result.files);
       this.chats.sink.consult(finished);
       this.chats.emit(chatId, this.chats.route(chatId, caller), caller, { type: "consult_end", consultId: consult.id, status, summary, files: result.files });
+      this.chats.emit(chatId, "orch", target.key, { type: "room_message", from: target.key, text: `[${CONSULT_KIND_LABEL[kind]} · ${status} · 협의 ${consult.id}${assignmentModel ? ` · ${assignmentModel}` : ""}]\n${clipText(summary, 4000)}` });
       // The worker queue remains held until its native log is safely archived.
       await this.chats.archiveWorker(chatId, target.key);
       this.running.get(chatId)?.delete(target.key);
@@ -1180,9 +1266,11 @@ export class Orchestrator {
         r.text = event.text;
         break;
       case "tool_call":
+        (r.tools ??= new Set()).add(event.id);
         if (event.diffs?.length) r.pendingFiles.set(event.id, event.diffs.flatMap((d) => d.movePath ? [d.path, d.movePath] : [d.path]));
         break;
       case "tool_result": {
+        r.tools?.delete(event.id);
         const files = r.pendingFiles.get(event.id);
         if (files && event.ok) for (const f of files) r.files.add(f);
         r.pendingFiles.delete(event.id);
@@ -1690,7 +1778,7 @@ export class Orchestrator {
       if (!target || target.status !== "active") continue;
       const prior = assignment.consultId ? this.chats.store.consult(assignment.consultId) : undefined;
       const message = `[일시 정지한 작업 재시작]\n현재 파일과 이전 진행 상태를 확인하고 남은 부분만 이어가세요. 이미 완료된 변경은 반복하지 마세요.\n\n${assignment.message}${prior?.responseSummary ? `\n\n중지 전 진행 내용:\n${prior.responseSummary}` : ""}`;
-      void this.consult(chat.id, assignment.caller, target, assignment.kind, message, assignment.scope, assignment.attach, "일시 정지한 기존 작업을 같은 담당자에게 재전달", prior?.id, assignment.effort, assignment.discussion, true).catch(error => {
+      void this.consult(chat.id, assignment.caller, target, assignment.kind, message, assignment.scope, assignment.attach, "일시 정지한 기존 작업을 같은 담당자에게 재전달", prior?.id, assignment.effort, assignment.discussion, true, undefined, assignment.model).catch(error => {
         this.chats.emit(chat.id, target.key, target.key, { type: "error", message: `작업 재시작 실패: ${String(error)}` });
       });
     }

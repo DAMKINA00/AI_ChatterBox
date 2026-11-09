@@ -16,6 +16,7 @@ import type { AgentEvent, ApprovalDecision, ApprovalMode, ApprovalRequest, FileD
 export type Verdict = "allow" | "allow_chat" | "deny";
 export interface VerdictResult {
   verdict: Verdict;
+  cancelled?: boolean;
   /** Shown to the agent on deny (Claude gets it as the tool error). */
   reason?: string;
 }
@@ -28,6 +29,8 @@ export interface ApprovalInput {
   reason?: string;
   /** Key for "allow for this chat", e.g. "Write" or "cmd:npm". */
   key: string;
+  /** Native app access requires a person unless full approval was explicitly selected. */
+  userOnly?: boolean;
   command?: string;
   paths?: string[];
   diffs?: FileDiff[];
@@ -86,6 +89,7 @@ function relToFolder(folder: string, p: string): string | null {
 }
 
 export function classify(input: ApprovalInput, folder: string): Classification {
+  if (input.userOnly) return { risk: "high", reason: "앱 접근 권한", critical: true };
   const cmd = input.command ?? "";
   if (cmd) {
     for (const [re, why] of CRITICAL_CMD) if (re.test(cmd)) return { risk: "high", reason: why, critical: true };
@@ -159,13 +163,14 @@ export class ApprovalService {
       return { verdict: "deny", reason: blocked };
     }
     const policy = this.host.mode(chatId);
+    const fullApproval = policy.mode === "orchestrator-all" || policy.mode === "orchestrator" && policy.delegateHighRisk;
     // The judge's own tools must never ask that same judge to approve them.
-    const mode = judgeSignal ? "user" : policy.mode === "orchestrator-all" ? "orchestrator" : policy.mode;
+    const mode = judgeSignal || input.userOnly && !fullApproval ? "user" : policy.mode === "orchestrator-all" ? "orchestrator" : policy.mode;
     const delegateHighRisk = policy.mode === "orchestrator-all" || (mode === "orchestrator" && policy.delegateHighRisk);
     // A shell can touch paths not present in its request metadata. Reassess it for every task.
     const reusable = c.risk === "low" && (!input.command || isReadCommand(input.command));
     // Reads (Claude asks for reads outside its cwd, e.g. a user skill file).
-    if (input.readOnly && !(c.critical && c.reason?.startsWith("자격"))) {
+    if (!input.userOnly && input.readOnly && !(c.critical && c.reason?.startsWith("자격"))) {
       log("allow", "read-only", "auto");
       return { verdict: "allow" };
     }
@@ -184,6 +189,12 @@ export class ApprovalService {
       riskReason: c.reason,
       diffs: input.diffs,
     };
+    if (input.userOnly && fullApproval && !judgeSignal) {
+      const reason = "전체 승인 설정에 따라 앱 접근을 허용했습니다.";
+      log("allow", "once", "orchestrator-delegated", reason);
+      this.host.emit(chatId, input.node, input.role, { type: "approval_auto", request: { ...base, id: `ap:${randomUUID()}` }, decision: "allow", reason });
+      return { verdict: "allow" };
+    }
     if (mode === "orchestrator" && reusable && this.judged.get(chatId)?.has(exact)) {
       log("allow", "once", "orchestrator-memo");
       this.host.emit(chatId, input.node, input.role, {
@@ -240,7 +251,7 @@ export class ApprovalService {
         if (!this.pending.delete(id)) return;
         this.host.emit(chatId, input.node, input.role, { type: "approval_resolved", id, decision: "expired" });
         this.host.pendingChanged(chatId, this.pendingCount(chatId));
-        resolve({ verdict: "deny", reason: "승인 판단이 종료되었습니다." });
+        resolve({ verdict: "deny", cancelled: true, reason: "승인 판단이 종료되었습니다." });
       };
       const resolve = (result: VerdictResult) => {
         judgeSignal?.removeEventListener("abort", cancel);
@@ -284,7 +295,7 @@ export class ApprovalService {
       if (p.chatId !== chatId || (role && p.role !== role)) continue;
       this.pending.delete(id);
       this.host.emit(chatId, p.node, p.role, { type: "approval_resolved", id, decision: "expired" });
-      p.resolve({ verdict: "deny", reason: "작업이 중지되었습니다." });
+      p.resolve({ verdict: "deny", cancelled: true, reason: "작업이 중지되었습니다." });
     }
     this.host.pendingChanged(chatId, this.pendingCount(chatId));
   }

@@ -212,11 +212,11 @@ export interface ProjectSettings {
   deepseekEffort: string;
   /** Lead must get a Codex/Claude review before finishing code changes. */
   reviewGate: boolean;
-  /** Max consults per user instruction. */
+  /** Planning reference for consults; does not stop unfinished work. */
   maxConsults: number;
-  /** Max review round-trips per user instruction. */
+  /** Planning reference for review round-trips. */
   maxReviews: number;
-  /** Max workers of each kind alive at once in a chat. */
+  /** Suggested worker counts; zero disables an optional provider. */
   maxClaudeWorkers: number;
   maxGptWorkers: number;
   maxGeminiWorkers: number;
@@ -391,6 +391,7 @@ export type ApprovalDecision = "once" | "chat" | "deny";
 
 /** Normalized event stream. Every event also carries the agent that produced it (see TimelineEvent). */
 export type AgentEvent =
+  | { type: "room_message"; from: Role; text: string }
   | { type: "peer_message"; from: Role; to: Role; text: string }
   | { type: "artifacts"; paths: string[] }
   | { type: "agent_usage"; metrics: AgentMetrics }
