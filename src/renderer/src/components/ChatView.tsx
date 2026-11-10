@@ -23,7 +23,8 @@ import {
 import { api, cn, errorMessage } from "../lib/utils";
 import { useStore } from "../store";
 import { buildItems, chatTimelines, latestExpression, planOf } from "../timeline";
-import { GoalBar, PlanPanel } from "./PlanGoal";
+import { GoalBar, PlanHistory, PlanPanel } from "./PlanGoal";
+import { planHistory } from "../lib/plan-history";
 import { SLASH_COMMANDS, StatusDialog, type SlashCommand } from "./Commands";
 import { AttachmentChip, ItemList } from "./Items";
 import { AgentAvatar } from "./AgentAvatar";
@@ -62,6 +63,7 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
   const [searchQuery, setSearchQuery] = useState("");
   const composer = useRef<ComposerHandle>(null);
   const plan = useMemo(() => planOf(events ?? []), [events]);
+  const ended = useMemo(() => planHistory(events ?? []), [events]);
   const canAttach = !node || node === "orch";
 
   useEffect(() => {
@@ -117,6 +119,7 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
       {!node && <ForkOrigin chat={chat} />}
       {!node && <GoalBar chat={chat} />}
       {!node && plan && <PlanPanel chat={chat} plan={plan} onRevise={() => composer.current?.setText("/plan 수정: ")} />}
+      {!node && <PlanHistory history={ended} />}
       {!node && <ReviewTotalsBar chatId={chat.id} />}
       <Timeline key={node ?? "all"} items={items} chatId={chat.id} role={streamRole} busy={busy} instructionAt={instructionAt} empty={!events?.length} loading={!events} masterView={!node || node === "orch"}
         searchOpen={searchOpen} searchQuery={searchQuery} onSearchQuery={setSearchQuery} onCloseSearch={() => { setSearchOpen(false); setSearchQuery(""); }} />

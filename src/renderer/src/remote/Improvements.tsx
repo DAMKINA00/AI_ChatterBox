@@ -1,12 +1,13 @@
 // Remote web counterparts of the desktop fork / structured review / run statistics / checklist views.
 // Same pure helpers as the desktop (lib/fork, lib/review-summary, lib/run-stats-view, lib/plan-view).
 import { useEffect, useMemo, useState } from "react";
-import { Circle, CircleCheck, CircleDot, LoaderCircle, Split } from "lucide-react";
+import { Ban, Circle, CircleCheck, CircleDot, LoaderCircle, Split } from "lucide-react";
 import type { RemoteChatResponse } from "../../../shared/remote-web";
 import type { RunStats } from "../../../shared/run-stats";
 import type { Chat, ChatAgent, ChatForkOptions, Consult, ConsultStatus, ReviewResult, TimelineEvent } from "../../../shared/types";
 import { FORK_NOT_COPIED, FORK_NOTE, FORK_RANGE_LABEL, forkOriginText, forkPreview } from "../lib/fork";
-import { consultCardIds, planConsultLinks, planStepName, planStepViews } from "../lib/plan-view";
+import { consultCardIds, openPlanSteps, PLAN_STATE_LABEL, planBlockerName, planConsultLinks, planCounts, planCountsText, planEndedEarly, planStepName, planStepViews } from "../lib/plan-view";
+import type { PlanHistoryEntry } from "../lib/plan-history";
 import { findingLocation, NO_STRUCTURED_REVIEW, reviewRunNote, reviewsFromEvents, reviewTotalsText, SEVERITY_LABEL, summarizeReviews, TEST_STATUS_LABEL, VERDICT_LABEL } from "../lib/review-summary";
 import { formatDuration, PENDING_TOOL_LABEL, RUN_STATS_NOTE, runStatsFlags, runStatsRows, type RunStatsRow } from "../lib/run-stats-view";
 import { cn } from "../lib/utils";
@@ -157,19 +158,72 @@ function revealConsultCard(consultId: number) {
   card.focus({ preventScroll: true });
 }
 
+/** Summary line content: plan state, counts (취소 never counted as 완료) and, for an ended plan, its reason. */
+export function PlanSummary({ plan }: { plan: NonNullable<ReturnType<typeof planOf>> }) {
+  const counts = planCounts(plan.steps);
+  const ended = planEndedEarly(plan.state);
+  return (
+    <>
+      <span className={cn(ended ? "text-warning" : plan.state === "done" ? "text-success" : undefined)} data-plan-state={plan.state}>· {plan.state === "live" ? "체크리스트" : "계획"} {PLAN_STATE_LABEL[plan.state]} · {planCountsText(counts)}</span>
+      {(ended || plan.reason) && <span className="basis-full pl-6 text-[12px] font-normal text-warning">{PLAN_STATE_LABEL[plan.state]} 사유: {plan.reason?.trim() || "사유가 기록되지 않았습니다."}</span>}
+    </>
+  );
+}
+
+const HISTORY_STEP_STATUS = { pending: "미진행", inProgress: "진행 중이었음", completed: "완료", cancelled: "취소됨" } as const;
+
+/** Ended plans no longer on the panel: read-only, collapsed, no run/cancel buttons. */
+export function PlanHistoryList({ history }: { history: readonly PlanHistoryEntry[] }) {
+  if (!history.length) return null;
+  return (
+    <details className="rounded border px-2 py-1 text-[12px]" aria-label="이전 계획">
+      <summary className="cursor-pointer text-muted-foreground">이전 계획 {history.length}개</summary>
+      <ul className="mt-1 grid gap-1">
+        {history.map((h) => (
+          <li key={h.key} data-plan-history={h.state}>
+            <details>
+              <summary className="cursor-pointer">
+                <span className={planEndedEarly(h.state) ? "text-warning" : "text-success"}>{PLAN_STATE_LABEL[h.state]}</span> · {planCountsText(planCounts(h.steps))}
+                {(planEndedEarly(h.state) || h.reason) && <> · 사유: {h.reason?.trim() || "사유가 기록되지 않았습니다."}</>}
+              </summary>
+              <ol className="mt-0.5 grid gap-0.5 pl-3">
+                {h.steps.map((s, i) => (
+                  <li key={`${i}:${s.id ?? ""}`}>
+                    <span className={cn((s.status === "completed" || s.status === "cancelled") && "text-muted-foreground line-through")}>{normalizePlanStepTitle(planStepName(s))}</span>
+                    <span className="text-muted-foreground"> · {HISTORY_STEP_STATUS[s.status]}{s.status === "cancelled" ? ` · 취소 사유: ${s.cancelReason?.trim() || "사유가 기록되지 않았습니다."}` : ""}</span>
+                  </li>
+                ))}
+              </ol>
+            </details>
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
 export function PlanSteps({ plan, consults, items }: { plan: NonNullable<ReturnType<typeof planOf>>; consults: Consult[]; items: Item[] }) {
   const views = useMemo(() => planStepViews(plan.steps), [plan.steps]);
   const cards = useMemo(() => consultCardIds(items), [items]);
+  const open = planEndedEarly(plan.state) ? openPlanSteps(plan.steps) : [];
   return (
+    <>
+    {open.length > 0 && (
+      <div className="rounded border border-warning/40 px-2 py-1 text-[12px]" aria-label="진행되지 않은 단계">
+        <span className="font-medium text-warning">진행되지 않은 단계 {open.length}개:</span> {open.map((s) => normalizePlanStepTitle(planStepName(s))).join(", ")}
+      </div>
+    )}
     <ol className="grid gap-1" aria-label="체크리스트">
       {views.map(({ step: s, key, blockers, ready }) => (
         <li key={key} className="flex items-start gap-1.5">
-          {s.status === "completed" ? <CircleCheck className="mt-0.5 size-3.5 shrink-0 text-success" /> : s.status === "inProgress" ? <CircleDot className="mt-0.5 size-3.5 shrink-0 text-primary" /> : <Circle className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />}
+          {s.status === "completed" ? <CircleCheck className="mt-0.5 size-3.5 shrink-0 text-success" /> : s.status === "cancelled" ? <Ban className="mt-0.5 size-3.5 shrink-0 text-warning" aria-label="취소됨" /> : s.status === "inProgress" ? <CircleDot className="mt-0.5 size-3.5 shrink-0 text-primary" /> : <Circle className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />}
           <div className="min-w-0">
-            <span className={cn(s.status === "completed" && "text-muted-foreground line-through")}>{s.owner && <span className="mr-1 font-medium text-orch">[{s.owner}]</span>}{normalizePlanStepTitle(s.title)}</span>
+            <span className={cn((s.status === "completed" || s.status === "cancelled") && "text-muted-foreground line-through")}>{s.owner && <span className="mr-1 font-medium text-orch">[{s.owner}]</span>}{normalizePlanStepTitle(s.title)}</span>
+            {s.status === "cancelled" && <span className="ml-1 rounded border border-warning/50 px-1 text-[11px] text-warning">취소됨</span>}
+            {s.status === "cancelled" && <div className="text-[11.5px] text-muted-foreground">취소 사유: {s.cancelReason?.trim() || "사유가 기록되지 않았습니다."}</div>}
             {(blockers.length > 0 || ready || !!s.consultIds?.length) && (
               <div className="flex flex-wrap gap-x-2 text-[11.5px]">
-                {blockers.length > 0 && <span className="text-warning">대기 · 선행 미완료: {blockers.map(planStepName).join(", ")}</span>}
+                {blockers.length > 0 && <span className="text-warning">대기 · 선행 미완료: {blockers.map(planBlockerName).join(", ")}</span>}
                 {ready && <span className="text-success">시작 가능</span>}
                 {planConsultLinks(s, consults).map(({ consultId, consult }) => (
                   <button key={consultId} type="button" disabled={!cards.has(consultId)} aria-label={`협의 ${consult?.seq ?? consultId} 카드로 이동`} onClick={() => revealConsultCard(consultId)}
@@ -183,6 +237,7 @@ export function PlanSteps({ plan, consults, items }: { plan: NonNullable<ReturnT
         </li>
       ))}
     </ol>
+    </>
   );
 }
 

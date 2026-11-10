@@ -23,12 +23,16 @@ export interface InstructionSnapshot {
   dualInvestigation?: boolean;
   planning: boolean;
   reviewing: boolean;
+  /** Id of the approved /plan being carried out; absent on older snapshots (never inferred). */
+  planRun?: number;
 }
 
 export function parseInstructionSnapshot(raw: string | undefined): InstructionSnapshot | undefined {
   try {
     const s = JSON.parse(raw ?? "null");
-    return s && Number.isSafeInteger(s.id) && typeof s.text === "string" ? { ...s, planning: !!s.planning, reviewing: !!s.reviewing } : undefined;
+    return s && Number.isSafeInteger(s.id) && typeof s.text === "string"
+      ? { ...s, planning: !!s.planning, reviewing: !!s.reviewing, planRun: Number.isSafeInteger(s.planRun) ? s.planRun : undefined }
+      : undefined;
   } catch { return undefined; }
 }
 

@@ -21,7 +21,9 @@ import { applyChatUpdate, applyMessage, mergeChats, mergeSnapshot, type Detail, 
 import { useTheme } from "./theme";
 import { Btn, Card, Clip, ConfirmHost, errorText, FIELD, Md } from "./ui";
 import { UsageSheet } from "./Usage";
-import { consultCardDomId, ForkAction, ForkContext, ForkOriginBar, PlanSteps, ReviewBlock, ReviewTotalsLine, RunStatsSheet } from "./Improvements";
+import { planHistory } from "../lib/plan-history";
+import { planActionsAvailable } from "../lib/plan-view";
+import { consultCardDomId, ForkAction, ForkContext, ForkOriginBar, PlanHistoryList, PlanSteps, PlanSummary, ReviewBlock, ReviewTotalsLine, RunStatsSheet } from "./Improvements";
 
 const STATUS_LABEL: Record<ChatStatus, string> = {
   idle: "대기", working: "작업 중", approval: "승인 대기", pausing: "일시정지 중", paused: "일시정지", done: "완료", error: "오류", interrupted: "중단됨",
@@ -343,14 +345,18 @@ function TeamPanel({ chat, agents, consults, events, items, plan, pending, onPla
 }) {
   const active = agents.filter(a => a.status === "active");
   const running = consults.filter(c => c.status === "running");
-  const shownPlan = plan?.state === "cancelled" ? null : plan;
+  // Cancelled, incomplete, failed and stopped plans stay listed with their state and reason.
+  const shownPlan = plan;
   const proposed = shownPlan?.state === "proposed";
+  const actions = !!shownPlan && planActionsAvailable(shownPlan.state, chat.status);
+  const history = useMemo(() => planHistory(events), [events]);
   const reviews = consults.filter(c => c.kind === "review").length;
-  if (!active.length && !shownPlan && !reviews) return null;
+  if (!active.length && !shownPlan && !reviews && !history.length) return null;
   return (
     <details className="border-b bg-muted/30 px-3 py-2 text-[12.5px] md:px-6" open={proposed || (!!shownPlan && busyStatus(chat.status))}>
-      <summary className="flex cursor-pointer items-center gap-2 font-medium">
-        <Users className="size-4" /> 작업자 {active.length}명{running.length ? ` · ${running.length}건 진행 중` : ""}{reviews ? ` · 리뷰 ${reviews}건` : ""}{shownPlan ? ` · ${proposed ? "계획 승인 대기" : "체크리스트"} ${shownPlan.steps.filter(s => s.status === "completed").length}/${shownPlan.steps.length}` : ""}
+      <summary className="flex cursor-pointer flex-wrap items-center gap-x-2 font-medium">
+        <Users className="size-4" /> 작업자 {active.length}명{running.length ? ` · ${running.length}건 진행 중` : ""}{reviews ? ` · 리뷰 ${reviews}건` : ""}
+        {shownPlan && <PlanSummary plan={shownPlan} />}
       </summary>
       <div className="mt-2 grid gap-2">
         {active.length > 0 && <ul className="grid gap-1">
@@ -362,11 +368,12 @@ function TeamPanel({ chat, agents, consults, events, items, plan, pending, onPla
         {shownPlan?.explanation && <div className="text-muted-foreground">{shownPlan.explanation}</div>}
         {shownPlan && <PlanSteps plan={shownPlan} consults={consults} items={items} />}
         <ReviewTotalsLine consults={consults} events={events} />
-        {proposed && <div className="flex flex-wrap gap-2">
+        {actions ? <div className="flex flex-wrap gap-2">
           <Btn disabled={pending} onClick={() => onPlan("plan-run")}><Play /> 계획 실행</Btn>
           <Btn variant="outline" disabled={pending} onClick={() => onPlan("plan-cancel")}><X /> 계획 취소</Btn>
           <span className="self-center text-[12px] text-muted-foreground">수정하려면 아래에 지시를 보내세요.</span>
-        </div>}
+        </div> : proposed && <div className="text-[12px] text-muted-foreground">작업이 끝나면 이 계획을 실행하거나 취소할 수 있습니다.</div>}
+        <PlanHistoryList history={history} />
       </div>
     </details>
   );

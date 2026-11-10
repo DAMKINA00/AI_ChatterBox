@@ -439,16 +439,30 @@ export type AgentEvent =
   | { type: "ask_user_answer"; id: string; answer: string }
   | { type: "notice"; text: string; webAccountId?: GeminiWebAccountId; cliAccountId?: CliAccountId }
   /** Checklist from the orchestrator's native plan tool (Claude TodoWrite / Codex update_plan). */
-  | { type: "plan_update"; steps: PlanStep[]; explanation?: string }
-  /** /plan proposal lifecycle: proposed → running → done / cancelled. */
-  | { type: "plan_state"; state: "proposed" | "running" | "done" | "cancelled" }
+  /**
+   * planId: the instruction the plan belongs to (the /plan instruction for a proposal and its run, otherwise
+   * the instruction itself); instructionId: the instruction during which it was updated. Absent on older
+   * records and on native plan tools.
+   */
+  | { type: "plan_update"; steps: PlanStep[]; explanation?: string; planId?: number; instructionId?: number }
+  /** Plan lifecycle (see PlanState); reason explains incomplete/failed/stopped/cancelled. */
+  | { type: "plan_state"; state: PlanState; planId?: number; reason?: string }
   | { type: "goal_update"; goal: ChatGoal | null }
   | { type: "turn_end"; ok: boolean; error?: string; interrupted?: boolean }
   | { type: "error"; message: string; kind?: "auth" | "missing_cli" | "process" };
 
+/**
+ * proposed → running → done (no open step left) / incomplete (steps still open after the one repair) /
+ * failed (the run errored) / stopped (the user stopped it). cancelled: only an idle proposal the user cancelled.
+ */
+export type PlanState = "proposed" | "running" | "done" | "cancelled" | "incomplete" | "failed" | "stopped";
+
 export interface PlanStep {
   title: string;
-  status: "pending" | "inProgress" | "completed";
+  /** cancelled is never completed: it does not count as done and does not unblock dependents. */
+  status: "pending" | "inProgress" | "completed" | "cancelled";
+  /** Why a cancelled step was dropped; filled with a default by the validator when missing. */
+  cancelReason?: string;
   /** Needed only by steps that others depend on; unique within one checklist. */
   id?: string;
   /** Display nickname of the assignee. Recorded as given; the app never assigns work from it. */

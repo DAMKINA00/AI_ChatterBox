@@ -59,6 +59,7 @@ import { WEB_LOW_REMAINING } from "./drivers/gemini-web-accounts";
 import { isAIStudioModel } from "../shared/aistudio";
 import { cliRemaining, CLI_LOW_REMAINING } from "./cli-accounts";
 import { planStepBlockers, validatePlanSteps } from "../shared/plan-steps";
+import { alignNativeSteps, droppedSteps, isOpenStep, keepDroppedSteps, openStepsText, pendingProposal, planStepsFor, stepKey } from "../shared/plan-lifecycle";
 import { validateReviewResult } from "../shared/review-result";
 import { forkContextPrompt } from "./chat-fork";
 import { buildResumeContext, instructionToResume, parseInstructionSnapshot, type InstructionSnapshot } from "./resume-context";
@@ -197,7 +198,7 @@ const CHECK_AGENT_TOOL: ToolDef = {
 const CHECKLIST_TOOL: ToolDef = {
   name: "checklist",
   description:
-    "작업 체크리스트를 등록·갱신합니다 (화면 상단 카드). 전체 단계 목록을 매번 보내세요. owner에 담당 닉네임을 적으세요. 선행이 있는 단계에는 id를 붙이고 dependsOn에 선행 단계 id를 적으세요. 협의가 시작되면 consultIds에 협의 id를 연결하세요. 앱은 이 정보로 작업을 배정하거나 완료 처리하지 않으며 status는 직접 갱신합니다. status: pending | inProgress | completed.",
+    "작업 체크리스트를 등록·갱신합니다 (화면 상단 카드). 전체 단계 목록을 매번 보내세요. owner에 담당 닉네임을 적으세요. 선행이 있는 단계에는 id를 붙이고 dependsOn에 선행 단계 id를 적으세요. 협의가 시작되면 consultIds에 협의 id를 연결하세요. 앱은 이 정보로 작업을 배정하거나 완료 처리하지 않으며 status는 직접 갱신합니다. status: pending | inProgress | completed | cancelled. 진행하지 않기로 한 단계는 목록에서 빼지 말고 cancelled와 cancelReason(사유)으로 남기세요. cancelled는 완료가 아니며 그 단계를 선행으로 둔 단계는 계속 막힙니다. pending·inProgress 단계가 남으면 앱은 지시를 완료로 처리하지 않습니다.",
   inputSchema: {
     type: "object",
     properties: {
@@ -207,7 +208,8 @@ const CHECKLIST_TOOL: ToolDef = {
           type: "object",
           properties: {
             title: { type: "string" },
-            status: { type: "string", enum: ["pending", "inProgress", "completed"] },
+            status: { type: "string", enum: ["pending", "inProgress", "completed", "cancelled"] },
+            cancelReason: { type: "string", description: "status=cancelled일 때 진행하지 않는 이유" },
             id: { type: "string", description: "다른 단계가 선행으로 지정할 고유 id" },
             owner: { type: "string", description: "담당 닉네임 (예: 클로드 1호, 마스터)" },
             dependsOn: { type: "array", items: { type: "string" }, description: "먼저 완료되어야 하는 단계 id" },
@@ -355,6 +357,8 @@ interface PauseState {
   folder: string;
   instruction: Omit<Instruction, "requests"> & { requests: [string, number][] };
   planning: boolean; reviewing: boolean; assignments: PausedAssignment[];
+  /** Plan id of an approved /plan being carried out. */
+  planRun?: number;
 }
 interface Running {
   lastEventAt: number;
@@ -412,11 +416,34 @@ export class Orchestrator {
   private reviewing = new Set<number>();
   /** Master native tool calls which may still be changing the workspace. */
   private masterActions = new Map<number, Set<string>>();
-  private planRunning = new Set<number>();
+  /** chatId -> id of the approved plan being carried out (the /plan instruction's id). */
+  private planRunning = new Map<number, number>();
+  /** Chats whose current turn already recorded its plan as incomplete (the completion guard). */
+  private planIncomplete = new Set<number>();
   readonly judge: ApprovalJudge;
 
   constructor(private chats: ChatManager) {
     chats.beforeMasterEnd = (chatId, event) => this.checkCompletion(chatId, event);
+    // Native plan tools (Claude TodoWrite, Codex plan updates) follow the same rules as the checklist
+    // tool. A whole list cannot be refused, so steps that must stay are kept instead of dropped.
+    chats.attributePlan = (chatId, event) => {
+      const { planId, instructionId } = this.planOwner(chatId);
+      if (planId === undefined) return event;
+      const previous = planStepsFor(chats.store.events(chatId), planId) ?? [];
+      // Title-only steps take the identity of the one same-titled step already recorded (never a guess),
+      // then the same keep and cancellation rules as the checklist tool apply.
+      const merged = keepDroppedSteps(previous, alignNativeSteps(previous, event.steps));
+      try {
+        return { ...event, steps: validatePlanSteps(merged, previous), planId, instructionId };
+      } catch (e) {
+        // Never store an unchecked list over a recorded one: that would bypass the kept cancellations.
+        if (previous.length) {
+          chats.emit(chatId, "orch", null, { type: "notice", text: `계획 도구의 목록을 반영하지 못해 이전 체크리스트를 유지합니다: ${e instanceof Error ? e.message : String(e)} checklist 도구로 전체 목록을 다시 보내세요.` });
+          return { ...event, steps: previous.map((s) => ({ ...s })), planId, instructionId };
+        }
+        return { ...event, planId, instructionId }; // Nothing recorded yet to protect: kept as reported, never lost.
+      }
+    };
     this.judge = new ApprovalJudge(chats, (chatId, role) => {
       const r = role ? this.running.get(chatId)?.get(role) : undefined;
       return {
@@ -901,17 +928,31 @@ export class Orchestrator {
     return textResult(`${a.nickname}을(를) 해제했습니다.`);
   }
 
+  /** The plan a new checklist belongs to: the approved /plan while it runs, otherwise this instruction. */
+  private planOwner(chatId: number): { planId?: number; instructionId?: number } {
+    const instructionId = this.instructions.get(chatId)?.id;
+    return { planId: this.planRunning.get(chatId) ?? instructionId, instructionId };
+  }
+
   private checklist(chatId: number, raw: unknown): ToolResult {
-    const steps = validatePlanSteps(raw);
+    const { planId, instructionId } = this.planOwner(chatId);
+    const previous = planId === undefined ? [] : planStepsFor(this.chats.store.events(chatId), planId) ?? [];
+    const kept: string[] = [];
+    const steps = validatePlanSteps(raw, previous, kept);
     if (!steps.length) return textResult("steps가 비었습니다.", true);
     const consults = new Map(this.chats.store.listConsults(chatId).map((c) => [c.id, c]));
     const unknown = steps.flatMap((s) => s.consultIds ?? []).filter((id) => !consults.has(id));
     if (unknown.length) return textResult(`이 채팅에 없는 협의 id입니다: ${[...new Set(unknown)].join(", ")}`, true);
-    this.chats.emit(chatId, "orch", "orch", { type: "plan_update", steps });
-    const head = `체크리스트를 갱신했습니다 (${steps.filter((s) => s.status === "completed").length}/${steps.length} 완료).`;
+    if (planId !== undefined) {
+      const dropped = droppedSteps(previous, steps);
+      if (dropped.length) return textResult(`끝나지 않았거나 취소된 단계를 목록에서 뺄 수 없습니다: ${dropped.map(stepKey).join(", ")}. 끝냈으면 completed로, 진행하지 않을 단계는 status=cancelled와 cancelReason으로 남기고, 취소된 단계도 목록에 그대로 두세요.`, true);
+    }
+    this.chats.emit(chatId, "orch", "orch", { type: "plan_update", steps, planId, instructionId });
+    const cancelled = steps.filter((s) => s.status === "cancelled").length;
+    const head = `체크리스트를 갱신했습니다 (${steps.filter((s) => s.status === "completed").length}/${steps.length} 완료${cancelled ? ` · 취소 ${cancelled}` : ""}).` + (kept.length ? `\n${kept.join("\n")}` : "");
     if (!steps.some((s) => s.dependsOn?.length || s.consultIds?.length)) return textResult(head);
     const label = (s: PlanStep) => s.id ? `${s.id}(${s.title})` : s.title;
-    const open = steps.filter((s) => s.status !== "completed");
+    const open = steps.filter(isOpenStep);
     const waiting = open.filter((s) => planStepBlockers(s, steps).length);
     const ready = open.filter((s) => s.status === "pending" && !planStepBlockers(s, steps).length);
     const early = waiting.filter((s) => s.status === "inProgress");
@@ -1375,7 +1416,7 @@ export class Orchestrator {
   private saveInstruction(chatId: number) {
     const inst = this.instructions.get(chatId);
     if (!inst) return;
-    const snapshot: InstructionSnapshot = { id: inst.id, text: inst.text, mode: inst.mode, dualInvestigation: inst.dualInvestigation, planning: this.planning.has(chatId), reviewing: this.reviewing.has(chatId) };
+    const snapshot: InstructionSnapshot = { id: inst.id, text: inst.text, mode: inst.mode, dualInvestigation: inst.dualInvestigation, planning: this.planning.has(chatId), reviewing: this.reviewing.has(chatId), planRun: this.planRunning.get(chatId) };
     this.chats.store.setSetting(`runInstruction:${chatId}:current`, JSON.stringify(snapshot));
   }
 
@@ -1430,10 +1471,22 @@ export class Orchestrator {
       }
       return null;
     }
-    const issue = this.investigationIssue(chatId) ?? completionIssue(inst.id, inst.mode, this.chats.store.listConsults(chatId), !!this.chats.store.project(chat.projectId)?.settings.reviewGate);
+    // The checklist of this instruction (or of the approved plan it carries out) must not end with open steps.
+    const planId = this.planRunning.get(chatId) ?? inst.id;
+    const steps = planStepsFor(this.chats.store.events(chatId), planId);
+    const open = steps?.filter(isOpenStep) ?? [];
+    const planIssue = open.length ? `체크리스트에 끝나지 않은 단계 ${open.length}개: ${openStepsText(steps!)}. 실제로 끝냈으면 completed로, 진행하지 않을 단계는 cancelled와 cancelReason으로 갱신하세요.` : undefined;
+    const issue = this.investigationIssue(chatId) ?? completionIssue(inst.id, inst.mode, this.chats.store.listConsults(chatId), !!this.chats.store.project(chat.projectId)?.settings.reviewGate) ?? planIssue;
     if (!issue) return end;
     this.chats.emit(chatId, "orch", "orch", { type: "notice", text: `완료 확인: ${issue}` });
-    if (inst.repaired) return { ...end, ok: false, error: `미완료: ${issue}` };
+    if (inst.repaired) {
+      // After the one repair: say so plainly and end without another automatic turn.
+      if (open.length) {
+        this.planIncomplete.add(chatId);
+        this.chats.emit(chatId, "orch", null, { type: "plan_state", state: "incomplete", planId, reason: `끝나지 않은 단계 ${open.length}개: ${openStepsText(steps!)}` });
+      }
+      return { ...end, ok: false, error: `미완료: ${issue}` };
+    }
     inst.repaired = true;
     // Resume the same instruction once. Do not reset its limits or lose its queued user input.
     setTimeout(() => {
@@ -1529,6 +1582,7 @@ export class Orchestrator {
     }
     // Runtime mode sets are empty after restart; the restrictions come with the instruction they belonged to.
     if (current.planning) this.planning.add(chatId); else this.planning.delete(chatId);
+    if (current.planRun !== undefined) this.planRunning.set(chatId, current.planRun); else this.planRunning.delete(chatId);
     if (current.reviewing) this.reviewing.add(chatId); else this.reviewing.delete(chatId);
     const inst: Instruction = { id: current.id, mode: current.mode, dualInvestigation: current.dualInvestigation, text: current.text, asks: 0, reviews: 0, requests: new Map(), queued: [], pinned: [] };
     const direct = events.findLast((e) => e.event.type === "user" && !e.event.queued);
@@ -1654,21 +1708,29 @@ export class Orchestrator {
       }
       case "plan-run": {
         needIdle();
+        // Only the plan still waiting for approval runs: never a cancelled, finished or superseded one.
+        const events = this.chats.store.events(chatId);
+        const planId = pendingProposal(events);
+        if (planId === undefined) throw new Error("승인할 제안 계획이 없습니다. 취소·완료됐거나 그 뒤에 다른 지시가 있었던 계획은 실행할 수 없으니 /plan으로 새로 계획하세요.");
+        const steps = planStepsFor(events, planId);
         this.planning.delete(chatId);
-        this.planRunning.add(chatId);
-        this.chats.emit(chatId, "orch", null, { type: "plan_state", state: "running" });
+        this.planRunning.set(chatId, planId);
+        this.chats.emit(chatId, "orch", null, { type: "plan_state", state: "running", planId });
         const text =
           "사용자가 계획을 승인했다. 계획대로 실행하라: 필요한 작업자를 spawn 하고, 단계마다 담당 작업자에게 ask로 맡기고(implement는 scope 지정), 단계를 시작·완료할 때마다 checklist를 갱신하고, " +
-          "모든 단계를 완료로 표시한 뒤 결과를 보고하라.";
+          "모든 단계를 완료하거나, 진행하지 않을 단계는 cancelled와 cancelReason으로 표시한 뒤 결과를 보고하라. 끝나지 않은 단계가 남으면 앱은 완료로 처리하지 않는다." +
+          (steps?.length ? `\n\n승인된 계획 단계:\n${steps.map((s) => `- ${s.id ? `${s.id} ` : ""}${s.title} (${s.status})`).join("\n")}` : "");
         await this.chats.startTurn(chatId, "계획 실행", [], () => this.instructWith(chat, text, "계획 실행"));
         return;
       }
-      case "plan-cancel":
-        this.planning.delete(chatId);
-        this.planRunning.delete(chatId);
-        this.saveInstruction(chatId); // Otherwise a crash brings the cancelled plan restriction back.
-        this.chats.emit(chatId, "orch", null, { type: "plan_state", state: "cancelled" });
+      case "plan-cancel": {
+        // Cancels a proposal that waits for approval, and nothing else: no flag, snapshot or queued work changes.
+        if (busy) throw new Error("계획을 세우거나 실행하는 중에는 계획을 취소할 수 없습니다. 멈추려면 중지(/stop)를 사용하세요.");
+        const planId = pendingProposal(this.chats.store.events(chatId));
+        if (planId === undefined) throw new Error("취소할 제안 계획이 없습니다.");
+        this.chats.emit(chatId, "orch", null, { type: "plan_state", state: "cancelled", planId, reason: "사용자가 제안을 취소했습니다." });
         return;
+      }
       case "goal": {
         const a = arg.trim();
         if (!a) {
@@ -1750,14 +1812,25 @@ export class Orchestrator {
 
   /** Plan proposals and goal auto-continuation after the master's turn. */
   private afterMasterTurn(chatId: number, end: Extract<AgentEvent, { type: "turn_end" }>) {
-    if (this.planning.has(chatId)) {
-      this.planning.delete(chatId);
-      if (end.ok) this.chats.emit(chatId, "orch", null, { type: "plan_state", state: "proposed" });
-    } else if (this.planRunning.has(chatId)) {
-      this.planRunning.delete(chatId);
-      this.chats.emit(chatId, "orch", null, { type: "plan_state", state: end.ok ? "done" : "cancelled" });
-    }
+    const incomplete = this.planIncomplete.delete(chatId);
     const chat = this.chats.store.chat(chatId);
+    // A pause ends the turn too; the plan resumes with the chat, so its state stays as it is.
+    const pausing = ["pausing", "paused"].includes(chat?.status ?? "");
+    const proposal = this.planning.has(chatId);
+    if (proposal) {
+      this.planning.delete(chatId);
+      if (end.ok) this.chats.emit(chatId, "orch", null, { type: "plan_state", state: "proposed", planId: this.instructions.get(chatId)?.id });
+    } else if (this.planRunning.has(chatId) && !pausing) {
+      const planId = this.planRunning.get(chatId)!;
+      this.planRunning.delete(chatId);
+      // The completion guard already let this turn end successfully only without open steps.
+      if (!incomplete) this.chats.emit(chatId, "orch", null, end.interrupted
+        ? { type: "plan_state", state: "stopped", planId, reason: "사용자가 작업을 중지했습니다." }
+        : end.ok ? { type: "plan_state", state: "done", planId }
+        : { type: "plan_state", state: "failed", planId, reason: end.error });
+    }
+    // A proposal waits for the user's approval: never continue a goal past it automatically.
+    if (proposal) return;
     const goal = chat?.goal;
     if (!chat || !goal || goal.status !== "active" || !end.ok || end.interrupted || this.stopped.has(chatId)) return;
     if (goal.turns >= MAX_GOAL_TURNS) {
@@ -1768,9 +1841,14 @@ export class Orchestrator {
       });
       return;
     }
+    // The continuation belongs to this instruction: a later instruction or command (a new /plan, which a
+    // proposal cancel can only follow), a stop or a restart in between makes it stale.
+    const inst = this.instructions.get(chatId);
+    const epoch = this.epochs.get(chatId);
     setTimeout(() => {
       const c = this.chats.store.chat(chatId);
       if (!c?.goal || c.goal.status !== "active" || this.stopped.has(chatId) || ["working", "pausing", "paused"].includes(c.status) || this.chats.isBusy(chatId)) return;
+      if (this.instructions.get(chatId) !== inst || this.epochs.get(chatId) !== epoch) return;
       this.setGoal(chatId, { ...c.goal, turns: c.goal.turns + 1, updatedAt: Date.now() });
       const text = `[목표 계속] 목표: ${c.goal.objective}\n지금까지: ${c.goal.progress || "(보고 없음)"}\n남은 일을 이어서 하라. 다 이뤘으면 update_goal(status=complete)로 알리고 보고하라.`;
       void this.chats.startTurn(chatId, "목표를 향해 계속 진행", [], () => this.instructWith(c, text, c.goal!.objective));
@@ -1853,7 +1931,7 @@ export class Orchestrator {
     const state: PauseState = {
       folder: this.chats.store.project(chat.projectId)!.folder,
       instruction: { ...inst, requests: [...inst.requests] },
-      planning: this.planning.has(chat.id), reviewing: this.reviewing.has(chat.id),
+      planning: this.planning.has(chat.id), reviewing: this.reviewing.has(chat.id), planRun: this.planRunning.get(chat.id),
       assignments: [...(this.assignments.get(chat.id)?.values() ?? [])],
     };
     this.stopped.add(chat.id);
@@ -1878,6 +1956,7 @@ export class Orchestrator {
     const inst = this.restoreInstruction(state);
     this.instructions.set(chat.id, inst);
     if (state.planning) this.planning.add(chat.id); else this.planning.delete(chat.id);
+    if (state.planRun !== undefined) this.planRunning.set(chat.id, state.planRun); else this.planRunning.delete(chat.id);
     if (state.reviewing) this.reviewing.add(chat.id); else this.reviewing.delete(chat.id);
     this.stopped.delete(chat.id);
     this.chats.updateChat(chat.id, { status: "working", touch: true });

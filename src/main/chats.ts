@@ -874,6 +874,8 @@ export class ChatManager {
   // ---------- events and status
   emit(chatId: number, node: NodeId, role: Role | null, event: AgentEvent): void {
     if (this.disposing || !this.store.chat(chatId)) return; // quitting, or deleted meanwhile
+    // The master's native plan tools report without a plan: attach them to the current one as they arrive.
+    if (event.type === "plan_update" && role === "orch" && node === "orch" && event.planId === undefined && this.attributePlan) event = this.attributePlan(chatId, event);
     const e: TimelineEvent = TRANSIENT.has(event.type)
       ? { id: 0, chatId, node, role, at: Date.now(), event }
       : this.store.addEvent(chatId, node, role, event);
@@ -961,6 +963,8 @@ export class ChatManager {
 
   /** Hooks for the orchestrator. */
   onDriverEvent?: (chatId: number, role: Role, event: AgentEvent) => void;
+  /** Stamps a new unattributed master plan_update with the plan it belongs to (before it is stored). */
+  attributePlan?: (chatId: number, event: Extract<AgentEvent, { type: "plan_update" }>) => Extract<AgentEvent, { type: "plan_update" }>;
   beforeMasterEnd?: (chatId: number, event: Extract<AgentEvent, { type: "turn_end" }>) => Extract<AgentEvent, { type: "turn_end" }> | null;
   instructionsFor?: (chat: Chat, project: Project, role: Role, agent: AgentKind) => string | undefined;
   /** Extra MCP servers for a role: Claude --mcp-config entries and the same entries as Codex config. */

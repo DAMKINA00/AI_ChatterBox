@@ -3,7 +3,8 @@
 //  - "orch" / "claude" / "gpt": one conversation, flat
 //  - "consult:N": one consult
 import { isAgentExpression, isWorkerKey } from "../../shared/types";
-import type { AgentExpression, PlanStep, AgentEvent, ApprovalDecision, ApprovalRequest, AttachmentRef, ConsultKind, ConsultStatus, FileDiff, NodeId, ReviewResult, Role, TimelineEvent } from "../../shared/types";
+import { currentPlanView, type PlanView } from "../../shared/plan-lifecycle";
+import type { AgentExpression, AgentEvent, ApprovalDecision, ApprovalRequest, AttachmentRef, ConsultKind, ConsultStatus, FileDiff, NodeId, ReviewResult, Role, TimelineEvent } from "../../shared/types";
 
 export type Item =
   | { kind: "artifacts"; key: string; paths: string[] }
@@ -511,22 +512,11 @@ export function normalizePlanStepTitle(title: string): string {
   return title.replace(/^\[(?:Antigravity|Gemini) (\d+호)\](?=\s|$)/, "[제미나이 $1]");
 }
 
-/** Latest plan checklist and its /plan state, for the pinned plan panel. */
-export function planOf(events: TimelineEvent[]): { steps: PlanStep[]; explanation?: string; state: "proposed" | "running" | "done" | "cancelled" | "live" } | null {
-  let steps: PlanStep[] | null = null;
-  let explanation: string | undefined;
-  let state: "proposed" | "running" | "done" | "cancelled" | "live" = "live";
-  for (const e of events) {
-    const ev = e.event;
-    if (ev.type === "plan_update" && e.role === "orch") {
-      steps = ev.steps;
-      explanation = ev.explanation;
-    } else if (ev.type === "plan_state") state = ev.state;
-    else if (ev.type === "user" && !ev.queued && !ev.text.startsWith("/plan") && ev.text !== "계획 실행" && state !== "running") {
-      // A new ordinary instruction starts fresh (its own checklist, if any, will follow).
-      steps = null;
-      state = "live";
-    }
-  }
-  return steps ? { steps, explanation, state } : null;
+/**
+ * Latest plan checklist and its lifecycle state, for the pinned plan panel (desktop and remote). The fold
+ * is the shared one the main process uses, so a new instruction or a new /plan never mixes with an older
+ * plan, and cancelled/incomplete/failed/stopped plans stay visible with their reason.
+ */
+export function planOf(events: readonly TimelineEvent[]): PlanView | null {
+  return currentPlanView(events);
 }

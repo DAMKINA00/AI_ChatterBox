@@ -1,6 +1,8 @@
 import type { PlanStep } from "./types";
 
-const STATUSES: PlanStep["status"][] = ["pending", "inProgress", "completed"];
+const STATUSES: PlanStep["status"][] = ["pending", "inProgress", "completed", "cancelled"];
+const MAX_REASON = 300;
+export const DEFAULT_CANCEL_REASON = "사유가 기록되지 않았습니다.";
 const MAX_STEPS = 200;
 const MAX_ID = 80;
 const MAX_OWNER = 80;
@@ -10,10 +12,15 @@ const MAX_LINKS = 50;
  * Normalize a checklist from a model. Older `{title, status}` lists stay valid: an unknown status is
  * pending and a step without a title is dropped. Dependency mistakes are rejected rather than repaired,
  * because a silently dropped edge would present blocked work as ready.
+ *
+ * `previous` is the plan's last recorded list. A cancellation is kept: the step stays cancelled (there is
+ * no reopening; new work is a new step) and keeps its recorded reason unless a new one is given. Each
+ * cancellation kept against the input is described in `notes`.
  */
-export function validatePlanSteps(raw: unknown): PlanStep[] {
+export function validatePlanSteps(raw: unknown, previous?: readonly PlanStep[], notes?: string[]): PlanStep[] {
   if (!Array.isArray(raw)) throw new Error("steps는 배열이어야 합니다.");
   if (raw.length > MAX_STEPS) throw new Error(`체크리스트는 최대 ${MAX_STEPS}단계입니다.`);
+  const before = new Map((previous ?? []).map((p) => [p.id ?? p.title, p]));
   const steps: PlanStep[] = [];
   for (const item of raw) {
     const s = (item && typeof item === "object" ? item : {}) as Record<string, unknown>;
@@ -22,6 +29,16 @@ export function validatePlanSteps(raw: unknown): PlanStep[] {
     const step: PlanStep = { title, status: STATUSES.includes(s.status as PlanStep["status"]) ? s.status as PlanStep["status"] : "pending" };
     const id = optionalText(s.id, "id", MAX_ID);
     if (id) step.id = id;
+    const prior = before.get(id ?? title);
+    if (prior?.status === "cancelled" && step.status !== "cancelled") {
+      notes?.push(`${id ?? title}: 취소된 단계는 다시 열지 않습니다(취소 유지). 이어서 할 일이면 새 단계로 추가하세요.`);
+      step.status = "cancelled";
+    }
+    if (step.status === "cancelled") {
+      // Decided on the raw input: a missing reason never replaces the one already recorded.
+      const reason = typeof s.cancelReason === "string" ? s.cancelReason.trim().slice(0, MAX_REASON) : "";
+      step.cancelReason = reason || (prior?.status === "cancelled" ? prior.cancelReason : undefined) || DEFAULT_CANCEL_REASON;
+    }
     const owner = optionalText(s.owner, "owner", MAX_OWNER);
     if (owner) step.owner = owner;
     if (s.dependsOn !== undefined && s.dependsOn !== null) {

@@ -1,7 +1,47 @@
 // Display state of checklist steps (owner, prerequisites, consult links). Pure: shared by desktop and remote UI.
 import { planStepBlockers } from "../../../shared/plan-steps";
+import { isOpenStep, type PlanView } from "../../../shared/plan-lifecycle";
 import type { Consult, PlanStep } from "../../../shared/types";
 import type { Item } from "../timeline";
+
+/** Plan lifecycle label; "live" is an ordinary instruction's checklist outside /plan. */
+export const PLAN_STATE_LABEL: Record<PlanView["state"], string> = {
+  proposed: "승인 대기", running: "실행 중", done: "완료", cancelled: "취소됨",
+  incomplete: "미완료", failed: "실패", stopped: "중지됨", live: "진행 중",
+};
+
+/** States that end a plan without finishing all of it: their reason is always shown. */
+export const planEndedEarly = (state: PlanView["state"]) => state === "cancelled" || state === "incomplete" || state === "failed" || state === "stopped";
+
+/** Same chat states the main process treats as busy for /plan-run and /plan-cancel. */
+export const chatBusyForPlan = (status: string) => status === "working" || status === "approval" || status === "pausing" || status === "paused";
+
+/** Run/cancel are offered only on a proposal while the chat is idle; the server still checks both. */
+export const planActionsAvailable = (state: PlanView["state"], chatStatus: string) => state === "proposed" && !chatBusyForPlan(chatStatus);
+
+export interface PlanCounts { total: number; completed: number; cancelled: number; open: number }
+
+/** Cancelled steps are never counted as completed. */
+export function planCounts(steps: readonly PlanStep[]): PlanCounts {
+  let completed = 0, cancelled = 0, open = 0;
+  for (const s of steps) {
+    if (s.status === "completed") completed++;
+    else if (s.status === "cancelled") cancelled++;
+    else open++;
+  }
+  return { total: steps.length, completed, cancelled, open };
+}
+
+/** "완료 n · 취소 m · 남음 k" (취소 is shown only when there is one). */
+export function planCountsText(c: PlanCounts): string {
+  return [`완료 ${c.completed}`, ...(c.cancelled ? [`취소 ${c.cancelled}`] : []), `남음 ${c.open}`].join(" · ");
+}
+
+/** Steps still owed (pending or in progress), for the "미진행" list of an ended plan. */
+export const openPlanSteps = (steps: readonly PlanStep[]) => steps.filter(isOpenStep);
+
+/** Blocker name, marked when the prerequisite was cancelled (it does not count as done). */
+export const planBlockerName = (step: PlanStep) => (step.status === "cancelled" ? `${planStepName(step)}(취소됨)` : planStepName(step));
 
 export interface PlanStepView {
   step: PlanStep;
@@ -17,7 +57,7 @@ export function planStepViews(steps: readonly PlanStep[]): PlanStepView[] {
   const list = [...steps];
   const structured = list.some((s) => !!s.id || !!s.dependsOn?.length);
   return list.map((step, index) => {
-    const blockers = step.status === "completed" ? [] : planStepBlockers(step, list);
+    const blockers = step.status === "completed" || step.status === "cancelled" ? [] : planStepBlockers(step, list);
     return { step, key: `${index}:${step.id ?? ""}`, blockers, ready: structured && step.status === "pending" && !blockers.length };
   });
 }

@@ -543,6 +543,10 @@ test("checklist keeps structure, reports ready and blocked work, and never compl
     driver.finish();
     await ask;
     assert.equal(f.store.consult(consult.id)!.status, "done");
+    // The older {title, status} format stays valid. (A finished step may be left out of the next list;
+    // an unfinished one may not.)
+    const old = await f.engine.call(f.chat.id, "orch", "checklist", { steps: [{ title: "[클로드 1호] 수정", status: "completed" }] });
+    assert.equal(old.content[0].text.split("\n")[0], "체크리스트를 갱신했습니다 (1/1 완료).");
     const steps = [
       { id: "a", title: "API", status: "inProgress", owner: worker.nickname, consultIds: [consult.id] },
       { id: "b", title: "UI", status: "pending", dependsOn: ["a"] },
@@ -561,10 +565,7 @@ test("checklist keeps structure, reports ready and blocked work, and never compl
     const unknown = await f.engine.call(f.chat.id, "orch", "checklist", { steps: [{ title: "A", status: "pending", consultIds: [99999] }] });
     assert.equal(unknown.isError, true);
     const count = f.store.events(f.chat.id).filter(e => e.event.type === "plan_update").length;
-    assert.equal(count, 1, "rejected lists are not recorded");
-
-    const old = await f.engine.call(f.chat.id, "orch", "checklist", { steps: [{ title: "[클로드 1호] 수정", status: "pending" }] });
-    assert.equal(old.content[0].text.split("\n")[0], "체크리스트를 갱신했습니다 (0/1 완료).");
+    assert.equal(count, 2, "rejected lists are not recorded");
   } finally { f.close(); }
 });
 
@@ -842,11 +843,16 @@ test("plan and review restrictions follow the snapshot, not an earlier command's
   const cancelled = fixture();
   try {
     await cancelled.engine.command(cancelled.chat.id, "plan", "계획 대상");
+    // Cancelling is for a proposal waiting for approval; the proposal turn itself is stopped with /stop.
+    await assert.rejects(cancelled.engine.command(cancelled.chat.id, "plan-cancel", ""), /\/stop/);
+    assert.equal(cancelled.engine.planning.has(cancelled.chat.id), true, "a refused cancel changes nothing");
+    cancelled.driverFor(cancelled.chat.id, "orch").finish();
     await cancelled.engine.command(cancelled.chat.id, "plan-cancel", "");
     assert.equal(cancelled.engine.planning.has(cancelled.chat.id), false);
-    const { next, prompt } = await crashAndResume(cancelled);
-    assert.equal(next.engine.planning.has(cancelled.chat.id), false, "a cancelled plan does not come back");
-    assert.doesNotMatch(prompt, /\[계획 모드\]/);
+    const next = await cancelled.reopen();
+    const saved = JSON.parse(next.store.getSetting(`runInstruction:${cancelled.chat.id}:current`)!);
+    assert.equal(saved.planning, false, "a cancelled plan's restriction does not come back after a restart");
+    assert.equal(saved.planRun, undefined);
     next.store.close();
   } finally { cancelled.close(); }
 });
