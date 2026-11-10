@@ -11,13 +11,13 @@ type Reply = Extract<Item, { kind: "message" }>;
  * survives the live preview being replaced by the saved message (the key changes from live-… to e…,
  * the position in that conversation does not). The same saved event received twice counts once.
  */
-function replies(items: readonly Item[]): Map<string, Reply> {
+function replies(items: readonly Item[], topOnly: boolean): Map<string, Reply> {
   const out = new Map<string, Reply>();
   const keys = new Set<string>();
   const ordinal = new Map<string, number>();
   const walk = (list: readonly Item[]) => {
     for (const item of list) {
-      if (item.kind === "consult") walk(item.children);
+      if (item.kind === "consult" && !topOnly) walk(item.children);
       if (item.kind !== "message" || keys.has(item.key)) continue;
       keys.add(item.key);
       const stream = `${item.node}|${item.role}`;
@@ -30,18 +30,22 @@ function replies(items: readonly Item[]): Map<string, Reply> {
   return out;
 }
 
-export function seenReplies(items: readonly Item[]): SeenReplies {
-  return new Map([...replies(items)].map(([id, reply]) => [id, reply.text.length]));
+/**
+ * topOnly: the main view keeps workers' internal replies inside folded consult cards, so only the group-chat
+ * lines on its surface count there; the master/worker/consult views count every reply as before.
+ */
+export function seenReplies(items: readonly Item[], topOnly = false): SeenReplies {
+  return new Map([...replies(items, topOnly)].map(([id, reply]) => [id, reply.text.length]));
 }
 
 /**
  * What arrived since the reader left the bottom: replies not seen then (once each, however many
  * tokens they stream), and whether a reply already seen has kept growing.
  */
-export function unseenReplies(items: readonly Item[], seen: SeenReplies): { count: number; growing: boolean } {
+export function unseenReplies(items: readonly Item[], seen: SeenReplies, topOnly = false): { count: number; growing: boolean } {
   let count = 0;
   let growing = false;
-  for (const [id, reply] of replies(items)) {
+  for (const [id, reply] of replies(items, topOnly)) {
     const length = seen.get(id);
     if (length === undefined) count++;
     else if (reply.text.length > length) growing = true;

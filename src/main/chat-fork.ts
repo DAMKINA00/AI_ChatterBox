@@ -45,7 +45,7 @@ function line(e: TimelineEvent, agents: ChatAgent[], attachments: Map<number, At
       return ev.status === "done" && !files ? null : `협의 ${ev.consultId} 결과(${ev.status}):${detail}${files}`;
     }
     case "room_message":
-      return AUTOMATIC_ROOM.test(ev.text) ? null : `${name(ev.from)}: ${clip(ev.text, MAX_MESSAGE)}`;
+      return ev.kind === "result" || ev.kind === "system" || AUTOMATIC_ROOM.test(ev.text) ? null : `${name(ev.from)}: ${clip(ev.text, MAX_MESSAGE)}`;
     case "peer_message":
       return `${name(ev.from)} → ${name(ev.to)}: ${clip(ev.text, MAX_MESSAGE)}`;
     case "ask_user":

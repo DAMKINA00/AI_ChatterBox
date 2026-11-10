@@ -178,7 +178,7 @@ const RELEASE_TOOL: ToolDef = {
 };
 const MESSAGE_TOOL: ToolDef = {
   name: "send_message",
-  description: "동료·마스터에게 보내거나 to=all로 그룹 채팅에 발언합니다. 진행·반론·근거·질문을 공유하고 본 작업을 계속합니다. 작업 중인 상대에게 즉시 전달을 시도하며 다음 도구 호출에도 확인합니다. 답변이 필요하면 ask를 사용하세요.",
+  description: "동료·마스터에게 보내거나 to=all로 그룹 채팅(사용자가 읽는 메인 대화)에 발언합니다. to=all은 실제 진행·질문·답변·막힘을 쉬운 한국어 1~3문장으로 쓰고, 상세 근거·로그는 1:1 메시지나 최종 응답에 담습니다. 보낸 뒤 본 작업을 계속합니다. 작업 중인 상대에게 즉시 전달을 시도하며 다음 도구 호출에도 확인합니다. 답변이 필요하면 ask를 사용하세요.",
   inputSchema: { type: "object", properties: { to: { type: "string" }, message: { type: "string" } }, required: ["to", "message"], additionalProperties: false },
 };
 const MESSAGES_TOOL: ToolDef = {
@@ -289,6 +289,7 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     `- 양쪽 조사: 클로드와 지피티에게 동일한 문제·증상·소스·로그·완료 기준을 주고 ${t("ask_parallel")}(각 kind=opinion)로 독립 조사시킨다. 다른 쪽 결론을 먼저 전달하거나 파일 수정을 맡기지 않는다. 각각 원인 후보·근거(파일/로그)·재현 방법·수정안·불확실성을 보고하게 한다. 두 결과가 오면 공통점과 차이를 대조하고, 충돌은 추가 증거로 확인해 마스터가 최종 원인·수정 방향을 취합한다. 이후 구현은 정한 담당자에게 맡기고 교차 리뷰 규칙을 유지한다. 한쪽을 실행할 수 없으면 양쪽 조사를 완료했다고 하지 말고 제한과 확인된 결과를 보고한다.`,
     `- 팀: ${t("spawn")}(kind=claude|gpt|gemini|grok|deepseek)로 작업자를 만든다. 기존 동료를 우선 재사용하고 필요한 인원과 병렬 수를 상황에 맞게 선택한다. 설정 인원은 권장 규모이며 초과해도 차단되지 않는다. 0으로 비활성화한 계열은 사용하지 않는다. 다 쓴 동료는 ${t("release")}로 해제한다.`,
     "- 한 요청 안에서도 UI·로직·테스트·자료 조사처럼 독립 가능한 파트를 나누고 담당·파일 범위·입출력 계약·의존성을 체크리스트에 기록한다. 파트는 ask_parallel로 동시에 맡긴다. 각 파트 담당에게 동료 닉네임과 연결되는 부분을 명시하고 직접 협의하게 한다. 마스터가 모든 대화를 중계하지 않는다. 작업 중인 동료와는 send_message로 계약·진행·질문을 주고받고, 대기 동료의 결과가 필요하면 ask/ask_parallel을 사용한다. 결과는 read_messages와 agents로 확인한 뒤 통합·검증한다.",
+    "- send_message(to=all)는 사용자가 읽는 메인 대화다. 결정·질문·답변·막힘처럼 실제로 할 말이 있을 때만 쉬운 한국어 1~3문장으로 말한다. 상세 근거·로그·계정 정보는 마스터 대화와 협의 결과에 남긴다. 상태 확인용 반복 발언이나 형식적인 대사는 만들지 않는다.",
     `- 일 맡기기: ${t("ask")}(to=닉네임, kind, message, scope). 서로 독립적인 일은 반드시 ${t("ask_parallel")}(tasks=[…])로 한 번에 맡겨 동시에 진행한다(하나씩 기다리지 말 것). 파일을 변경할 작업은 종류와 관계없이 scope를 겹치지 않게 나눈다. 읽기·토의는 동시에 가능하며, 리뷰·의견에서 수정할 때도 범위와 승인을 따른다.`,
     `- 관련 쟁점·서로 맞물린 설계·문장과 연출 등 직접 논의가 필요한 항목은 주제별 토의 그룹으로 묶는다. ${t("ask")}(to=클로드/지피티 진행자, kind=opinion|writing, discussion={topic:주제, peers:[참여 닉네임]}, message=목표·공통 자료·쟁점·완료 기준, reason, effort)로 맡긴다. 진행자가 참여자에게 직접 ask로 초안과 근거를 주고받아 합의·이견·남은 확인을 정리하고, 너는 그룹별 결과와 필요한 최종 결정만 취합한다. 사소한 확인까지 매번 중계하지 않는다.`,
     "- 토의 중 필요한 파일 수정·명령 실행도 지정 범위와 승인을 따른다. 주제와 사용자의 지정을 따라 Claude·Codex·Gemini·Grok에서 진행자와 참여자를 정한다. Gemini 웹은 MCP가 없어 진행자는 될 수 없으며 제공된 자료로 참여한다. 참여자는 토의 시점에 대기 상태로 두고 다른 병렬 작업·토의 그룹에 중복 배정하지 않는다. 중요한 오류는 먼저 양쪽 독립 조사 결과를 확보한 뒤 토의 그룹에서 대조한다. 토의 결과를 교차 리뷰로 대신하지 않는다. 실제 참여 응답이 없으면 토의 완료로 보고하지 말고 보완하거나 미완료 사유를 알린다.",
@@ -316,7 +317,7 @@ function workerInstructions(a: ChatAgent): string {
     "- 너의 모델은 앱이 지정한다. 네이티브 spawn_agent/Agent/Task 또는 별도 CLI로 하위 작업자를 생성하지 않는다. 추가 인력이 필요하면 마스터에게 send_message로 요청한다. 기존 팀과는 앱 ask/ask_parallel/send_message/read_messages로 협업한다.",
     "- 구현 지시(implement): 지정된 범위(scope) 안의 파일만 고친다. 사용자에게 지정받은 종류의 작업을 수행한다. 승인·범위·도구 한계는 지킨다.",
     "- 계획·리뷰(review)·의견(opinion)·글쓰기(writing)에서도 사용자 지시에 필요한 수정·명령 실행이 가능하다. 지정된 파일 범위와 승인 절차, 사용자가 명시한 수정 금지를 지킨다.",
-    "- 팀은 그룹 채팅으로 협의한다. send_message(to=all)로 진행·근거·반론·완료 결과를 공개하고 직접 질문은 동료에게 ask한다. 메시지를 read_messages로 확인한다. 질문마다 난도에 맞는 effort를 선택할 수 있다. 작업 중인 동료에게는 send_message, 상태 확인은 check_agent를 사용한다. 이미 배정했다는 이유로 점검을 생략하지 않는다. 자신의 잠근 파일 범위는 다시 위임하지 않는다.",
+    "- 팀은 그룹 채팅으로 협의한다. send_message(to=all)는 사용자가 읽는 메인 대화다. 실제로 바뀐 진행, 동료에게 할 질문·답변·반론, 막힌 점이 생겼을 때만 쉬운 한국어 1~3문장으로 말한다. 근거·로그·명령·계정·검증표 같은 상세는 공개하지 말고 최종 응답(마스터가 받는 결과 보고)에 담는다. 협의 결과는 앱이 마스터에게 그대로 전달하므로 같은 보고를 그룹에 다시 올리지 않는다. 할 말이 없으면 주기적인 상태 발언을 하지 않는다. 직접 질문은 동료에게 ask한다. 메시지를 read_messages로 확인한다. 질문마다 난도에 맞는 effort를 선택할 수 있다. 작업 중인 동료에게는 send_message, 상태 확인은 check_agent를 사용한다. 이미 배정했다는 이유로 점검을 생략하지 않는다. 자신의 잠근 파일 범위는 다시 위임하지 않는다.",
     "- writing은 글쓰기 목적의 배정이다. 필요한 사실 확인과 파일 반영은 지정 범위와 사용자 승인을 따르며 요청한 독자·말투·길이를 지킨다.",
     "- 다른 작업자에게 확인할 것이 있으면 ask(to=닉네임)로 직접 묻는다. 팀 목록은 agents. 마스터에게는 ask를 쓰지 말고 결과 보고에 질문을 적는다.",
     "- 토의 그룹의 진행자로 지정되면 공통 주제와 너의 초안·근거·질문을 각 참여자에게 앱 ask로 직접 보내고, 실제 의견을 받아 대조·보완한 뒤 합의, 이견, 근거, 남은 결정을 한 번에 보고한다. 참여자로 질문을 받으면 쟁점에 답하고 반론·확인 질문을 이번 응답에 담는다. 너의 답을 기다리는 진행자에게 다시 ask하여 순환 대기를 만들지 않는다. 그룹 밖 쟁점이나 사용자 결정만 마스터에게 최종 보고한다.",
@@ -493,7 +494,8 @@ export class Orchestrator {
               running.lastError = "작업자 실행이 끝났지만 종료 결과가 도착하지 않았습니다.";
             } else {
               const note = `${this.name(chatId, role)}의 활동이 ${Math.floor((now - running.lastEventAt) / 60_000)}분간 없습니다. 긴 도구 실행·동료 대기일 수 있으며 실패로 단정하지 않습니다. 마스터는 check_agent(to="${this.name(chatId, role)}")로 확인하고, 실제 무응답이면 recover=true로 기존 실행 정리 후 supersedes로 이어 맡기세요. 이미 배정했다는 이유로 확인을 생략하지 마세요.`;
-              this.chats.emit(chatId, "orch", role, { type: "room_message", from: role, text: `[앱 상태 점검] ${note}` });
+              // An app notice about the quiet worker, not the worker's words; delivery to the team is unchanged.
+              this.chats.emit(chatId, "orch", role, { type: "room_message", from: role, text: `[앱 상태 점검] ${note}`, kind: "system" });
               this.wakeMasterConsults(chatId, note);
               const master = this.chats.liveDriver(chatId, "orch");
               if (master?.running) void master.steer?.({ text: `[앱 상태 점검]\n${note}`, attachments: [] }).catch(() => undefined);
@@ -1261,7 +1263,8 @@ export class Orchestrator {
       const finished = this.chats.store.finishConsult(consult.id, status, summary, result.files);
       this.chats.sink.consult(finished);
       this.chats.emit(chatId, this.chats.route(chatId, caller), caller, { type: "consult_end", consultId: consult.id, status, summary, files: result.files });
-      this.chats.emit(chatId, "orch", target.key, { type: "room_message", from: target.key, text: `[${CONSULT_KIND_LABEL[kind]} · ${status} · 협의 ${consult.id}${assignmentModel ? ` · ${assignmentModel}` : ""}]\n${clipText(summary, 4000)}` });
+      // The team (including a master who did not assign this) still receives the result; kind keeps it out of the main chat view.
+      this.chats.emit(chatId, "orch", target.key, { type: "room_message", from: target.key, text: `[${CONSULT_KIND_LABEL[kind]} · ${status} · 협의 ${consult.id}${assignmentModel ? ` · ${assignmentModel}` : ""}]\n${clipText(summary, 4000)}`, kind: "result", consultId: consult.id, status });
       // The worker queue remains held until its native log is safely archived.
       await this.chats.archiveWorker(chatId, target.key);
       this.running.get(chatId)?.delete(target.key);

@@ -1,4 +1,4 @@
-import { memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
   ArrowRight,
@@ -35,6 +35,13 @@ import { ReviewResultView } from "./ReviewResult";
 import { ForkContextCard, ForkMessageButton } from "./Fork";
 import { forkEventId } from "../lib/fork";
 import { consultCardReview, consultCardStatus } from "../lib/review-summary";
+import { consultReason } from "../../../shared/room-message";
+
+/**
+ * The main ("전체 대화") view reads as the group chat: long texts fold, consult summaries and work logs open on
+ * request. Every other view shows the full originals as before.
+ */
+export const MainTimeline = createContext(false);
 
 export type Tone = "orch" | "claude" | "gpt" | "gemini" | "grok" | "deepseek";
 const TONE_TEXT: Record<Tone, string> = { orch: "text-orch", claude: "text-claude", gpt: "text-gpt", gemini: "text-gemini", grok: "text-grok", deepseek: "text-deepseek" };
@@ -276,15 +283,16 @@ const ItemView = memo(function ItemView({ item, chatId, nested }: { item: Item; 
       );
     case "message":
       return (
-        <div className="group grid grid-cols-[36px_minmax(0,1fr)_auto] items-start gap-x-3 rounded-md px-2 py-1.5 transition-colors hover:bg-accent/30" data-testid="agent-message" data-role={item.role} data-expression={item.expression}>
+        <div className="group grid grid-cols-[36px_minmax(0,1fr)_auto] items-start gap-x-3 rounded-md px-2 py-1.5 transition-colors hover:bg-accent/30" data-testid="agent-message" data-role={item.role} data-expression={item.expression} data-origin={item.origin}>
           <AgentAvatar kind={roleTone(item.role, agents) as Tone} expression={item.expression} size={36} alt={`${roleName(item.role, agents)} 캐릭터`} />
           <div className="min-w-0">
             <div className="flex min-w-0 items-center gap-2">
               <RoleName chatId={chatId} role={item.role} expression={item.expression} avatar={false} />
+              {item.origin === "result" && <Badge title="앱이 협의 결과를 그룹 채팅에 옮긴 사본입니다. 작업자가 직접 쓴 발언이 아닙니다.">자동 결과</Badge>}
               {forkId && <ForkMessageButton chatId={chatId} eventId={forkId} preview={item.text} className={FORK_ACTION} />}
             </div>
             <div className="group relative mt-0.5">
-              <div data-chat-search-text><Markdown text={item.text} streaming={item.streaming} /></div>
+              <MessageBody text={item.text} streaming={item.streaming} fold={!!item.room} />
               {item.streaming && <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse-dot rounded-sm bg-primary align-text-bottom" />}
               {!item.streaming && (
                 <CopyButton text={item.text} className="absolute -top-6 right-0 opacity-0 group-hover:opacity-100" label="메시지 복사" />
@@ -319,11 +327,71 @@ const ItemView = memo(function ItemView({ item, chatId, nested }: { item: Item; 
     case "artifacts":
       return <ArtifactCard item={item} nested={nested} />;
     case "notice":
+      if (item.detail) return <SystemNotice text={item.text} detail={item.detail} />;
       return <Notice tone={item.tone}><span data-chat-search-text>{item.text}</span></Notice>;
     case "fork":
       return <ForkContextCard item={item} />;
   }
 });
+
+const LONG_MESSAGE_CHARS = 700;
+const LONG_MESSAGE_LINES = 12;
+
+/**
+ * Main view only: a long message shows its beginning and its last line (where a question or blocker usually
+ * is) until the reader opens it. Nothing is cut: the full text stays in the DOM (screen readers read it),
+ * opens by keyboard, opens while searching, and is shown unfolded in the master/worker views.
+ */
+function MessageBody({ text, streaming, fold }: { text: string; streaming: boolean; fold: boolean }) {
+  const main = useContext(MainTimeline);
+  const searching = !!useContext(ChatSearchQuery).trim();
+  const [open, setOpen] = useState(false);
+  // Only group chat lines fold; the master's own answers to the user stay whole.
+  const long = main && fold && !streaming && (text.length > LONG_MESSAGE_CHARS || text.split("\n").length > LONG_MESSAGE_LINES);
+  if (!long) return <div data-chat-search-text><Markdown text={text} streaming={streaming} /></div>;
+  const shown = open || searching;
+  const last = text.trimEnd().split("\n").findLast((line) => line.trim())?.trim() ?? "";
+  return (
+    <div data-testid="message-long" data-open={shown}>
+      <div className={cn(!shown && "relative max-h-48 overflow-hidden")}>
+        <div data-chat-search-text><Markdown text={text} /></div>
+        {!shown && <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-background to-transparent" />}
+      </div>
+      {!shown && last && (
+        <div className="mt-1 truncate text-[12.5px] text-muted-foreground" data-testid="message-tail" title={last}>
+          끝부분 · {last.length > 200 ? `${last.slice(0, 199)}…` : last}
+        </div>
+      )}
+      {!searching && (
+        <button type="button" className="mt-1 flex items-center gap-1 text-[12px] text-muted-foreground hover:text-foreground" data-testid="message-expand" aria-expanded={shown} onClick={() => setOpen(!open)}>
+          <ChevronRight className={cn("size-3.5", shown && "rotate-90")} /> {shown ? "접기" : `전체 보기 · ${text.length.toLocaleString()}자`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** An app status line from the group chat: never shown as something a worker said. */
+function SystemNotice({ text, detail }: { text: string; detail: string }) {
+  const searching = !!useContext(ChatSearchQuery).trim();
+  const [open, setOpen] = useState(false);
+  const shown = open || searching;
+  return (
+    <div className="text-[11.5px] text-muted-foreground" data-testid="room-system-notice">
+      <div className="flex items-center gap-3">
+        <span className="h-px flex-1 bg-border" />
+        <span data-chat-search-text>{text}</span>
+        {!searching && (
+          <button type="button" className="shrink-0 underline-offset-2 hover:text-foreground hover:underline" data-testid="room-system-expand" aria-expanded={shown} onClick={() => setOpen(!open)}>
+            {shown ? "접기" : "자세히"}
+          </button>
+        )}
+        <span className="h-px flex-1 bg-border" />
+      </div>
+      {shown && <div className="mx-auto mt-1 max-w-[640px] whitespace-pre-wrap select-text" data-chat-search-text>{detail}</div>}
+    </div>
+  );
+}
 
 /** Next to the speaker name (the copy button owns the top-right corner); shown on row hover or keyboard focus. */
 const FORK_ACTION = "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100";
@@ -579,14 +647,23 @@ const STATUS_LABEL = { running: "진행 중", done: "완료", error: "오류", s
 
 function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }>; chatId: number }) {
   const [expanded, setExpanded] = useState(false);
+  const main = useContext(MainTimeline);
+  const [summaryOpen, setSummaryOpen] = useState(false);
   const searchQuery = useContext(ChatSearchQuery);
   const searching = !!searchQuery.trim();
   const showRequest = expanded || searching;
   const select = useStore((s) => s.select);
   const consult = useStore((s) => s.consults[chatId]?.find((c) => c.id === item.consultId));
   const status = consultCardStatus(item, consult);
-  const [progressExpanded, setProgressExpanded] = useState(status === "running");
-  const attention = needsAttention(status === item.status ? item : { ...item, status }, true);
+  // Main view: the work log stays folded even while running; a pending approval/question inside still opens it.
+  const [progressExpanded, setProgressExpanded] = useState(status === "running" && !main);
+  const attention = main ? item.children.some((child) => needsAttention(child, false)) : needsAttention(status === item.status ? item : { ...item, status }, true);
+  // Main view: the free-text report and the full structured review open together on request.
+  const showSummary = !main || summaryOpen || searching;
+  const reviewData = consultCardReview(item, consult);
+  const hasReport = (status !== "running" && !!item.summary?.trim()) || (item.consultKind === "review" && !!reviewData.review);
+  // A failure stays readable in the main view without opening the full report (account metadata skipped).
+  const reason = main && status !== "running" && status !== "done" ? consultReason(item.summary) : undefined;
   const requestBrief = item.request.split("\n").find((line) => line.trim())?.trim() ?? "(요청 내용 없음)";
   const actualEffort = consult?.effort;
   const effortTitle = `CLI에 전달한 설정입니다. 서비스 정책에 따라 조정될 수 있습니다.${consult?.requestedEffort && consult.requestedEffort !== actualEffort ? ` 마스터 요청: ${consult.requestedEffort}` : ""}`;
@@ -624,7 +701,7 @@ function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }
           {item.attachments.length > 0 && <span className="shrink-0 text-[11px] text-muted-foreground">첨부 {item.attachments.length}개</span>}
         </button>
         {item.files && item.files.length > 0 && <Badge>파일 {item.files.length}개</Badge>}
-        <span data-testid="consult-status" className={cn("flex items-center gap-1 text-[12px]", status === "done" ? "text-success" : status === "running" ? "text-primary" : "text-muted-foreground")}>
+        <span data-testid="consult-status" title={status === "done" ? "이 협의의 응답이 끝났습니다. 전체 작업의 완료 여부는 마스터 답변과 계획에서 확인하세요." : undefined} className={cn("flex items-center gap-1 text-[12px]", status === "done" ? "text-success" : status === "running" ? "text-primary" : "text-muted-foreground")}>
           {status === "running" ? <WorkingIndicator chatId={chatId} role={item.to} /> : status === "done" ? <Check className="size-3.5" /> : <AlertTriangle className="size-3.5" />}
           {STATUS_LABEL[status]}
         </span>
@@ -637,13 +714,25 @@ function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }
           배정 이유 · <span data-chat-search-text>{item.reason}</span>
         </div>
       )}
-      {status !== "running" && item.summary?.trim() && (
+      {reason && (
+        <div className="border-t px-3 py-1.5 text-[12px] text-destructive select-text" data-testid="consult-error-line">
+          <span data-chat-search-text>{reason}</span>
+        </div>
+      )}
+      {hasReport && main && !searching && (
+        <div className="border-t px-3 py-1.5">
+          <button type="button" className="flex items-center gap-1 text-[12px] text-muted-foreground hover:text-foreground" data-testid="consult-summary-toggle" aria-expanded={summaryOpen} onClick={() => setSummaryOpen(!summaryOpen)}>
+            <ChevronRight className={cn("size-3.5", summaryOpen && "rotate-90")} /> 결과 보고 {summaryOpen ? "접기" : "펼치기"}
+          </button>
+        </div>
+      )}
+      {status !== "running" && item.summary?.trim() && showSummary && (
         <div className="border-t px-3 py-2 text-[12px]" data-testid="consult-summary">
           <div className="mb-1 text-[11px] font-medium text-muted-foreground">결과 요약</div>
           <div data-chat-search-text><Markdown text={item.summary} className="text-[12.5px]" /></div>
         </div>
       )}
-      {item.consultKind === "review" && <ReviewResultView {...consultCardReview(item, consult)} />}
+      {item.consultKind === "review" && <ReviewResultView {...reviewData} compact={!showSummary} />}
       {showRequest && (
         <div className="border-t bg-background/40 p-3" data-testid="consult-request-details">
           <div className="rounded-lg border bg-card px-3 py-2">

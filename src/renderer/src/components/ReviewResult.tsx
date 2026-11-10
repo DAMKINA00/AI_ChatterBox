@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { ClipboardCheck } from "lucide-react";
 import type { Consult, ReviewResult } from "../../../shared/types";
 import { cn } from "../lib/utils";
-import { findingLocation, NO_STRUCTURED_REVIEW, reviewRunNote, reviewsFromEvents, reviewTotalsText, SEVERITY_LABEL, summarizeReviews, TEST_STATUS_LABEL, VERDICT_LABEL } from "../lib/review-summary";
+import { findingLocation, NO_STRUCTURED_REVIEW, reviewCountsText, reviewDigest, reviewRunNote, reviewsFromEvents, reviewTotalsText, SEVERITY_LABEL, summarizeReviews, TEST_STATUS_LABEL, VERDICT_LABEL } from "../lib/review-summary";
 import { useStore } from "../store";
 import { Badge } from "./ui";
 
@@ -14,8 +14,11 @@ const VERDICT_TONE: Record<ReviewResult["verdict"], string> = {
 const SEVERITY_TONE = { high: "border-destructive/40 text-destructive", medium: "border-warning/50 text-warning", low: "text-muted-foreground" } as const;
 const TEST_TONE = { passed: "text-success", failed: "text-destructive", not_run: "text-muted-foreground" } as const;
 
-/** Structured review inside a review consult card; the free-text summary stays shown separately. */
-export function ReviewResultView({ review, status }: { review?: ReviewResult; status: Consult["status"] }) {
+/**
+ * Structured review inside a review consult card; the free-text summary stays shown separately.
+ * compact (main chat view): verdict, counts and only high findings / failed tests in one line each.
+ */
+export function ReviewResultView({ review, status, compact = false }: { review?: ReviewResult; status: Consult["status"]; compact?: boolean }) {
   const note = reviewRunNote(status);
   if (!review) {
     return (
@@ -24,14 +27,41 @@ export function ReviewResultView({ review, status }: { review?: ReviewResult; st
       </div>
     );
   }
-  return (
-    <div className="space-y-1.5 border-t px-3 py-2 text-[12px]" data-testid="consult-review" data-verdict={review.verdict} data-run={status}>
+  const header = (
+    <>
       {note && <div className={cn("text-[11.5px]", status === "running" ? "text-muted-foreground" : "text-warning")} data-testid="review-run-note">{note}</div>}
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="text-[11px] font-medium text-muted-foreground">리뷰 판정</span>
         <Badge className={VERDICT_TONE[review.verdict]} data-testid="review-verdict">{VERDICT_LABEL[review.verdict]}</Badge>
         {review.revision && <span className="font-mono text-[11px] text-muted-foreground" title="리뷰 대상 기준">기준 <span data-chat-search-text>{review.revision}</span></span>}
       </div>
+    </>
+  );
+  if (compact) {
+    const digest = reviewDigest(review);
+    return (
+      <div className="space-y-1 border-t px-3 py-2 text-[12px]" data-testid="consult-review" data-verdict={review.verdict} data-run={status} data-compact="true">
+        {header}
+        <div className="text-[11.5px] text-muted-foreground" data-testid="review-counts">{reviewCountsText(digest)}</div>
+        {(digest.high.length > 0 || digest.failed.length > 0) && (
+          <ul className="space-y-0.5 text-[11.5px]" aria-label="조치가 필요한 항목" data-testid="review-digest">
+            {digest.high.map((f, i) => (
+              <li key={`f${i}`} className="truncate text-destructive" title={f.message}>
+                높음 · {f.location && <span className="font-mono">{f.location} </span>}<span data-chat-search-text>{f.message}</span>
+              </li>
+            ))}
+            {digest.failed.map((name, i) => (
+              <li key={`t${i}`} className="truncate text-destructive" title={name}>테스트 실패 · <span className="font-mono" data-chat-search-text>{name}</span></li>
+            ))}
+            {digest.more > 0 && <li className="text-muted-foreground">외 {digest.more}건은 결과 보고에서 확인</li>}
+          </ul>
+        )}
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-1.5 border-t px-3 py-2 text-[12px]" data-testid="consult-review" data-verdict={review.verdict} data-run={status}>
+      {header}
       {review.summary && <div className="select-text" data-chat-search-text>{review.summary}</div>}
       {review.findings.length > 0 && (
         <ul className="space-y-1" aria-label="지적 사항" data-testid="review-findings">

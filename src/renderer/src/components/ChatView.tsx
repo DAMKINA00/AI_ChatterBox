@@ -26,7 +26,7 @@ import { buildItems, chatTimelines, latestExpression, planOf } from "../timeline
 import { GoalBar, PlanHistory, PlanPanel } from "./PlanGoal";
 import { planHistory } from "../lib/plan-history";
 import { SLASH_COMMANDS, StatusDialog, type SlashCommand } from "./Commands";
-import { AttachmentChip, ItemList } from "./Items";
+import { AttachmentChip, ItemList, MainTimeline } from "./Items";
 import { AgentAvatar } from "./AgentAvatar";
 import { AgentUsage } from "./AgentUsage";
 import { defaultEffortForModel, EffortPicker, effortLabel } from "./EffortPicker";
@@ -121,7 +121,7 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
       {!node && plan && <PlanPanel chat={chat} plan={plan} onRevise={() => composer.current?.setText("/plan 수정: ")} />}
       {!node && <PlanHistory history={ended} />}
       {!node && <ReviewTotalsBar chatId={chat.id} />}
-      <Timeline key={node ?? "all"} items={items} chatId={chat.id} role={streamRole} busy={busy} instructionAt={instructionAt} empty={!events?.length} loading={!events} masterView={!node || node === "orch"}
+      <Timeline key={node ?? "all"} items={items} chatId={chat.id} role={streamRole} busy={busy} instructionAt={instructionAt} empty={!events?.length} loading={!events} masterView={!node || node === "orch"} mainView={!node}
         searchOpen={searchOpen} searchQuery={searchQuery} onSearchQuery={setSearchQuery} onCloseSearch={() => { setSearchOpen(false); setSearchQuery(""); }} />
       {chat.status === "interrupted" && <InterruptedBanner chat={chat} />}
       {node && node !== "orch" ? (
@@ -549,14 +549,15 @@ function useStatusAnnouncement(status: ChatStatus, events: TimelineEvent[] | und
   return text;
 }
 
-function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, masterView, searchOpen, searchQuery, onSearchQuery, onCloseSearch }: { items: ReturnType<typeof buildItems>; chatId: number; role?: Role; busy: boolean; instructionAt: number; empty: boolean; loading: boolean; masterView: boolean; searchOpen: boolean; searchQuery: string; onSearchQuery: (q: string) => void; onCloseSearch: () => void }) {
+function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, masterView, mainView, searchOpen, searchQuery, onSearchQuery, onCloseSearch }: { items: ReturnType<typeof buildItems>; chatId: number; role?: Role; busy: boolean; instructionAt: number; empty: boolean; loading: boolean; masterView: boolean; mainView: boolean; searchOpen: boolean; searchQuery: string; onSearchQuery: (q: string) => void; onCloseSearch: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
   const stick = useRef(true);
   // Replies as they were when the reader was last at the bottom; the jump button names what came since.
+  // The main view counts only its surface (group chat), not workers' replies folded inside consult cards.
   const seen = useRef<SeenReplies>(new Map());
-  if (atBottom) seen.current = seenReplies(items);
-  const unseen = atBottom ? null : unseenLabel(unseenReplies(items, seen.current));
+  if (atBottom) seen.current = seenReplies(items, mainView);
+  const unseen = atBottom ? null : unseenLabel(unseenReplies(items, seen.current, mainView));
   const [now, setNow] = useState(() => Date.now());
   const { history, pending } = useMemo(() => masterView ? {
     history: items.filter(item => item.kind !== "approval" || !!item.decision),
@@ -582,6 +583,7 @@ function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, ma
 
   return (
     <ChatSearchQuery.Provider value={searchOpen ? searchQuery : ""}>
+    <MainTimeline.Provider value={mainView}>
     <div className="relative flex min-h-0 flex-1 flex-col">
       {searchOpen && <ChatSearch root={ref} revision={items} query={searchQuery} onQuery={onSearchQuery} onClose={onCloseSearch} />}
       <div
@@ -635,6 +637,7 @@ function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, ma
         </Button>
       )}
     </div>
+    </MainTimeline.Provider>
     </ChatSearchQuery.Provider>
   );
 }

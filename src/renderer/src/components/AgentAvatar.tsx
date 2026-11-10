@@ -8,7 +8,8 @@ export type AvatarSize = 24 | 32 | 36;
 const SIZE_CLASS: Record<AvatarSize, string> = { 24: "size-6", 32: "size-8", 36: "size-9" };
 
 function source(kind: AvatarKind, expression: AgentExpression): string {
-  const base = import.meta.env.BASE_URL || "./";
+  // Optional chaining keeps server-side unit renders (no Vite env) working; Vite still substitutes it.
+  const base = import.meta.env?.BASE_URL || "./";
   return `${base.endsWith("/") ? base : `${base}/`}characters/${kind}/${expression}.png`;
 }
 

@@ -1,16 +1,23 @@
 // Folds TimelineEvents into display items for one view of a chat:
-//  - unified (default): user + orchestrator, with each consult as a card holding the worker's events
+//  - unified (default): user + orchestrator, with each consult as a card holding the worker's events.
+//    It reads as the group chat: the app's consult-result copies, 1:1 messages and top-level tool cards are
+//    left to the master/worker/consult views (stored events and team delivery are unchanged).
 //  - "orch" / "claude" / "gpt": one conversation, flat
 //  - "consult:N": one consult
 import { isAgentExpression, isWorkerKey } from "../../shared/types";
 import { currentPlanView, type PlanView } from "../../shared/plan-lifecycle";
+import { roomProvenance, systemBrief, type ConsultFacts, type RoomProvenance } from "../../shared/room-message";
 import type { AgentExpression, AgentEvent, ApprovalDecision, ApprovalRequest, AttachmentRef, ConsultKind, ConsultStatus, FileDiff, NodeId, ReviewResult, Role, TimelineEvent } from "../../shared/types";
 
 export type Item =
   | { kind: "artifacts"; key: string; paths: string[] }
   /** eventId: the persisted event (fork point); absent for live previews. */
   | { kind: "user"; key: string; text: string; attachments: AttachmentRef[]; at: number; queued?: boolean; delivery?: "now" | "next"; eventId?: number }
-  | { kind: "message"; key: string; role: Role; node: NodeId; text: string; streaming: boolean; expression: AgentExpression; at: number; eventId?: number }
+  /**
+   * room: a group chat line (send_message to=all or an app copy). origin "result": the app's copy of a finished
+   * consult, not something the worker said.
+   */
+  | { kind: "message"; key: string; role: Role; node: NodeId; text: string; streaming: boolean; expression: AgentExpression; at: number; eventId?: number; room?: true; origin?: "result" }
   /** Read-only transcript a forked chat started from. */
   | { kind: "fork"; key: string; text: string; attachments: AttachmentRef[]; at: number }
   | { kind: "tool"; key: string; role: Role; id: string; name: string; input: string; diffs?: FileDiff[]; result?: { ok: boolean; output: string } }
@@ -39,7 +46,8 @@ export type Item =
   | { kind: "image"; key: string; role: Role; node: NodeId; id: string; status: "running" | "done" | "error"; prompt?: string; attachment?: AttachmentRef; error?: string }
   | { kind: "ask"; key: string; id: string; question: string; options: string[]; answer?: string }
   | { kind: "peer"; key: string; from: Role; to: Role; text: string }
-  | { kind: "notice"; key: string; tone: "error" | "auth" | "info"; text: string };
+  /** origin "system": an app status line from the group chat; detail keeps its full original text. */
+  | { kind: "notice"; key: string; tone: "error" | "auth" | "info"; text: string; detail?: string; origin?: "system" };
 
 type View = NodeId | undefined;
 
@@ -195,16 +203,27 @@ interface FoldState {
   consultTargets: Map<number, Role>;
   expressions: ExpressionState;
   consultPaths: Map<number, number[] | null>;
+  /** Recorded end status per consult, to recognize the app's legacy result copies exactly. */
+  consultEnds: Map<number, { status: ConsultStatus; summary: string }>;
 }
 
-const emptyFold = (): FoldState => ({ top: [], consultTargets: new Map(), expressions: new Map(), consultPaths: new Map() });
-const copyFold = (state: FoldState): FoldState => ({ top: state.top, consultTargets: new Map(state.consultTargets), expressions: new Map(state.expressions), consultPaths: new Map(state.consultPaths) });
+const emptyFold = (): FoldState => ({ top: [], consultTargets: new Map(), expressions: new Map(), consultPaths: new Map(), consultEnds: new Map() });
+const copyFold = (state: FoldState): FoldState => ({ top: state.top, consultTargets: new Map(state.consultTargets), expressions: new Map(state.expressions), consultPaths: new Map(state.consultPaths), consultEnds: new Map(state.consultEnds) });
+
+/** Group chat line as a display item; the main view drops result copies before this. */
+function roomItem(e: TimelineEvent, ev: Extract<AgentEvent, { type: "room_message" }>, provenance: RoomProvenance): Item {
+  const key = e.id ? `e${e.id}` : `live-${e.node}-${e.role ?? "orch"}`;
+  if (provenance.kind === "system") return { kind: "notice", key, tone: "info", text: systemBrief(ev.text), detail: ev.text, origin: "system" };
+  // No eventId: a group message is not a fork point, even when the master wrote it.
+  return { kind: "message", key, role: ev.from, node: "orch", text: ev.text, streaming: false, expression: "neutral", at: e.at, room: true, ...(provenance.kind === "result" ? { origin: "result" as const } : {}) };
+}
 
 function foldEvents(events: TimelineEvent[], view: View, state: FoldState, start = 0, beforeEvent?: (index: number, state: FoldState) => void) {
   let { top } = state;
-  const { consultTargets, expressions, consultPaths } = state;
+  const { consultTargets, expressions, consultPaths, consultEnds } = state;
+  const facts: ConsultFacts = { target: (id) => consultTargets.get(id), ended: (id) => consultEnds.get(id) };
   for (let index = start; index < events.length; index++) {
-    if (beforeEvent) beforeEvent(index, { top, consultTargets, expressions, consultPaths });
+    if (beforeEvent) beforeEvent(index, { top, consultTargets, expressions, consultPaths, consultEnds });
     const e = events[index];
     if (e.event.type === "review_result") {
       // Reported from inside the consult; the result belongs on the consult card itself in every view.
@@ -212,6 +231,26 @@ function foldEvents(events: TimelineEvent[], view: View, state: FoldState, start
       continue;
     }
     if (e.event.type === "consult_start") consultTarget(e, consultTargets);
+    if (e.event.type === "consult_end") consultEnds.set(e.event.consultId, { status: e.event.status, summary: e.event.summary });
+    if (e.event.type === "room_message") {
+      const provenance = roomProvenance(e.event, facts);
+      // The consult card already shows this result's state in the main view; its full text is in the detail views.
+      if (view === undefined && provenance.kind === "result") continue;
+      top = [...top, roomItem(e, e.event, provenance)];
+      continue;
+    }
+    if (view === undefined) {
+      // 1:1 traffic (including check_agent prompts) belongs to the sender/recipient views.
+      if (e.event.type === "peer_message") continue;
+      if (consultOf(e.node) === null) {
+        // Top-level tool logs stay in the master/worker views; a hidden call still ends the open stream.
+        if (e.event.type === "tool_call") {
+          top = closeStream(top, (e.role ?? "orch") as Role, e.node);
+          continue;
+        }
+        if (e.event.type === "tool_result") continue;
+      }
+    }
     const where = belongs(e, view, consultTargets);
     if (!where) continue;
     const role = (e.role ?? "orch") as Role;
@@ -367,8 +406,8 @@ export function apply(items: Item[], e: TimelineEvent, expression?: AgentExpress
   const key = e.id ? `e${e.id}` : `live-${e.node}-${role}`;
   switch (ev.type) {
     case "room_message":
-      // No eventId: a group message is not a fork point, even when the master wrote it.
-      return [...items, { kind: "message", key, role: ev.from, node: "orch", text: ev.text, streaming: false, expression: "neutral", at: e.at }];
+      // Without consult facts only an explicit kind or the status-check wrapper is recognized.
+      return [...items, roomItem(e, ev, roomProvenance(ev))];
     case "peer_message":
       return [...items, { kind: "peer", key, from: ev.from, to: ev.to, text: ev.text }];
     case "agent_usage":

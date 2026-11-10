@@ -11,6 +11,8 @@ import { CONSULT_KIND_LABEL, roleName, type AttachmentRef, type Chat, type ChatA
 import { buildItems, planOf, type Item } from "../timeline";
 import { forkEventId } from "../lib/fork";
 import { consultCardReview, consultCardStatus } from "../lib/review-summary";
+import { needsAttention } from "../timeline-window";
+import { consultReason } from "../../../shared/room-message";
 import { cn } from "../lib/utils";
 import { AuthError, request, setCsrf, url } from "./api";
 import { ChatSettings } from "./ChatSettings";
@@ -399,7 +401,7 @@ function ItemView({ item, chat, agents, consults, live, onError, onForked, neste
           <span>{roleName(item.role, agents)}{item.streaming ? " · 작성 중…" : ""}</span>
           {forkId && <ForkAction chat={chat} eventId={forkId} preview={item.text} onForked={onForked} onError={onError} />}
         </div>
-        <Md text={item.text} />
+        {item.room && !nested ? <RoomText text={item.text} /> : <Md text={item.text} />}
       </div>;
     case "fork":
       return <ForkContext item={item} />;
@@ -419,6 +421,7 @@ function ItemView({ item, chat, agents, consults, live, onError, onForked, neste
     case "consult": {
       const consult = consults.find(c => c.id === item.consultId);
       const status = consultCardStatus(item, consult);
+      const reason = status !== "running" && status !== "done" ? consultReason(item.summary) : undefined;
       return (
         <div id={consultCardDomId(item.consultId)} tabIndex={-1} data-testid="remote-consult-card" data-status={status} className="rounded-lg outline-none focus:ring-2 focus:ring-primary">
         <Card>
@@ -428,10 +431,11 @@ function ItemView({ item, chat, agents, consults, live, onError, onForked, neste
             <span data-testid="remote-consult-status" className={cn("text-[11.5px]", status === "running" ? "text-primary" : status === "done" ? "text-success" : "text-destructive")}>{CONSULT_STATUS_LABEL[status]}</span>
           </div>
           <details className="mt-1.5 text-[12.5px]"><summary className="cursor-pointer text-muted-foreground">요청 내용</summary><div className="mt-1.5"><Md text={item.request} /></div></details>
-          {item.summary && <div className="mt-2 border-t pt-2"><Md text={item.summary} /></div>}
+          {/* Remote is the short main chat: the full report stays in the desktop master view; a failure keeps its reason. */}
+          {reason && <div data-testid="remote-consult-error" className="mt-1.5 break-words text-[12.5px] text-destructive">{reason}</div>}
           {item.consultKind === "review" && <ReviewBlock {...consultCardReview(item, consult)} />}
           {item.children.length > 0 && (
-            <details className="mt-2 text-[12.5px]" open={status === "running"}>
+            <details className="mt-2 text-[12.5px]" open={item.children.some(child => needsAttention(child, false))}>
               <summary className="cursor-pointer text-muted-foreground">작업 과정 {item.children.length}개</summary>
               <div className="mt-2 grid gap-2 border-l pl-3">{item.children.map(child => <ItemView key={child.key} item={child} chat={chat} agents={agents} consults={consults} live={live} onError={onError} onForked={onForked} nested />)}</div>
             </details>
@@ -451,6 +455,18 @@ function ItemView({ item, chat, agents, consults, live, onError, onForked, neste
     case "artifacts":
       return <Card className="text-[12.5px]"><div className="mb-1 font-medium">산출물</div><ul className="font-mono text-[11.5px]">{item.paths.map(p => <li key={p} className="break-all">{p}</li>)}</ul></Card>;
   }
+}
+
+/** A long group chat line shows its start and its last line (a question or blocker) and opens in place. */
+function RoomText({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  if (open || (text.length <= 700 && text.split("\n").length <= 12)) return <Md text={text} />;
+  const last = text.trimEnd().split("\n").findLast(line => line.trim())?.trim() ?? "";
+  return <div data-testid="remote-message-long">
+    <div className="max-h-40 overflow-hidden"><Md text={text} /></div>
+    {last && <div className="mt-1 truncate text-[12px] text-muted-foreground">끝부분 · {last}</div>}
+    <button type="button" className="mt-1 text-[12px] text-muted-foreground underline underline-offset-2" data-testid="remote-message-expand" aria-expanded={false} onClick={() => setOpen(true)}>전체 보기</button>
+  </div>;
 }
 
 function Approval({ item, chat, agents, live, onError }: { item: Extract<Item, { kind: "approval" }>; chat: Chat; agents: ChatAgent[]; live: boolean; onError: (e: unknown) => void }) {

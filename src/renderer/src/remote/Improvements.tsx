@@ -8,7 +8,7 @@ import type { Chat, ChatAgent, ChatForkOptions, Consult, ConsultStatus, ReviewRe
 import { FORK_NOT_COPIED, FORK_NOTE, FORK_RANGE_LABEL, forkOriginText, forkPreview } from "../lib/fork";
 import { consultCardIds, openPlanSteps, PLAN_STATE_LABEL, planBlockerName, planConsultLinks, planCounts, planCountsText, planEndedEarly, planStepName, planStepViews } from "../lib/plan-view";
 import type { PlanHistoryEntry } from "../lib/plan-history";
-import { findingLocation, NO_STRUCTURED_REVIEW, reviewRunNote, reviewsFromEvents, reviewTotalsText, SEVERITY_LABEL, summarizeReviews, TEST_STATUS_LABEL, VERDICT_LABEL } from "../lib/review-summary";
+import { NO_STRUCTURED_REVIEW, reviewCountsText, reviewDigest, reviewRunNote, reviewsFromEvents, reviewTotalsText, summarizeReviews, VERDICT_LABEL } from "../lib/review-summary";
 import { formatDuration, PENDING_TOOL_LABEL, RUN_STATS_NOTE, runStatsFlags, runStatsRows, type RunStatsRow } from "../lib/run-stats-view";
 import { cn } from "../lib/utils";
 import { normalizePlanStepTitle, type Item, type planOf } from "../timeline";
@@ -105,6 +105,7 @@ export function ForkContext({ item }: { item: Extract<Item, { kind: "fork" }> })
 export function ReviewBlock({ review, status }: { review?: ReviewResult; status: ConsultStatus }) {
   const note = reviewRunNote(status);
   if (!review) return <div className="mt-2 border-t pt-2 text-[12px] text-muted-foreground">리뷰 판정 · {status === "running" ? "보고 대기" : `${NO_STRUCTURED_REVIEW} (통과로 간주하지 않음)`}</div>;
+  const digest = reviewDigest(review);
   return (
     <div className="mt-2 grid gap-1.5 border-t pt-2 text-[12.5px]">
       {note && <div className={cn("text-[12px]", status === "running" ? "text-muted-foreground" : "text-warning")}>{note}</div>}
@@ -113,19 +114,12 @@ export function ReviewBlock({ review, status }: { review?: ReviewResult; status:
         <span className={cn("rounded border px-1.5 text-[11.5px] font-medium", review.verdict === "pass" ? "border-success/50 text-success" : review.verdict === "changes_requested" ? "border-destructive/50 text-destructive" : "border-warning/60 text-warning")}>{VERDICT_LABEL[review.verdict]}</span>
         {review.revision && <span className="font-mono text-[11.5px] text-muted-foreground">기준 {review.revision}</span>}
       </div>
-      {review.summary && <div className="break-words">{review.summary}</div>}
-      {review.findings.length > 0 && <ul className="grid gap-1" aria-label="지적 사항">
-        {review.findings.map((f, i) => (
-          <li key={i} className="flex items-start gap-1.5">
-            <span className={cn("shrink-0 rounded border px-1 text-[11px]", f.severity === "high" ? "border-destructive/50 text-destructive" : f.severity === "medium" ? "border-warning/60 text-warning" : "text-muted-foreground")}>{SEVERITY_LABEL[f.severity]}</span>
-            <span className="min-w-0 break-words">{findingLocation(f) && <span className="mr-1 font-mono text-[11.5px] text-muted-foreground">{findingLocation(f)}</span>}{f.message}</span>
-          </li>
-        ))}
-      </ul>}
-      {review.tests.length > 0 && <ul className="grid gap-0.5" aria-label="테스트">
-        {review.tests.map((t, i) => (
-          <li key={i} className="break-words"><span className={cn("font-medium", t.status === "passed" ? "text-success" : t.status === "failed" ? "text-destructive" : "text-muted-foreground")}>{TEST_STATUS_LABEL[t.status]}</span> <span className="font-mono">{t.name}</span>{t.detail && <span className="text-muted-foreground"> · {t.detail}</span>}</li>
-        ))}
+      {/* Remote is the short main chat: counts and what must be acted on; the full review stays in the desktop detail views. */}
+      <div className="text-[12px] text-muted-foreground" data-testid="remote-review-counts">{reviewCountsText(digest)}</div>
+      {(digest.high.length > 0 || digest.failed.length > 0) && <ul className="grid gap-0.5 text-[12px] text-destructive" aria-label="조치가 필요한 항목" data-testid="remote-review-digest">
+        {digest.high.map((f, i) => <li key={`f${i}`} className="break-words">높음 · {f.location && <span className="font-mono">{f.location} </span>}{f.message}</li>)}
+        {digest.failed.map((name, i) => <li key={`t${i}`} className="break-words">테스트 실패 · <span className="font-mono">{name}</span></li>)}
+        {digest.more > 0 && <li className="text-muted-foreground">외 {digest.more}건은 데스크톱에서 확인</li>}
       </ul>}
     </div>
   );

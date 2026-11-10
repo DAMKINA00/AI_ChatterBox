@@ -145,13 +145,27 @@ try {
   check("[UI] missing structured result is listed apart", (await totals.getAttribute("data-missing")) === "1" && totalsText.includes("구조화 결과 없음 1"), totalsText);
   const reviews = page.getByTestId("consult-review");
   const reviewCard2 = page.getByTestId("consult-card").filter({ has: page.getByTestId("consult-request-brief").filter({ hasText: "변경 리뷰" }) });
-  check("[UI] latest report wins on the card and the free-text summary stays", (await reviewCard2.getByTestId("consult-review").getAttribute("data-verdict")) === "changes_requested" && (await reviewCard2.getByTestId("consult-summary").innerText()).includes("자유문장 리뷰 요약"));
+  // Main view: the review reads as verdict, counts and what must be acted on; the full report opens on request.
+  const review2 = reviewCard2.getByTestId("consult-review");
+  const digest2 = await reviewCard2.getByTestId("review-digest").innerText();
+  check("[UI] main view: latest report wins on the card, compact with counts and required failures only",
+    (await review2.getAttribute("data-verdict")) === "changes_requested" && (await review2.getAttribute("data-compact")) === "true" &&
+      (await reviewCard2.getByTestId("review-counts").innerText()).includes("지적 높음 1 · 중간 0 · 낮음 1 · 테스트 통과 0 · 실패 1 · 미실행 1") &&
+      digest2.includes("src/a.ts:12") && digest2.includes("널 검사 누락") && digest2.includes("테스트 실패 · unit") &&
+      !(await review2.innerText()).includes("이름 다듬기") && !(await review2.innerText()).includes("1건 실패") &&
+      (await reviewCard2.getByTestId("consult-summary").count()) === 0, digest2);
+  await reviewCard2.getByTestId("consult-summary-toggle").click();
+  await reviewCard2.getByTestId("consult-summary").waitFor();
+  check("[UI] opening the report shows the free-text summary and the full review", (await reviewCard2.getByTestId("consult-summary").innerText()).includes("자유문장 리뷰 요약") &&
+    (await review2.getAttribute("data-compact")) === null && (await reviewCard2.getByTestId("review-findings").innerText()).includes("이름 다듬기"));
   check("[UI] findings and tests are listed", (await page.getByTestId("review-findings").first().innerText()).includes("src/a.ts:12") && (await page.getByTestId("review-tests").first().innerText()).includes("실패"));
   check("[UI] review without a report says so", (await reviews.nth(1).innerText()).includes("구조화 결과 없음"));
   check("[UI] errored review shows its run state next to the verdict", (await page.getByTestId("review-run-note").first().innerText()).includes("오류"));
-  check("[UI] record-only review shows the record's verdict and run state", (await reviews.nth(3).getAttribute("data-verdict")) === "inconclusive" && (await reviews.nth(3).getAttribute("data-run")) === "done" && (await reviews.nth(3).innerText()).includes(RECORD_ONLY_SUMMARY), await reviews.nth(3).innerText());
+  check("[UI] record-only review shows the record's verdict and run state; its summary waits behind the report toggle", (await reviews.nth(3).getAttribute("data-verdict")) === "inconclusive" && (await reviews.nth(3).getAttribute("data-run")) === "done" && !(await reviews.nth(3).innerText()).includes(RECORD_ONLY_SUMMARY), await reviews.nth(3).innerText());
   // Without consult_end the timeline copy stays running; header, icon, progress and review block follow the record.
   const card = (request) => page.getByTestId("consult-card").filter({ has: page.getByTestId("consult-request-brief").filter({ hasText: request }) });
+  await card("기록만 있는 리뷰").getByTestId("consult-summary-toggle").click();
+  check("[UI] record-only review opens to the record's full summary", (await card("기록만 있는 리뷰").getByTestId("consult-review").innerText()).includes(RECORD_ONLY_SUMMARY));
   const cardState = async (request) => {
     const c = card(request);
     return { card: await c.getAttribute("data-status"), header: await c.getByTestId("consult-status").innerText(), review: await c.getByTestId("consult-review").getAttribute("data-run"),
@@ -272,14 +286,16 @@ try {
     return { card: await remoteCard(id).getAttribute("data-status"), header: await remoteCard(id).getByTestId("remote-consult-status").innerText(), text: await remoteCard(id).innerText(),
       progressOpen: await progress.count() ? await progress.evaluate((d) => d.open) : null };
   };
-  check("[UI remote] record-only review shows the record's verdict without a stale run note", await ok(web.getByText(RECORD_ONLY_SUMMARY).first().waitFor({ timeout: 5_000 })) && (await remoteState(5)).text.includes("판단 보류") && !/리뷰 실행 중지|리뷰 진행 중/.test((await remoteState(5)).text));
+  // Remote is the short main chat: verdict and counts only; the review's full text stays in the desktop detail views.
+  check("[UI remote] record-only review shows the record's verdict without a stale run note or its full summary", await ok(remoteCard(5).waitFor({ timeout: 5_000 })) && (await remoteState(5)).text.includes("판단 보류") && !(await remoteState(5)).text.includes(RECORD_ONLY_SUMMARY) && !/리뷰 실행 중지|리뷰 진행 중/.test((await remoteState(5)).text));
   const remote5 = await remoteState(5);
   check("[UI remote] record-only review: header and review block both say done", remote5.card === "done" && remote5.header === "완료", JSON.stringify(remote5));
   const remote6 = await remoteState(6);
   check("[UI remote] review stopped by a restart: header, review note and progress agree", remote6.card === "stopped" && remote6.header === "중지" && remote6.text.includes("리뷰 실행 중지") && remote6.progressOpen === false, JSON.stringify(remote6));
   const remote2 = await remoteCard(2).innerText();
   const remote3 = await remoteCard(3).innerText();
-  check("[UI remote] review cards show verdicts and the missing result", remote2.includes("수정 요청") && remote2.includes("src/a.ts:12") && remote3.includes("구조화 결과 없음 (통과로 간주하지 않음)"), `${remote2} | ${remote3}`);
+  check("[UI remote] review cards show verdicts, required failures and the missing result", remote2.includes("수정 요청") && remote2.includes("src/a.ts:12") && remote2.includes("테스트 실패 · unit") && remote3.includes("구조화 결과 없음 (통과로 간주하지 않음)"), `${remote2} | ${remote3}`);
+  check("[UI remote] review cards leave the full report out (no free-text summary, low findings or test details)", !remote2.includes("자유문장 리뷰 요약") && !remote2.includes("이름 다듬기") && !remote2.includes("1건 실패"), remote2);
   await web.locator("details summary").filter({ hasText: /리뷰 5건/ }).click();
   check("[UI remote] team panel shows the review total and checklist prerequisites", await ok(web.getByText(/실행 미완료 2/).first().waitFor({ timeout: 5_000 })) && await ok(web.getByText(/선행 미완료: API 구현/).waitFor({ timeout: 5_000 })));
   await web.getByRole("button", { name: "협의 1 카드로 이동" }).click();

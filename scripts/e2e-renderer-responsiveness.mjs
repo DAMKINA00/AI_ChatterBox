@@ -179,8 +179,10 @@ try {
   await page.reload();
   await page.waitForSelector('[data-testid="sidebar"]');
   await selectChat(page, ids.historyChat);
-  await page.waitForSelector('[data-testid="consult-summary"]');
+  // The main view folds consult reports behind a toggle; the report itself opens on request.
+  await page.waitForSelector('[data-testid="consult-summary-toggle"]');
   check("completed histories defer worker detail rendering", await page.getByTestId("agent-message").count() === 0);
+  check("main view keeps completed consult reports folded", await page.getByTestId("consult-summary").count() === 0);
   const firstConsult = page.getByTestId("consult-card").first();
   await firstConsult.getByTestId("consult-progress-toggle").click();
   await firstConsult.getByTestId("load-earlier").click();

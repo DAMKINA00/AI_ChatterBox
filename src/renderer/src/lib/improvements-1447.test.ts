@@ -170,7 +170,8 @@ test("fork_context is a top-level item; user/master messages expose their persis
   assert.equal(forkEventId(live[2]), undefined, "streaming preview cannot be a fork point");
   const done = buildItems([...events, ev("orch", "orch", { type: "text", text: "완료" })], undefined, false);
   assert.equal(forkEventId(done[2]), nextId - 1, "final text carries its event id");
-  const tool = buildItems([ev("orch", "orch", { type: "tool_call", id: "t", name: "Bash", input: "ls" })], undefined, false);
+  // Tool cards live in the master view (the main view leaves top-level tool logs out).
+  const tool = buildItems([ev("orch", "orch", { type: "tool_call", id: "t", name: "Bash", input: "ls" })], "orch", false);
   assert.equal(forkEventId(tool[0]), undefined, "tool cards are not fork points");
   const liveOnly = buildItems([{ id: 0, chatId: 1, node: "orch", role: null, at: 1, event: { type: "user", text: "x", attachments: [] } }], undefined, true);
   assert.equal(forkEventId(liveOnly[0]), undefined, "unsaved event has no id");

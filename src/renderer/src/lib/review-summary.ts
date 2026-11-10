@@ -98,3 +98,36 @@ export function reviewTotalsText(t: ReviewTotals): string {
 
 /** "file.ts:12" style location of a finding. */
 export const findingLocation = (f: ReviewResult["findings"][number]) => (f.path ? (f.line ? `${f.path}:${f.line}` : f.path) : "");
+
+const clipLine = (text: string, max: number) => {
+  const line = text.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+};
+
+/**
+ * The main chat's view of a structured review: verdict, counts, and only what must be acted on (high
+ * findings and failed tests, one short line each, at most three of each). The summary text, other
+ * findings and test details stay in the desktop detail views.
+ */
+export function reviewDigest(review: ReviewResult, limit = 3, max = 120) {
+  const count = (severity: ReviewResult["findings"][number]["severity"]) => review.findings.filter((f) => f.severity === severity).length;
+  const testCount = (status: ReviewResult["tests"][number]["status"]) => review.tests.filter((t) => t.status === status).length;
+  const high = review.findings.filter((f) => f.severity === "high");
+  const failed = review.tests.filter((t) => t.status === "failed");
+  return {
+    findings: { high: count("high"), medium: count("medium"), low: count("low") },
+    tests: { passed: testCount("passed"), failed: testCount("failed"), notRun: testCount("not_run") },
+    high: high.slice(0, limit).map((f) => ({ location: findingLocation(f), message: clipLine(f.message, max) })),
+    failed: failed.slice(0, limit).map((t) => clipLine(t.name, max)),
+    more: Math.max(0, high.length - limit) + Math.max(0, failed.length - limit),
+  };
+}
+
+/** One line of counts for the compact review: "지적 높음 1 · 중간 0 · 낮음 2 · 테스트 통과 3 · 실패 1 · 미실행 0". */
+export function reviewCountsText(d: ReturnType<typeof reviewDigest>): string {
+  const parts: string[] = [];
+  if (d.findings.high + d.findings.medium + d.findings.low) parts.push(`지적 높음 ${d.findings.high} · 중간 ${d.findings.medium} · 낮음 ${d.findings.low}`);
+  else parts.push("지적 없음");
+  if (d.tests.passed + d.tests.failed + d.tests.notRun) parts.push(`테스트 통과 ${d.tests.passed} · 실패 ${d.tests.failed} · 미실행 ${d.tests.notRun}`);
+  return parts.join(" · ");
+}

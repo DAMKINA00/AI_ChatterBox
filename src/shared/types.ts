@@ -411,9 +411,15 @@ export interface ApprovalRequest {
 
 export type ApprovalDecision = "once" | "chat" | "deny";
 
+export type RoomMessageKind = "chat" | "result" | "system";
+
 /** Normalized event stream. Every event also carries the agent that produced it (see TimelineEvent). */
 export type AgentEvent =
-  | { type: "room_message"; from: Role; text: string }
+  /**
+   * Group chat line. kind is display provenance only (absent = a real message someone wrote):
+   * "result" is the app's copy of a finished consult, "system" an app notice. Delivery to the team is the same.
+   */
+  | { type: "room_message"; from: Role; text: string; kind?: RoomMessageKind; consultId?: number; status?: ConsultStatus }
   | { type: "peer_message"; from: Role; to: Role; text: string }
   | { type: "artifacts"; paths: string[] }
   | { type: "agent_usage"; metrics: AgentMetrics }

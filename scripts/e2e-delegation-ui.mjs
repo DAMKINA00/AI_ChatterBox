@@ -73,6 +73,8 @@ const attachment = {
 };
 const completedRequest = `${"장문의 완료 요청입니다. ".repeat(18)}\n완료 요청의 세부 조건과 첨부 파일은 펼친 요청 안에 표시합니다.`;
 const runningRequest = `${"장문의 진행 요청입니다. ".repeat(18)}\n진행 중 요청의 세부 조건과 첨부 파일도 같은 방식으로 접고 펼칩니다.`;
+const AUTO_RESULT_COPY = "[구현 · done · 협의 1]\n[CLI 지정 계정=claude-e2e · 실제 실행 계정=claude-e2e]\n자동 결과 사본: 메인 대화에는 나오지 않습니다.";
+const PUBLIC_LINE = "공개 대화: 요약을 올렸어요. 확인 부탁해요.";
 const secondRunningRequest = `${"장문의 병렬 요청입니다. ".repeat(18)}\n두 번째 진행 중 협의도 모두 끝나기 전까지 사이드바에 표시합니다.`;
 const workerApprovalId = "e2e-worker-approval-1";
 
@@ -231,6 +233,9 @@ function seedDatabase() {
         request: { id: "e2e-approval-1", role: "orch", title: "저장 대화 확인", detail: "Write approval-fixture.txt", risk: "low", reason: "격리 UI 검증" },
       }),
     );
+    // Group chat: the app's copy of consult 1's report stays out of the main view; a real public line stays in.
+    event(60, "orch", "w1", { type: "room_message", from: "w1", text: AUTO_RESULT_COPY, kind: "result", consultId: 1, status: "done" });
+    event(61, "orch", "w1", { type: "room_message", from: "w1", text: PUBLIC_LINE });
   } finally {
     db.close();
   }
@@ -447,11 +452,33 @@ try {
       (await consult.locator('[data-testid="consult-request-details"]').count()) === 0 &&
       briefIsClipped,
   );
+  // Main view is the group chat: the report and the worker's internal reply open only on request.
+  const doneSummaryToggle = consult.locator('[data-testid="consult-summary-toggle"]');
+  const doneProgressToggle = consult.locator('[data-testid="consult-progress-toggle"]');
+  const workerReply = page.locator('[data-testid="agent-message"][data-role="w1"]').filter({ hasText: "요청을 확인했고 결과를 요약했습니다." });
   check(
-    "completed collapsed consult keeps reason, summary, and worker response visible",
+    "completed consult in the main view keeps its reason while the report and worker reply stay folded",
     (await consult.locator('[data-testid="consult-reason"]').textContent())?.includes("소스 구조를 파악한 Claude") &&
+      (await consult.locator('[data-testid="consult-summary"]').count()) === 0 &&
+      (await doneSummaryToggle.getAttribute("aria-expanded")) === "false" &&
+      (await doneProgressToggle.getAttribute("aria-expanded")) === "false" &&
+      (await workerReply.count()) === 0,
+  );
+  check(
+    "main view shows the real public line but not the app's automatic result copy",
+    (await page.locator('[data-testid="agent-message"][data-role="w1"]').filter({ hasText: PUBLIC_LINE }).count()) === 1 &&
+      (await page.getByText("자동 결과 사본", { exact: false }).count()) === 0 &&
+      (await page.locator('[data-testid="agent-message"][data-origin="result"]').count()) === 0,
+  );
+  await doneSummaryToggle.press("Enter");
+  await consult.locator('[data-testid="consult-summary"]').waitFor({ state: "visible" });
+  await doneProgressToggle.click();
+  await workerReply.waitFor({ state: "visible" });
+  check(
+    "explicit expansion shows the full report and the worker reply in place",
+    (await doneSummaryToggle.getAttribute("aria-expanded")) === "true" &&
       (await consult.locator('[data-testid="consult-summary"]').textContent())?.includes("접힌 카드에서도 읽을 수 있습니다") &&
-      (await page.locator('[data-testid="agent-message"][data-role="w1"]').filter({ hasText: "요청을 확인했고 결과를 요약했습니다." }).count()) === 1,
+      (await workerReply.count()) === 1,
   );
   await doneToggle.press("Enter");
   const doneDetails = consult.locator('[data-testid="consult-request-details"]');
@@ -476,12 +503,18 @@ try {
   await runningConsult.waitFor({ state: "visible" });
   const runningToggle = runningConsult.locator('[data-testid="consult-request-toggle"]');
   const runningProgress = runningConsult.locator('[data-testid="consult-progress"]');
+  // In the main view a running worker's log is folded too (it is not group chat); it opens on request.
+  const runningProgressToggle = runningConsult.locator('[data-testid="consult-progress-toggle"]');
   check(
-    "running request starts collapsed while worker progress remains visible",
+    "running request and worker log start folded in the main view, with the log one click away",
     (await runningToggle.getAttribute("aria-expanded")) === "false" &&
       (await runningConsult.locator('[data-testid="consult-request-details"]').count()) === 0 &&
-      (await runningProgress.textContent())?.includes(progressText),
+      (await runningProgressToggle.getAttribute("aria-expanded")) === "false" &&
+      !(await runningProgress.textContent())?.includes(progressText),
   );
+  await runningProgressToggle.click();
+  await runningProgress.getByText(progressText).waitFor({ state: "visible" });
+  check("opening the worker log shows the running progress", (await runningProgressToggle.getAttribute("aria-expanded")) === "true");
   await runningToggle.click();
   const runningDetails = runningConsult.locator('[data-testid="consult-request-details"]');
   await runningDetails.waitFor({ state: "visible" });
@@ -511,6 +544,15 @@ try {
     (await workerHistoryToggle.getAttribute("aria-expanded")) === "false" &&
       (await workerHistoryConsult.locator('[data-testid="consult-request-details"]').count()) === 0 &&
       (await workerHistoryConsult.locator('[data-testid="consult-summary"]').textContent())?.includes("접힌 카드에서도 읽을 수 있습니다"),
+  );
+  const workerResultCopy = page.locator('[data-testid="agent-message"][data-role="w1"][data-origin="result"]');
+  check(
+    "worker history keeps the app's result copy whole, marked as an automatic result",
+    (await workerResultCopy.count()) === 1 &&
+      (await workerResultCopy.textContent())?.includes("자동 결과 사본") &&
+      (await workerResultCopy.textContent())?.includes("claude-e2e") &&
+      (await workerResultCopy.textContent())?.includes("자동 결과") &&
+      (await page.locator('[data-testid="agent-message"][data-role="w1"]').filter({ hasText: PUBLIC_LINE }).count()) === 1,
   );
   await workerHistoryToggle.click();
   await workerHistoryConsult.locator('[data-testid="consult-request-details"]').waitFor({ state: "visible" });
@@ -601,6 +643,16 @@ try {
       (await masterApproval.locator('[data-testid="agent-avatar"][data-kind="orch"], [role="img"][aria-label="마스터 캐릭터"]').count()) > 0 &&
       (await masterApproval.locator('[data-testid="approve-once"]').count()) === 1 &&
       (await masterApproval.locator('[data-testid="approve-deny"]').count()) === 1,
+  );
+  // The master conversation keeps every detail: the app's result copy and the unfolded consult report.
+  const masterResultCopy = page.locator('[data-testid="agent-message"][data-origin="result"]');
+  check(
+    "master conversation keeps the automatic result copy and the full consult report",
+    (await masterResultCopy.count()) === 1 &&
+      (await masterResultCopy.textContent())?.includes("자동 결과 사본") &&
+      (await masterResultCopy.textContent())?.includes("claude-e2e") &&
+      (await page.locator('[data-testid="consult-summary"]').filter({ hasText: "접힌 카드에서도 읽을 수 있습니다" }).count()) === 1 &&
+      (await page.locator('[data-testid="consult-summary-toggle"]').count()) === 0,
   );
 
   await page.locator('[data-testid="team-chip"][data-role="w1"]').click();
@@ -746,13 +798,32 @@ try {
   await page.waitForFunction(() => document.querySelectorAll('[data-testid="consult-card"]').length === 3);
   const replayedDone = page.locator('[data-testid="consult-card"][data-status="done"]');
   const replayedRunning = page.locator('[data-testid="consult-card"][data-status="running"]').filter({ hasText: "장문의 진행 요청입니다." });
+  // After a restart the main view is still the folded group chat; the originals stay in the master conversation.
   check(
-    "replayed completed and running consults start collapsed with progress and summary retained",
+    "replayed consults in the main view start folded: request, report and worker log",
     (await replayedDone.locator('[data-testid="consult-request-toggle"]').getAttribute("aria-expanded")) === "false" &&
       (await replayedRunning.locator('[data-testid="consult-request-toggle"]').getAttribute("aria-expanded")) === "false" &&
-      (await replayedDone.locator('[data-testid="consult-summary"]').textContent())?.includes("접힌 카드에서도 읽을 수 있습니다") &&
-      (await replayedRunning.textContent())?.includes("진행 중 작업자 응답은 요청을 접어도 계속 표시됩니다."),
+      (await replayedDone.locator('[data-testid="consult-summary"]').count()) === 0 &&
+      (await replayedDone.locator('[data-testid="consult-summary-toggle"]').getAttribute("aria-expanded")) === "false" &&
+      (await replayedRunning.locator('[data-testid="consult-progress-toggle"]').getAttribute("aria-expanded")) === "false" &&
+      !(await replayedRunning.textContent())?.includes("진행 중 작업자 응답은 요청을 접어도 계속 표시됩니다.") &&
+      (await page.locator('[data-testid="agent-message"][data-role="w1"]').filter({ hasText: PUBLIC_LINE }).count()) === 1 &&
+      (await page.locator('[data-testid="agent-message"][data-origin="result"]').count()) === 0,
   );
+  const restartedChat = page.locator('[data-testid="chat-node"][data-chat-id="1"]');
+  const restartedExpand = restartedChat.getByRole("button", { name: "펼치기", exact: true });
+  if (await restartedExpand.count()) await restartedExpand.click();
+  await restartedChat.locator('[data-testid="tree-node"]').filter({ hasText: "마스터 대화" }).click();
+  await page.waitForFunction(() => document.querySelector('[data-testid="chat-title"]')?.parentElement?.textContent?.includes("마스터 대화"));
+  const replayedResultCopy = page.locator('[data-testid="agent-message"][data-origin="result"]');
+  check(
+    "after restart the master conversation keeps the original report and the automatic result copy",
+    (await page.locator('[data-testid="consult-summary"]').filter({ hasText: "접힌 카드에서도 읽을 수 있습니다" }).count()) === 1 &&
+      (await replayedResultCopy.count()) === 1 &&
+      (await replayedResultCopy.textContent())?.includes("자동 결과 사본"),
+  );
+  await page.locator('[data-testid="chat-node"][data-chat-id="1"] [role="treeitem"]').click();
+  await page.waitForFunction(() => !document.querySelector('[data-testid="chat-title"]')?.parentElement?.textContent?.includes("마스터 대화"));
   const restartedProject = (await page.evaluate(() => window.chatterbox.listProjects())).find((p) => p.id === 1);
   check("edited worker profiles survive app restart", Object.entries(savedProfile).every(([key, value]) => restartedProject?.settings[key] === value));
   const restartedUsage = page.locator('[data-testid="agent-usage-w1"]');
