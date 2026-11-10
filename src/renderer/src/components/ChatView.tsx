@@ -12,6 +12,7 @@ import {
   type AgentKind,
   type AttachmentRef,
   type Chat,
+  type ChatStatus,
   type ChatAgent,
   type Consult,
   type NodeId,
@@ -30,6 +31,7 @@ import { AgentUsage } from "./AgentUsage";
 import { defaultEffortForModel, EffortPicker, effortLabel } from "./EffortPicker";
 import { ModelPicker, useModelLabel } from "./ModelPicker";
 import { formatElapsed, latestInstructionAt } from "../lib/time";
+import { seenReplies, statusAnnouncement, unseenLabel, unseenReplies, type SeenReplies } from "../lib/new-responses";
 import {
   Badge,
   Button,
@@ -85,6 +87,8 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
     return node === "orch" ? `${MASTER_LABEL} 대화` : roleName(node as "orch", agents);
   }, [node, consults, agents]);
   const streamRole: Role | undefined = node?.startsWith("consult:") ? consults?.find(c => c.id === Number(node.slice(8)))?.toRole : node as Role | undefined;
+  const masterExpression = useMemo(() => latestExpression(events ?? [], "orch"), [events]);
+  const announcement = useStatusAnnouncement(chat.status, events);
 
   return (
     <div
@@ -107,7 +111,8 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
         if (canAttach) composer.current?.addFiles([...e.dataTransfer.files]);
       }}
     >
-      <ChatHeader chat={chat} project={project} nodeLabel={nodeLabel} masterExpression={latestExpression(events ?? [], "orch")} onSearch={() => setSearchOpen(true)} />
+      <ChatHeader chat={chat} project={project} nodeLabel={nodeLabel} masterExpression={masterExpression} onSearch={() => setSearchOpen(true)} />
+      <div role="status" aria-live="polite" aria-atomic="true" className="sr-only" data-testid="chat-status-announcer">{announcement}</div>
       <TeamChips chat={chat} />
       {!node && <ForkOrigin chat={chat} />}
       {!node && <GoalBar chat={chat} />}
@@ -518,10 +523,37 @@ function InterruptedBanner({ chat }: { chat: Chat }) {
   );
 }
 
+/**
+ * The polite status line for the chat on screen. ChatView remounts per chat, so the status it opens
+ * with (and a replayed update with the same status) is never announced; only later changes are.
+ */
+function useStatusAnnouncement(status: ChatStatus, events: TimelineEvent[] | undefined): string {
+  const previous = useRef<ChatStatus | undefined>(undefined);
+  const latest = useRef(events);
+  latest.current = events;
+  const [text, setText] = useState("");
+  useEffect(() => {
+    // The main process emits the master's turn_end before it changes the status, so it is here already.
+    const end = latest.current?.findLast((e) => e.node === "orch" && e.role === "orch" && e.event.type === "turn_end")?.event;
+    const line = statusAnnouncement(previous.current, status, end?.type === "turn_end" ? end : undefined);
+    previous.current = status;
+    if (!line) return;
+    // Clear first so the same sentence after another change is announced again.
+    setText("");
+    const timer = window.setTimeout(() => setText(line), 50);
+    return () => window.clearTimeout(timer);
+  }, [status]);
+  return text;
+}
+
 function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, masterView, searchOpen, searchQuery, onSearchQuery, onCloseSearch }: { items: ReturnType<typeof buildItems>; chatId: number; role?: Role; busy: boolean; instructionAt: number; empty: boolean; loading: boolean; masterView: boolean; searchOpen: boolean; searchQuery: string; onSearchQuery: (q: string) => void; onCloseSearch: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
   const stick = useRef(true);
+  // Replies as they were when the reader was last at the bottom; the jump button names what came since.
+  const seen = useRef<SeenReplies>(new Map());
+  if (atBottom) seen.current = seenReplies(items);
+  const unseen = atBottom ? null : unseenLabel(unseenReplies(items, seen.current));
   const [now, setNow] = useState(() => Date.now());
   const { history, pending } = useMemo(() => masterView ? {
     history: items.filter(item => item.kind !== "approval" || !!item.decision),
@@ -553,6 +585,7 @@ function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, ma
         ref={ref}
         className="min-h-0 flex-1 overflow-y-auto"
         data-testid="timeline"
+        aria-busy={busy}
         onScroll={(e) => {
           const el = e.currentTarget;
           const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
@@ -584,16 +617,18 @@ function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, ma
       </div>
       {!atBottom && (
         <Button
-          variant="secondary"
-          size="icon-sm"
-          className="absolute right-6 bottom-3 rounded-full border shadow-md"
-          aria-label="맨 아래로"
+          variant={unseen ? "default" : "secondary"}
+          size={unseen ? "sm" : "icon-sm"}
+          className={cn("absolute bottom-3 rounded-full border shadow-md", unseen ? "left-1/2 -translate-x-1/2" : "right-6")}
+          aria-label={unseen ? `${unseen} · 맨 아래로 이동` : "맨 아래로"}
+          data-testid={unseen ? "new-responses" : "scroll-bottom"}
           onClick={() => {
             const el = ref.current;
             if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
           }}
         >
           <ArrowDown />
+          {unseen}
         </Button>
       )}
     </div>

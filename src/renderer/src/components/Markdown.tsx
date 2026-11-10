@@ -55,13 +55,20 @@ function Pre({ children }: { children?: ReactNode }) {
   );
 }
 
-export const Markdown = memo(function Markdown({ text, className }: { text: string; className?: string }) {
+const HIGHLIGHT: NonNullable<Parameters<typeof ReactMarkdown>[0]["rehypePlugins"]> = [[rehypeHighlight, { detect: true, ignoreMissing: true }]];
+const NO_HIGHLIGHT: typeof HIGHLIGHT = [];
+
+/**
+ * While a reply streams, the whole text is parsed again on every flush; language detection on code
+ * blocks costs most of that, so it waits until the reply ends (completed, failed or stopped).
+ */
+export const Markdown = memo(function Markdown({ text, className, streaming = false }: { text: string; className?: string; streaming?: boolean }) {
   return (
     <div className={cn("prose-chat", className)}>
       <ReactMarkdown
         urlTransform={safeLinkHref}
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
+        rehypePlugins={streaming ? NO_HIGHLIGHT : HIGHLIGHT}
         components={{
           pre: Pre,
           a: ({ href, children }) => <ArtifactPreview href={href ?? ""} label={children} />,

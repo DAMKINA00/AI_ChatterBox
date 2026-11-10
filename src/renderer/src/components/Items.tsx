@@ -284,7 +284,7 @@ const ItemView = memo(function ItemView({ item, chatId, nested }: { item: Item; 
               {forkId && <ForkMessageButton chatId={chatId} eventId={forkId} preview={item.text} className={FORK_ACTION} />}
             </div>
             <div className="group relative mt-0.5">
-              <div data-chat-search-text><Markdown text={item.text} /></div>
+              <div data-chat-search-text><Markdown text={item.text} streaming={item.streaming} /></div>
               {item.streaming && <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse-dot rounded-sm bg-primary align-text-bottom" />}
               {!item.streaming && (
                 <CopyButton text={item.text} className="absolute -top-6 right-0 opacity-0 group-hover:opacity-100" label="메시지 복사" />
