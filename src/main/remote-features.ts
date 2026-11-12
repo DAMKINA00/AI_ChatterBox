@@ -4,12 +4,13 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmdirSync, statSync } from "node:fs";
 import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
-import { DEFAULT_SETTINGS, type AgentKind, type ApprovalMode, type AttachmentRef, type Chat, type CliAccountStatus, type ModelOption, type Project, type TimelineEvent } from "../shared/types";
+import { DEFAULT_SETTINGS, type AgentKind, type ApprovalMode, type AttachmentRef, type Chat, type CliAccountStatus, type ModelOption, type Project, type TimelineEvent, type UsageInfo } from "../shared/types";
+import { safeUsageText, usageGroups } from "../shared/usage-view";
 import type { AIStudioUsageReport } from "../shared/aistudio";
 import {
   REMOTE_ATTACHMENT_TYPES, REMOTE_COMMANDS, REMOTE_EVENTS, REMOTE_FOLDER_NAME_PATTERN, REMOTE_LIMITS, REMOTE_NUMBER_SETTINGS,
   REMOTE_PROJECT_SETTING_KEYS, REMOTE_UPLOAD_BUDGET, REMOTE_UPLOAD_UUID, normalizeRemoteFileName,
-  type RemoteAuditAction, type RemoteCliAccount, type RemoteProject, type RemoteProjectRoot,
+  type RemoteAuditAction, type RemoteProject, type RemoteProjectRoot, type RemoteUsageResponse,
   type RemoteUpload, type RemoteUploadKey,
 } from "../shared/remote-web";
 
@@ -54,6 +55,9 @@ export function stripLocalPaths<T>(value: T): T {
 
 /** File identity of a folder (volume + file index), used to pin an allowed root (D1). */
 export const folderId = (path: string) => { const s = statSync(path, { bigint: true }); return `${s.dev}:${s.ino}`; };
+
+/** Error texts go out only without emails, local paths or URLs (a CLI error may quote them). */
+export const remoteSafeText = safeUsageText;
 
 /** AI Studio usage groups are keyed by account email; remote answers number them instead. */
 export function anonymizeAccounts(report: AIStudioUsageReport): AIStudioUsageReport {
@@ -480,11 +484,14 @@ export class RemoteFeatures {
       if (this.ctx.now() - last < REMOTE_LIMITS.usageRefreshSeconds * 1000) throw new HttpError(429, "사용량 새로고침은 1분에 한 번만 할 수 있습니다.");
       this.usageRefreshed.set(session.key, this.ctx.now());
     }
-    const [usage, accounts] = await Promise.all([this.ctx.call("usage:get", [refresh]), this.ctx.call("cli-accounts:list", [])]);
-    const remote: RemoteCliAccount[] = (accounts as CliAccountStatus[]).map(a => ({
-      accountId: a.accountId, kind: a.kind, label: a.label, enabled: a.enabled, isDefault: a.isDefault,
-      authStatus: a.authStatus, remainingPercent: a.remainingPercent, runningWorkers: a.runningWorkers,
-    }));
-    this.ctx.send(res, 200, { usage, accounts: remote });
+    // The same view the desktop panel builds (shared/usage-view.ts) from ChatterBox's account store.
+    const [usage, accounts] = await Promise.all([this.ctx.call("usage:get", [refresh]) as Promise<UsageInfo>, this.ctx.call("cli-accounts:list", []) as Promise<CliAccountStatus[]>]);
+    const groups = usageGroups(accounts, usage).map(g => ({ ...g, accounts: g.accounts.map(r => (r.error ? { ...r, error: remoteSafeText(r.error) } : r)) }));
+    const d = usage.deepseek;
+    const body: RemoteUsageResponse = {
+      groups,
+      ...(d ? { deepseek: { state: d.state, balances: d.balances, ...(d.error ? { error: remoteSafeText(d.error) } : {}), ...(d.updatedAt ? { updatedAt: d.updatedAt } : {}) } } : {}),
+    };
+    this.ctx.send(res, 200, body);
   }
 }

@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { ChevronRight, Globe2, KeyRound, RotateCw, Settings, Smartphone, Sparkles, Terminal } from "lucide-react";
-import { pickUsage, type UsageDisplay } from "../../../shared/usage";
+import type { UsageDisplay } from "../../../shared/usage";
+
+const KIND_COLOR = { claude: "bg-claude", gpt: "bg-gpt", grok: "bg-grok" } as const;
 import { api, cn, errorMessage } from "../lib/utils";
 import { useStore } from "../store";
 import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, Tooltip } from "./ui";
-import type { UsageInfo, CliAccountStatus } from "../../../shared/types";
-import { multipleCliAccounts, type CliKind } from "../lib/cli-accounts-ui";
+import { usageGroups, type UsageAccountRow, type UsageKindGroup } from "../../../shared/usage-view";
 import { CliAccountsDialog } from "./CliAccountsDialog";
 import { GeminiWebDialog } from "./GeminiWebDialog";
 import { AIStudioDialog } from "./AIStudioDialog";
@@ -23,15 +24,16 @@ function resetText(ts?: number | null) {
   return h >= 24 ? `${Math.floor(h / 24)}일 ${h % 24}시간 뒤 초기화` : `${h}시간 ${m}분 뒤 초기화`;
 }
 
-function Bar({ name, d, color, error, updatedAt }: { name: string; d: UsageDisplay | null; color: string; error?: string; updatedAt?: number }) {
+function Bar({ name, d, color, error, updatedAt, disabled }: { name: string; d: UsageDisplay | null; color: string; error?: string; updatedAt?: number; disabled?: boolean }) {
   const tip = error ?? (d
     ? [`${name} ${d.window} 남은 사용량 ${Math.round(d.remaining)}%`, resetText(d.resetsAt), d.warn ? "5시간 한도가 거의 찼습니다" : d.note]
         .filter(Boolean)
         .join(" · ")
     : "사용량 정보를 확인하는 중입니다");
+  const full = [tip, updatedAt ? `${new Date(updatedAt).toLocaleString("ko-KR")} 조회` : "", disabled ? "배정 제외 계정(사용량을 새로 조회하지 않음)" : ""].filter(Boolean).join(" · ");
   return (
-    <Tooltip content={updatedAt ? `${tip} · ${new Date(updatedAt).toLocaleString("ko-KR")} 조회` : tip}>
-      <div className="flex items-center gap-2 text-[11px] text-muted-foreground" data-testid="usage-bar">
+    <Tooltip content={full}>
+      <div className={cn("flex items-center gap-2 text-[11px] text-muted-foreground", disabled && "opacity-60")} data-testid="usage-bar">
         <span className="w-[108px] shrink-0 whitespace-nowrap">
           {name} <span className={cn(d?.warn && "font-semibold text-destructive")}>{error ? "조회 실패" : d ? d.window : "정보 없음"}</span>
         </span>
@@ -44,19 +46,14 @@ function Bar({ name, d, color, error, updatedAt }: { name: string; d: UsageDispl
   );
 }
 
-export function CliUsageBars({ kind, name, color, usage, accounts }: { kind: CliKind; name: string; color: string; usage: UsageInfo; accounts: CliAccountStatus[] }) {
-  const multiple = multipleCliAccounts(accounts, kind);
-  const provider = kind === "gpt" ? "codex" : kind;
-  if (!multiple.length) return <Bar name={name} d={pickUsage(usage[provider])} color={color} error={kind === "grok" ? usage.grok?.error : undefined} updatedAt={kind === "grok" ? usage.grok?.updatedAt : undefined} />;
-  return <section className="space-y-1" data-testid={`cli-usage-${kind}`} aria-label={`${name} 계정별 잔여량`}>
-    <div className="text-[11px] font-medium text-muted-foreground">{name}</div>
+/** One family from the ChatterBox account store: a single bar for one account, a labelled bar per account otherwise. */
+export function CliUsageBars({ group, color }: { group: UsageKindGroup; color: string }) {
+  const bar = (row: UsageAccountRow, name: string) => <Bar name={name} d={row.display} color={color} error={row.error} updatedAt={row.checkedAt} disabled={!row.enabled} />;
+  if (group.accounts.length === 1) return <div title={group.accounts[0].label}>{bar(group.accounts[0], group.name)}</div>;
+  return <section className="space-y-1" data-testid={`cli-usage-${group.kind}`} aria-label={`${group.name} 계정별 잔여량`}>
+    <div className="text-[11px] font-medium text-muted-foreground">{group.name}</div>
     <div className="space-y-1 pl-2">
-      {multiple.map(account => {
-        const accountUsage = usage.accounts?.[account.accountId] ?? account.usage;
-        return <div key={account.accountId} title={`${account.accountId}${!account.enabled ? " · 배정 제외" : ""}`}>
-          <Bar name={account.label} d={accountUsage?.error ? null : pickUsage(accountUsage)} color={color} error={accountUsage?.error} updatedAt={account.usage?.checkedAt ?? account.auth?.checkedAt} />
-        </div>;
-      })}
+      {group.accounts.map(row => <div key={row.accountId} title={`${row.accountId}${!row.enabled ? " · 배정 제외" : ""}`}>{bar(row, row.label)}</div>)}
     </div>
   </section>;
 }
@@ -139,9 +136,7 @@ export function UsageBar() {
           </DropdownMenu>
         </div>
       </div>
-      <CliUsageBars kind="claude" name="클로드" color="bg-claude" usage={usage} accounts={cliAccounts} />
-      <CliUsageBars kind="gpt" name="지피티" color="bg-gpt" usage={usage} accounts={cliAccounts} />
-      <CliUsageBars kind="grok" name="그록" color="bg-grok" usage={usage} accounts={cliAccounts} />
+      {usageGroups(cliAccounts, usage).map(group => <CliUsageBars key={group.kind} group={group} color={KIND_COLOR[group.kind]} />)}
       <DeepSeekBalance compact />
       <CliAccountsDialog open={cliOpen} onOpenChange={setCliOpen} />
       <GeminiWebDialog open={webOpen} onOpenChange={setWebOpen} />

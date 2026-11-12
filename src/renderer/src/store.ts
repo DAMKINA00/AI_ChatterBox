@@ -99,7 +99,17 @@ export const useStore = create<State>((set, get) => ({
   async init() {
     let receivedUsage: UsageInfo | undefined;
     // Subscribe before slow CLI/auth initialization so fresh limits cannot be lost to a cached error.
-    api.onUsage((usage) => { receivedUsage = usage; set({ usage }); });
+    // Usage bars read each account's stored reading from the account list, so re-read it with every
+    // usage update (at most once a second; the list call is a synchronous read in the core).
+    let accountsTimer: number | undefined;
+    api.onUsage((usage) => {
+      receivedUsage = usage;
+      set({ usage });
+      accountsTimer ??= window.setTimeout(() => {
+        accountsTimer = undefined;
+        void api.cliAccounts.list().then(cliAccounts => set({ cliAccounts })).catch(() => undefined);
+      }, 1000);
+    });
     const [projects, chats, cli, theme, usage] = await Promise.all([
       api.listProjects(),
       api.listChats(),

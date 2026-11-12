@@ -1,6 +1,8 @@
 // Remote web access (browser → Caddy → 127.0.0.1 → this app). Shared by main, preload and renderer.
 import type { AIStudioUsageRange, AIStudioUsageReport } from "./aistudio";
-import type { ApprovalMode, AgentKind, Chat, CliAccountId, CliAccountKind, ModelOption, ProjectSettings, UsageInfo } from "./types";
+import type { ApprovalMode, AgentKind, Chat, CliAccountId, ModelOption, ProjectSettings } from "./types";
+import type { DeepSeekBalance } from "./deepseek";
+import type { UsageKindGroup } from "./usage-view";
 
 export const REMOTE_WEB_DEFAULT_PORT = 47821;
 export const REMOTE_WEB_DEFAULT_ORIGIN = "https://ai.damkina.net";
@@ -344,19 +346,16 @@ export interface RemoteProjectPatch { name?: string; archived?: boolean; setting
 
 // ---------- usage (B, read-only, D5)
 
-/** CLI account summary without config dir or email. */
-export interface RemoteCliAccount {
-  accountId: CliAccountId;
-  kind: CliAccountKind;
-  label: string;
-  enabled: boolean;
-  isDefault: boolean;
-  authStatus: "authenticated" | "required" | "unknown";
-  remainingPercent?: number;
-  runningWorkers: number;
+/**
+ * GET /api/usage?refresh=0|1 (refresh at most once per REMOTE_LIMITS.usageRefreshSeconds per session → 429).
+ * The same view as the desktop usage panel (shared/usage-view.ts): CLI accounts exactly as in ChatterBox's
+ * account store (label, enabled, auth state, remaining, window, reset time, check time) and the DeepSeek
+ * balance. No email, folder, API key or raw provider data; error texts with paths or emails are replaced.
+ */
+export interface RemoteUsageResponse {
+  groups: UsageKindGroup[];
+  deepseek?: Pick<DeepSeekBalance, "state" | "balances" | "error" | "updatedAt">;
 }
-/** GET /api/usage?refresh=0|1 (refresh at most once per REMOTE_LIMITS.usageRefreshSeconds per session → 429). */
-export interface RemoteUsageResponse { usage: UsageInfo; accounts: RemoteCliAccount[] }
 /** GET /api/aistudio/usage?range= */
 export interface RemoteAIStudioUsageQuery { range?: AIStudioUsageRange }
 export interface RemoteAIStudioUsageResponse { report: AIStudioUsageReport }

@@ -105,8 +105,15 @@ async function setup(t: { after(fn: () => unknown): void }) {
       case "projects:create": { const p = { id: state.nextId++, name: args[0].name, folder: args[0].folder, archived: false, createdAt: 2, settings: args[0].settings }; state.projects.push(p); return p; }
       case "remote:att-bytes": await new Promise(ok => setTimeout(ok, 20)); return saveRemoteUpload(store, files, args[0], args[1], args[2], args[3], args[4]);
       case "attachment:info": return state.attachments.get(args[0]) ?? store.attachment(args[0]);
-      case "usage:get": return { claude: { fiveHour: null } };
-      case "cli-accounts:list": return [{ accountId: "claude-1", kind: "claude", label: "C1", enabled: true, isDefault: true, authStatus: "authenticated", runningWorkers: 0, configDir: "C:\\Users\\x\\.claude", auth: { loggedIn: true, email: "me@example.com", checkedAt: 1 } }];
+      case "usage:get": return {
+        claude: { fiveHour: null }, gemini: { weekly: { usedPercent: 1 } }, geminiWeb: { status: "available", detail: "me@example.com 로그인", checkedAt: 1 },
+        accounts: { "gpt-9": { weekly: { usedPercent: 5 } } }, deepseek: { state: "ready", balances: [{ currency: "USD", total: "5.20", granted: "0", toppedUp: "5.20" }] },
+      };
+      case "cli-accounts:list": return [
+        { accountId: "claude-1", kind: "claude", label: "C1", enabled: true, isDefault: true, authStatus: "authenticated", runningWorkers: 0, configDir: "C:\\Users\\x\\.claude", auth: { loggedIn: true, email: "me@example.com", checkedAt: 1 }, usage: { checkedAt: 1_800_000_000_000, weekly: { usedPercent: 29, resetsAt: 1_800_003_600 } } },
+        { accountId: "gpt-1", kind: "gpt", label: "PREVATE", enabled: true, isDefault: true, authStatus: "authenticated", runningWorkers: 1, configDir: null, usage: { checkedAt: 1, weekly: { usedPercent: 57 } } },
+        { accountId: "gpt-2", kind: "gpt", label: "PUBLIC 1", enabled: false, isDefault: false, authStatus: "required", runningWorkers: 0, configDir: "C:\\Users\\x\\AppData\\gpt-2", usage: { checkedAt: 1, error: "spawn C:\\Users\\x\\codex.exe ENOENT" } },
+      ];
       case "chats:search": return [1];
       case "aistudio:usage": return { from: "a", to: "b", generatedAt: "c", totals: { requests: 2 }, groups: { account: [{ key: "alice@example.com", requests: 1 }, { key: "bob@example.com", requests: 1 }], model: [], channel: [] } };
       default: return { ok: true };
@@ -405,8 +412,17 @@ test("attachment downloads need the owning chat; images inline, others as downlo
 
 test("#7 usage and AI Studio usage carry no emails or folders; refresh is rate limited; snapshots strip paths", async (t) => {
   const s = await setup(t);
-  const usage = await (await s.get("/api/usage")).json();
-  assert.ok(!JSON.stringify(usage).includes("@example.com") && !JSON.stringify(usage).includes(".claude"));
+  const usage = await (await s.get("/api/usage")).json() as any;
+  assert.ok(!JSON.stringify(usage).includes("@example.com") && !JSON.stringify(usage).includes(".claude") && !/AppData|Users/.test(JSON.stringify(usage)), JSON.stringify(usage));
+  // The same view as the desktop panel: ChatterBox's accounts and labels only (no stale gpt-9, no retired Gemini CLI value).
+  assert.deepEqual(Object.keys(usage).sort(), ["deepseek", "groups"]);
+  assert.deepEqual(usage.groups.map((g: any) => [g.kind, g.accounts.map((a: any) => a.label)]), [["claude", ["C1"]], ["gpt", ["PREVATE", "PUBLIC 1"]]]);
+  const [claude] = usage.groups[0].accounts;
+  assert.deepEqual([Math.round(claude.display.remaining), claude.display.window, claude.display.resetsAt, claude.checkedAt], [71, "주간", 1_800_003_600, 1_800_000_000_000]);
+  const off = usage.groups[1].accounts[1];
+  assert.deepEqual([off.enabled, off.authStatus, off.display], [false, "required", null]);
+  assert.match(off.error, /자세한 내용은 데스크톱/, "an error quoting a local path is replaced");
+  assert.deepEqual(usage.deepseek, { state: "ready", balances: [{ currency: "USD", total: "5.20", granted: "0", toppedUp: "5.20" }] });
   assert.equal(await s.status(s.get("/api/usage?refresh=1")), 200);
   assert.equal(await s.status(s.get("/api/usage?refresh=1")), 429);
   assert.equal(await s.status(s.get("/api/aistudio/usage?range=1y")), 400);

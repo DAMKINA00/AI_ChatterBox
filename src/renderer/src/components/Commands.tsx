@@ -1,5 +1,5 @@
 import { APPROVAL_MODE_LABEL, AGENT_LABEL, MASTER_LABEL, parseOrchestrator, type Chat, type Project, type OrchestratorModel } from "../../../shared/types";
-import { pickUsage } from "../../../shared/usage";
+import { deepSeekBalanceText, usageGroups, usageSummary } from "../../../shared/usage-view";
 import { useStore } from "../store";
 import { defaultEffortForModel, EffortPicker, effortLabel } from "./EffortPicker";
 import { ModelPicker } from "./ModelPicker";
@@ -28,6 +28,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
 export function StatusDialog({ open, onOpenChange, chat, project }: { open: boolean; onOpenChange: (o: boolean) => void; chat: Chat; project: Project }) {
   const updateChat = useStore((s) => s.updateChat);
   const usage = useStore((s) => s.usage);
+  const cliAccounts = useStore((s) => s.cliAccounts);
   const agents = useStore((s) => s.agents[chat.id]);
   const models = useStore((s) => s.models);
   const orch = parseOrchestrator(chat.orchestratorModelOverride ?? project.settings.orchestratorModel);
@@ -148,7 +149,7 @@ export function StatusDialog({ open, onOpenChange, chat, project }: { open: bool
           <div className="mt-1 text-[12px] font-medium text-muted-foreground">기타</div>
           {row("승인 방식", APPROVAL_MODE_LABEL[chat.approvalModeOverride ?? project.settings.approvalMode])}
           {row("목표", chat.goal ? `${chat.goal.objective} (${chat.goal.status})` : "없음")}
-          {row("남은 사용량", (["claude", "codex", "grok", "deepseek"] as const).map(a => { const d = pickUsage(usage[a]); return `${AGENT_LABEL[a]} ${d ? `${d.window} ${Math.round(d.remaining)}%` : "정보 없음"}`; }).join(" · "))}
+          {row("남은 사용량", [usageSummary(usageGroups(cliAccounts, usage)), `딥시크 ${deepSeekBalanceText(usage.deepseek)}`].filter(Boolean).join(" · "))}
           {row("작업 폴더", <span className="font-mono text-[12px] break-all">{project.folder}</span>)}
         </div>
       </DialogContent>

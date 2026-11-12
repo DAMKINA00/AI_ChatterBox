@@ -1,33 +1,33 @@
-// Read-only usage sheet (D5): subscription limits, API balance, CLI accounts and AI Studio request log.
+// Read-only usage sheet (D5): the desktop usage panel's view of ChatterBox's accounts, API balance and AI Studio request log.
 import { useCallback, useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import type { AIStudioUsageRange, AIStudioUsageStats } from "../../../shared/aistudio";
-import { REMOTE_LIMITS, type RemoteAIStudioUsageResponse, type RemoteCliAccount, type RemoteUsageResponse } from "../../../shared/remote-web";
-import { pickUsage, type ProviderUsage } from "../../../shared/usage";
+import type { DeepSeekBalance } from "../../../shared/deepseek";
+import { REMOTE_LIMITS, type RemoteAIStudioUsageResponse, type RemoteUsageResponse } from "../../../shared/remote-web";
+import { deepSeekBalanceText, type UsageAccountRow } from "../../../shared/usage-view";
 import { cn } from "../lib/utils";
 import { AuthError, request, url } from "./api";
 import { Btn, ErrorLine, errorText, Modal } from "./ui";
 
-const PROVIDERS = [["claude", "클로드"], ["codex", "지피티"], ["gemini", "제미나이"], ["grok", "그록"]] as const;
-const ACCOUNT_KIND = { claude: "클로드", gpt: "지피티", grok: "그록" } as const;
 const AUTH_LABEL = { authenticated: "로그인됨", required: "로그인 필요", unknown: "확인 안 됨" } as const;
-const resetText = (at?: number | null) => {
-  if (!at) return "";
-  const ms = at < 1e12 ? at * 1000 : at;
-  return ` · ${new Date(ms).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })} 초기화`;
-};
+const time = (at: number) => new Date(at < 1e12 ? at * 1000 : at).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
 
-function Bar({ name, usage }: { name: string; usage?: ProviderUsage }) {
-  const d = usage?.error ? null : pickUsage(usage);
+/** One account row, the same values as the desktop usage panel (shared/usage-view.ts). */
+function Row({ name, row }: { name: string; row: UsageAccountRow }) {
+  const d = row.display;
+  const extra = [row.authStatus === "required" ? AUTH_LABEL.required : "", row.runningWorkers ? `작업자 ${row.runningWorkers}명` : "", !row.enabled ? "배정 제외(조회 안 함)" : "", row.checkedAt ? `${time(row.checkedAt)} 조회` : ""].filter(Boolean).join(" · ");
   return (
-    <div className="grid gap-1">
+    <div className={cn("grid gap-1", !row.enabled && "opacity-60")} data-testid="remote-usage-row">
       <div className="flex justify-between gap-2 text-[12.5px]">
         <span className="font-medium">{name}</span>
-        <span className={cn("text-muted-foreground", d?.warn && "text-warning")}>{d ? `${d.window} ${Math.round(d.remaining)}% 남음${resetText(d.resetsAt)}` : usage?.error ?? "정보 없음"}</span>
+        <span className={cn("text-right text-muted-foreground", (d?.warn || row.error) && "text-warning")}>
+          {row.error ? `조회 실패: ${row.error}` : d ? `${d.window} ${Math.round(d.remaining)}% 남음${d.resetsAt ? ` · ${time(d.resetsAt)} 초기화` : ""}` : "정보 없음"}
+        </span>
       </div>
       <div className="h-1.5 overflow-hidden rounded-full bg-muted">
         {d && <div className={cn("h-full rounded-full", d.warn ? "bg-warning" : "bg-success")} style={{ width: `${d.remaining}%` }} />}
       </div>
+      {extra && <div className="text-[11.5px] text-muted-foreground">{extra}</div>}
     </div>
   );
 }
@@ -44,51 +44,31 @@ export function UsageSheet({ onClose, onAuthError }: { onClose: () => void; onAu
     finally { setPending(false); }
   }, [onAuthError]);
   useEffect(() => { void load(false); }, [load]);
-  const usage = data?.usage;
   return (
     <Modal title="사용량" onClose={onClose} wide>
       <div className="grid gap-5">
         <div className="flex items-center gap-2">
-          <p className="flex-1 text-[12px] text-muted-foreground">읽기 전용입니다. 새로 고침은 {REMOTE_LIMITS.usageRefreshSeconds}초에 한 번 할 수 있습니다.</p>
+          <p className="flex-1 text-[12px] text-muted-foreground">데스크톱 앱에 연결된 계정 그대로입니다(읽기 전용). 새로 고침은 {REMOTE_LIMITS.usageRefreshSeconds}초에 한 번 할 수 있습니다.</p>
           <Btn variant="outline" disabled={pending} onClick={() => void load(true)}><RefreshCw className={cn(pending && "animate-spin")} /> 새로 고침</Btn>
         </div>
         <ErrorLine error={error} />
-        {usage && <section className="grid gap-3">
-          {PROVIDERS.map(([key, name]) => <Bar key={key} name={name} usage={usage[key]} />)}
-          {usage.geminiWeb && <div className="flex justify-between gap-2 text-[12.5px]"><span className="font-medium">제미나이 웹</span><span className="text-muted-foreground">{usage.geminiWeb.detail || usage.geminiWeb.status}</span></div>}
-          {usage.deepseek && usage.deepseek.state !== "unconfigured" && (
+        {data && <section className="grid gap-3" aria-label="남은 사용량 · 잔고">
+          {data.groups.map(g => g.accounts.length === 1
+            ? <Row key={g.kind} name={g.name} row={g.accounts[0]} />
+            : <div key={g.kind} className="grid gap-2" aria-label={`${g.name} 계정별 잔여량`}>
+              <h3 className="text-[12.5px] font-medium">{g.name}</h3>
+              <div className="grid gap-2 pl-3">{g.accounts.map(r => <Row key={r.accountId} name={r.label} row={r} />)}</div>
+            </div>)}
+          {data.deepseek && (
             <div className="flex justify-between gap-2 text-[12.5px]">
               <span className="font-medium">딥시크 잔고</span>
-              <span className="text-muted-foreground">{usage.deepseek.error ?? (usage.deepseek.balances.map(b => `${b.total} ${b.currency}`).join(" · ") || "정보 없음")}</span>
+              <span className="text-muted-foreground">{deepSeekBalanceText(data.deepseek as DeepSeekBalance)}</span>
             </div>
           )}
         </section>}
-        {data && data.accounts.length > 0 && <Accounts accounts={data.accounts} usage={data.usage} />}
         <AIStudioReport onAuthError={onAuthError} />
       </div>
     </Modal>
-  );
-}
-
-function Accounts({ accounts, usage }: { accounts: RemoteCliAccount[]; usage: RemoteUsageResponse["usage"] }) {
-  return (
-    <section className="grid gap-2">
-      <h3 className="text-[13px] font-medium">CLI 계정</h3>
-      <ul className="grid gap-2">
-        {accounts.map(a => (
-          <li key={a.accountId} className={cn("grid gap-1 rounded-md border px-3 py-2", !a.enabled && "opacity-60")}>
-            <div className="flex flex-wrap items-center gap-x-2 text-[12.5px]">
-              <span className="font-medium">{ACCOUNT_KIND[a.kind]} · {a.label}</span>
-              {a.isDefault && <span className="rounded border px-1 text-[11px]">기본</span>}
-              {!a.enabled && <span className="text-[11px] text-muted-foreground">배정 제외</span>}
-              <span className={cn("ml-auto text-[11.5px]", a.authStatus === "required" ? "text-destructive" : "text-muted-foreground")}>{AUTH_LABEL[a.authStatus]}{a.runningWorkers ? ` · 작업자 ${a.runningWorkers}명` : ""}</span>
-            </div>
-            {usage.accounts?.[a.accountId] ? <Bar name="잔여" usage={usage.accounts[a.accountId]} />
-              : a.remainingPercent !== undefined && <div className="text-[12px] text-muted-foreground">잔여 {Math.round(a.remainingPercent)}%</div>}
-          </li>
-        ))}
-      </ul>
-    </section>
   );
 }
 

@@ -5,6 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { CliAccountStatus, CliAccountId } from "../../../shared/types";
 import { cliRemaining, cliCheckedText, multipleCliAccounts, existingCliAccountPolicies } from "./cli-accounts-ui";
+import { usageGroups } from "../../../shared/usage-view";
 
 function account(accountId: CliAccountId = "claude-1", kind: CliAccountStatus["kind"] = "claude"): CliAccountStatus {
   return { accountId, kind, label: accountId, configDir: null, createdAt: 0, enabled: true, isDefault: accountId.endsWith("-1"), runningWorkers: 0, authStatus: "authenticated", auth: { loggedIn: true, checkedAt: 1_700_000_000_000, email: "person@example.com" }, usage: { checkedAt: 1_700_000_000_000, fiveHour: { usedPercent: 30 }, weekly: { usedPercent: 50 } } };
@@ -89,15 +90,21 @@ test("project priority policies keep their order minus missing accounts and stay
   assert.deepEqual(existingCliAccountPolicies({ claude: { mode: "priority", accountId: "claude-9" } }, [account()]), {});
 });
 
-test("usage component renders identical markup for zero or one account and adds rows only for multiple accounts", async () => {
+test("usage bars follow the account store: one bar for one account, labelled rows for several, numbers from each account's stored reading", async () => {
   const { CliUsageBars, TooltipProvider } = await components();
-  const render = (accounts: CliAccountStatus[] = []) => renderToStaticMarkup(createElement(TooltipProvider, null, createElement(CliUsageBars, {
-    kind: "claude", name: "클로드", color: "bg-claude", accounts, usage: { claude: { weekly: { usedPercent: 20 } }, accounts: Object.fromEntries(accounts.map(a => [a.accountId, { weekly: { usedPercent: 90 } }])) },
-  })));
-  assert.equal(render(), render([account()]));
-  assert.match(render([account(), account("claude-2")]), /10%/);
-  assert.equal((render([account(), account("claude-2")]).match(/data-testid="usage-bar"/g) ?? []).length, 2);
-  assert.match(render([account(), account("claude-2")]), /data-testid="cli-usage-claude"/);
+  const render = (accounts: CliAccountStatus[]) => renderToStaticMarkup(createElement(TooltipProvider, null,
+    ...usageGroups(accounts, { claude: { weekly: { usedPercent: 20 } } }).map(group => createElement(CliUsageBars, { key: group.kind, group, color: "bg-claude" }))));
+  const one = render([account()]);
+  assert.equal((one.match(/data-testid="usage-bar"/g) ?? []).length, 1);
+  assert.match(one, /클로드/);
+  assert.match(one, /50%/, "the account's stored weekly reading, not the legacy family value");
+  const two = render([account(), { ...account("claude-2"), label: "PUBLIC 2", enabled: false, usage: { checkedAt: 1, weekly: { usedPercent: 90 } } }]);
+  assert.equal((two.match(/data-testid="usage-bar"/g) ?? []).length, 2);
+  assert.match(two, /data-testid="cli-usage-claude"/);
+  assert.match(two, /PUBLIC 2/);
+  assert.match(two, /10%/);
+  assert.match(two, /opacity-60/, "an account excluded from assignment is shown dimmed");
+  assert.doesNotMatch(two, /person@example.com/);
 });
 
 test("backend default and running-worker flags control account actions", async () => {
@@ -114,14 +121,11 @@ test("backend default and running-worker flags control account actions", async (
   assert.match(actions, /삭제/);
 });
 
-test("gpt family keeps the legacy Codex bar for one account", async () => {
-  const { CliUsageBars, TooltipProvider } = await components();
-  const html = renderToStaticMarkup(createElement(TooltipProvider, null, createElement(CliUsageBars, {
-    kind: "gpt", name: "지피티", color: "bg-gpt", accounts: [account("gpt-1", "gpt")],
-    usage: { codex: { weekly: { usedPercent: 25 } }, accounts: { "gpt-1": { weekly: { usedPercent: 99 } } } },
-  })));
-  assert.match(html, /75%/);
-  assert.doesNotMatch(html, /cli-usage-gpt/);
+test("a default account without a stored reading falls back to the live, then the legacy family value", () => {
+  const bare = { ...account("gpt-1", "gpt"), usage: undefined };
+  assert.equal(usageGroups([bare], { codex: { weekly: { usedPercent: 25 } } })[0].accounts[0].display?.remaining, 75);
+  assert.equal(usageGroups([bare], { codex: { weekly: { usedPercent: 25 } }, accounts: { "gpt-1": { weekly: { usedPercent: 99 } } } })[0].accounts[0].display?.remaining, 1);
+  assert.equal(usageGroups([{ ...bare, accountId: "gpt-2", isDefault: false }], { codex: { weekly: { usedPercent: 25 } } })[0].accounts[0].display, null, "the family value belongs to the default account only");
 });
 
 test("project policies discard missing or wrong-family accounts while preserving auto and valid fixed policies", () => {

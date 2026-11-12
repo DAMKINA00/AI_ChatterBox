@@ -160,7 +160,7 @@
 ### 3.4 사용량 (B, 읽기 전용)
 | 메서드·경로 | 응답 | 코어 | 비고 |
 |---|---|---|---|
-| `GET /api/usage?refresh=0|1` | `200 { usage: UsageInfo, accounts: {accountId,kind,label,enabled,remainingPercent,authStatus}[] }` | `usage:get`, `cli-accounts:list` | 이메일·`configDir`·`path` 제거. `refresh=1`은 세션당 60초에 1회(초과 시 429) |
+| `GET /api/usage?refresh=0|1` | `200 RemoteUsageResponse { groups: UsageKindGroup[], deepseek? }` (2026-11-12 변경, 아래 절) | `usage:get`, `cli-accounts:list` | 데스크톱 사용량 패널과 같은 보기(`shared/usage-view.ts`). 이메일·`configDir`·경로 없음, 경로·이메일이 든 오류 문구는 대체. `refresh=1`은 세션당 60초에 1회(초과 시 429) |
 | `GET /api/aistudio/usage?range=` | `200 { report }` | `aistudio:usage` | 읽기 전용 |
 
 ### 3.5 클라이언트 전용
@@ -343,6 +343,19 @@
     - 데스크톱 전송 회귀
   - `remote-features.test.ts`: 설정 범위 검사, HTTP 507 문구, 한도 변경의 즉시 반영
   - e2e: 설정 창의 기본값 표시와 저장
+
+### 사용량 표시를 ChatterBox 계정 저장소로 통일 (2026-11-12)
+- 데스크톱 사용량 패널, 명령 팔레트의 "남은 사용량", 원격 웹 사용량 창이 모두 `src/shared/usage-view.ts`의 `usageGroups(cli-accounts:list, usage:get)`를 씁니다.
+  - 계정 목록·순서·라벨·배정 제외 여부는 ChatterBox CLI 계정 저장소 하나에서 옵니다.
+  - 각 계정의 값은 그 계정에 저장된 조회 결과입니다(잔여, 창, 리셋 시각, `checkedAt`).
+  - 계정 저장소에 값이 없을 때만 실시간 값을 쓰고, 기본 `*-1` 계정에 한해 예전 계열 값을 씁니다.
+- ChatterBox에서 계정을 추가·이름 변경·배정 제외·삭제하면 다음 조회부터 그대로 보입니다.
+  - 데스크톱은 사용량이 갱신될 때마다 계정 목록을 다시 읽습니다.
+  - 삭제된 계정에 남은 값이나 폐기된 Gemini CLI 값은 표시하지 않습니다.
+- `GET /api/usage` 응답이 `{ usage: UsageInfo, accounts }`에서 `{ groups, deepseek? }`로 바뀌었습니다.
+  - 원본 사용량 데이터를 보내지 않습니다(Gemini 웹 상세 문구 포함).
+  - 계정 행에는 이메일·폴더가 없고, 오류 문구에 경로·이메일·URL이 있으면 일반 문구로 바꿉니다.
+- 함께 빌드되는 AIUsageMonitor는 자체 설정(`%LOCALAPPDATA%\AIUsageMonitor\settings.json`의 추가 계정·알림 임계값)과 자체 조회를 그대로 씁니다. 바꾸려면 그 저장소를 수정해야 하므로 선택지만 보고했습니다.
 
 ### 구현 중 계약 변경 (2026-10-30, 클로드 2호에게 통지함)
 - `GET /api/attachments/:id`에 `?chat=<chatId>` 필수. 없으면 400, 첨부가 그 채팅의 기록이나 원격 미전송 업로드에 없으면 404.

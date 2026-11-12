@@ -269,8 +269,25 @@ try {
   // Usage (read-only).
   await web.getByRole("button", { name: "사용량" }).first().click();
   check("the usage window opens", await ok(dialog(/사용량/).waitFor({ timeout: 10_000 })));
+  check("the usage rows load", await ok(dialog(/사용량/).locator('[data-testid="remote-usage-row"]').first().waitFor({ timeout: 15_000 })));
   const usageText = await dialog(/사용량/).textContent();
   check("usage shows no emails or local folders", !/@|\\\.claude|AppData/.test(usageText ?? ""));
+  const accountCount = (await page.evaluate(() => window.chatterbox.cliAccounts.list())).length;
+  check("the web usage rows are exactly ChatterBox's CLI accounts", (await dialog(/사용량/).locator('[data-testid="remote-usage-row"]').count()) === accountCount, String(accountCount));
+  await dialog(/사용량/).getByRole("button", { name: "닫기" }).first().click();
+  // Add, rename and disable an account in ChatterBox: the web and the desktop panel follow without any other setting.
+  const added = (await page.evaluate(() => window.chatterbox.cliAccounts.create("claude", "E2E 둘째"))).find((a) => a.label === "E2E 둘째");
+  await page.evaluate((id) => window.chatterbox.cliAccounts.update(id, { label: "E2E 이름변경", enabled: false }), added.accountId);
+  await web.getByRole("button", { name: "사용량" }).first().click();
+  const sheet = dialog(/사용량/);
+  check("an added, renamed and disabled account shows on the web under its new label", await ok(sheet.getByText("E2E 이름변경").waitFor({ timeout: 10_000 })) && /배정 제외/.test((await sheet.textContent()) ?? ""));
+  await sheet.getByRole("button", { name: "닫기" }).first().click();
+  await page.getByRole("button", { name: "사용량·잔고 새로고침" }).click();
+  check("the desktop usage panel shows the same account", await ok(page.locator('[data-testid="cli-usage-claude"]').getByText("E2E 이름변경").waitFor({ timeout: 60_000 })));
+  const removed = await page.evaluate((id) => window.chatterbox.cliAccounts.remove(id).then((l) => l.map((a) => a.accountId), (e) => `ERR ${e.message}`), added.accountId);
+  await web.getByRole("button", { name: "사용량" }).first().click();
+  await dialog(/사용량/).locator('[data-testid="remote-usage-row"]').first().waitFor({ timeout: 10_000 }).catch(() => undefined);
+  check("a removed account disappears from the web usage", await ok(dialog(/사용량/).getByText("E2E 이름변경").waitFor({ state: "detached", timeout: 10_000 })) && (await dialog(/사용량/).locator('[data-testid="remote-usage-row"]').count()) === accountCount, JSON.stringify({ removed, rows: await dialog(/사용량/).locator('[data-testid="remote-usage-row"]').count() }));
   await dialog(/사용량/).getByRole("button", { name: "닫기" }).first().click();
   await web.screenshot({ path: join(data, "remote-features-mobile.png") });
 
