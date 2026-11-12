@@ -13,6 +13,7 @@ import {
   cliAccountKindOf,
   defaultCliAccountId,
   isCliAccountId,
+  priorityOrder,
   type CliAccountId,
   type CliAccountKind,
   type CliAccountPolicies,
@@ -43,7 +44,7 @@ import { ApprovalService, type ApprovalInput, type JudgeAnswer } from "./approva
 import { findClaude, findCodex, findGrok } from "./locate";
 import { GrokDriver, listGrokModels, readGrokAuth, readGrokUsage } from "./drivers/grok";
 import { readClaudeAuth, readClaudeAuthDetail } from "./cli-auth";
-import { CLI_LOGIN_ARGS, CLI_LOGOUT_ARGS, CliAccounts, accountEnv, cliRemaining, resolveAccountPolicy, sanitizePolicies } from "./cli-accounts";
+import { CLI_LOGIN_ARGS, CLI_LOGOUT_ARGS, CliAccounts, accountEnv, cliRemaining, priorityFailure, priorityFailureActive, priorityRecovered, prioritySkipReason, resolveAccountPolicy, sanitizePolicies, type PriorityEvidence, type PriorityFailure, type PriorityFailureReason } from "./cli-accounts";
 import { GeminiWebDriver, type WebContext } from "./drivers/gemini-web";
 import { GeminiWebAccounts } from "./drivers/gemini-web-accounts";
 import { conversationAccount } from "./drivers/gemini-web-protocol";
@@ -413,7 +414,7 @@ export class ChatManager {
       const exe = findCodex(this.store.getSetting("codexPath"));
       if (!exe) throw new Error(this.cliInfo()[1].error);
       const server = new CodexServer(exe, this.cliAccounts().env(accountId));
-      server.onUsage = (u) => this.mergeUsage(u, accountId, token);
+      server.onUsage = (u, startedAt) => this.mergeUsage(u, accountId, token, startedAt);
       current = { server, token };
       this.codexServers.set(accountId, current);
     }
@@ -424,7 +425,7 @@ export class ChatManager {
    * `accountId` names the CLI account that reported the reading. The family keys keep the default
    * (`*-1`) account's values so a single-account setup reads exactly as before.
    */
-  mergeUsage(u: UsageInfo, accountId?: CliAccountId, token?: string) {
+  mergeUsage(u: UsageInfo, accountId?: CliAccountId, token?: string, startedAt = Date.now()) {
     const family = { claude: "claude", codex: "gpt", grok: "grok" } as const;
     if (accountId && !isCliAccountId(accountId)) accountId = undefined;
     // A reading that started before the account was logged out, removed or re-created is dropped.
@@ -442,6 +443,10 @@ export class ChatManager {
       if (accounts[id]!.error === undefined) delete accounts[id]!.error;
       this.usageState = { ...this.usageState, accounts };
       this.cliAccounts().setUsage(id, next, partial);
+      // Live events report the present (startedAt = arrival); explicit reads pass when they began.
+      // Only windows this response actually carries can prove recovery; cached ones may only veto it.
+      const read = responseRemaining(next);
+      if (!next.error && read !== undefined) this.priorityEvidence(id, { startedAt, remaining: Math.min(read, cliRemaining(this.cliAccounts().get(id)) ?? read) });
       if (!isDefault && id === accountId) continue;
       if (partial) {
         const old = this.usageState[k] ?? {};
@@ -463,9 +468,10 @@ export class ChatManager {
     const exe = findClaude(this.store.getSetting("claudePath"));
     if (!exe) return;
     const token = this.accountToken(accountId);
+    const startedAt = Date.now();
     const text = await claudeUsageText(exe, this.tmpDir, this.cliAccounts().env(accountId)).catch(() => null);
     const parsed = text ? parseClaudeUsageText(text) : null;
-    if (parsed) this.mergeUsage({ claude: parsed }, accountId, token);
+    if (parsed) this.mergeUsage({ claude: parsed }, accountId, token, startedAt);
   }
 
   refreshGrokUsage(accountId: CliAccountId = defaultCliAccountId("grok")): Promise<void> {
@@ -477,9 +483,10 @@ export class ChatManager {
       return Promise.resolve();
     }
     const token = this.accountToken(accountId);
+    const startedAt = Date.now();
     const promise = readGrokUsage(exe, this.tmpDir, this.cliAccounts().env(accountId))
-      .then(usage => { if (!this.disposing) this.mergeUsage({ grok: { ...usage, updatedAt: Date.now() } }, accountId, token); })
-      .catch(error => { if (!this.disposing) this.mergeUsage({ grok: { error: error instanceof Error ? error.message : "Grok 사용량 조회에 실패했습니다." } }, accountId, token); })
+      .then(usage => { if (!this.disposing) this.mergeUsage({ grok: { ...usage, updatedAt: Date.now() } }, accountId, token, startedAt); })
+      .catch(error => { if (!this.disposing) this.mergeUsage({ grok: { error: error instanceof Error ? error.message : "Grok 사용량 조회에 실패했습니다." } }, accountId, token, startedAt); })
       .finally(() => { this.grokUsageRefresh.delete(accountId); });
     this.grokUsageRefresh.set(accountId, promise);
     return promise;
@@ -546,10 +553,68 @@ export class ChatManager {
   sanitizeAccountPolicy(value: unknown): CliAccountPolicies {
     const policies = sanitizePolicies(value);
     for (const kind of Object.keys(policies) as CliAccountKind[]) {
-      const id = policies[kind]?.accountId;
-      if (id && !this.cliAccounts().get(id)) delete policies[kind];
+      const policy = policies[kind]!;
+      if (policy.accountId && !this.cliAccounts().get(policy.accountId)) { delete policies[kind]; continue; }
+      // A priority list just loses accounts that no longer exist (the empty fallback still applies).
+      if (policy.order) {
+        const order = policy.order.filter(id => this.cliAccounts().get(id));
+        if (order.length) policies[kind] = { ...policy, order };
+        else { const { order: _drop, ...rest } = policy; policies[kind] = rest; }
+      }
     }
     return policies;
+  }
+
+  /** priority: accounts that recently failed (limit / sign-in / no response) and when they may be tried again. */
+  private priorityFailures = new Map<CliAccountId, PriorityFailure>();
+  /** priority: account fixed for a role while its assignment runs ("chatId:role"). */
+  private accountPins = new Map<string, ResolvedCliAccount>();
+
+  markPriorityFailure(id: CliAccountId, reason: PriorityFailureReason, now = Date.now()) {
+    this.priorityFailures.set(id, priorityFailure(reason, this.cliAccounts().get(id), now));
+  }
+
+  /** A check that began after the failure and shows recovery removes the record (it never revives). */
+  priorityEvidence(id: CliAccountId, evidence: PriorityEvidence) {
+    const failure = this.priorityFailures.get(id);
+    if (failure && priorityRecovered(failure, evidence)) this.priorityFailures.delete(id);
+  }
+
+  /** Current failure record, for display and tests; expired records are dropped. */
+  priorityFailureOf(id: CliAccountId, now = Date.now()): PriorityFailure | undefined {
+    const failure = this.priorityFailures.get(id);
+    if (failure && !priorityFailureActive(failure, now)) { this.priorityFailures.delete(id); return undefined; }
+    return failure;
+  }
+
+  /** Keeps an assignment on its account until it ends; a recovered first account applies to the next one. */
+  pinRoleAccount(chatId: number, role: Role, account: ResolvedCliAccount | undefined) {
+    if (account) this.accountPins.set(`${chatId}:${role}`, account);
+    else this.accountPins.delete(`${chatId}:${role}`);
+  }
+
+  /** priority: the candidates in order, each with why it would be passed over (undefined = usable). */
+  priorityCandidates(order: CliAccountId[], now = Date.now()): { accountId: CliAccountId; skip?: string }[] {
+    return order.map(accountId => {
+      const skip = this.accountChanges.has(accountId) ? "계정 변경 중" : prioritySkipReason(this.cliAccounts().get(accountId), this.priorityFailureOf(accountId, now), now);
+      return skip ? { accountId, skip } : { accountId };
+    });
+  }
+
+  /** The first usable account of a priority order after `tried`; the note lists what was passed over. */
+  nextPriorityAccount(base: ResolvedCliAccount, tried: CliAccountId[] = [], now = Date.now()): ResolvedCliAccount | undefined {
+    const skipped: string[] = [];
+    for (const c of this.priorityCandidates(base.order ?? priorityOrder(base.kind, base), now)) {
+      if (tried.includes(c.accountId)) continue;
+      if (c.skip) { skipped.push(`${c.accountId} 건너뜀(${c.skip})`); continue; }
+      return { ...base, accountId: c.accountId, ...(skipped.length ? { note: skipped.join(", ") } : {}) };
+    }
+    return undefined;
+  }
+
+  /** Why every untried priority account is unusable, for the failure report. */
+  priorityUnavailable(order: CliAccountId[], tried: CliAccountId[] = []): string {
+    return this.priorityCandidates(order).filter(c => !tried.includes(c.accountId)).map(c => `${c.accountId}(${c.skip ?? "사용 가능"})`).join(", ");
   }
 
   private cliStatus(account: ReturnType<CliAccounts["list"]>[number]): CliAccountStatus {
@@ -617,7 +682,22 @@ export class ChatManager {
     const policy = this.resolveAccountPolicy(kind, project.settings);
     if (policy.mode === "fixed" && policy.source !== "default") return policy;
     const stored = role === "orch" ? undefined : this.store.agentByKey(chatId, role)?.cliAccountId;
-    return stored && cliAccountKindOf(stored) === kind ? this.resolveAccountPolicy(kind, project.settings, stored) : policy;
+    if (policy.mode !== "priority") return stored && cliAccountKindOf(stored) === kind ? this.resolveAccountPolicy(kind, project.settings, stored) : policy;
+    // priority: an assignment in progress keeps its account; otherwise the master's explicit choice
+    // when still usable, else the first usable account of the order (unknown usage is tried).
+    const pinned = this.accountPins.get(`${chatId}:${role}`);
+    if (pinned && pinned.kind === kind) return pinned;
+    const skipped: string[] = [];
+    if (stored && cliAccountKindOf(stored) === kind) {
+      const explicit = this.resolveAccountPolicy(kind, project.settings, stored);
+      const skip = this.priorityCandidates([stored])[0].skip;
+      if (!skip) return explicit;
+      skipped.push(`지정 계정 ${stored} 사용 불가(${skip})`);
+    }
+    const next = this.nextPriorityAccount(policy);
+    if (!next) return { ...policy, ...(skipped.length ? { note: skipped.join(", ") } : {}), unavailable: this.priorityUnavailable(policy.order ?? []) };
+    const note = [...skipped, next.note].filter(Boolean).join(", ");
+    return { ...next, ...(note ? { note } : {}) };
   }
 
   /** Account of the role's live CLI process, if any. */
@@ -648,6 +728,7 @@ export class ChatManager {
 
   private async refreshAccountAuth(id: CliAccountId, token: string) {
     this.assertAccountAvailable(id);
+    const startedAt = Date.now();
     const accounts = this.cliAccounts();
     const kind = cliAccountKindOf(id);
     const env = accounts.env(id);
@@ -668,6 +749,7 @@ export class ChatManager {
     // Logged out, removed or re-created meanwhile: the answer belongs to an earlier incarnation.
     if (!this.isCurrentAccount(id, token)) return null;
     if (auth) accounts.setAuth(id, { ...auth, checkedAt: Date.now() });
+    if (auth?.loggedIn) this.priorityEvidence(id, { startedAt, loggedIn: true });
     return auth;
   }
 
@@ -774,17 +856,28 @@ export class ChatManager {
       await this.releaseAccountProcesses(id);
       this.cliAccounts().remove(id);
       this.store.clearCliAccount(id);
-      const global = this.cliAccounts().policies();
-      for (const kind of Object.keys(global) as CliAccountKind[]) if (global[kind]?.accountId === id) delete global[kind];
-      this.cliAccounts().setPolicies(global);
+      // A policy naming the account is dropped; a priority order only loses that entry.
+      const without = (policies: CliAccountPolicies): CliAccountPolicies | undefined => {
+        let changed = false;
+        const next = { ...policies };
+        for (const kind of Object.keys(next) as CliAccountKind[]) {
+          const policy = next[kind]!;
+          if (policy.accountId === id) { delete next[kind]; changed = true; }
+          else if (policy.order?.includes(id)) {
+            const order = policy.order.filter(x => x !== id);
+            const { order: _drop, ...rest } = policy;
+            next[kind] = order.length ? { ...rest, order } : rest;
+            changed = true;
+          }
+        }
+        return changed ? next : undefined;
+      };
+      this.cliAccounts().setPolicies(without(this.cliAccounts().policies()) ?? this.cliAccounts().policies());
       for (const project of this.store.listProjects()) {
-        const policy = project.settings.accountPolicy;
-        const kinds = (Object.keys(policy ?? {}) as CliAccountKind[]).filter(kind => policy?.[kind]?.accountId === id);
-        if (!kinds.length) continue;
-        const next = { ...policy };
-        for (const kind of kinds) delete next[kind];
-        this.store.updateProject(project.id, { settings: { ...project.settings, accountPolicy: next } });
+        const next = without(project.settings.accountPolicy ?? {});
+        if (next) this.store.updateProject(project.id, { settings: { ...project.settings, accountPolicy: next } });
       }
+      this.priorityFailures.delete(id);
       const accounts = { ...this.usageState.accounts };
       delete accounts[id];
       this.usageState = { ...this.usageState, accounts };
@@ -1300,6 +1393,13 @@ export class ChatManager {
     await this.webAccounts?.dispose();
     this.bridge.stop();
   }
+}
+
+/** Lowest remaining percent among the 5-hour/weekly windows present in one usage response. */
+export function responseRemaining(usage: { fiveHour?: { usedPercent: number }; weekly?: { usedPercent: number } } | undefined): number | undefined {
+  const values = [usage?.fiveHour?.usedPercent, usage?.weekly?.usedPercent]
+    .filter((v): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 100).map(v => 100 - v);
+  return values.length ? Math.min(...values) : undefined;
 }
 
 /** Prepends the account handoff to the first input the new session accepts. */

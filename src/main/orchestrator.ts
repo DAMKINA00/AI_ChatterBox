@@ -57,7 +57,7 @@ import { completionIssue, dualInvestigationIssue } from "./dispatch";
 import { conversationAccount, webAccountId } from "./drivers/gemini-web-protocol";
 import { WEB_LOW_REMAINING } from "./drivers/gemini-web-accounts";
 import { isAIStudioModel } from "../shared/aistudio";
-import { cliRemaining, CLI_LOW_REMAINING } from "./cli-accounts";
+import { cliRemaining, CLI_LOW_REMAINING, isAuthError, isQuotaError, PRIORITY_FAILURE_LABEL, type PriorityFailureReason } from "./cli-accounts";
 import { planStepBlockers, validatePlanSteps } from "../shared/plan-steps";
 import { alignNativeSteps, droppedSteps, isOpenStep, keepDroppedSteps, openStepsText, pendingProposal, planStepsFor, stepKey } from "../shared/plan-lifecycle";
 import { validateReviewResult } from "../shared/review-result";
@@ -73,11 +73,11 @@ const WEB_ACCOUNTS_TOOL: ToolDef = {
   description: "마스터가 직접 전체 Gemini 웹 계정의 잔여량·조회 시각·로그인·작업 상태와 작업자 연결을 확인합니다. 기본은 사용량 갱신. 모두 작업 중/잔여량 부족이면 waitForAvailable=true로 10초마다 재확인하며 기다립니다. 계정을 선택하거나 작업자를 실행하지 않으며 선택은 마스터가 spawn/ask의 webAccountId로 합니다.",
   inputSchema: { type: "object", properties: { refresh: { type: "boolean" }, waitForAvailable: { type: "boolean" } }, additionalProperties: false },
 };
-const CLI_ACCOUNT_INPUT = { type: "string", pattern: "^(claude|gpt|grok)-([1-9]|10)$", description: "Claude/Codex/Grok CLI 계정 ID. 작업자 계열과 같아야 합니다. 프로젝트·전역 fixed 정책에서는 정책 계정만 허용하며, auto/기본 정책에서는 명시 지정을 적용합니다. 지정 해제는 clearAccountId=true로 요청하며 accountId와 함께 지정할 수 없습니다. 계정 번호를 작업자 번호로 추정하지 마세요." };
+const CLI_ACCOUNT_INPUT = { type: "string", pattern: "^(claude|gpt|grok)-([1-9]|10)$", description: "Claude/Codex/Grok CLI 계정 ID. 작업자 계열과 같아야 합니다. 프로젝트·전역 fixed 정책에서는 정책 계정만 허용하며, auto/기본 정책에서는 명시 지정을 적용합니다. priority(계정 우선 할당) 정책에서는 명시 지정을 먼저 쓰고, 그 계정이 한도·인증·무응답으로 실패하면 앱이 우선 순서의 다음 계정으로 이어서 실행합니다. 지정 해제는 clearAccountId=true로 요청하며 accountId와 함께 지정할 수 없습니다. 계정 번호를 작업자 번호로 추정하지 마세요." };
 const CLEAR_CLI_ACCOUNT_INPUT = { type: "boolean", description: "true이면 저장된 CLI 계정 지정을 해제하고 프로젝트·전역 정책을 따릅니다. accountId와 동시에 지정할 수 없습니다." };
 const CLI_ACCOUNTS_TOOL: ToolDef = {
   name: "cli_accounts",
-  description: "Claude/Codex/Grok CLI 계정별 로그인·잔여량·실행 중 작업자와 적용 정책을 조회합니다. 계정을 선택하거나 작업을 자동 재시도하지 않습니다. 10분이 지난 잔여량은 미확인입니다. 기본은 캐시 조회이며 refresh=true만 로그인·사용량을 갱신합니다.",
+  description: "Claude/Codex/Grok CLI 계정별 로그인·잔여량·실행 중 작업자와 적용 정책을 조회합니다. 이 조회는 계정을 선택하거나 작업을 자동 재시도하지 않습니다(priority 정책의 순차 전환은 배정 실행 중 앱이 처리). 10분이 지난 잔여량은 미확인입니다. 기본은 캐시 조회이며 refresh=true만 로그인·사용량을 갱신합니다.",
   inputSchema: { type: "object", properties: { kind: { type: "string", enum: ["claude", "gpt", "grok"] }, refresh: { type: "boolean" } }, additionalProperties: false },
 };
 const DISCUSSION_INPUT = {
@@ -193,7 +193,7 @@ const AGENTS_TOOL: ToolDef = {
 const CHECK_AGENT_TOOL: ToolDef = {
   name: "check_agent",
   description: "이미 맡긴 작업도 다시 점검합니다. 마지막 활동·실행 상태·대기 도구·오류·최근 결과를 확인하고 진행 상황 응답을 요청합니다. 기존 작업을 중복 배정하거나 중지하지 않습니다.",
-  inputSchema: { type: "object", properties: { to: { type: "string" }, recover: { type: "boolean", description: "마스터만 사용. 무응답 작업의 기존 프로세스 종료를 확인한 뒤 실패로 정리합니다. 저장된 파일은 보존하며 supersedes로 이어 맡길 수 있습니다." } }, required: ["to"], additionalProperties: false },
+  inputSchema: { type: "object", properties: { to: { type: "string" }, recover: { type: "boolean", description: "마스터만 사용. 무응답 작업의 기존 프로세스 종료를 확인한 뒤 실패로 정리합니다. 저장된 파일은 보존하며 supersedes로 이어 맡길 수 있습니다. priority(계정 우선 할당) 정책 작업자는 앱이 같은 작업을 다음 우선 계정으로 이어서 실행하므로 재배정하지 않습니다." } }, required: ["to"], additionalProperties: false },
 };
 const CHECKLIST_TOOL: ToolDef = {
   name: "checklist",
@@ -279,7 +279,8 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     "- 모든 웹 계정이 작업 중이거나 잔여량 부족이면 gemini_web_accounts(waitForAvailable=true)로 완료·초기화를 기다린 뒤 마스터가 다시 선택한다. 선택 이후 한도가 부족해지면 작업자는 요청·대화·초안을 보존하고 마스터에게 실패를 반환한다. 마스터가 계정 목록을 갱신해 직접 새 계정을 지정하고 실패 협의 id를 supersedes로 이어받는다. 작업자가 임의로 계정을 바꾸지 않는다. agents와 ask 결과의 지정/실행 계정 ID를 보고하며 작업자 번호를 계정 번호로 추정하지 않는다.",
     "- Claude/Codex/Grok CLI 계정 정책은 프로젝트 accountPolicy > 전역 cliAccountPolicy > 기본 fixed/*-1 순이다. 프로젝트·전역 fixed 정책에서는 정책 계정이 최우선이며, 저장된 작업자 지정도 이를 덮어쓰지 못한다. 다른 accountId 지정은 거부되므로 정책 변경을 사용자에게 요청한다. auto 또는 기본(default) 정책에서만 명시·저장된 accountId를 우선 적용한다. clearAccountId=true는 저장된 지정을 해제하고 정책을 따르며 release도 지정을 해제한다. 결과의 정책과 출처를 확인한다.",
     "- auto에서는 마스터가 cli_accounts로 로그인·enabled·실행 중 작업자·remainingPercent·checkedAt를 직접 확인한다. 잔여량이 10%를 초과하는 계정 중 실행 중 작업자가 없는 계정을 우선하고 잔여량이 가장 많은 계정을 accountId로 지정한다. 대기 계정이 없으면 잔여량 10% 초과 계정을 여러 작업자가 공유할 수 있다. 미조회·10분 초과·미확인 잔여량은 사용 가능으로 추정하지 않는다. 적합한 계정이 없으면 갱신하거나 사용자에게 알린다.",
-    "- 앱은 CLI 한도 소진 시 자동 계정 전환이나 작업 재시도를 하지 않는다. fixed는 실패를 보고한다. auto는 마스터가 cli_accounts로 다시 확인하고 실패 협의 id를 supersedes에 넣어 다른 계정으로 재배정한다. 계정 변경은 새 세션과 요약 인계로 처리한다. auto에서 accountId를 생략하면 기존 지정 계정을 유지하고, 지정이 없으면 정책 계정(없으면 *-1)을 사용한다. 앱이 잔여량으로 대신 선택하지 않는다.",
+    "- fixed·auto에서 앱은 CLI 한도 소진 시 자동 계정 전환이나 작업 재시도를 하지 않는다. fixed는 실패를 보고한다. auto는 마스터가 cli_accounts로 다시 확인하고 실패 협의 id를 supersedes에 넣어 다른 계정으로 재배정한다. 계정 변경은 새 세션과 요약 인계로 처리한다. auto에서 accountId를 생략하면 기존 지정 계정을 유지하고, 지정이 없으면 정책 계정(없으면 *-1)을 사용한다. 앱이 잔여량으로 대신 선택하지 않는다.",
+    "- priority(계정 우선 할당)에서는 앱이 사용자가 정한 우선 순서의 첫 사용 가능 계정으로 배정한다(배정 제외·로그아웃 확인·잔여 0% 확인·최근 실패 계정은 건너뛰고 미확인 잔여량은 시도). 한도 소진·인증 실패·무응답으로 실패하면 앱이 같은 협의를 다음 계정의 새 세션과 요약 인계로 자동 이어서 실행하고, 모두 실패하면 실패를 보고한다. 이 경우 마스터는 같은 작업을 재배정하지 않는다. 첫 계정이 회복되면 다음 새 배정부터 다시 첫 계정을 쓰며 진행 중 작업은 바꾸지 않는다. 명시·저장된 accountId는 먼저 사용하고 실패하면 우선 순서로 넘어간다. 협의 결과의 '우선 할당' 줄과 실제 실행 계정을 확인해 보고한다.",
     "- 작업자 번호를 CLI 계정 번호로 추정하지 않는다. spawn/ask/ask_parallel의 accountId로 계정을 명시하고 agents와 협의 결과의 실제 실행 계정을 확인하여 최종 결과에도 실행 계정을 보고한다. Gemini 웹의 webAccountId는 별도이다.",
     "- Gemini 웹은 로컬 파일·명령·MCP를 실행할 수 없으므로 message에 필요한 자료를 포함하거나 attach에 UTF-8 텍스트 파일을 명시한다. 웹에는 추론 단계 설정·토큰 수가 없으므로 effort는 배정 의도로만 기록된다.",
     "- 기술 업무도 모델별 고정 역할 없이 필요한 구현·분석·검증 능력과 실제 가용성을 비교해 맡긴다. 중요한 오류의 독립 검증이 필요하면 dualInvestigation을 선택한다.",
@@ -382,7 +383,15 @@ interface Running {
   discussion?: Discussion;
   discussionReplies?: Set<Role>;
   resolve: (r: { ok: boolean; interrupted?: boolean; error?: string }) => void;
+  /** priority: failed attempts so far, the account switch in progress and the last switch shown to the team. */
+  attempts?: PriorityAttempt[];
+  switching?: boolean;
+  /** Runs under a priority policy: every close before a switch must confirm the exit. */
+  priority?: boolean;
+  exhausted?: boolean;
+  failover?: string;
 }
+interface PriorityAttempt { accountId: CliAccountId; reason: PriorityFailureReason; error: string }
 
 export class Orchestrator {
   private messageFlights = new Set<string>();
@@ -479,6 +488,90 @@ export class Orchestrator {
 
   get recovering() { return this.recoveryFlights.size > 0; }
 
+  /** An app notice about a worker (not the worker's words) that also reaches a waiting or idle master. */
+  private alertMaster(chatId: number, role: Role, note: string) {
+    this.chats.emit(chatId, "orch", role, { type: "room_message", from: role, text: `[앱 상태 점검] ${note}`, kind: "system" });
+    this.wakeMasterConsults(chatId, note);
+    const master = this.chats.liveDriver(chatId, "orch");
+    if (master?.running) void master.steer?.({ text: `[앱 상태 점검]\n${note}`, attachments: [] }).catch(() => undefined);
+    else if (master) {
+      this.chats.updateChat(chatId, { status: "working" });
+      void master.send({ text: `[앱 상태 점검]\n${note}`, attachments: [] }).catch(() => undefined);
+    }
+  }
+
+  /**
+   * priority switch: archive and close the failed account's process. Returns why its exit could not be
+   * confirmed; the live handle then stays in place so check_agent(recover=true) can still clean it up.
+   */
+  private async closeForSwitch(chatId: number, role: Role): Promise<string | undefined> {
+    const old = this.chats.liveDriver(chatId, role);
+    try {
+      if (old) {
+        if (!old.closeStrict) throw new Error("이 작업자 종류는 프로세스 종료 확인을 지원하지 않습니다.");
+        // Each driver bounds its own checks; this outer deadline only guards against one that never answers.
+        const closed = await this.withinDeadline(old.closeStrict(), this.switchCloseMs);
+        if (closed !== true) throw new Error(closed);
+        if (old.running) throw new Error("이전 프로세스가 아직 실행 중입니다.");
+      }
+    } catch (error) {
+      // The handle stays so a later recover can retry the same confirmed close.
+      return error instanceof Error ? error.message : String(error);
+    }
+    // Exit confirmed. Archiving the closed session and dropping the handle are best effort within a
+    // deadline: a silent archive must never hold the switch (or block recover) indefinitely.
+    const archived = await this.withinDeadline(this.chats.archiveWorker(chatId, role), this.switchCleanupMs);
+    // disposeRole removes the handle at once; only its (already closed) driver cleanup is awaited.
+    const released = await this.withinDeadline(this.chats.disposeRole(chatId, role), this.switchCleanupMs);
+    if (archived !== true || released !== true)
+      this.chats.emit(chatId, "orch", "orch", { type: "notice", text: `이전 계정 실행 종료는 확인했으나 세션 ${archived !== true ? "보관" : "정리"}을 완료하지 못했습니다(${archived !== true ? archived : released}). 계정 전환은 계속합니다.` });
+    return undefined;
+  }
+
+  /** Deadline for the best-effort archive/cleanup after a confirmed close (tests may shorten it). */
+  switchCleanupMs = 8000;
+  /** Outer deadline for a driver's confirmed close (its own checks are shorter). */
+  switchCloseMs = 20_000;
+
+  /** true when the promise settled successfully in time; otherwise why not (never throws). */
+  private async withinDeadline(promise: Promise<unknown>, ms: number): Promise<true | string> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise.then(() => true as const),
+        new Promise<string>(resolve => { timer = setTimeout(() => resolve(`${Math.round(ms / 1000)}초 시간 초과`), ms); }),
+      ]);
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    } finally { clearTimeout(timer); }
+  }
+
+  /**
+   * Ends a worker's run before its write scope is released or another account continues the work.
+   * Priority assignments (manual recover, sweep and switch alike) use the confirmed close above and
+   * keep the handle and scope on failure; other policies keep their existing recover/dispose steps.
+   * Throws when the end is not confirmed.
+   */
+  private async endWorkerRun(chatId: number, role: Role, running: Running, manual: boolean): Promise<void> {
+    if (running.priority) {
+      const error = await this.closeForSwitch(chatId, role);
+      if (error) throw new Error(`이전 실행 종료를 확인하지 못했습니다: ${error}`);
+      return;
+    }
+    const driver = this.chats.liveDriver(chatId, role);
+    if (manual) {
+      if (!driver) throw new Error("기존 작업자 실행 핸들을 확인하지 못했습니다.");
+      await (driver.recover ? driver.recover() : driver.dispose());
+      if (driver.running) throw new Error("기존 작업자 실행 종료를 확인하지 못했습니다.");
+      if (!driver.recover) await this.chats.disposeRole(chatId, role, true);
+      return;
+    }
+    // Dispose the failed session before releasing its write scope or assigning a replacement.
+    if (driver?.running) await (driver.recover ? driver.recover() : driver.dispose());
+    if (driver?.running) throw new Error("작업자 프로세스가 아직 실행 중입니다.");
+    if (!driver?.recover) await this.chats.disposeRole(chatId, role);
+  }
+
   /** Silence prompts a check, not termination: a long tool may still own its write scope. */
   async sweepWorkerRecovery(now = Date.now()) {
     for (const [chatId, inst] of this.instructions) {
@@ -494,25 +587,14 @@ export class Orchestrator {
               running.lastError = "작업자 실행이 끝났지만 종료 결과가 도착하지 않았습니다.";
             } else {
               const note = `${this.name(chatId, role)}의 활동이 ${Math.floor((now - running.lastEventAt) / 60_000)}분간 없습니다. 긴 도구 실행·동료 대기일 수 있으며 실패로 단정하지 않습니다. 마스터는 check_agent(to="${this.name(chatId, role)}")로 확인하고, 실제 무응답이면 recover=true로 기존 실행 정리 후 supersedes로 이어 맡기세요. 이미 배정했다는 이유로 확인을 생략하지 마세요.`;
-              // An app notice about the quiet worker, not the worker's words; delivery to the team is unchanged.
-              this.chats.emit(chatId, "orch", role, { type: "room_message", from: role, text: `[앱 상태 점검] ${note}`, kind: "system" });
-              this.wakeMasterConsults(chatId, note);
-              const master = this.chats.liveDriver(chatId, "orch");
-              if (master?.running) void master.steer?.({ text: `[앱 상태 점검]\n${note}`, attachments: [] }).catch(() => undefined);
-              else if (master) {
-                this.chats.updateChat(chatId, { status: "working" });
-                void master.send({ text: `[앱 상태 점검]\n${note}`, attachments: [] }).catch(() => undefined);
-              }
+              this.alertMaster(chatId, role, note);
             }
           }
           if (!running.lastError || running.recovering || now - running.lastEventAt < 60_000) continue;
           running.recovering = true;
           running.recoveryError = running.lastError;
           try {
-            // Dispose the failed session before releasing its write scope or assigning a replacement.
-            if (driver?.running) await (driver.recover ? driver.recover() : driver.dispose());
-            if (driver?.running) throw new Error("작업자 프로세스가 아직 실행 중입니다.");
-            if (!driver?.recover) await this.chats.disposeRole(chatId, role);
+            await this.endWorkerRun(chatId, role, running, false);
             running.recovering = false;
             if (this.instructions.get(chatId) !== inst || this.stopped.has(chatId)) {
               running.resolve({ ok: false, interrupted: true });
@@ -652,16 +734,15 @@ export class Orchestrator {
           const latest = this.chats.store.listConsults(chatId).findLast(c => c.toRole === target.key);
           if (args.recover) {
             if (!master || !running || running.recovering) return textResult("마스터만 실행 중인 작업을 복구할 수 있습니다.", true);
+            if (running.switching) return textResult("앱이 우선 할당 계정 전환을 진행 중입니다. 잠시 후 check_agent로 다시 확인하세요.", true);
             if (this.chats.approvals.pendingCount(chatId)) return textResult("사용자 승인 대기 중입니다. 승인 응답을 먼저 확인하세요.", true);
             running.recovering = true;
             running.recoveryError = "마스터가 무응답 작업의 실행을 정리했습니다. 기존 산출물을 확인하고 이어서 진행하세요.";
             try {
-              if (!driver) throw new Error("기존 작업자 실행 핸들을 확인하지 못했습니다.");
-              await (driver.recover ? driver.recover() : driver.dispose());
-              if (driver.running) throw new Error("기존 작업자 실행 종료를 확인하지 못했습니다.");
-              if (!driver.recover) await this.chats.disposeRole(chatId, target.key, true);
+              await this.endWorkerRun(chatId, target.key, running, true);
               running.recovering = false;
               running.resolve({ ok: false, error: running.recoveryError });
+              if (running.switching) return textResult(`기존 실행 종료를 확인했습니다. 계정 우선 할당 정책에 따라 앱이 협의 ${running.consultId}를 다음 계정으로 이어서 실행합니다(${running.failover}). 재배정하지 말고 결과를 기다리세요.`);
               return textResult(`기존 실행 종료를 확인했습니다. 협의 ${running.consultId} 정리 후 supersedes로 이어 맡기세요. 저장된 결과는 보존했습니다.`);
             } catch (error) {
               running.recovering = false;
@@ -745,7 +826,7 @@ export class Orchestrator {
             else await this.chats.refreshCliAccount();
           }
           if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch || !this.chats.store.chat(chatId)) return textResult("계정 조회 중 작업이 중지되거나 채팅이 종료되었습니다.", true);
-          return textResult(JSON.stringify({ ...this.cliAccountsInfo(chatId, args.kind), minimumRemainingPercent: CLI_LOW_REMAINING, selection: "master", note: "자동 선택·전환·작업 재시도 없음. remainingPercent=null은 미조회·오류·10분 초과입니다. auto에서는 로그인·enabled·실행 중 작업자를 확인하고 잔여량 10% 초과인 대기 계정을 우선 지정하고, 대기 계정이 없으면 같은 조건의 계정을 여러 작업자가 공유할 수 있습니다. refresh=true만 실측을 갱신합니다." }));
+          return textResult(JSON.stringify({ ...this.cliAccountsInfo(chatId, args.kind), minimumRemainingPercent: CLI_LOW_REMAINING, selection: "master", note: "fixed·auto는 자동 선택·전환·작업 재시도 없음. priority는 앱이 우선 순서대로 배정하고 실패 시 다음 계정으로 이어서 실행합니다(policies의 order·priorityState 참고). remainingPercent=null은 미조회·오류·10분 초과입니다. auto에서는 로그인·enabled·실행 중 작업자를 확인하고 잔여량 10% 초과인 대기 계정을 우선 지정하고, 대기 계정이 없으면 같은 조건의 계정을 여러 작업자가 공유할 수 있습니다. refresh=true만 실측을 갱신합니다." }));
         }
         case "gemini_web_accounts": {
           if (!master) return textResult("Gemini 웹 계정 선택·조회는 마스터가 직접 합니다.", true);
@@ -842,14 +923,19 @@ export class Orchestrator {
         const balance = quota ? ` · 잔여=${quota.remainingPercent === undefined ? "미확인" : `${quota.remainingPercent}%`} · 사용량 조회=${quota.usage.checkedAt || "미조회"}` : "";
         const cli = this.chats.roleAccount(chatId, a.key);
         const cliInfo = this.cliAccountText(chatId, cli, r?.cliAccountId, true);
-        return `- ${a.nickname} (${WORKER_KIND_LABEL[a.kind]}) · ${a.job || "역할 미정"} · ${state}${account}${balance}${cliInfo ? ` · ${cliInfo} · 최근 세션 계정=${a.sessionAccountId ?? "없음"}` : ""}${result}`;
+        const failover = r?.attempts?.length ? ` · 우선 할당: ${r.attempts.map(x => `${x.accountId} 실패(${PRIORITY_FAILURE_LABEL[x.reason]})`).join(" → ")}${r.failover ? ` → ${r.failover}` : ""}` : "";
+        return `- ${a.nickname} (${WORKER_KIND_LABEL[a.kind]}) · ${a.job || "역할 미정"} · ${state}${account}${balance}${cliInfo ? ` · ${cliInfo}${failover} · 최근 세션 계정=${a.sessionAccountId ?? "없음"}` : ""}${result}`;
       })
       .join("\n");
   }
 
   private cliAccountsInfo(chatId: number, kind?: CliAccountKind) {
     const project = this.chats.store.project(this.chats.store.chat(chatId)!.projectId)!;
-    const policies = Object.fromEntries((kind ? [kind] : CLI_ACCOUNT_KINDS).map(k => [k, this.chats.resolveAccountPolicy(k, project.settings)])) as Record<CliAccountKind, ResolvedCliAccount>;
+    const policies = Object.fromEntries((kind ? [kind] : CLI_ACCOUNT_KINDS).map(k => {
+      const policy = this.chats.resolveAccountPolicy(k, project.settings);
+      // priority: the order and why each account would be passed over right now.
+      return [k, policy.mode === "priority" ? { ...policy, priorityState: this.chats.priorityCandidates(policy.order ?? []).map(c => ({ accountId: c.accountId, skip: c.skip ?? null })) } : policy];
+    })) as Record<CliAccountKind, ResolvedCliAccount>;
     const accounts = this.chats.listCliAccounts(kind).map(a => ({
       accountId: a.accountId, kind: a.kind, label: a.label, enabled: a.enabled, isDefault: a.isDefault,
       authStatus: a.authStatus, authCheckedAt: a.auth?.checkedAt ?? null,
@@ -869,7 +955,7 @@ export class Orchestrator {
     const policy = configuredPolicy ?? this.chats.resolveAccountPolicy(selected.kind, settings);
     const quota = this.chats.getCliAccount(executed ?? selected.accountId);
     const remaining = cliRemaining(quota);
-    return `지정 계정=${selected.accountId} · ${pending ? "현재 실행 계정" : "실제 실행 계정"}=${executed ?? (pending ? "없음" : "연결 전 실패/중지")} · 모드=${selected.mode} · 출처=${selected.source} · 정책 출처=${policy.source} · 정책 계정=${policy.accountId} · 잔여=${remaining === undefined ? "미확인" : `${remaining}%`} · 사용량 조회=${quota?.usage?.checkedAt ?? "미조회"}${selected.mode === "auto" ? " · auto 자동 선택 없음: cli_accounts 확인 후 accountId 지정" : ""}`;
+    return `지정 계정=${selected.accountId} · ${pending ? "현재 실행 계정" : "실제 실행 계정"}=${executed ?? (pending ? "없음" : "연결 전 실패/중지")} · 모드=${selected.mode} · 출처=${selected.source} · 정책 출처=${policy.source} · 정책 계정=${policy.accountId} · 잔여=${remaining === undefined ? "미확인" : `${remaining}%`} · 사용량 조회=${quota?.usage?.checkedAt ?? "미조회"}${selected.mode === "auto" ? " · auto 자동 선택 없음: cli_accounts 확인 후 accountId 지정" : ""}${selected.mode === "priority" ? ` · 우선 순서=${(selected.order ?? []).join(">")}${selected.note ? ` · ${selected.note}` : ""}${selected.unavailable ? ` · 사용 가능 계정 없음: ${selected.unavailable}` : ""}` : ""}`;
   }
 
   private selectedCliAccount(chatId: number, kind: CliAccountKind, value: unknown, clear?: unknown): CliAccountId | null | undefined {
@@ -1122,8 +1208,11 @@ export class Orchestrator {
     const cliKind = cliAccountKindForAgent(WORKER_AGENT[target.kind]);
     let cliPolicy = cliKind ? this.chats.resolveAccountPolicy(cliKind, project.settings) : undefined;
     let cliSelection = accountChange !== undefined && cliPolicy
-      ? cliPolicy.mode === "fixed" && cliPolicy.source !== "default" ? cliPolicy : this.chats.resolveAccountPolicy(cliKind!, project.settings, accountChange ?? undefined)
+      ? cliPolicy.mode === "fixed" && cliPolicy.source !== "default" ? cliPolicy
+        : cliPolicy.mode === "priority" && accountChange === null ? this.chats.nextPriorityAccount(cliPolicy) ?? { ...cliPolicy, unavailable: this.chats.priorityUnavailable(cliPolicy.order ?? []) }
+        : this.chats.resolveAccountPolicy(cliKind!, project.settings, accountChange ?? undefined)
       : this.chats.roleAccount(chatId, target.key);
+    if (cliSelection?.unavailable) return textResult(`우선 할당 목록에 지금 사용할 수 있는 ${cliSelection.kind} 계정이 없어 맡기지 않았습니다: ${cliSelection.unavailable}. cli_accounts(refresh=true)로 갱신하거나 사용자에게 계정 상태 확인을 요청하세요.`, true);
     if (cliSelection) this.chats.assertCliAccount(cliSelection.accountId, cliSelection.kind);
     const limited = resuming ? (this.stopped.has(chatId) || this.planning.has(chatId) ? "작업이 중지되었거나 계획 모드입니다." : null) : this.limitCheck(chatId, project, target.key, kind, message, target.kind === "gemini" && this.chats.usesGeminiWeb(chat) ? target.webAccountId : cliSelection?.accountId);
     if (limited) {
@@ -1191,7 +1280,7 @@ export class Orchestrator {
       if (kind === "implement") await this.acquireScope(chatId, consult.id, scope);
       this.chats.setRoute(chatId, target.key, node);
 
-      const result = await new Promise<{ ok: boolean; interrupted?: boolean; error?: string; text: string; files: string[]; webAccountId?: GeminiWebAccountId; cliAccountId?: CliAccountId }>((resolve) => {
+      const result = await new Promise<{ ok: boolean; interrupted?: boolean; error?: string; text: string; files: string[]; webAccountId?: GeminiWebAccountId; cliAccountId?: CliAccountId; attempts?: PriorityAttempt[]; exhausted?: boolean }>((resolve) => {
         let settled = false;
         const r: Running = {
           lastEventAt: Date.now(),
@@ -1208,13 +1297,16 @@ export class Orchestrator {
           discussion,
           discussionReplies: discussion ? new Set() : undefined,
           resolve: (end) => {
-            if (settled || r.recovering) return;
+            if (settled || r.recovering || r.switching) return;
+            const unresponsive = !!r.recoveryError && !this.stopped.has(chatId);
+            if (unresponsive) end = { ok: false, error: r.recoveryError };
+            // priority: limit / sign-in / no-response failures continue on the next account of the order.
+            if (!end.ok && !end.interrupted && failover(end.error, unresponsive)) return;
             settled = true;
-            if (r.recoveryError && !this.stopped.has(chatId)) end = { ok: false, error: r.recoveryError };
             const missing = discussion?.peers.filter(p => !r.discussionReplies!.has(p.key));
             const issue = end.ok && missing?.length ? `토의 미완료: ${missing.map(p => p.nickname).join(", ")}의 실제 참여 응답이 없습니다. 보완하거나 미완료 사유를 보고하세요.`
               : end.ok && message.includes("[이미지 결과 필수]") && ![...r.files].some(path => /\.(png|jpe?g|webp)$/i.test(path) && existsSync(resolvePath(project.folder, path))) ? "이미지 생성 미완료: 실제 이미지 파일이나 첨부 결과를 확인하지 못했습니다." : "";
-            resolve({ ...end, ...(issue ? { ok: false, error: issue } : {}), text: issue ? `${issue}\n${r.text}` : r.text, files: [...r.files], webAccountId: r.webAccountId, cliAccountId: r.cliAccountId });
+            resolve({ ...end, ...(issue ? { ok: false, error: issue } : {}), text: issue ? `${issue}\n${r.text}` : r.text, files: [...r.files], webAccountId: r.webAccountId, cliAccountId: r.cliAccountId, attempts: r.attempts, exhausted: r.exhausted });
           },
         };
         const m = this.running.get(chatId) ?? new Map<Role, Running>();
@@ -1222,16 +1314,29 @@ export class Orchestrator {
         this.running.set(chatId, m);
         this.chats.agentsChanged(chatId);
         if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch) return r.resolve({ ok: false, interrupted: true });
-        void (async () => {
+        // The account of the current attempt; only a priority policy ever moves to another one.
+        let attempt: ResolvedCliAccount | null | undefined;
+        let handover = "";
+        const run = async (next?: ResolvedCliAccount) => {
           try {
-            cliSelection = this.chats.roleAccount(chatId, target.key);
-            cliPolicy = cliSelection ? this.chats.resolveAccountPolicy(cliSelection.kind, this.chats.store.project(chat.projectId)!.settings) : undefined;
-            if (cliSelection) this.chats.assertCliAccount(cliSelection.accountId, cliSelection.kind);
+            if (next) attempt = next;
+            else {
+              cliSelection = this.chats.roleAccount(chatId, target.key);
+              cliPolicy = cliSelection ? this.chats.resolveAccountPolicy(cliSelection.kind, this.chats.store.project(chat.projectId)!.settings) : undefined;
+              attempt = cliSelection;
+              if (attempt?.unavailable) throw new Error(`우선 할당 목록에 지금 사용할 수 있는 계정이 없습니다: ${attempt.unavailable}`);
+            }
+            // The assignment keeps this account to the end; a recovered first account waits for the next one.
+            if (attempt?.mode === "priority") {
+              r.priority = true;
+              this.chats.pinRoleAccount(chatId, target.key, attempt);
+            }
+            if (attempt) this.chats.assertCliAccount(attempt.accountId, attempt.kind);
             const driver = await this.chats.driver(chatId, target.key, reasoning.effort, assignmentModel);
             r.cliAccountId = this.chats.runningAccount(chatId, target.key);
             if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch || settled) return r.resolve({ ok: false, interrupted: true });
             await driver.send({
-              text: kindPrefix(kind, callerName, scope) + message + `\n\n[현재 팀과 최근 결과]\n${this.agentsText(chatId, true)}` + this.readMessages(chatId, target.key),
+              text: kindPrefix(kind, callerName, scope) + message + handover + `\n\n[현재 팀과 최근 결과]\n${this.agentsText(chatId, true)}` + this.readMessages(chatId, target.key),
               requiresImage: message.includes("[이미지 결과 필수]"),
               webAccountId: target.kind === "gemini" && this.chats.usesGeminiWeb(chat) ? target.webAccountId : undefined,
               attachments,
@@ -1240,7 +1345,53 @@ export class Orchestrator {
           } catch (e) {
             r.resolve({ ok: false, error: e instanceof Error ? e.message : String(e) });
           }
-        })();
+        };
+        const failover = (error: string | undefined, unresponsive: boolean): boolean => {
+          if (attempt?.mode !== "priority" || this.chats.quitting || this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch) return false;
+          const reason: PriorityFailureReason | undefined = unresponsive ? "unresponsive" : isQuotaError(error) ? "quota" : isAuthError(error) ? "auth" : undefined;
+          if (!reason) return false;
+          const failed = r.cliAccountId ?? attempt.accountId;
+          this.chats.markPriorityFailure(failed, reason);
+          // A switch held back earlier and then cleaned up (recover) keeps its first recorded cause.
+          if (r.attempts?.at(-1)?.accountId !== failed)
+            r.attempts = [...(r.attempts ?? []), { accountId: failed, reason, error: clipText(error ?? PRIORITY_FAILURE_LABEL[reason], 300) }];
+          const next = this.chats.nextPriorityAccount({ ...attempt, note: undefined }, r.attempts!.map(a => a.accountId));
+          if (!next) { r.exhausted = true; return false; }
+          r.switching = true;
+          r.failover = `${next.accountId}로 전환 중`;
+          const label = PRIORITY_FAILURE_LABEL[r.attempts!.at(-1)!.reason];
+          this.chats.emit(chatId, this.chats.route(chatId, target.key), target.key, { type: "notice", text: `우선 할당: ${failed} 실패(${label}) → ${next.accountId}로 전환합니다${next.note ? ` (${next.note})` : ""}. 이전 계정의 실행 종료를 확인한 뒤 새 세션으로 같은 작업을 이어서 실행합니다.` });
+          void (async () => {
+            // The failed account's process must be confirmed closed before the next account starts;
+            // otherwise the switch is held: the scope stays locked and the master is told to clean up.
+            let closeError: string | undefined;
+            try { closeError = await this.closeForSwitch(chatId, target.key); }
+            catch (error) { closeError = error instanceof Error ? error.message : String(error); }
+            finally { r.switching = false; } // never left set: recover must stay possible
+            if (closeError) {
+              r.failover = "전환 보류(이전 계정 실행 종료 미확인)";
+              r.lastError = `우선 할당 전환 실패: 이전 계정 ${failed}의 실행 종료를 확인하지 못해 다음 계정 ${next.accountId}로 전환하지 않았습니다(${clipText(closeError, 200)}). 작업 범위 잠금은 유지됩니다.`;
+              r.lastEventAt = Date.now();
+              this.chats.agentsChanged(chatId);
+              this.alertMaster(chatId, target.key, `${target.nickname}: ${r.lastError} 마스터는 check_agent(to="${target.nickname}", recover=true)로 이전 실행을 정리하세요. 정리가 확인되면 앱이 우선 순서의 다음 계정으로 이어서 실행합니다.`);
+              return;
+            }
+            const draft = r.text.trim();
+            const files = [...r.files];
+            r.failover = `${next.accountId}로 전환`;
+            Object.assign(r, { text: "", lastError: undefined, recoveryError: undefined, tools: new Set(), cliAccountId: undefined, lastEventAt: Date.now(), lastProbeAt: undefined });
+            r.pendingFiles.clear();
+            handover = `\n\n[앱 우선 할당 전환] 이전 계정 ${failed}에서 ${label}(으)로 실패해 계정 ${next.accountId}로 같은 작업을 이어서 실행합니다. 이미 끝난 부분은 반복하지 말고 파일 상태를 먼저 확인하세요.`
+              + `\n이전 시도에서 변경된 파일: ${files.length ? files.join(", ") : "없음"}`
+              + (draft ? `\n이전 시도의 중간 응답(일부):\n${clipText(draft, 2000)}` : "");
+            this.chats.setRoute(chatId, target.key, node);
+            this.chats.agentsChanged(chatId);
+            if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch) return r.resolve({ ok: false, interrupted: true });
+            await run(next);
+          })();
+          return true;
+        };
+        void run();
       });
 
       // Quitting: leave it running so the next launch records that the app exit cut it off.
@@ -1255,10 +1406,17 @@ export class Orchestrator {
       const cliInfo = this.cliAccountText(chatId, cliSelection, result.cliAccountId, false, cliPolicy);
       const accountInfo = target.kind === "gemini" && this.chats.usesGeminiWeb(chat)
         ? `[Gemini 웹 지정 계정=${target.webAccountId ?? "없음"} · 실제 실행 계정=${result.webAccountId ?? "연결 전 실패/중지"}]\n` : cliInfo ? `[CLI ${cliInfo}]\n` : "";
-      const quotaFailure = !result.ok && ["claude", "gpt", "grok"].includes(target.kind)
-        && /rate[ _-]?limit|usage[ _-]?limit|quota|\btoo many requests\b|\byou(?:'ve|’ve| have) (?:hit|reached) your (?:usage )?limit\b|(?:계정|사용량|요청|구독|이용|잔여)\s*한도.{0,12}(?:소진|초과|부족)|^한도\s*(?:소진|초과|부족)|\b429\b/i.test(result.error ?? "");
-      const quotaNotice = quotaFailure ? "[CLI 한도 소진 — 자동 계정 전환·재시도 없음. fixed는 실패를 보고하고, auto는 마스터가 cli_accounts 조회 후 다른 계정에 supersedes로 재배정하세요.]\n" : "";
-      const summary = accountInfo + quotaNotice + [!result.ok ? result.error : undefined, result.text.trim()].filter(Boolean).join("\n")
+      const quotaFailure = !result.ok && ["claude", "gpt", "grok"].includes(target.kind) && isQuotaError(result.error);
+      const priorityRun = result.attempts?.length || cliSelection?.mode === "priority";
+      const quotaNotice = !quotaFailure ? ""
+        : priorityRun ? "[CLI 한도 소진 — 우선 할당 목록에 이어서 실행할 계정이 남지 않아 실패를 보고합니다. cli_accounts로 상태를 확인하고 사용자에게 알리세요.]\n"
+        : "[CLI 한도 소진 — 자동 계정 전환·재시도 없음. fixed는 실패를 보고하고, auto는 마스터가 cli_accounts 조회 후 다른 계정에 supersedes로 재배정하세요.]\n";
+      const attempts = result.attempts ?? [];
+      const failoverInfo = !attempts.length ? ""
+        : result.exhausted
+          ? `[우선 할당: 시도한 계정 모두 실패 — ${attempts.map(a => `${a.accountId}(${PRIORITY_FAILURE_LABEL[a.reason]}: ${a.error})`).join(", ")}${cliSelection?.order ? ` · 남은 계정: ${this.chats.priorityUnavailable(cliSelection.order, attempts.map(a => a.accountId)) || "없음"}` : ""}]\n`
+          : `[우선 할당: ${attempts.map(a => `${a.accountId} 실패(${PRIORITY_FAILURE_LABEL[a.reason]})`).join(" → ")} → ${result.cliAccountId ?? "연결 전 실패/중지"}로 전환 · 실제 실행 계정=${result.cliAccountId ?? "연결 전 실패/중지"}]\n`;
+      const summary = accountInfo + failoverInfo + quotaNotice +[!result.ok ? result.error : undefined, result.text.trim()].filter(Boolean).join("\n")
         + (!result.text.trim() && !result.error ? (status === "done" && report ? `구조화 리뷰 제출(${report.verdict}): ${report.summary}` : result.files.length ? `산출물 ${result.files.length}개를 생성·수정했습니다.` : "작업자의 응답과 산출물이 없습니다.") : "");
       const finished = this.chats.store.finishConsult(consult.id, status, summary, result.files);
       this.chats.sink.consult(finished);
@@ -1283,6 +1441,7 @@ export class Orchestrator {
         : "\n\n구조화 리뷰 결과가 제출되지 않았습니다. 통과로 간주하지 마세요.";
       return textResult(`${head} 협의 id=${consult.id} · 추론 ${effortLabel}\n${summary}${reviewNote}${files}${caller === "orch" ? this.takeQueued(chatId) : ""}`, status !== "done");
     } finally {
+      if (cliKind) this.chats.pinRoleAccount(chatId, target.key, undefined);
       assignments.delete(assignmentKey);
       removeWait(this.graph(chatId), caller, target.key);
       done();

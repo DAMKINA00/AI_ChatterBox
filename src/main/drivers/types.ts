@@ -36,6 +36,13 @@ export interface AgentDriver {
   dispose(): Promise<void>;
   /** Stop only this role and confirm it is idle before releasing its write scope. */
   recover?(): Promise<void>;
+  /**
+   * Before another CLI account continues this work (priority policy): end every process this driver
+   * started and confirm the exit (tree kill, exit event, pid gone), or for a shared server confirm the
+   * turn stopped and the conversation was released. Rejects when that is not confirmed; calling it
+   * again retries whatever is still left.
+   */
+  closeStrict?(): Promise<void>;
   /** Hide a finished worker's native conversation while preserving it for resume. */
   archive?(): Promise<void>;
 }

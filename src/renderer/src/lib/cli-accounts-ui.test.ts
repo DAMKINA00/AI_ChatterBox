@@ -64,6 +64,31 @@ test("policy field preserves inherited, auto and missing fixed account selection
   assert.match(render({ value: { mode: "fixed", accountId: "claude-9" } }), /value="claude-9" selected=""/);
 });
 
+test("policy field offers priority with an ordered list, move buttons and accounts outside the order", async () => {
+  const { CliAccountPolicyField } = await components();
+  const accounts = [account(), account("claude-2"), { ...account("claude-3"), enabled: false }];
+  const render = (props: Record<string, unknown>) => renderToStaticMarkup(createElement(CliAccountPolicyField, { kind: "claude", accounts, onChange: () => {}, ...props }));
+  assert.match(render({ inherit: true }), /<option value="priority">계정 우선 할당/);
+  const html = render({ value: { mode: "priority", order: ["claude-2", "claude-1"] } });
+  assert.match(html, /value="priority" selected=""/);
+  assert.match(html, /aria-label="Claude 계정 우선 순서"/);
+  assert.doesNotMatch(html, /aria-label="Claude 지정 계정"/);
+  assert.ok(html.indexOf("1.</span><span class=\"min-w-0 flex-1 truncate\">claude-2") > 0, "first in order is listed first");
+  assert.match(html, /disabled=""[^>]*aria-label="claude-2 위로"/);
+  assert.match(html, /disabled=""[^>]*aria-label="claude-1 아래로"/);
+  assert.match(html, /claude-3 · 배정 제외\(건너뜀\) · 순서에 없음/);
+  assert.match(html, /aria-label="claude-3 순서에 추가"/);
+  // An empty order shows the fallback: the policy account, then *-1.
+  assert.match(render({ value: { mode: "priority" } }), /1\.<\/span><span class="min-w-0 flex-1 truncate">claude-1/);
+});
+
+test("project priority policies keep their order minus missing accounts and stay compatible with older entries", () => {
+  assert.deepEqual(existingCliAccountPolicies({ claude: { mode: "priority", order: ["claude-9", "claude-2", "claude-1"] } }, [account(), account("claude-2")]),
+    { claude: { mode: "priority", order: ["claude-2", "claude-1"] } });
+  assert.deepEqual(existingCliAccountPolicies({ claude: { mode: "priority", order: ["claude-9"] } }, [account()]), { claude: { mode: "priority" } });
+  assert.deepEqual(existingCliAccountPolicies({ claude: { mode: "priority", accountId: "claude-9" } }, [account()]), {});
+});
+
 test("usage component renders identical markup for zero or one account and adds rows only for multiple accounts", async () => {
   const { CliUsageBars, TooltipProvider } = await components();
   const render = (accounts: CliAccountStatus[] = []) => renderToStaticMarkup(createElement(TooltipProvider, null, createElement(CliUsageBars, {

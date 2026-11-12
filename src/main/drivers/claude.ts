@@ -7,7 +7,7 @@ import { bridgeServerConfig, textResult, type LocalBridge } from "../local-bridg
 import { claudeToolDiffs, claudeToolPaths } from "../diffs";
 import { READ_ONLY_TOOLS } from "../approvals";
 import { isReadCommand } from "../execution-policy";
-import { readLines, shutdown } from "../proc";
+import { closeConfirmed, readLines, shutdown } from "../proc";
 import { fileNote, IMAGE_MIMES, MAX_IMAGE_BYTES, type AgentDriver, type AgentInput, type DriverHost, type DriverOptions } from "./types";
 import { ClaudeSessionArchive } from "./claude-archive";
 
@@ -56,6 +56,8 @@ export class ClaudeDriver implements AgentDriver {
   private toolInputs = new Map<string, { name: string; input: any }>();
   private canSteer = false;
   private pendingSteers = new Set<string>();
+  /** Every process this driver started that has not reported its exit yet (closeStrict checks them all). */
+  private processes = new Set<ChildProcess>();
 
   constructor(
     private opts: DriverOptions,
@@ -128,11 +130,15 @@ export class ClaudeDriver implements AgentDriver {
       // Approvals and consults can take a long time; don't let MCP calls time out.
       env: { ...process.env, ...this.opts.accountEnv, MCP_TOOL_TIMEOUT: String(24 * 3600 * 1000), ...(this.opts.effort ? { CLAUDE_CODE_EFFORT_LEVEL: this.opts.effort } : {}) },
     });
+    this.processes.add(child);
+    child.once("exit", () => this.processes.delete(child));
     child.stderr!.setEncoding("utf8");
     let stderr = "";
     child.stderr!.on("data", (d: string) => (stderr = (stderr + d).slice(-4000)));
     readLines(child, (line) => this.onLine(line));
     child.on("error", (e) => {
+      // A process that never started has nothing to end.
+      if (child.pid === undefined) this.processes.delete(child);
       this.env.bridge.unregister(key);
       if (this.child !== child) return;
       this.child = undefined;
@@ -339,6 +345,18 @@ export class ClaudeDriver implements AgentDriver {
     this.pendingSteers.clear();
     this.canSteer = false;
     if (child) await shutdown(child);
+    if (this.bridgeKey) this.env.bridge.unregister(this.bridgeKey);
+  }
+
+  async closeStrict(): Promise<void> {
+    this.child = undefined;
+    this._running = false;
+    this.pendingSteers.clear();
+    this.canSteer = false;
+    // Includes processes an earlier ordinary dispose/stop left without a confirmed exit.
+    const results = await Promise.allSettled([...this.processes].map(child => closeConfirmed(child).then(() => { this.processes.delete(child); })));
+    const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
+    if (failed) throw failed.reason;
     if (this.bridgeKey) this.env.bridge.unregister(this.bridgeKey);
   }
 

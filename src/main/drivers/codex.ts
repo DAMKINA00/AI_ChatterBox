@@ -42,13 +42,16 @@ export class CodexServer {
   private closeError?: Error;
 
   get stopping() { return !!this.closing || !!this.closeError; }
+  /** The app-server process is running (cleared by its exit/error handlers). */
+  get processAlive() { return !!this.child; }
   private nextId = 1;
   private pending = new Map<RequestId, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   private threads = new Map<string, CodexDriver>();
   /** Threads already started or resumed in the current process. */
   readonly loaded = new Set<string>();
   stderrTail = "";
-  onUsage?: (u: UsageInfo) => void;
+  /** startedAt: when an explicit read began; live notifications omit it (they report the present). */
+  onUsage?: (u: UsageInfo, startedAt?: number) => void;
   private workerProject?: Promise<string>;
 
   /** `env` selects the account (CODEX_HOME); one server per account, never shared across accounts. */
@@ -123,9 +126,11 @@ export class CodexServer {
   }
 
   async readUsage(): Promise<void> {
+    // When the read began: a late answer must not count as a check made after a later failure.
+    const startedAt = Date.now();
     await this.ensure();
     const r = await this.request<any>("account/rateLimits/read", {}).catch(() => null);
-    if (r?.rateLimits) this.onUsage?.(toUsage(r.rateLimits));
+    if (r?.rateLimits) this.onUsage?.(toUsage(r.rateLimits), startedAt);
   }
 
   /** The native project is display metadata; thread cwd always stays the user's project. */
@@ -721,6 +726,34 @@ export class CodexDriver implements AgentDriver {
         this.server.loaded.delete(this.threadId);
       }
     }
+  }
+
+  /**
+   * The app-server is shared by every thread of this account and is never closed here: the turn must
+   * be confirmed stopped (recover) and the thread released by the server within the deadline. A late
+   * or failed answer rejects (the switch is held) and keeps the thread attached so a retry can finish.
+   */
+  async closeStrict(timeoutMs = CODEX_DISPOSE_TIMEOUT_MS): Promise<void> {
+    if (this._running) await this.recover();
+    if (this._running) throw new Error("Codex 작업 중지를 확인하지 못했습니다.");
+    if (!this.threadId) return;
+    if (!this.server.processAlive) {
+      // The server already exited: nothing of this thread is running any more.
+      this.server.detach(this.threadId);
+      this.server.loaded.delete(this.threadId);
+      return;
+    }
+    if (this.server.loaded.has(this.threadId)) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          this.server.request("thread/unsubscribe", { threadId: this.threadId }),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Codex 대화 해제 응답을 제한 시간 안에 받지 못했습니다. 공유 서버는 유지하고 전환을 보류합니다.")), timeoutMs); }),
+        ]);
+      } finally { clearTimeout(timer); }
+    }
+    this.server.detach(this.threadId);
+    this.server.loaded.delete(this.threadId);
   }
 
   async recover(): Promise<void> {

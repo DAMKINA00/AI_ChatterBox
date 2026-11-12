@@ -9,6 +9,7 @@ import {
   cliAccountKindOf,
   defaultCliAccountId,
   isCliAccountId,
+  priorityOrder,
   type CliAccount,
   type CliAccountId,
   type CliAccountKind,
@@ -47,12 +48,115 @@ export function cliRemaining(value: Pick<CliAccount, "usage"> | CliAccount["usag
   return values.length ? Math.min(...values) : undefined;
 }
 
+const sameKind = (kind: CliAccountKind, id: unknown): id is CliAccountId => isCliAccountId(id) && cliAccountKindOf(id) === kind;
+
 export function validPolicy(kind: CliAccountKind, value: unknown): CliAccountPolicy | undefined {
   if (!value || typeof value !== "object") return undefined;
   const p = value as Record<string, unknown>;
-  if (p.mode !== "fixed" && p.mode !== "auto") return undefined;
-  if (p.accountId !== undefined && !(isCliAccountId(p.accountId) && cliAccountKindOf(p.accountId) === kind)) return undefined;
-  return p.accountId ? { mode: p.mode, accountId: p.accountId as CliAccountId } : { mode: p.mode };
+  if (p.mode !== "fixed" && p.mode !== "auto" && p.mode !== "priority") return undefined;
+  if (p.accountId !== undefined && !sameKind(kind, p.accountId)) return undefined;
+  const policy: CliAccountPolicy = p.accountId ? { mode: p.mode, accountId: p.accountId as CliAccountId } : { mode: p.mode };
+  // Only priority keeps an order; older files (fixed/auto without order) stay exactly as they were.
+  if (p.mode === "priority" && p.order !== undefined) {
+    if (!Array.isArray(p.order) || p.order.length > MAX_CLI_ACCOUNTS || !p.order.every(id => sameKind(kind, id))) return undefined;
+    const order = [...new Set(p.order as CliAccountId[])];
+    if (order.length) policy.order = order;
+  }
+  return policy;
+}
+
+/**
+ * Provider (CLI account) usage or rate limits as Claude/Codex/Grok and their APIs word them. A bare
+ * "quota" or "429" is not enough: disk/file-system quotas, max-turn/context limits and a line number
+ * 429 are ordinary failures.
+ */
+const PROVIDER_LIMIT = new RegExp([
+  String.raw`rate[ _-]?limit`, String.raw`usage[ _-]?limit`, String.raw`insufficient[ _-]?quota`,
+  String.raw`exceeded your (?:current )?quota`, String.raw`(?:api|request|usage|token|plan|account|billing|subscription|monthly|daily|weekly)[ _-]?quota`,
+  String.raw`quota[ _-]?(?:exceeded|exhausted|reached|limit)`, String.raw`resource[ _-]?exhausted`, String.raw`\btoo many requests\b`,
+  String.raw`\byou(?:'ve|’ve| have) (?:hit|reached) your (?:usage |weekly |5-hour |session |daily |monthly )?limit\b`,
+  String.raw`(?:5-hour|five-hour|weekly|session|daily|monthly) (?:usage )?limit(?: (?:reached|exceeded|hit))?\b`,
+  String.raw`(?:계정|사용량|요청|구독|이용|잔여)\s*한도.{0,12}(?:소진|초과|부족)`, String.raw`^한도\s*(?:소진|초과|부족)`,
+  String.raw`(?:status|code|http|error)\W{0,3}\s*429\b`, String.raw`\b429\b\W{0,3}(?:too many|rate|limit|quota)`,
+].join("|"), "i");
+const NOT_PROVIDER_LIMIT = /\b(?:disk|file ?system|filesystem|storage|inode|block|volume|user|group|mailbox)s?\s+quota\b|\bEDQUOT\b|quota\s+(?:exceeded\s+)?(?:on|for)\s+(?:disk|device|volume|file)/i;
+export function isQuotaError(error: string | undefined): boolean {
+  const text = error ?? "";
+  return PROVIDER_LIMIT.test(text) && !NOT_PROVIDER_LIMIT.test(text);
+}
+
+/**
+ * Sign-in failures of the CLI account itself, as Claude Code / Codex / Grok and this app word them,
+ * plus an account taken out of assignment meanwhile. A bare 401, "Unauthorized" or "authentication
+ * failed" is not enough: line numbers (app.ts:401) and the user's own servers or databases rejecting a
+ * request are ordinary task failures. A 401 counts only as the CLI's API error or from a provider host.
+ */
+const PROVIDER_AUTH = new RegExp([
+  String.raw`authentication_error`, String.raw`invalid[ _-]?(?:x-)?api[ _-]?key`, String.raw`please run /login`,
+  String.raw`not (?:logged|signed) in\b`, String.raw`please (?:log|sign) ?in again`, String.raw`log out and sign in again`,
+  String.raw`(?:oauth|access|refresh|authentication) token (?:has expired|is expired|expired|could not be refreshed|was revoked|is invalid)`,
+  String.raw`\btoken_expired\b`, String.raw`refresh_token_(?:reused|expired|invalidated)`,
+  String.raw`^api error: 401\b`, String.raw`\bapi error: 401 \{`,
+  String.raw`\b401\b[^\n]{0,200}(?:api\.anthropic\.com|api\.openai\.com|chatgpt\.com|auth\.openai\.com|api\.x\.ai)`,
+  String.raw`(?:api\.anthropic\.com|api\.openai\.com|chatgpt\.com|auth\.openai\.com|api\.x\.ai)[^\n]{0,200}\b401\b`,
+  String.raw`run [\x60'"]?(?:claude|codex|grok) login\b`, String.raw`(?:grok|codex|claude) 로그인이 필요`,
+  String.raw`CLI 계정 [a-z]+-\d+에 로그인되어 있지 않습니다`, String.raw`^로그인이 필요합니다`,
+  String.raw`CLI 계정 [a-z]+-\d+은\(는\) 배정에서 제외되어 있`,
+].join("|"), "im");
+export function isAuthError(error: string | undefined): boolean {
+  return PROVIDER_AUTH.test(error ?? "");
+}
+
+export type PriorityFailureReason = "quota" | "auth" | "unresponsive";
+export const PRIORITY_FAILURE_LABEL: Record<PriorityFailureReason, string> = { quota: "한도 소진", auth: "인증 실패", unresponsive: "무응답" };
+export const PRIORITY_COOLDOWN_MS: Record<PriorityFailureReason, number> = { quota: 30 * 60_000, auth: 30 * 60_000, unresponsive: 10 * 60_000 };
+export interface PriorityFailure { reason: PriorityFailureReason; at: number; until: number }
+
+const resetMs = (value: number | null | undefined) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value > 1e12 ? value : value * 1000 : undefined;
+
+/** Until when a failed account is passed over: a known future limit reset, otherwise a fixed cooldown. */
+export function priorityFailure(reason: PriorityFailureReason, account: Pick<CliAccount, "usage"> | undefined, at = Date.now()): PriorityFailure {
+  let until = at + PRIORITY_COOLDOWN_MS[reason];
+  if (reason === "quota" && account?.usage && !account.usage.error) {
+    const windows = [account.usage.fiveHour, account.usage.weekly, account.usage.monthly].filter(w => w && resetMs(w.resetsAt) !== undefined && resetMs(w.resetsAt)! > at);
+    const exhausted = windows.filter(w => w!.usedPercent >= 100);
+    const resets = (exhausted.length ? exhausted : windows).map(w => resetMs(w!.resetsAt)!);
+    // An exhausted window resets at its own time; otherwise the latest known reset bounds the wait.
+    if (resets.length) until = exhausted.length ? Math.max(...resets) : Math.min(...resets);
+  }
+  return { reason, at, until };
+}
+
+/**
+ * A recorded failure applies until it expires. Early recovery is decided once, when a reading arrives
+ * (priorityRecovered), and then removes the record, so an aging reading can never revive it.
+ */
+export function priorityFailureActive(failure: PriorityFailure | undefined, now = Date.now()): boolean {
+  return !!failure && now < failure.until;
+}
+
+/** A newer check of the account; startedAt is when that reading or login check began. */
+export interface PriorityEvidence { startedAt: number; remaining?: number; loggedIn?: boolean }
+
+/**
+ * Only a check that began after the failure counts. Limit: remaining > 0. Sign-in: a confirmed login.
+ * No response: either remaining > 0 or a confirmed login.
+ */
+export function priorityRecovered(failure: PriorityFailure, evidence: PriorityEvidence): boolean {
+  if (!(evidence.startedAt > failure.at)) return false;
+  const usable = typeof evidence.remaining === "number" && evidence.remaining > 0;
+  const loggedIn = evidence.loggedIn === true;
+  return failure.reason === "quota" ? usable : failure.reason === "auth" ? loggedIn : usable || loggedIn;
+}
+
+/** Why a priority candidate is passed over before trying it; undefined = try it (unknown usage is tried). */
+export function prioritySkipReason(account: CliAccount | undefined, failure: PriorityFailure | undefined, now = Date.now()): string | undefined {
+  if (!account) return "미등록";
+  if (!account.enabled) return "배정 제외";
+  if (account.auth && !account.auth.loggedIn) return "로그인 필요";
+  if (cliRemaining(account, now) === 0) return "잔여 0%";
+  if (priorityFailureActive(failure, now)) return `최근 ${PRIORITY_FAILURE_LABEL[failure!.reason]}`;
+  return undefined;
 }
 
 /** Keeps only well-formed families; unknown keys and malformed entries are dropped. */
@@ -75,7 +179,11 @@ export function resolveAccountPolicy(kind: CliAccountKind, project: CliAccountPo
     : { policy: { mode: "fixed" } as CliAccountPolicy, source: "default" as const };
   if (explicitId !== undefined) {
     if (!isCliAccountId(explicitId) || cliAccountKindOf(explicitId) !== kind) throw new Error(`${explicitId}은(는) ${kind} 계열 계정이 아닙니다.`);
-    return { kind, mode: base.policy.mode, accountId: explicitId, source: "explicit" };
+    return { kind, mode: base.policy.mode, accountId: explicitId, source: "explicit", ...(base.policy.mode === "priority" ? { order: priorityOrder(kind, base.policy) } : {}) };
+  }
+  if (base.policy.mode === "priority") {
+    const order = priorityOrder(kind, base.policy);
+    return { kind, mode: "priority", accountId: order[0], source: base.source, order };
   }
   return { kind, mode: base.policy.mode, accountId: base.policy.accountId ?? defaultCliAccountId(kind), source: base.source };
 }
@@ -298,7 +406,8 @@ export class CliAccounts {
     for (const kind of Object.keys(value as object))
       if (!(CLI_ACCOUNT_KINDS as readonly string[]).includes(kind) || !policies[kind as CliAccountKind]) throw new Error(`CLI 계정 정책이 올바르지 않습니다: ${kind}`);
     for (const policy of Object.values(policies))
-      if (policy?.accountId && !this.accounts.some(a => a.accountId === policy.accountId)) throw new Error(`등록되지 않은 CLI 계정입니다: ${policy.accountId}`);
+      for (const id of [policy?.accountId, ...(policy?.order ?? [])])
+        if (id && !this.accounts.some(a => a.accountId === id)) throw new Error(`등록되지 않은 CLI 계정입니다: ${id}`);
     this.settings.setSetting(POLICY_SETTING, JSON.stringify(policies));
     return policies;
   }

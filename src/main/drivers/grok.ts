@@ -1,7 +1,7 @@
 // Official Grok ACP transport. Per-session hooks keep every tool behind ChatterBox approvals.
 import { spawn, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
-import { readLines, shutdown } from "../proc";
+import { closeConfirmed, readLines, shutdown } from "../proc";
 import { isReadCommand } from "../execution-policy";
 import { claudeToolDiffs } from "../diffs";
 import { publishGeneratedImages } from "./generated-images";
@@ -73,6 +73,13 @@ class GrokConnection {
     this.pending.clear();
     await shutdown(this.child, 1000);
   }
+  /** Ends the process tree and confirms the exit (priority account switch only). */
+  async closeConfirmed() {
+    this.closed = true;
+    for (const p of this.pending.values()) p.reject(new Error("Grok 연결이 종료되었습니다."));
+    this.pending.clear();
+    await closeConfirmed(this.child);
+  }
 }
 
 const initialize = { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: "AI_ChatterBox", version: "0.4.10" } };
@@ -130,6 +137,8 @@ export async function listGrokModels(exe: string, cwd: string, env: Record<strin
 export class GrokDriver implements AgentDriver {
   readonly agent = "grok" as const;
   private connection?: GrokConnection;
+  /** Connections opened by this driver whose exit closeStrict has not confirmed yet. */
+  private connections = new Set<GrokConnection>();
   private nativeId: string | null;
   private _running = false;
   private epoch = 0;
@@ -232,6 +241,7 @@ export class GrokDriver implements AgentDriver {
       this.finish(false, error.message);
     }, this.opts.accountEnv);
     this.connection = connection;
+    this.connections.add(connection);
     const init = await connection.request("initialize", initialize);
     if (epoch !== this.epoch) throw new Error("Grok 실행이 취소되었습니다.");
     const hooks = init.agentCapabilities?._meta?.["x.ai/hooks"];
@@ -284,4 +294,15 @@ export class GrokDriver implements AgentDriver {
     await connection?.close();
   }
   async dispose() { await this.stop(); }
+  async closeStrict() {
+    ++this.epoch;
+    const connection = this.connection;
+    this.connection = undefined;
+    connection?.notify("session/cancel", { sessionId: this.nativeId });
+    this.finish(false, undefined, true);
+    // Every connection this driver opened, including ones an ordinary stop left unconfirmed.
+    const results = await Promise.allSettled([...this.connections].map(c => c.closeConfirmed().then(() => { this.connections.delete(c); })));
+    const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
+    if (failed) throw failed.reason;
+  }
 }

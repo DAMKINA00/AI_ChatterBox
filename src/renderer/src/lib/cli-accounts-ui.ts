@@ -27,7 +27,14 @@ export function existingCliAccountPolicies(policies: CliAccountPolicies | undefi
   const next: CliAccountPolicies = {};
   for (const kind of CLI_KINDS) {
     const policy = policies[kind];
-    if (policy?.mode === "auto" || (policy?.mode === "fixed" && accounts.some(account => account.kind === kind && account.accountId === (policy.accountId ?? defaultCliAccountId(kind))))) next[kind] = policy;
+    if (policy?.mode === "priority") {
+      // A priority list keeps its order and only loses accounts that no longer exist.
+      const order = policy.order?.filter(id => accounts.some(account => account.kind === kind && account.accountId === id));
+      if (policy.accountId && !accounts.some(account => account.kind === kind && account.accountId === policy.accountId)) continue;
+      next[kind] = order?.length ? { ...policy, order } : { mode: "priority", ...(policy.accountId ? { accountId: policy.accountId } : {}) };
+      continue;
+    }
+    if (policy?.mode === "auto" ||(policy?.mode === "fixed" && accounts.some(account => account.kind === kind && account.accountId === (policy.accountId ?? defaultCliAccountId(kind))))) next[kind] = policy;
   }
   return next;
 }

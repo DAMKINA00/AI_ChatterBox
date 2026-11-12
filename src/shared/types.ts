@@ -78,16 +78,37 @@ export interface CliAccountStatus extends CliAccount {
   runningWorkers: number;
 }
 
+/**
+ * fixed: the policy account only. auto: the master picks by remaining usage. priority: the app
+ * always starts from the first usable account of `order` and, when it fails (limit, sign-in,
+ * no response), continues the same assignment on the next one.
+ */
+export type CliAccountMode = "fixed" | "auto" | "priority";
+export const CLI_ACCOUNT_MODE_LABEL: Record<CliAccountMode, string> = { fixed: "특정 계정 지정", auto: "잔여 사용량 판단", priority: "계정 우선 할당" };
 export interface CliAccountPolicy {
-  mode: "fixed" | "auto";
+  mode: CliAccountMode;
   accountId?: CliAccountId;
+  /** priority only: same-family accounts, most preferred first. Empty → accountId, then `*-1`. */
+  order?: CliAccountId[];
 }
 export type CliAccountPolicies = Partial<Record<CliAccountKind, CliAccountPolicy>>;
 export interface ResolvedCliAccount {
   kind: CliAccountKind;
-  mode: "fixed" | "auto";
+  mode: CliAccountMode;
   accountId: CliAccountId;
   source: "explicit" | "project" | "global" | "default";
+  /** priority: the effective account order (after the empty-list fallback). */
+  order?: CliAccountId[];
+  /** priority: why earlier accounts were passed over for this selection. */
+  note?: string;
+  /** priority: no account of the order is usable now; why, per account. */
+  unavailable?: string;
+}
+
+/** Account order a priority policy tries: its list, or the policy account then `*-1` when empty. */
+export function priorityOrder(kind: CliAccountKind, policy: Pick<CliAccountPolicy, "accountId" | "order"> | undefined): CliAccountId[] {
+  const list: unknown[] = policy?.order?.length ? policy.order : [policy?.accountId, defaultCliAccountId(kind)];
+  return [...new Set(list.filter((id): id is CliAccountId => isCliAccountId(id) && cliAccountKindOf(id) === kind))];
 }
 
 export interface TokenCounts {
