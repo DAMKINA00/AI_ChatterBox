@@ -25,15 +25,13 @@ export function suiteMenu(usage: UsageCompanionSnapshot, update: Readonly<AppUpd
     { label: "사용량 모니터 설정", submenu: [
       { label: state?.visible ? "모니터 숨기기" : "모니터 열기", click: () => actions.command(state?.visible ? "hide" : "show") },
       { label: "사용량 새로 고침", click: () => actions.command("refresh") },
-      { label: "계정 관리", click: () => actions.command("accounts") },
+      // Accounts are managed in ChatterBox; the monitor only shows them.
+      { label: "계정별 사용량", click: () => actions.command("accounts") },
       { type: "separator" },
       toggle("항상 위에", "topmost", "topmost"), toggle("캐릭터 표시", "characters", "characters"),
       toggle("작업표시줄 사용량", "taskbar", "taskbar"), toggle("Windows 시작 시 함께 실행", "startup", "startup"),
       toggle("사용량 알림", "usageAlerts", "usage-alerts"), toggle("작업 상태 알림", "activityAlerts", "activity-alerts"),
       { type: "separator" },
-      toggle("Claude Desktop 연결", "claudeDesktop", "claude-desktop"),
-      { label: "Claude 웹 로그인", click: () => actions.command("claude-login") },
-      { label: "Claude 웹 로그아웃", enabled: !!state?.claudeLoggedIn, click: () => actions.command("claude-logout") },
       { label: "사용량 데이터 폴더", click: () => actions.command("data-folder") },
     ] },
     { type: "separator" },

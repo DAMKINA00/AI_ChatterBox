@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import updaterPackage from "electron-updater";
 import { mkdirSync, readFileSync, existsSync, statSync, copyFileSync, writeFileSync, cpSync } from "node:fs";
 import { join, basename, resolve } from "node:path";
-import type { AttachmentRef, Chat, Theme } from "../shared/types";
+import type { AttachmentRef, Chat, Theme, UsageInfo } from "../shared/types";
 import { AppTray } from "./tray";
 import { ensureOnlyInstance } from "./instance-guard";
 import { mayOpenDocument, resolveLink } from "./file-links";
@@ -12,6 +12,7 @@ import { runCore } from "./core";
 import type { CoreRpc } from "./core-rpc";
 import { AppUpdates } from "./app-updates";
 import { UsageCompanion } from "./usage-companion";
+import { MonitorFeed } from "./usage-monitor-feed";
 import { suiteMenu } from "./suite-menu";
 import { RemoteWeb } from "./remote-web";
 import type { RemoteWebAction, RemoteWebInput } from "../shared/remote-web";
@@ -41,6 +42,8 @@ let updates: AppUpdates | undefined;
 let applyingUpdate = false;
 let startupSetting: boolean | undefined;
 let remote: RemoteWeb | undefined;
+/** Pushes ChatterBox's accounts and usage to the hosted usage monitor (its only data source). */
+let monitorFeed: MonitorFeed | undefined;
 
 const reportDesktopError = (error: unknown) => dialog.showErrorBox("AI ChatterBox", error instanceof Error ? error.message : String(error));
 
@@ -81,7 +84,11 @@ function startDesktopServices() {
     exe: join(process.resourcesPath, "usage-monitor", "AIUsageMonitor.exe"), settingsFile: join(dataDir, "desktop.json"), allowed,
     changed: snapshot => { tray?.refresh(); if (snapshot.running && snapshot.state) syncStartup(snapshot.state.startup); },
     notification: notice => { if (Notification.isSupported()) new Notification({ title: notice.title, body: notice.message }).show(); },
+    // The monitor's own refresh: ChatterBox re-reads its accounts' usage; the usage event then pushes it.
+    refreshRequested: () => { void core?.call("usage:get", [true]).catch(() => undefined); },
   });
+  monitorFeed = new MonitorFeed({ accounts: () => core!.call("cli-accounts:list", []), send: payload => usage?.setAccounts(payload) });
+  monitorFeed.changed();
   updates = new AppUpdates(autoUpdater, {
     version: app.getVersion(), enabled: allowed && !process.env.PORTABLE_EXECUTABLE_DIR,
     changed: state => { tray?.refresh(); if (state.status === "error" && applyingUpdate && !quitting) void cancelUpdate(); },
@@ -162,6 +169,8 @@ function registerUi(channels: string[], rpc: CoreRpc) {
     ipcMain.handle(channel, async (_event, ...args) => {
       const result = await rpc.call(channel, args);
       if (["chats:create", "chats:fork", "chats:delete", "projects:delete"].includes(channel)) chatCache = await rpc.call("chats:list");
+      // Account added, renamed, enabled/disabled, logged in/out or removed: the monitor follows at once.
+      if (channel.startsWith("cli-accounts:") && channel !== "cli-accounts:list" && channel !== "cli-accounts:get-policy") monitorFeed?.changed();
       return result;
     });
   }
@@ -259,6 +268,7 @@ app.whenReady().then(async () => {
           chatCache = chatCache.some(value => value.id === chat.id) ? chatCache.map(value => value.id === chat.id ? chat : value) : [chat, ...chatCache];
           tray?.chatChanged(chat);
         }
+        if (channel === "usage") monitorFeed?.usage(args[0] as UsageInfo);
         win?.webContents.send(channel, ...args);
         remote?.publish(channel, args);
       };

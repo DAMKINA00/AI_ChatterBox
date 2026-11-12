@@ -10,10 +10,12 @@ test("single tray keeps all monitor actions and gates update installation on dow
     activityAlerts: false, claudeDesktop: true, claudeLoggedIn: true,
   } }, { status: "ready", currentVersion: "1.0.0", version: "1.0.1" }, actions);
   const items = menu.find(i => i.label === "사용량 모니터 설정")!.submenu as any[];
-  for (const label of ["모니터 숨기기", "계정 관리", "작업표시줄 사용량", "Windows 시작 시 함께 실행", "Claude 웹 로그아웃", "사용량 데이터 폴더"]) assert.ok(items.some(i => i.label === label));
+  for (const label of ["모니터 숨기기", "계정별 사용량", "작업표시줄 사용량", "Windows 시작 시 함께 실행", "사용량 데이터 폴더"]) assert.ok(items.some(i => i.label === label));
+  // The monitor has no accounts or logins of its own any more: ChatterBox manages them.
+  assert.ok(items.every(i => !/Claude (웹|Desktop)|로그인|로그아웃/.test(String(i.label))));
   assert.ok(items.every(i => !String(i.label).includes("Gemini")));
   items.find(i => i.label === "캐릭터 표시").click({ checked: false });
-  items.find(i => i.label === "계정 관리").click();
+  items.find(i => i.label === "계정별 사용량").click();
   (menu.find(i => i.label === "업데이트하고 재시작")!.click as any)();
   assert.deepEqual(calls, [["characters", false], ["accounts"], ["install"]]);
   assert.equal(menu.find(i => i.label === "업데이트 확인")!.enabled, false);

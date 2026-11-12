@@ -8,6 +8,8 @@ export interface UsageMonitorState {
   activityAlerts: boolean;
   claudeDesktop: boolean;
   claudeLoggedIn: boolean;
+  /** Version of the ChatterBox account message the monitor reads (absent: an older monitor; nothing is sent). */
+  accountsVersion?: number;
 }
 
 export interface UsageNotification {

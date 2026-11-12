@@ -6,6 +6,7 @@ import type {
   UsageMonitorState,
   UsageNotification,
 } from "../shared/usage-companion";
+import { MONITOR_ACCOUNTS_VERSION, type MonitorAccountsPayload } from "./usage-monitor-feed";
 
 const MAX_LINE_BYTES = 64 * 1024;
 const START_TIMEOUT_MS = 20_000;
@@ -42,6 +43,8 @@ export interface UsageCompanionOptions {
   allowed: boolean;
   changed(snapshot: UsageCompanionSnapshot): void;
   notification(notification: UsageNotification): void;
+  /** The monitor's refresh button/menu: ChatterBox refreshes its accounts' usage (the monitor queries nothing itself). */
+  refreshRequested?(): void;
   spawn?: UsageSpawn;
 }
 
@@ -62,6 +65,8 @@ interface ChildSession {
   line: Buffer;
   lineLength: number;
   lineTooLong: boolean;
+  /** The current account snapshot went to this process (sent again after every restart). */
+  accountsSent?: MonitorAccountsPayload;
 }
 
 function text(value: unknown, fallback: string): string {
@@ -100,6 +105,7 @@ export class UsageCompanion {
   private state?: UsageMonitorState;
   private error?: string;
   private session?: ChildSession;
+  private accounts?: MonitorAccountsPayload;
   private readonly spawn: UsageSpawn;
 
   constructor(private readonly options: UsageCompanionOptions, spawn?: UsageSpawn) {
@@ -143,6 +149,28 @@ export class UsageCompanion {
     const session = this.session;
     if (!session || session.ended) throw new Error("AI 사용량 모니터가 실행 중이 아닙니다.");
     this.write(session, command);
+  }
+
+  /**
+   * The ChatterBox account snapshot the monitor shows. Kept and sent to every monitor process that
+   * announces the same protocol version (an older monitor would not understand it).
+   */
+  setAccounts(payload: MonitorAccountsPayload) {
+    this.accounts = payload;
+    if (this.session && !this.session.ended) this.sendAccounts(this.session);
+  }
+
+  private sendAccounts(session: ChildSession) {
+    const payload = this.accounts;
+    if (!payload || !session.initialState || session.accountsSent === payload || this.state?.accountsVersion !== MONITOR_ACCOUNTS_VERSION || session.stopping) return;
+    const line = JSON.stringify({ command: "chatterbox-accounts", value: payload });
+    if (Buffer.byteLength(line) >= MAX_LINE_BYTES) return this.fail("계정 정보가 너무 커서 AI 사용량 모니터에 보내지 못했습니다.");
+    try {
+      session.child.stdin!.write(`${line}\n`);
+      session.accountsSent = payload;
+    } catch (error) {
+      this.fail(text(error instanceof Error ? error.message : error, "AI 사용량 모니터에 계정 정보를 보내지 못했습니다."));
+    }
   }
 
   stop(): Promise<void> {
@@ -318,6 +346,7 @@ export class UsageCompanion {
       this.state = copyState(message.state);
       this.error = undefined;
       this.publish();
+      this.sendAccounts(session);
       if (!session.startSettled) {
         if (session.startTimer) clearTimeout(session.startTimer);
         session.startTimer = undefined;
@@ -328,6 +357,10 @@ export class UsageCompanion {
     }
     if (message.type === "notification" && typeof message.title === "string" && typeof message.message === "string" && typeof message.error === "boolean") {
       this.options.notification({ title: text(message.title, TITLE).slice(0, 200), message: text(message.message, "AI 사용량 모니터 알림"), error: message.error });
+      return;
+    }
+    if (message.type === "refresh") {
+      this.options.refreshRequested?.();
       return;
     }
     if (message.type === "error" && typeof message.message === "string") {
