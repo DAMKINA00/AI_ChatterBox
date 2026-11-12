@@ -477,7 +477,8 @@ export type AgentEvent =
    * the instruction itself); instructionId: the instruction during which it was updated. Absent on older
    * records and on native plan tools.
    */
-  | { type: "plan_update"; steps: PlanStep[]; explanation?: string; planId?: number; instructionId?: number }
+  /** stepsTotal: set when a history page or snapshot sent only the first steps (shared/event-page.ts). */
+  | { type: "plan_update"; steps: PlanStep[]; explanation?: string; planId?: number; instructionId?: number; stepsTotal?: number }
   /** Plan lifecycle (see PlanState); reason explains incomplete/failed/stopped/cancelled. */
   | { type: "plan_state"; state: PlanState; planId?: number; reason?: string }
   | { type: "goal_update"; goal: ChatGoal | null }

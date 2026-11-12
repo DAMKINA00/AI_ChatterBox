@@ -859,11 +859,12 @@ export class Store {
   pendingApprovals(chatId: number, before: number, offset = 0, limit = SNAPSHOT_LIMITS.approvals): { items: PendingApproval[]; total: number } {
     const where = `FROM chat_events WHERE chat_id = ? AND id < ? AND type = 'approval_request'
       AND json_extract(payload_json, '$.request.id') NOT IN (
-        SELECT json_extract(payload_json, '$.id') FROM chat_events WHERE chat_id = ? AND id < ? AND type = 'approval_resolved' AND json_extract(payload_json, '$.id') IS NOT NULL)`;
-    const total = Number((this.db.prepare(`SELECT COUNT(*) AS n ${where}`).get(chatId, before, chatId, before) as Row).n);
+        SELECT json_extract(payload_json, '$.id') FROM chat_events WHERE chat_id = ? AND type = 'approval_resolved' AND json_extract(payload_json, '$.id') IS NOT NULL)`;
+    // Requests from before `before`; answers from any time (one given later removes the request too).
+    const total = Number((this.db.prepare(`SELECT COUNT(*) AS n ${where}`).get(chatId, before, chatId) as Row).n);
     const rows = this.db.prepare(`SELECT id, ts, json_extract(payload_json, '$.request.id') AS rid, json_extract(payload_json, '$.request.role') AS role,
         substr(json_extract(payload_json, '$.request.title'), 1, 300) AS title, json_extract(payload_json, '$.request.risk') AS risk ${where}
-      ORDER BY id DESC LIMIT ? OFFSET ?`).all(chatId, before, chatId, before, Math.min(Math.max(1, limit), 200), Math.max(0, offset)) as Row[];
+      ORDER BY id DESC LIMIT ? OFFSET ?`).all(chatId, before, chatId, Math.min(Math.max(1, limit), 200), Math.max(0, offset)) as Row[];
     return { items: rows.map(r => ({ eventId: r.id, at: r.ts, id: String(r.rid), role: r.role, title: r.title ?? "", risk: r.risk === "high" ? "high" : "low" })), total };
   }
   /**

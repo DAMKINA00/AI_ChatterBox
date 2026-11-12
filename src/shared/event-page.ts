@@ -49,14 +49,41 @@ const STEPS: [text: number, items: number][] = [[48_000, 1000], [12_000, 200], [
 export function pageEvent(e: TimelineEvent): TimelineEvent {
   let event: AgentEvent = e.event;
   let clipped = false;
-  if (event.type === "tool_call" && event.input.length > CLIP_AT) { event = { ...event, input: clipText(event.input), clipped: event.input.length }; clipped = true; }
+  if (event.type === "plan_update") {
+    // A checklist keeps its first steps whole (titles shortened) and says how many there are, instead of
+    // the generic shrink cutting the list to a few entries without notice.
+    const summary = planSummary(event);
+    if (summary !== event) { event = summary; clipped = true; }
+  } else if (event.type === "tool_call" && event.input.length > CLIP_AT) { event = { ...event, input: clipText(event.input), clipped: event.input.length }; clipped = true; }
   else if (event.type === "tool_result" && event.output.length > CLIP_AT) { event = { ...event, output: clipText(event.output), clipped: event.output.length }; clipped = true; }
   for (const [text, items] of STEPS) {
-    if (JSON.stringify(event).length <= EVENT_MAX_CHARS) break;
+    if (event.type === "plan_update" || JSON.stringify(event).length <= EVENT_MAX_CHARS) break;
     event = { ...(shrink(event, text, items) as AgentEvent), type: event.type } as AgentEvent;
     clipped = true;
   }
   return clipped ? { ...e, event, clipped: true } : e;
+}
+
+/** Longest step title in a plan summary; with SNAPSHOT_LIMITS.planSteps steps a summary stays near EVENT_MAX_CHARS. */
+export const PLAN_TITLE_MAX = 250;
+
+/**
+ * A checklist as sent in pages and snapshots: the first SNAPSHOT_LIMITS.planSteps steps with titles up to
+ * PLAN_TITLE_MAX and the explanation up to 1000 characters; stepsTotal = the real step count when cut.
+ * Returns the event itself when nothing had to be cut.
+ */
+export function planSummary(event: Extract<AgentEvent, { type: "plan_update" }>): Extract<AgentEvent, { type: "plan_update" }> {
+  const total = event.stepsTotal ?? event.steps.length;
+  const tooMany = event.steps.length > SNAPSHOT_LIMITS.planSteps;
+  const longTitle = event.steps.some(s => s.title.length > PLAN_TITLE_MAX);
+  const longText = (event.explanation?.length ?? 0) > 1000;
+  if (!tooMany && !longTitle && !longText) return event;
+  return {
+    ...event,
+    steps: event.steps.slice(0, SNAPSHOT_LIMITS.planSteps).map(s => (s.title.length > PLAN_TITLE_MAX ? { ...s, title: `${s.title.slice(0, PLAN_TITLE_MAX)}…` } : s)),
+    explanation: short(event.explanation, 1000),
+    ...(total > SNAPSHOT_LIMITS.planSteps ? { stepsTotal: total } : {}),
+  };
 }
 
 /** JSON characters of an event as sent. */
@@ -78,8 +105,8 @@ export function minimalContextEvent(e: TimelineEvent): TimelineEvent | null {
   let event: AgentEvent | null = null;
   switch (ev.type) {
     case "user": event = { type: "user", text: short(ev.text, 300) ?? "", attachments: [], ...(ev.queued ? { queued: true } : {}), ...(ev.delivery ? { delivery: ev.delivery } : {}) }; break;
-    // Up to 1000 steps so the snapshot can count what its own cap leaves out.
-    case "plan_update": event = { ...ev, steps: ev.steps.slice(0, 1000).map(s => ({ ...s, title: short(s.title, 300) ?? "" })), explanation: short(ev.explanation, 1000) }; break;
+    // The plan summary keeps the first steps and the real count (the generic shrink would cut it silently).
+    case "plan_update": return { ...e, event: planSummary(ev) };
     case "plan_state": event = { ...ev, reason: short(ev.reason, 500) }; break;
     case "approval_request": event = { type: "approval_request", request: { ...ev.request, title: short(ev.request.title, 300) ?? "", detail: "", diffs: undefined } }; break;
     case "approval_resolved": case "review_result": case "expression": case "turn_end": case "agent_usage": case "goal_update": event = ev; break;
@@ -126,7 +153,7 @@ export interface StateSnapshot {
 
 /** Plan fold (same rules as currentPlanView) that also returns the state carried when no plan is shown. */
 function foldPlan(events: readonly TimelineEvent[]): StateSnapshot["plan"] {
-  let view = null as StateSnapshot["plan"]["view"];
+  let view = null as (NonNullable<StateSnapshot["plan"]["view"]> & { stepsTotal?: number }) | null;
   let state: PlanState | "live" = "live";
   let reason: string | undefined;
   let planId: number | undefined;
@@ -135,7 +162,7 @@ function foldPlan(events: readonly TimelineEvent[]): StateSnapshot["plan"] {
     if (ev.type === "plan_update" && e.role === "orch") {
       if (ev.planId !== undefined && planId !== undefined && ev.planId !== planId) { state = "live"; reason = undefined; }
       if (ev.planId !== undefined) planId = ev.planId;
-      view = { planId, steps: ev.steps, explanation: ev.explanation };
+      view = { planId, steps: ev.steps, explanation: ev.explanation, stepsTotal: ev.stepsTotal };
     } else if (ev.type === "plan_state") {
       if (ev.planId !== undefined && planId !== undefined && ev.planId !== planId && ev.state !== "running") continue;
       state = ev.state;
@@ -149,11 +176,11 @@ function foldPlan(events: readonly TimelineEvent[]): StateSnapshot["plan"] {
       planId = undefined;
     }
   }
-  const steps = view?.steps ?? [];
-  const stepsOmitted = Math.max(0, steps.length - SNAPSHOT_LIMITS.planSteps);
+  const summary = view && planSummary({ type: "plan_update", steps: view.steps, explanation: view.explanation, stepsTotal: view.stepsTotal });
   return {
-    view: view && { ...view, steps: steps.slice(0, SNAPSHOT_LIMITS.planSteps).map(st => ({ ...st, title: short(st.title, 300) ?? "" })), explanation: short(view.explanation, 1000) },
-    state, reason: short(reason, 500), planId, stepsOmitted,
+    view: view && summary && { planId: view.planId, steps: summary.steps, explanation: summary.explanation },
+    state, reason: short(reason, 500), planId,
+    stepsOmitted: summary ? (summary.stepsTotal ?? summary.steps.length) - summary.steps.length : 0,
   };
 }
 
@@ -213,7 +240,7 @@ export function snapshotEvents(snapshot: StateSnapshot, chatId: number): Timelin
   const at = (event: AgentEvent, time: number, node: NodeId = "orch", role: Role | null = "orch"): TimelineEvent => ({ id: id--, chatId, node, role, at: time, event });
   const out: TimelineEvent[] = [at({ type: "user", text: "/plan", attachments: [] }, snapshot.lastUserAt ?? 0, "orch", null)];
   const { plan } = snapshot;
-  if (plan.view) out.push(at({ type: "plan_update", steps: plan.view.steps, explanation: plan.view.explanation, planId: plan.view.planId }, 0));
+  if (plan.view) out.push(at({ type: "plan_update", steps: plan.view.steps, explanation: plan.view.explanation, planId: plan.view.planId, ...(plan.stepsOmitted ? { stepsTotal: plan.view.steps.length + plan.stepsOmitted } : {}) }, 0));
   if (plan.state !== "live") out.push(at({ type: "plan_state", state: plan.state, reason: plan.reason, planId: plan.planId }, 0));
   for (const c of [...snapshot.conversations].reverse()) {
     if (c.expression) out.push(at({ type: "expression", expression: c.expression }, 0, c.node, c.role));

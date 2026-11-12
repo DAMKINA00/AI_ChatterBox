@@ -17,3 +17,13 @@ export function mergeTeamUpdates(fetchedAgents: ChatAgent[], fetchedConsults: Co
   for (const c of updates.consults.values()) if (!fetchedConsults.some(x => x.id === c.id)) consults.push(c);
   return { agents: updates.agents ?? fetchedAgents, consults };
 }
+
+/**
+ * Older unanswered approvals as last loaded, minus those answered since (approval_resolved events seen in
+ * the window); the total drops by the ones removed. A refresh from the core gives the exact total.
+ */
+export function withoutAnswered<T extends { id: string }>(list: { items: T[]; total: number }, answered: ReadonlySet<string>): { items: T[]; total: number } {
+  if (!answered.size) return list;
+  const items = list.items.filter(a => !answered.has(a.id));
+  return items.length === list.items.length ? list : { items, total: Math.max(0, list.total - (list.items.length - items.length)) };
+}

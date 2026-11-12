@@ -13,7 +13,7 @@ import { oneAtATime } from "../renderer/src/lib/full-event";
 import { RunStatsCache } from "./run-stats-cache";
 import { runStatsRows } from "../renderer/src/lib/run-stats-view";
 import { appendEvent } from "../renderer/src/timeline";
-import { emptyTeamUpdates, mergeTeamUpdates } from "../renderer/src/lib/history-load";
+import { emptyTeamUpdates, mergeTeamUpdates, withoutAnswered } from "../renderer/src/lib/history-load";
 import type { ChatAgent, Consult } from "../shared/types";
 import { DEFAULT_SETTINGS, type AgentEvent, type TimelineEvent } from "../shared/types";
 import { buildItems, eventText, markClipped, planOf } from "../renderer/src/timeline";
@@ -207,7 +207,8 @@ test("hard size bound: big old instructions, approvals with diffs and huge tool 
     const answered = new Set(older.flatMap(e => (e.event.type === "approval_resolved" ? [e.event.id] : [])));
     assert.equal(approvals.total, older.filter(e => e.event.type === "approval_request" && !answered.has(e.event.request.id)).length);
     assert.ok(approvals.total > SNAPSHOT_LIMITS.approvals);
-    assert.ok(approvals.pending.length === SNAPSHOT_LIMITS.approvals && approvals.pending.every(a => Number(a.id.slice(1)) % 2 === 0));
+    // Unanswered where the page begins (an answer inside the page is folded from the page itself).
+    assert.ok(approvals.pending.length === SNAPSHOT_LIMITS.approvals && approvals.pending.every(a => !answered.has(a.id)));
     assert.ok(Number(approvals.pending[0].id.slice(1)) > Number(approvals.pending[1].id.slice(1)), "newest first");
     let page = first;
     while (page.hasMore) {
@@ -389,4 +390,45 @@ test("shortened messages are marked for the view; tool and approval cards keep t
   const plain = buildItems([at(6, { type: "text", text: "a" })], undefined, false);
   assert.equal(markClipped(plain, [at(6, { type: "text", text: "a" })]), plain);
   assert.equal(eventText({ type: "consult_start", consultId: 1, kind: "review", from: "orch", to: "w1", request: "요청 원문", attachments: [] }), "요청 원문");
+});
+
+test("a long checklist (300 steps, long titles) keeps its first 200 steps and says 100 are omitted, in pages and in the snapshot", () => {
+  const plan: AgentEvent = { type: "plan_update", steps: Array.from({ length: 300 }, (_, k) => ({ title: `${k}번 단계 ${"가".repeat(300)}`, status: "pending" as const })), planId: 3 };
+  const at = (id: number, event: AgentEvent, role: TimelineEvent["role"] = "orch"): TimelineEvent => ({ id, chatId: 1, node: "orch", role, at: id, event });
+  // As an event of a page.
+  const sent = pageEvent(at(2, plan));
+  assert.ok(sent.clipped && sent.event.type === "plan_update");
+  if (sent.event.type !== "plan_update") return;
+  assert.equal(sent.event.steps.length, SNAPSHOT_LIMITS.planSteps);
+  assert.equal(sent.event.stepsTotal, 300);
+  assert.ok(sent.event.steps.every((s, k) => s.title.startsWith(`${k}번 단계`) && s.title.length <= 251));
+  // In the snapshot of older history.
+  const all = [at(1, { type: "user", text: "/plan 긴 계획", attachments: [] }, null), at(2, plan), at(3, { type: "plan_state", state: "running", planId: 3 } as AgentEvent)];
+  const minimal = all.flatMap(e => { const m = minimalContextEvent(e); return m ? [m] : []; });
+  const { snapshot, context } = reduceContext(minimal);
+  assert.equal(snapshot.plan.view?.steps.length, SNAPSHOT_LIMITS.planSteps);
+  assert.equal(snapshot.plan.stepsOmitted, 100);
+  const state = stateEvents({ events: [], context, snapshot, snapshotAt: 10 });
+  assert.equal(planOf(state)?.steps.length, SNAPSHOT_LIMITS.planSteps);
+  const last = state.findLast(e => e.event.type === "plan_update");
+  assert.equal(last?.event.type === "plan_update" && last.event.stepsTotal, 300, "the view can say how many were left out");
+  // A short plan is sent as it is.
+  const small: AgentEvent = { type: "plan_update", steps: [{ title: "하나", status: "pending" }], planId: 1 };
+  assert.equal(pageEvent(at(4, small)).event, small);
+});
+
+test("older unanswered approvals drop what was answered since; the core count includes later answers", () => {
+  const list = { items: [{ id: "a" }, { id: "b" }, { id: "c" }], total: 70 };
+  assert.deepEqual(withoutAnswered(list, new Set(["b", "zz"])), { items: [{ id: "a" }, { id: "c" }], total: 69 });
+  assert.equal(withoutAnswered(list, new Set()), list);
+  withStore((store, chatId) => {
+    for (let i = 0; i < 5; i++) store.addEvent(chatId, "w1", "w1", { type: "approval_request", request: { id: `r${i}`, role: "w1", title: `승인 ${i}`, detail: "", risk: "low" } });
+    const before = store.addEvent(chatId, "orch", "orch", { type: "text", text: "경계" }).id;
+    assert.equal(store.pendingApprovals(chatId, before).total, 5);
+    // Answered after the page boundary (e.g. from another view): no longer pending.
+    store.addEvent(chatId, "w1", "w1", { type: "approval_resolved", id: "r2", decision: "deny" });
+    const after = store.pendingApprovals(chatId, before);
+    assert.equal(after.total, 4);
+    assert.ok(!after.items.some(a => a.id === "r2"));
+  });
 });

@@ -22,7 +22,8 @@ import {
 } from "../../../shared/types";
 import { api, cn, errorMessage } from "../lib/utils";
 import { retryHistory, stateEventsOf, useStore } from "../store";
-import { SNAPSHOT_LIMITS, type PendingApproval } from "../../../shared/event-page";
+import type { PendingApproval } from "../../../shared/event-page";
+import { withoutAnswered } from "../lib/history-load";
 import { buildItems, chatTimelines, latestExpression, markClipped, planOf } from "../timeline";
 import { GoalBar, PlanHistory, PlanPanel } from "./PlanGoal";
 import { planHistory } from "../lib/plan-history";
@@ -69,6 +70,11 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
   const [searchQuery, setSearchQuery] = useState("");
   const composer = useRef<ComposerHandle>(null);
   const plan = useMemo(() => planOf(all), [all]);
+  // A long checklist arrives as its first steps plus the real count (history pages and the snapshot).
+  const planOmitted = useMemo(() => {
+    const last = all.findLast((e) => e.event.type === "plan_update" && e.role === "orch");
+    return last?.event.type === "plan_update" && last.event.stepsTotal ? last.event.stepsTotal - last.event.steps.length : 0;
+  }, [all]);
   const ended = useMemo(() => planHistory(all), [all]);
   const canAttach = !node || node === "orch";
 
@@ -131,9 +137,9 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
       {!node && <ForkOrigin chat={chat} />}
       {!node && <GoalBar chat={chat} />}
       {!node && plan && <PlanPanel chat={chat} plan={plan} onRevise={() => composer.current?.setText("/plan 수정: ")} />}
-      {!node && plan && !!history?.snapshot?.plan.stepsOmitted && history.snapshotAt !== undefined && !events?.some((e) => e.event.type === "plan_update" && e.id >= history.snapshotAt!) && (
+      {!node && plan && planOmitted > 0 && (
         <div className="mx-auto mt-1 w-[min(860px,calc(100%-32px))] text-[11.5px] text-muted-foreground" data-testid="plan-steps-omitted">
-          체크리스트가 길어 앞 {SNAPSHOT_LIMITS.planSteps}단계만 표시합니다 ({history.snapshot.plan.stepsOmitted}단계 생략).
+          체크리스트가 길어 앞 {plan.steps.length}단계만 표시합니다 ({planOmitted}단계 생략).
         </div>
       )}
       {!node && <PlanHistory history={ended} />}
@@ -683,22 +689,36 @@ function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, lo
  * Unanswered approval requests in history older than the loaded pages (the snapshot carries the newest
  * few and the total; more load on request). Usually leftovers of turns that ended without an answer.
  */
-function OlderApprovals({ chatId, before, first, total }: { chatId: number; before: number; first: PendingApproval[]; total: number }) {
+function OlderApprovals({ chatId, before, first, total: firstTotal }: { chatId: number; before: number; first: PendingApproval[]; total: number }) {
   const agents = useStore((s) => s.agents[chatId]);
+  const events = useStore((s) => s.events[chatId]);
   const [open, setOpen] = useState(false);
-  const [items, setItems] = useState(first);
+  const [list, setList] = useState({ items: first, total: firstTotal });
   const [loading, setLoading] = useState(false);
+  // Answers given since (here, in another view or remotely) take requests off the list at once; the list
+  // is then read again from the core, which also counts the ones not shown.
+  const answered = useMemo(() => new Set(events?.flatMap((e) => (e.event.type === "approval_resolved" ? [e.event.id] : [])) ?? []), [events]);
+  const { items, total } = withoutAnswered(list, answered);
+  const refresh = useCallback(async () => {
+    try {
+      const page = await api.pendingApprovals(chatId, before, 0);
+      setList({ items: page.items, total: page.total });
+    } catch { /* keep what is shown */ }
+  }, [chatId, before]);
+  useEffect(() => { if (open) void refresh(); }, [open, refresh]);
+  useEffect(() => { if (answered.size) void refresh(); }, [answered.size, refresh]);
   const more = async () => {
     setLoading(true);
     try {
       const page = await api.pendingApprovals(chatId, before, items.length);
-      setItems((list) => [...list, ...page.items.filter((a) => !list.some((x) => x.eventId === a.eventId))]);
+      setList((l) => ({ items: [...l.items, ...page.items.filter((a) => !l.items.some((x) => x.eventId === a.eventId))], total: page.total }));
     } catch (e) {
       useStore.getState().toast(errorMessage(e));
     } finally {
       setLoading(false);
     }
   };
+  if (!total) return null;
   return (
     <div className="mx-auto mt-3 w-[min(860px,calc(100%-32px))] rounded-xl border border-warning/40 bg-warning/5 px-3.5 py-2 text-[12.5px]" data-testid="older-approvals" data-total={total}>
       <button type="button" className="flex w-full items-center gap-2 text-left" onClick={() => setOpen(!open)} aria-expanded={open}>
