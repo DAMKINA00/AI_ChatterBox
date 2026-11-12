@@ -7,7 +7,12 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { serialize } from "node:v8";
 import { Store } from "./db";
-import { CLIP_AT, EVENT_PAGE_LIMITS, historyFromPage, lightEvent, prependPage, stateEvents, type EventPage } from "../shared/event-page";
+import { CLIP_AT, CONTEXT_MAX_CHARS, EVENT_MAX_CHARS, EVENT_PAGE_LIMITS, eventChars, historyFromPage, PAGE_MAX_BYTES, pageEvent, prependPage, replayLive, stateEvents, type EventPage } from "../shared/event-page";
+import { RunStatsCache } from "./run-stats-cache";
+import { runStatsRows } from "../renderer/src/lib/run-stats-view";
+import { appendEvent } from "../renderer/src/timeline";
+import { emptyTeamUpdates, mergeTeamUpdates } from "../renderer/src/lib/history-load";
+import type { ChatAgent, Consult } from "../shared/types";
 import { DEFAULT_SETTINGS, type AgentEvent, type TimelineEvent } from "../shared/types";
 import { buildItems, planOf } from "../renderer/src/timeline";
 import { summarizeRunStats } from "../shared/run-stats";
@@ -52,15 +57,30 @@ function fillLongChat(store: Store, chatId: number, turns = 8, toolsPerTurn = 30
   db.exec("COMMIT");
 }
 
-test("light events shorten long tool text and keep the original length", () => {
+const light = (event: AgentEvent) => pageEvent({ id: 1, chatId: 1, node: "orch", role: "orch", at: 1, event });
+
+test("page events shorten long tool text and keep the original length", () => {
   const long = "x".repeat(CLIP_AT + 1);
-  const result = lightEvent({ type: "tool_result", id: "a", ok: true, output: long });
-  assert.equal(result.type === "tool_result" && result.clipped, long.length);
-  assert.ok(result.type === "tool_result" && result.output.length < 6000 && result.output.startsWith("xxxx") && result.output.includes("자 생략"));
-  const short: AgentEvent = { type: "tool_result", id: "b", ok: true, output: "짧음" };
-  assert.equal(lightEvent(short), short);
-  const call = lightEvent({ type: "tool_call", id: "c", name: "Write", input: long });
-  assert.equal(call.type === "tool_call" && call.clipped, long.length);
+  const result = light({ type: "tool_result", id: "a", ok: true, output: long });
+  assert.equal(result.event.type === "tool_result" && result.event.clipped, long.length);
+  assert.ok(result.clipped && result.event.type === "tool_result" && result.event.output.length < 6000 && result.event.output.startsWith("xxxx") && result.event.output.includes("자 생략"));
+  const short = { id: 2, chatId: 1, node: "orch", role: "orch", at: 1, event: { type: "tool_result", id: "b", ok: true, output: "짧음" } } as TimelineEvent;
+  assert.equal(pageEvent(short), short);
+  const call = light({ type: "tool_call", id: "c", name: "Write", input: long });
+  assert.equal(call.event.type === "tool_call" && call.event.clipped, long.length);
+});
+
+test("any large field is shortened: diffs, approval details, long messages; each event stays under EVENT_MAX_CHARS", () => {
+  const diff = (n: number) => ({ path: `src/f${n}.ts`, kind: "update", diff: big(200_000) });
+  const call = light({ type: "tool_call", id: "d", name: "Edit", input: "짧은 입력", diffs: Array.from({ length: 40 }, (_, i) => diff(i)) } as AgentEvent);
+  assert.ok(call.clipped && eventChars(call) <= EVENT_MAX_CHARS + 200, `tool call is ${eventChars(call)}`);
+  assert.equal(call.event.type, "tool_call");
+  const approval = light({ type: "approval_request", request: { id: "a", role: "w1", title: "큰 변경", detail: big(500_000), risk: "high", diffs: Array.from({ length: 20 }, (_, i) => diff(i)) } } as AgentEvent);
+  assert.ok(approval.clipped && eventChars(approval) <= EVENT_MAX_CHARS + 200);
+  assert.equal(approval.event.type === "approval_request" && approval.event.request.id, "a", "ids survive");
+  const message = light({ type: "text", text: big(70_000) });
+  assert.ok(message.clipped && eventChars(message) <= EVENT_MAX_CHARS + 200);
+  assert.ok(message.event.type === "text" && message.event.text.length > 40_000, "a long message keeps most of its text");
 });
 
 test("pages of a long chat: bounded, fast, every event exactly once, full text on demand", () => {
@@ -73,7 +93,7 @@ test("pages of a long chat: bounded, fast, every event exactly once, full text o
     const first = store.eventsPage(chatId);
     const firstMs = performance.now() - started;
     assert.ok(firstMs < 1500, `first page took ${Math.round(firstMs)}ms`);
-    assert.ok(serialize(first).length < 16 * 1024 * 1024, `first page is ${serialize(first).length} bytes`);
+    assert.ok(serialize(first).length < PAGE_MAX_BYTES, `first page is ${serialize(first).length} bytes`);
     assert.ok(first.hasMore && first.context!.length > 0);
     assert.ok(first.events.length <= EVENT_PAGE_LIMITS.events + 20);
 
@@ -96,8 +116,13 @@ test("pages of a long chat: bounded, fast, every event exactly once, full text o
       const full = store.event(chatId, clipped.id);
       assert.equal(full?.event.type === "tool_result" && full.event.output.length, 300_000);
     }
-    // Run statistics from the minimal form match the full history.
-    assert.deepEqual(summarizeRunStats(store.statsEvents(chatId)), summarizeRunStats(all));
+    // Run statistics aggregated in the core match the full history, also after more events arrive.
+    const cache = new RunStatsCache(store);
+    assert.deepEqual(cache.rows(chatId), runStatsRows(all, store.listAgents(chatId), store.listConsults(chatId)));
+    store.addEvent(chatId, "orch", "orch", { type: "tool_call", id: "late", name: "Bash", input: "x" });
+    const now = Date.now() + 5000;
+    assert.deepEqual(cache.rows(chatId, now), runStatsRows(store.events(chatId), store.listAgents(chatId), store.listConsults(chatId), now));
+    assert.equal(summarizeRunStats(store.events(chatId)).pendingTools, cache.rows(chatId).total.pendingTools);
   });
 });
 
@@ -153,4 +178,62 @@ test("attachment ownership is looked up without reading tool output", () => {
     assert.equal(store.chatHasAttachment(chatId, 42), false);
     assert.equal(store.chatHasAttachment(chatId + 1, 41), false);
   });
+});
+
+test("hard size bound: big old instructions, approvals with diffs and huge tool diffs never push a page past PAGE_MAX_BYTES", () => {
+  withStore((store, chatId) => {
+    const db = (store as unknown as { db: { exec(sql: string): void } }).db;
+    db.exec("BEGIN");
+    for (let i = 0; i < 200; i++) {
+      // Old history: long instructions and approvals with large diffs, all context types.
+      store.addEvent(chatId, "orch", null, { type: "user", text: big(20_000), attachments: [] });
+      store.addEvent(chatId, "w1", "w1", { type: "approval_request", request: { id: `a${i}`, role: "w1", title: "변경", detail: big(20_000), risk: "low", diffs: [{ path: "a.ts", kind: "update", diff: big(20_000) }] } } as AgentEvent);
+      if (i % 2) store.addEvent(chatId, "w1", "w1", { type: "approval_resolved", id: `a${i}`, decision: "once" });
+      store.addEvent(chatId, "orch", "orch", { type: "plan_update", steps: Array.from({ length: 30 }, () => ({ title: big(2000), status: "pending" })), planId: i } as AgentEvent);
+    }
+    // The newest events: tool calls whose diffs are huge.
+    for (let i = 0; i < 60; i++) store.addEvent(chatId, "orch", "orch", { type: "tool_call", id: `t${i}`, name: "Edit", input: "e", diffs: [{ path: "b.ts", kind: "update", diff: big(400_000) }] } as AgentEvent);
+    db.exec("COMMIT");
+    const first = store.eventsPage(chatId);
+    const bytes = serialize({ type: "result", id: 1, value: first }).length;
+    assert.ok(bytes < PAGE_MAX_BYTES, `first page is ${bytes} bytes`);
+    assert.ok(first.events.every(e => eventChars(e) <= EVENT_MAX_CHARS + 200));
+    assert.ok(first.context!.reduce((n, e) => n + eventChars(e), 0) <= CONTEXT_MAX_CHARS);
+    // Unanswered approvals are kept (without detail), answered ones are not.
+    const approvals = first.context!.filter(e => e.event.type === "approval_request");
+    assert.ok(approvals.length > 0 && approvals.every(e => e.event.type === "approval_request" && e.event.request.detail === "" && Number(e.event.request.id.slice(1)) % 2 === 0));
+    let page = first;
+    while (page.hasMore) {
+      page = store.eventsPage(chatId, page.start);
+      assert.ok(serialize(page).length < PAGE_MAX_BYTES);
+    }
+    // The shortened diff is whole when the event is asked for alone.
+    const shortened = first.events.find(e => e.clipped && e.event.type === "tool_call");
+    const full = shortened && store.event(chatId, shortened.id);
+    assert.equal(full?.event.type === "tool_call" && full.event.diffs?.[0].diff.length, 400_000);
+  });
+});
+
+test("a preview replayed after loading is dropped when the page already has its final text", () => {
+  const at = (id: number, event: AgentEvent): TimelineEvent => ({ id, chatId: 1, node: "orch", role: "orch", at: id, event });
+  // The page was read after the reply finished (id 11); the stream sent deltas, then the final text.
+  const snapshot = [at(10, { type: "user", text: "질문", attachments: [] }), at(11, { type: "text", text: "완성된 답" })];
+  const buffered = [at(0, { type: "text_delta", text: "완성" }), at(0, { type: "text_delta", text: "된 답" }), at(11, { type: "text", text: "완성된 답" })];
+  assert.deepEqual(replayLive(snapshot, buffered, appendEvent).map(e => e.event.type), ["user", "text"]);
+  // A reply still streaming after the page keeps its preview, and newer events are added.
+  const streaming = [at(0, { type: "text_delta", text: "작성 중" }), at(12, { type: "notice", text: "알림" })];
+  assert.deepEqual(replayLive(snapshot, streaming, appendEvent).map(e => e.event.type), ["user", "text", "text_delta", "notice"]);
+});
+
+test("worker and consult updates sent while a chat loads win over the slower list answers", () => {
+  const consult = (id: number, status: Consult["status"]) => ({ id, chatId: 1, status } as Consult);
+  const agent = (id: number, status: ChatAgent["status"]) => ({ id, status } as ChatAgent);
+  const updates = emptyTeamUpdates();
+  updates.agents = [agent(1, "released")];
+  updates.consults.set(5, consult(5, "done"));
+  updates.consults.set(6, consult(6, "running"));
+  const merged = mergeTeamUpdates([agent(1, "active")], [consult(5, "running")], updates);
+  assert.deepEqual(merged.agents.map(a => a.status), ["released"]);
+  assert.deepEqual(merged.consults.map(c => [c.id, c.status]), [[5, "done"], [6, "running"]]);
+  assert.deepEqual(mergeTeamUpdates([agent(2, "active")], [], emptyTeamUpdates()).agents.map(a => a.id), [2]);
 });

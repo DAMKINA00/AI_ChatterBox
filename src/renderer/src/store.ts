@@ -15,7 +15,8 @@ import type {
   TimelineEvent,
   UsageInfo,
 } from "../../shared/types";
-import { historyFromPage, prependPage, stateEvents } from "../../shared/event-page";
+import { historyFromPage, prependPage, replayLive, stateEvents } from "../../shared/event-page";
+import { emptyTeamUpdates, mergeTeamUpdates, type TeamUpdates } from "./lib/history-load";
 import { api, errorMessage } from "./lib/utils";
 import { appendEvent, chatTimelines } from "./timeline";
 
@@ -88,6 +89,8 @@ interface State {
 let toastSeq = 0;
 /** Live events of chats whose first page is still loading; replayed on top of the page. */
 const loadingLive = new Map<number, TimelineEvent[]>();
+/** Worker/consult updates of chats whose first page is still loading; they win over the slower list answers. */
+const loadingTeam = new Map<number, TeamUpdates>();
 const loadingPages = new Map<number, Promise<void>>();
 
 function loadExpanded(): Record<string, boolean> {
@@ -106,6 +109,7 @@ function loadFirstPage(chatId: number): Promise<void> {
   const running = loadingPages.get(chatId);
   if (running) return running;
   loadingLive.set(chatId, []);
+  loadingTeam.set(chatId, emptyTeamUpdates());
   useStore.setState((s) => {
     const { [chatId]: _, ...loadErrors } = s.loadErrors;
     return { loadErrors };
@@ -113,15 +117,15 @@ function loadFirstPage(chatId: number): Promise<void> {
   const task = Promise.all([api.loadEventsPage(chatId), api.listConsults(chatId), api.listAgents(chatId)])
     .then(([page, consults, agents]) => {
       const loaded = historyFromPage(page);
-      const lastId = loaded.events.findLast((e) => e.id)?.id ?? 0;
-      let events = loaded.events;
-      // Events that arrived while the page was read: newer persisted ones and live previews.
-      for (const e of loadingLive.get(chatId) ?? []) if (!e.id || e.id > lastId) events = appendEvent(events, e);
+      // Events that arrived while the page was read: newer persisted ones and live previews (a preview
+      // whose final text the page already holds is dropped).
+      const events = replayLive(loaded.events, loadingLive.get(chatId) ?? [], appendEvent);
+      const team = mergeTeamUpdates(agents, consults, loadingTeam.get(chatId));
       useStore.setState((s) => ({
         events: { ...s.events, [chatId]: events },
         history: { ...s.history, [chatId]: { context: loaded.context, start: loaded.start, hasMore: loaded.hasMore } },
-        consults: { ...s.consults, [chatId]: consults },
-        agents: { ...s.agents, [chatId]: agents },
+        consults: { ...s.consults, [chatId]: team.consults },
+        agents: { ...s.agents, [chatId]: team.agents },
       }));
     })
     .catch((e) => {
@@ -129,6 +133,7 @@ function loadFirstPage(chatId: number): Promise<void> {
     })
     .finally(() => {
       loadingLive.delete(chatId);
+      loadingTeam.delete(chatId);
       loadingPages.delete(chatId);
     });
   loadingPages.set(chatId, task);
@@ -218,13 +223,18 @@ export const useStore = create<State>((set, get) => ({
     });
     api.onConsultUpdated((c) =>
       set((s) => {
+        loadingTeam.get(c.chatId)?.consults.set(c.id, c);
         const list = s.consults[c.chatId] ?? [];
         const next = list.some((x) => x.id === c.id) ? list.map((x) => (x.id === c.id ? c : x)) : [...list, c];
         return { consults: { ...s.consults, [c.chatId]: next } };
       }),
     );
     api.onGeminiWebLogin((status) => get().toast(`제미나이 웹 계정 ${status.accountId.slice(7)} · ${status.message}`, "info"));
-    api.onAgentsUpdated((chatId, list) => set((s) => ({ agents: { ...s.agents, [chatId]: list } })));
+    api.onAgentsUpdated((chatId, list) => {
+      const loading = loadingTeam.get(chatId);
+      if (loading) loading.agents = list;
+      set((s) => ({ agents: { ...s.agents, [chatId]: list } }));
+    });
     // Sidebar activity colors also need workers from chats that have not been opened.
     for (const chat of chats.filter(c => c.status === "working")) {
       void Promise.all([api.listAgents(chat.id), api.listConsults(chat.id)]).then(([agents, consults]) => set(s => ({

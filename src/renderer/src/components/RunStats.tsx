@@ -1,31 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 import type { RunStats } from "../../../shared/run-stats";
-import type { Chat, TimelineEvent } from "../../../shared/types";
+import type { Chat, RunStatsRows } from "../../../shared/types";
 import { formatDuration, PENDING_TOOL_LABEL, RUN_STATS_NOTE, runStatsFlags, runStatsRows, type RunStatsRow } from "../lib/run-stats-view";
 import { api, cn } from "../lib/utils";
 import { useStore } from "../store";
 import { Dialog, DialogContent } from "./ui";
 
+const CORE_REFRESH_MS = 5000;
 const running = (chat: Chat) => chat.status === "working" || chat.status === "approval" || chat.status === "pausing";
 
 /** Recorded spans of tool runs and approval waits, per chat / role / consult. Opened from the chat header. */
 export function RunStatsDialog({ chat, open, onOpenChange }: { chat: Chat; open: boolean; onOpenChange: (open: boolean) => void }) {
-  const loaded = useStore((s) => s.events[chat.id]);
+  const events = useStore((s) => s.events[chat.id]);
   const hasMore = useStore((s) => !!s.history[chat.id]?.hasMore);
-  // A chat loaded in pages measures every event: the minimal stats form of all of them, plus live ones.
-  const [stored, setStored] = useState<TimelineEvent[] | null>(null);
-  useEffect(() => {
-    if (!open || !hasMore) { setStored(null); return; }
-    let alive = true;
-    void api.loadStatsEvents(chat.id).then((list) => { if (alive) setStored(list); }).catch(() => undefined);
-    return () => { alive = false; };
-  }, [open, hasMore, chat.id]);
-  const events = useMemo(() => {
-    if (!hasMore) return loaded;
-    if (!stored) return undefined;
-    const last = stored.at(-1)?.id ?? 0;
-    return [...stored, ...(loaded ?? []).filter((e) => !e.id || e.id > last)];
-  }, [hasMore, loaded, stored]);
   const agents = useStore((s) => s.agents[chat.id]);
   const consults = useStore((s) => s.consults[chat.id]);
   const live = running(chat);
@@ -36,7 +23,17 @@ export function RunStatsDialog({ chat, open, onOpenChange }: { chat: Chat; open:
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [open, live]);
-  const rows = useMemo(() => (open && events ? runStatsRows(events, agents, consults, live ? now : undefined) : null), [open, events, agents, consults, live, now]);
+  // A chat loaded in pages is measured in the core (its whole history is not in the window); a running
+  // chat refreshes every few seconds instead of every tick.
+  const [coreRows, setCoreRows] = useState<RunStatsRows | null>(null);
+  const coreClock = hasMore && live ? Math.floor(now / CORE_REFRESH_MS) : 0;
+  useEffect(() => {
+    if (!open || !hasMore) { setCoreRows(null); return; }
+    let alive = true;
+    void api.runStats(chat.id, live ? Date.now() : undefined).then((r) => { if (alive) setCoreRows(r); }).catch(() => undefined);
+    return () => { alive = false; };
+  }, [open, hasMore, live, chat.id, coreClock]);
+  const rows = useMemo(() => (!open ? null : hasMore ? coreRows : events ? runStatsRows(events, agents, consults, live ? now : undefined) : null), [open, hasMore, coreRows, events, agents, consults, live, now]);
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent title="실행 통계" description={live ? "진행 중인 항목은 현재 시각까지 계산합니다." : "마지막 기록까지 계산합니다."} className="w-[min(760px,calc(100vw-32px))]" data-testid="run-stats">

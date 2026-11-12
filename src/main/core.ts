@@ -9,6 +9,7 @@ import { execFileSync } from "node:child_process";
 import { CLI_ACCOUNT_KINDS, type AgentKind, type ApprovalDecision, type ChatForkOptions, type CliAccountId, type CliAccountKind, type CliAccountPolicies, type ProjectSettings, type Theme, type GeminiWebAccountId } from "../shared/types";
 import type { AIStudioAction, AIStudioInput } from "../shared/aistudio";
 import { Store } from "./db";
+import { RunStatsCache } from "./run-stats-cache";
 import { ChatManager } from "./chats";
 import { AttachmentStore } from "./attachments";
 import { Orchestrator } from "./orchestrator";
@@ -17,6 +18,7 @@ import { previewImage } from "./artifact-preview";
 import { CoreRpc } from "./core-rpc";
 
 let store: Store;
+let runStats: RunStatsCache;
 let chats: ChatManager;
 let attachments: AttachmentStore;
 let orchestrator: Orchestrator;
@@ -81,6 +83,7 @@ function registerHandlers(rpc: CoreRpc) {
   ipcMain.handle("chats:delete", async (_e, id: number) => {
     await orchestrator.stop(id);
     orchestrator.forget(id);
+    runStats.forget(id);
     const released = remoteUploadsOf([id]);
     await chats.deleteChat(id);
     attachments.gcRemoteUploads({ released });
@@ -94,7 +97,8 @@ function registerHandlers(rpc: CoreRpc) {
   // Windows open chats page by page; one long chat can exceed the 128MB core frame (see shared/event-page.ts).
   ipcMain.handle("chats:eventsPage", (_e, id: number, before?: number) => store.eventsPage(id, before));
   ipcMain.handle("chats:event", (_e, id: number, eventId: number) => store.event(id, eventId));
-  ipcMain.handle("chats:statsEvents", (_e, id: number) => store.statsEvents(id));
+  // Aggregated here: the rows, not tens of thousands of events, cross the RPC (now = live clock or none).
+  ipcMain.handle("chats:runStats", (_e, id: number, now?: number) => runStats.rows(id, typeof now === "number" ? now : undefined));
   ipcMain.handle("chats:hasAttachment", (_e, id: number, attachmentId: number) => store.chatHasAttachment(id, attachmentId));
   ipcMain.handle("chats:search", (_e, q: string) => (q.trim() ? store.searchChats(q.trim()) : []));
   const notDeleting = (id: number) => { if (remoteDeleting.has(id)) throw new Error("채팅을 삭제하는 중입니다."); };
@@ -276,6 +280,7 @@ export async function runCore(dataDir: string, pipe: string, token: string, test
       "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)"], { windowsHide: true, timeout: 15_000, encoding: "utf8" }).trim() === "True";
     if (process.platform === "win32" && !test && !elevated) throw new Error("코어는 관리자 권한으로 실행해야 합니다.");
     store = new Store(join(dataDir, "chatterbox.db"));
+    runStats = new RunStatsCache(store);
     attachments = new AttachmentStore(join(dataDir, "attachments"), store);
     // Remote-upload collection at start and every 10 minutes (unref: never keeps the core alive).
     attachments.gcRemoteUploads();

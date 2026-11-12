@@ -17,7 +17,7 @@ import {
   X,
 } from "lucide-react";
 import { artifactFileLabel } from "../../../shared/artifact-markdown";
-import { CONSULT_KIND_LABEL, MASTER_LABEL, roleName, roleTone, type AgentExpression, type AttachmentRef, type Role } from "../../../shared/types";
+import { CONSULT_KIND_LABEL, MASTER_LABEL, roleName, roleTone, type AgentExpression, type ApprovalRequest, type AttachmentRef, type FileDiff, type Role } from "../../../shared/types";
 import { api, cn, errorMessage, formatBytes } from "../lib/utils";
 import { useStore } from "../store";
 import type { Item } from "../timeline";
@@ -469,20 +469,22 @@ const ToolCard = memo(function ToolCard({ item, chatId, nested }: { item: Extrac
   const state = !item.result ? "running" : item.result.ok ? "ok" : "fail";
   const shell = item.name === "Bash" || item.name === "PowerShell" || item.name === "명령";
   const brief = item.input.split("\n").find((l) => l.trim() && l.trim() !== "{") ?? "";
-  // History pages shorten long input/output; the full text is one event away.
-  const [full, setFull] = useState<{ input?: string; output?: string }>({});
+  // History pages shorten long input/output and diffs; the full call/result is one event away.
+  const [full, setFull] = useState<{ input?: string; diffs?: FileDiff[]; output?: string; loaded?: boolean }>({});
   const [loadingFull, setLoadingFull] = useState(false);
-  const clipped = (!!item.inputClipped && full.input === undefined) || (!!item.result?.clipped && full.output === undefined);
+  const clipped = !full.loaded && (!!item.callEventId || !!item.result?.eventId);
   const loadFull = async () => {
     setLoadingFull(true);
     try {
       const [call, result] = await Promise.all([
-        item.inputClipped && item.callEventId ? api.loadEvent(chatId, item.callEventId) : undefined,
-        item.result?.clipped && item.result.eventId ? api.loadEvent(chatId, item.result.eventId) : undefined,
+        item.callEventId ? api.loadEvent(chatId, item.callEventId) : undefined,
+        item.result?.eventId ? api.loadEvent(chatId, item.result.eventId) : undefined,
       ]);
       setFull({
         input: call?.event.type === "tool_call" ? call.event.input : undefined,
+        diffs: call?.event.type === "tool_call" ? call.event.diffs : undefined,
         output: result?.event.type === "tool_result" ? result.event.output : undefined,
+        loaded: true,
       });
     } catch (e) {
       useStore.getState().toast(errorMessage(e));
@@ -491,6 +493,7 @@ const ToolCard = memo(function ToolCard({ item, chatId, nested }: { item: Extrac
     }
   };
   const input = full.input ?? item.input;
+  const diffs = full.diffs ?? item.diffs;
   const output = full.output ?? item.result?.output ?? "";
   return (
     <div className={cn("overflow-hidden rounded-lg border bg-card", !nested && "ml-3.5")} data-testid="tool-card">
@@ -506,8 +509,8 @@ const ToolCard = memo(function ToolCard({ item, chatId, nested }: { item: Extrac
       </button>
       {showOpen && (
         <div className="space-y-2 border-t p-2.5">
-          {item.diffs?.length ? (
-            <DiffList files={item.diffs} defaultOpen />
+          {diffs?.length ? (
+            <DiffList files={diffs} defaultOpen />
           ) : (
             <pre data-chat-search-text className="max-h-64 overflow-auto rounded-md bg-code-bg p-2.5 font-mono text-[12px] whitespace-pre-wrap select-text">{input}</pre>
           )}
@@ -528,7 +531,7 @@ const ToolCard = memo(function ToolCard({ item, chatId, nested }: { item: Extrac
           {clipped && (
             <Button variant="outline" size="xs" data-testid="tool-full" disabled={loadingFull} onClick={() => void loadFull()}>
               {loadingFull ? <Loader2 className="animate-spin" /> : null}
-              전체 내용 불러오기 ({Math.max(item.inputClipped ?? 0, item.result?.clipped ?? 0).toLocaleString("ko-KR")}자)
+              전체 내용 불러오기{item.inputClipped || item.result?.clipped ? ` (${Math.max(item.inputClipped ?? 0, item.result?.clipped ?? 0).toLocaleString("ko-KR")}자)` : ""}
             </Button>
           )}
         </div>
@@ -538,7 +541,23 @@ const ToolCard = memo(function ToolCard({ item, chatId, nested }: { item: Extrac
 });
 
 function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval" }>; chatId: number }) {
-  const { request: r, decision } = item;
+  // A history page may have shortened a very large request; the full one loads on demand.
+  const [fullRequest, setFullRequest] = useState<ApprovalRequest>();
+  const [loadingFull, setLoadingFull] = useState(false);
+  const r = fullRequest ?? item.request;
+  const { decision } = item;
+  const loadFull = async () => {
+    if (!item.eventId) return;
+    setLoadingFull(true);
+    try {
+      const e = await api.loadEvent(chatId, item.eventId);
+      if (e?.event.type === "approval_request") setFullRequest(e.event.request);
+    } catch (err) {
+      useStore.getState().toast(errorMessage(err));
+    } finally {
+      setLoadingFull(false);
+    }
+  };
   const [busy, setBusy] = useState(false);
   const [pendingDecision, setPendingDecision] = useState<"once" | "chat" | "deny" | null>(null);
   const [localDecision, setLocalDecision] = useState<"once" | "chat" | "deny" | "expired" | null>(null);
@@ -611,6 +630,11 @@ function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval"
         <DiffList files={r.diffs} defaultOpen={!status} />
       ) : (
         <pre data-chat-search-text className="max-h-56 overflow-auto rounded-md bg-code-bg p-2.5 font-mono text-[12px] whitespace-pre-wrap select-text">{r.detail}</pre>
+      )}
+      {item.eventId && !fullRequest && (
+        <Button variant="outline" size="xs" data-testid="approval-full" disabled={loadingFull} onClick={() => void loadFull()}>
+          {loadingFull ? <Loader2 className="animate-spin" /> : null} 요청 전체 내용 불러오기
+        </Button>
       )}
       {!status && !masterView && (
         <Button size="sm" onClick={() => void select({ chatId, node: "orch" })} data-testid="approval-open-master">마스터 대화에서 확인</Button>

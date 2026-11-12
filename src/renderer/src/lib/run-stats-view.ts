@@ -35,17 +35,28 @@ function masterTurnOpen(events: readonly TimelineEvent[]): boolean {
 export function runStatsRows(events: readonly TimelineEvent[], agents: readonly ChatAgent[] | undefined, consults: readonly Consult[] | undefined, now?: number): { total: RunStats; roles: RunStatsRow[]; consults: RunStatsRow[] } {
   const opts = now === undefined ? {} : { now };
   const total = summarizeRunStats(events, opts);
+  // Group once: each row then reads only its own events (the role/node filter inside is idempotent).
+  // A long chat has tens of thousands of events and dozens of rows.
+  const byRole = new Map<string, TimelineEvent[]>();
+  const byNode = new Map<string, TimelineEvent[]>();
+  for (const e of events) {
+    const role = e.role ?? "";
+    (byRole.get(role) ?? byRole.set(role, []).get(role)!).push(e);
+    (byNode.get(e.node) ?? byNode.set(e.node, []).get(e.node)!).push(e);
+  }
+  const ofRole = (role: string) => byRole.get(role) ?? [];
+  const ofNode = (node: string) => byNode.get(node) ?? [];
   // Only work still running extends to now; a finished master turn or an idle or released worker ends at its last record.
-  const roles: RunStatsRow[] = [{ key: "orch", label: MASTER_LABEL, stats: summarizeRunStats(events, masterTurnOpen(events) ? { ...opts, role: "orch" } : { role: "orch" }) }];
+  const roles: RunStatsRow[] = [{ key: "orch", label: MASTER_LABEL, stats: summarizeRunStats(ofRole("orch"), masterTurnOpen(events) ? { ...opts, role: "orch" } : { role: "orch" }) }];
   const busy = new Set((consults ?? []).filter((c) => c.status === "running").map((c) => c.toRole));
-  for (const agent of agents ?? []) roles.push({ key: agent.key, label: agent.nickname, stats: summarizeRunStats(events, busy.has(agent.key) ? { ...opts, role: agent.key } : { role: agent.key }) });
+  for (const agent of agents ?? []) roles.push({ key: agent.key, label: agent.nickname, stats: summarizeRunStats(ofRole(agent.key), busy.has(agent.key) ? { ...opts, role: agent.key } : { role: agent.key }) });
   const consultRows = [...(consults ?? [])]
     .sort((a, b) => b.seq - a.seq)
     .map((c) => ({
       key: `consult:${c.id}`,
       label: `협의 ${c.seq} · ${roleName(c.toRole, agents as ChatAgent[] | undefined)} · ${CONSULT_KIND_LABEL[c.kind]}`,
       // A finished consult must not grow with the clock.
-      stats: summarizeRunStats(events, c.status === "running" ? { ...opts, node: `consult:${c.id}` } : { node: `consult:${c.id}` }),
+      stats: summarizeRunStats(ofNode(`consult:${c.id}`), c.status === "running" ? { ...opts, node: `consult:${c.id}` } : { node: `consult:${c.id}` }),
     }));
   return { total, roles: roles.filter((r) => r.stats.eventCount > 0), consults: consultRows.filter((r) => r.stats.eventCount > 0) };
 }

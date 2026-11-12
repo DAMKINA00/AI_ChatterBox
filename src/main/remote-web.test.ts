@@ -330,3 +330,22 @@ test("the event stream only delivers the selected chat's events", async (t) => {
   const snapshot = await (await s.request("/api/chats/1", { cookie })).json() as { seq: number };
   assert.equal(snapshot.seq, 3);
 });
+
+test("history pages and run statistics: older pages by ?before=, statistics aggregated in the core and rate limited", async (t) => {
+  const s = await setup(t, { "chats:runStats": { total: { eventCount: 3 }, roles: [], consults: [] } });
+  const { cookie } = await s.login();
+  assert.equal((await s.request("/api/chats/1?before=500", { cookie })).status, 200);
+  assert.equal((await s.request("/api/chats/1?before=abc", { cookie })).status, 400);
+  assert.deepEqual(s.calls.filter(([c]) => c === "chats:eventsPage").map(([, a]) => a), [[1, 500]]);
+  const stats = await s.request("/api/chats/1/run-stats?live=1", { cookie });
+  assert.equal(stats.status, 200);
+  assert.deepEqual(((await stats.json()) as { rows: { total: { eventCount: number } } }).rows.total.eventCount, 3);
+  const [, args] = s.calls.find(([c]) => c === "chats:runStats")!;
+  assert.equal(args[0], 1);
+  assert.equal(typeof args[1], "number", "live statistics run to now");
+  // One request per session every few seconds: they read a whole chat in the core.
+  assert.equal((await s.request("/api/chats/1/run-stats", { cookie })).status, 429);
+  s.advance(3000);
+  assert.equal((await s.request("/api/chats/1/run-stats", { cookie })).status, 200);
+  assert.equal(s.calls.filter(([c]) => c === "chats:runStats").at(-1)![1][1], undefined);
+});

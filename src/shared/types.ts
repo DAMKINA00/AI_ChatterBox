@@ -5,6 +5,10 @@ import type { AIStudioAction, AIStudioInput, AIStudioStatus, AIStudioUsageRange,
 import type { DeepSeekAction, DeepSeekBalance, DeepSeekInput, DeepSeekStatus } from "./deepseek";
 import type { RemoteWebAction, RemoteWebInput, RemoteWebStatus } from "./remote-web";
 import type { EventPage } from "./event-page";
+import type { RunStats } from "./run-stats";
+
+/** Rows of the run statistics panel (see renderer/src/lib/run-stats-view.ts). */
+export interface RunStatsRows { total: RunStats; roles: { key: string; label: string; stats: RunStats }[]; consults: { key: string; label: string; stats: RunStats }[] }
 
 export type AgentKind = "claude" | "codex" | "gemini" | "grok" | "deepseek";
 export const GEMINI_WEB_MODEL = "gemini-web-argon";
@@ -523,6 +527,8 @@ export interface TimelineEvent {
   role: Role | null;
   at: number;
   event: AgentEvent;
+  /** A history page shortened the payload (shared/event-page.ts); the full event loads by id. */
+  clipped?: boolean;
 }
 
 export interface CliInfo {
@@ -618,8 +624,8 @@ export interface ChatterBoxApi {
   loadEventsPage(chatId: number, before?: number): Promise<EventPage>;
   /** One event with its full payload. */
   loadEvent(chatId: number, eventId: number): Promise<TimelineEvent | undefined>;
-  /** Every event in the minimal form run statistics need. */
-  loadStatsEvents(chatId: number): Promise<TimelineEvent[]>;
+  /** Run statistics rows aggregated in the core (`now` = measure running work up to this time). */
+  runStats(chatId: number, now?: number): Promise<RunStatsRows>;
   /** Chat ids whose messages contain the text. */
   searchChats(q: string): Promise<number[]>;
   send(chatId: number, text: string, attachmentIds: number[], delivery?: "now" | "next"): Promise<void>;

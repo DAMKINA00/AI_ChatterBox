@@ -166,12 +166,17 @@ export function normalizeOrigin(value: string): string {
   return url.origin;
 }
 
+/** Minimum gap between run-statistics requests of one session. */
+const RUN_STATS_INTERVAL_MS = 3000;
+
 export class RemoteWeb {
   private config: Config;
   private server?: Server;
   private listening = false;
   private error?: string;
   private sessions = new Map<string, Session>();
+  /** Last run-statistics request per session (they read a whole chat in the core). */
+  private runStatsAt = new Map<string, number>();
   private streams = new Set<Stream>();
   private failures = new Map<string, Failures>();
   private allFailures: Failures = { count: 0, first: 0, lockedUntil: 0 };
@@ -691,11 +696,15 @@ export class RemoteWeb {
     }
     // Extended API (docs/remote-web-features.md); same session/CSRF/Origin/Host checks already passed.
     if (await this.features.handle(method, url, req, res, { key: session.key, user: session.user, ip: session.ip })) return;
-    const stats = /^\/api\/chats\/(\d{1,12})\/stats-events$/.exec(path);
+    const stats = /^\/api\/chats\/(\d{1,12})\/run-stats$/.exec(path);
     if (stats) {
-      // Run statistics of a chat loaded in pages: every event in the minimal timing form (no tool text).
+      // Aggregated in the core (the rows only); one request per session every RUN_STATS_INTERVAL_MS.
       if (method !== "GET") throw new HttpError(405, "지원하지 않는 요청입니다.");
-      return this.send(res, 200, { events: await call("chats:statsEvents", [this.chatId(stats[1])]) });
+      const last = this.runStatsAt.get(session.key) ?? 0;
+      if (this.now() - last < RUN_STATS_INTERVAL_MS) throw new HttpError(429, "잠시 뒤 다시 시도하세요.");
+      this.runStatsAt.set(session.key, this.now());
+      const rows = await call("chats:runStats", [this.chatId(stats[1]), url.searchParams.get("live") === "1" ? Date.now() : undefined]);
+      return this.send(res, 200, { rows });
     }
     const m = /^\/api\/chats\/([^/]+)(?:\/(stop|approve|answer))?$/.exec(path);
     if (!m) throw new HttpError(404, "없는 주소입니다.");

@@ -20,10 +20,14 @@ export type Item =
   | { kind: "message"; key: string; role: Role; node: NodeId; text: string; streaming: boolean; expression: AgentExpression; at: number; eventId?: number; room?: true; origin?: "result" }
   /** Read-only transcript a forked chat started from. */
   | { kind: "fork"; key: string; text: string; attachments: AttachmentRef[]; at: number }
-  /** inputClipped/result.clipped: a history page shortened the text; callEventId/eventId fetch the full event. */
+  /**
+   * A history page shortened the call or result (callEventId / result.eventId set: fetch the full event).
+   * inputClipped / result.clipped: original text length when the text itself was shortened.
+   */
   | { kind: "tool"; key: string; role: Role; id: string; name: string; input: string; diffs?: FileDiff[]; callEventId?: number; inputClipped?: number; result?: { ok: boolean; output: string; eventId?: number; clipped?: number } }
   | { kind: "files"; key: string; role: Role; files: FileDiff[]; ok: boolean }
-  | { kind: "approval"; key: string; request: ApprovalRequest; decision?: ApprovalDecision | "auto" | "expired" }
+  /** eventId: set when a history page shortened the request (the full event loads on demand). */
+  | { kind: "approval"; key: string; request: ApprovalRequest; decision?: ApprovalDecision | "auto" | "expired"; eventId?: number }
   | { kind: "auto"; key: string; request: ApprovalRequest; decision: "allow" | "deny"; reason: string; reused?: boolean }
   | {
       kind: "consult";
@@ -443,18 +447,18 @@ export function apply(items: Item[], e: TimelineEvent, expression?: AgentExpress
     case "tool_call":
       // The orchestrator's consult/ask tools and expression helper are not shown as timeline cards.
       if (ev.name.includes("chatterbox_bridge") || ev.name === "set_expression" || ev.name === "mcp__chatterbox_bridge__set_expression") return closeStream(items, role, node);
-      return [...closeStream(items, role, node), { kind: "tool", key: key, role, id: ev.id, name: ev.name, input: ev.input, diffs: ev.diffs, ...(ev.clipped ? { callEventId: e.id, inputClipped: ev.clipped } : {}) }];
+      return [...closeStream(items, role, node), { kind: "tool", key: key, role, id: ev.id, name: ev.name, input: ev.input, diffs: ev.diffs, ...(ev.clipped || e.clipped ? { callEventId: e.id, ...(ev.clipped ? { inputClipped: ev.clipped } : {}) } : {}) }];
     case "tool_result": {
       const i = items.findLastIndex((x) => x.kind === "tool" && x.id === ev.id);
       if (i < 0) return items;
       const copy = items.slice();
-      copy[i] = { ...(copy[i] as Extract<Item, { kind: "tool" }>), result: { ok: ev.ok, output: ev.output, ...(ev.clipped ? { eventId: e.id, clipped: ev.clipped } : {}) } };
+      copy[i] = { ...(copy[i] as Extract<Item, { kind: "tool" }>), result: { ok: ev.ok, output: ev.output, ...(ev.clipped || e.clipped ? { eventId: e.id, ...(ev.clipped ? { clipped: ev.clipped } : {}) } : {}) } };
       return copy;
     }
     case "file_change":
       return [...closeStream(items, role, node), { kind: "files", key: key, role, files: ev.files, ok: ev.ok }];
     case "approval_request":
-      return [...closeStream(items, role, node), { kind: "approval", key: key, request: ev.request }];
+      return [...closeStream(items, role, node), { kind: "approval", key: key, request: ev.request, ...(e.clipped ? { eventId: e.id } : {}) }];
     case "approval_auto":
       return [...closeStream(items, role, node), { kind: "auto", key: key, request: ev.request, decision: ev.decision, reason: ev.reason, reused: ev.reused }];
     case "approval_resolved":

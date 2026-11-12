@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Ban, Circle, CircleCheck, CircleDot, LoaderCircle, Split } from "lucide-react";
 import type { RemoteChatResponse } from "../../../shared/remote-web";
 import type { RunStats } from "../../../shared/run-stats";
-import type { Chat, ChatAgent, ChatForkOptions, Consult, ConsultStatus, ReviewResult, TimelineEvent } from "../../../shared/types";
+import type { Chat, ChatAgent, ChatForkOptions, Consult, ConsultStatus, ReviewResult, RunStatsRows, TimelineEvent } from "../../../shared/types";
 import { FORK_NOT_COPIED, FORK_NOTE, FORK_RANGE_LABEL, forkOriginText, forkPreview } from "../lib/fork";
 import { consultCardIds, openPlanSteps, PLAN_STATE_LABEL, planBlockerName, planConsultLinks, planCounts, planCountsText, planEndedEarly, planStepName, planStepViews } from "../lib/plan-view";
 import type { PlanHistoryEntry } from "../lib/plan-history";
@@ -237,7 +237,8 @@ export function PlanSteps({ plan, consults, items }: { plan: NonNullable<ReturnT
 
 // ---------- run statistics
 
-export function RunStatsSheet({ chat, events, agents, consults, onClose }: { chat: Chat; events: TimelineEvent[]; agents: ChatAgent[]; consults: Consult[]; onClose: () => void }) {
+/** `rows` given = computed by the server (chats loaded in pages); otherwise from the events here. */
+export function RunStatsSheet({ chat, events, rows: given, agents, consults, onClose }: { chat: Chat; events: TimelineEvent[]; rows?: RunStatsRows; agents: ChatAgent[]; consults: Consult[]; onClose: () => void }) {
   const live = chat.status === "working" || chat.status === "approval" || chat.status === "pausing";
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -245,7 +246,7 @@ export function RunStatsSheet({ chat, events, agents, consults, onClose }: { cha
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [live]);
-  const rows = useMemo(() => runStatsRows(events, agents, consults, live ? now : undefined), [events, agents, consults, live, now]);
+  const rows = useMemo(() => given ?? runStatsRows(events, agents, consults, live ? now : undefined), [given, events, agents, consults, live, now]);
   return (
     <Modal title="실행 통계" onClose={onClose} wide>
       <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">{RUN_STATS_NOTE}</p>

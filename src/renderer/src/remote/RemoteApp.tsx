@@ -7,14 +7,14 @@ import {
   Plus, Search, Settings2, Square, Sun, Users, X,
 } from "lucide-react";
 import { REMOTE_EVENTS, REMOTE_LIMITS, type RemoteChatResponse, type RemoteSearchResponse } from "../../../shared/remote-web";
-import { CONSULT_KIND_LABEL, roleName, type AttachmentRef, type Chat, type ChatAgent, type ChatStatus, type Consult, type ConsultStatus, type TimelineEvent } from "../../../shared/types";
+import { CONSULT_KIND_LABEL, roleName, type AttachmentRef, type Chat, type ChatAgent, type ChatStatus, type Consult, type ConsultStatus, type RunStatsRows, type TimelineEvent } from "../../../shared/types";
 import { buildItems, planOf, type Item } from "../timeline";
 import { forkEventId } from "../lib/fork";
 import { consultCardReview, consultCardStatus } from "../lib/review-summary";
 import { needsAttention } from "../timeline-window";
 import { consultReason } from "../../../shared/room-message";
 import { cn } from "../lib/utils";
-import { AuthError, request, setCsrf, url } from "./api";
+import { ApiError, AuthError, request, setCsrf, url } from "./api";
 import { ChatSettings } from "./ChatSettings";
 import { Composer } from "./Composer";
 import { chatGroups, formatBytes, INLINE_IMAGE, nextTheme, THEME_LABEL, withoutDeleted, type ProjectRef } from "./logic";
@@ -332,21 +332,22 @@ function ChatPane({ chat, detail, onOlder, sourceExists, onOpenChat, onBack, onS
 
 /** Run statistics need every event; a chat loaded in pages fetches them in the minimal timing form. */
 function PagedRunStats({ chat, detail, agents, onError, onClose }: { chat: Chat; detail: Detail; agents: ChatAgent[]; onError: (e: unknown) => void; onClose: () => void }) {
-  const [stored, setStored] = useState<TimelineEvent[] | null>(null);
+  // A chat loaded in pages is measured on the server; a running one refreshes every few seconds.
+  const live = chat.status === "working" || chat.status === "approval" || chat.status === "pausing";
+  const [rows, setRows] = useState<RunStatsRows | null>(null);
   useEffect(() => {
     if (!detail.hasMore) return;
     let alive = true;
-    request<{ events: TimelineEvent[] }>(url("/api/chats/:id/stats-events", chat.id)).then(r => { if (alive) setStored(r.events); }).catch(onError);
-    return () => { alive = false; };
-  }, [chat.id, detail.hasMore, onError]);
-  const events = useMemo(() => {
-    if (!detail.hasMore) return detail.events;
-    if (!stored) return null;
-    const last = stored.at(-1)?.id ?? 0;
-    return [...stored, ...detail.events.filter(e => !e.id || e.id > last)];
-  }, [detail, stored]);
-  if (!events) return null;
-  return <RunStatsSheet chat={chat} events={events} agents={agents} consults={detail.consults} onClose={onClose} />;
+    const load = () => request<{ rows: RunStatsRows }>(url("/api/chats/:id/run-stats", chat.id, live ? { live: "1" } : undefined))
+      .then(r => { if (alive) setRows(r.rows); })
+      // Asked again too soon (the server allows one request every few seconds): try once more shortly.
+      .catch(e => { if (e instanceof ApiError && e.status === 429) { if (alive) window.setTimeout(() => { if (alive) void load(); }, 3000); } else onError(e); });
+    void load();
+    const timer = live ? window.setInterval(() => void load(), 5000) : undefined;
+    return () => { alive = false; window.clearInterval(timer); };
+  }, [chat.id, detail.hasMore, live, onError]);
+  if (detail.hasMore && !rows) return null;
+  return <RunStatsSheet chat={chat} events={detail.events} rows={detail.hasMore ? rows ?? undefined : undefined} agents={agents} consults={detail.consults} onClose={onClose} />;
 }
 
 const GOAL_LABEL = { active: "진행 중", complete: "완료", blocked: "막힘", paused: "멈춤" } as const;
