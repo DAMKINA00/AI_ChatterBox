@@ -15,7 +15,7 @@ import type {
   TimelineEvent,
   UsageInfo,
 } from "../../shared/types";
-import { historyFromPage, prependPage, replayLive, stateEvents } from "../../shared/event-page";
+import { historyFromPage, prependPage, replayLive, stateEvents, type StateSnapshot } from "../../shared/event-page";
 import { emptyTeamUpdates, mergeTeamUpdates, type TeamUpdates } from "./lib/history-load";
 import { api, errorMessage } from "./lib/utils";
 import { appendEvent, chatTimelines } from "./timeline";
@@ -34,6 +34,9 @@ interface Toast {
 
 /** Paging state of a loaded chat (its events are in `events`). */
 export interface HistoryState {
+  /** Current state where the first page began (bounded aggregate from the core) and that point. */
+  snapshot?: StateSnapshot;
+  snapshotAt?: number;
   /** Context events older than `start` (pinned state only; never rendered). */
   context: TimelineEvent[];
   start: number;
@@ -123,7 +126,7 @@ function loadFirstPage(chatId: number): Promise<void> {
       const team = mergeTeamUpdates(agents, consults, loadingTeam.get(chatId));
       useStore.setState((s) => ({
         events: { ...s.events, [chatId]: events },
-        history: { ...s.history, [chatId]: { context: loaded.context, start: loaded.start, hasMore: loaded.hasMore } },
+        history: { ...s.history, [chatId]: { context: loaded.context, start: loaded.start, hasMore: loaded.hasMore, snapshot: loaded.snapshot, snapshotAt: loaded.snapshotAt } },
         consults: { ...s.consults, [chatId]: team.consults },
         agents: { ...s.agents, [chatId]: team.agents },
       }));
@@ -145,7 +148,7 @@ export const retryHistory = (chatId: number) => loadFirstPage(chatId);
 
 /** Loaded events plus the older context, for state that depends on the whole history (plan, reviews, expressions). */
 export function stateEventsOf(events: TimelineEvent[] | undefined, history: HistoryState | undefined): TimelineEvent[] {
-  return events ? stateEvents({ events, context: history?.context ?? [] }) : [];
+  return events ? stateEvents({ events, context: history?.context ?? [], snapshot: history?.snapshot, snapshotAt: history?.snapshotAt }) : [];
 }
 
 export const useStore = create<State>((set, get) => ({
@@ -309,7 +312,7 @@ export const useStore = create<State>((set, get) => ({
         const events = s.events[chatId];
         if (!current || !events) return s;
         const merged = prependPage({ ...current, events }, page);
-        return { events: { ...s.events, [chatId]: merged.events }, history: { ...s.history, [chatId]: { context: merged.context, start: merged.start, hasMore: merged.hasMore } } };
+        return { events: { ...s.events, [chatId]: merged.events }, history: { ...s.history, [chatId]: { context: merged.context, start: merged.start, hasMore: merged.hasMore, snapshot: merged.snapshot, snapshotAt: merged.snapshotAt } } };
       });
       return true;
     } catch (e) {

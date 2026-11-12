@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { REMOTE_EVENTS, REMOTE_LIMITS, type RemoteChatResponse, type RemoteSearchResponse } from "../../../shared/remote-web";
 import { CONSULT_KIND_LABEL, roleName, type AttachmentRef, type Chat, type ChatAgent, type ChatStatus, type Consult, type ConsultStatus, type RunStatsRows, type TimelineEvent } from "../../../shared/types";
-import { buildItems, eventText, markClipped, planOf, type Item } from "../timeline";
+import { buildItems, markClipped, planOf, type Item } from "../timeline";
 import { forkEventId } from "../lib/fork";
 import { consultCardReview, consultCardStatus } from "../lib/review-summary";
 import { needsAttention } from "../timeline-window";
@@ -436,8 +436,13 @@ function ClippedOriginal({ chatId, ids, onError }: { chatId: number; ids: number
   const load = async () => {
     setLoading(true);
     try {
-      const events = await Promise.all(ids.map(id => request<{ event: TimelineEvent }>(`${url("/api/chats/:id/events", chatId)}/${id}`)));
-      setText(events.map(r => eventText(r.event.event)).join("\n\n"));
+      // One at a time: the server allows one original-text request per second per session.
+      const texts: string[] = [];
+      for (const id of ids) {
+        if (texts.length) await new Promise(ok => setTimeout(ok, 1100));
+        texts.push((await request<{ id: number; type: string; text: string }>(`${url("/api/chats/:id/events", chatId)}/${id}`)).text);
+      }
+      setText(texts.join("\n\n"));
     } catch (e) { onError(e); } finally { setLoading(false); }
   };
   return (

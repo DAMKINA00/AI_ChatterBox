@@ -5,7 +5,7 @@
 // Size guarantee: every event in a page is at most EVENT_MAX_CHARS of JSON, the page events (with
 // anchors) at most EVENT_PAGE_LIMITS.chars, the context at most CONTEXT_MAX_CHARS. Strings are UTF-16 at
 // worst in the core frame, so a first page stays under PAGE_MAX_BYTES (16MB), far below the 128MB frame.
-import type { AgentEvent, TimelineEvent } from "./types";
+import type { AgentEvent, AgentExpression, ApprovalRequest, ChatGoal, NodeId, PlanState, PlanStep, Role, TimelineEvent } from "./types";
 
 /** One page: stop at whichever limit is reached first (counted from the newest event backwards). */
 export const EVENT_PAGE_LIMITS = {
@@ -78,7 +78,8 @@ export function minimalContextEvent(e: TimelineEvent): TimelineEvent | null {
   let event: AgentEvent | null = null;
   switch (ev.type) {
     case "user": event = { type: "user", text: short(ev.text, 300) ?? "", attachments: [], ...(ev.queued ? { queued: true } : {}), ...(ev.delivery ? { delivery: ev.delivery } : {}) }; break;
-    case "plan_update": event = { ...ev, steps: ev.steps.slice(0, 100).map(s => ({ ...s, title: short(s.title, 300) ?? "" })), explanation: short(ev.explanation, 1000) }; break;
+    // Up to 1000 steps so the snapshot can count what its own cap leaves out.
+    case "plan_update": event = { ...ev, steps: ev.steps.slice(0, 1000).map(s => ({ ...s, title: short(s.title, 300) ?? "" })), explanation: short(ev.explanation, 1000) }; break;
     case "plan_state": event = { ...ev, reason: short(ev.reason, 500) }; break;
     case "approval_request": event = { type: "approval_request", request: { ...ev.request, title: short(ev.request.title, 300) ?? "", detail: "", diffs: undefined } }; break;
     case "approval_resolved": case "review_result": case "expression": case "turn_end": case "agent_usage": case "goal_update": event = ev; break;
@@ -88,9 +89,6 @@ export function minimalContextEvent(e: TimelineEvent): TimelineEvent | null {
 }
 
 const isPlanCommandText = (text: string) => /^\/plan(?:\s|$)/.test(text);
-/** A user event that ends the shown plan, given the plan state at that point (same rule as currentPlanView). */
-const resetsPlan = (ev: AgentEvent, running: boolean) =>
-  ev.type === "user" && !ev.queued && ev.text !== "계획 실행" && !/^\/plan-(?:run|cancel)\b/.test(ev.text) && (isPlanCommandText(ev.text) || !running);
 
 /** Oldest-first list → newest entries that fit `budget` characters, in id order. */
 function newestWithin(events: TimelineEvent[], budget: number): TimelineEvent[] {
@@ -103,80 +101,140 @@ function newestWithin(events: TimelineEvent[], budget: number): TimelineEvent[] 
   return events.slice(start);
 }
 
+/** Caps of the state snapshot; together they keep it far below CONTEXT_MAX_CHARS. */
+export const SNAPSHOT_LIMITS = { planSteps: 200, approvals: 50, conversations: 50 } as const;
+
+/** An unanswered approval request, without its detail or diffs. */
+export interface PendingApproval { eventId: number; at: number; id: string; role: Role; title: string; risk: ApprovalRequest["risk"] }
+
 /**
- * Bounded state snapshot of the history older than the first page, from minimal context events in id
- * order (minimalContextEvent). It has two parts:
- * - current state, always kept: the plan as it stands (events from its last reset on, without the user
- *   messages that did not change it, plus the latest user and /plan messages), unanswered approvals, the
- *   latest goal, and the latest expression and turn end of each conversation;
- * - past history, kept newest first within what is left of CONTEXT_MAX_CHARS: earlier instructions and
- *   plans (ended plans), the latest review of each consult, the latest usage of each role and turn.
- * The result is the past part followed by the current part, each in id order; folding it gives the same
- * plan, worker state and approvals as the whole history.
+ * The current state where the first page begins, computed in the core from the whole older history and
+ * bounded by SNAPSHOT_LIMITS (what goes beyond a cap is counted, not sent):
+ * - plan: the plan fold as it stands (shown checklist, its state and reason); steps over the cap are
+ *   dropped from the end and counted in stepsOmitted;
+ * - approvals: the newest unanswered requests and the total (the rest via the pending-approvals lookup);
+ * - goal: the latest goal update; conversations: the latest expression and turn end of the most recently
+ *   active conversations; lastUserAt: when the latest instruction was sent.
  */
-export function reduceContext(events: readonly TimelineEvent[]): TimelineEvent[] {
-  // Plan: find the last reset; the plan state depends only on what follows it.
-  let running = false;
+export interface StateSnapshot {
+  plan: { view: { planId?: number; steps: PlanStep[]; explanation?: string } | null; state: PlanState | "live"; reason?: string; planId?: number; stepsOmitted: number };
+  approvals: { pending: PendingApproval[]; total: number };
+  goal: ChatGoal | null;
+  conversations: { node: NodeId; role: Role | null; expression?: AgentExpression; turnEnd?: { ok: boolean; interrupted?: boolean; at: number } }[];
+  lastUserAt?: number;
+}
+
+/** Plan fold (same rules as currentPlanView) that also returns the state carried when no plan is shown. */
+function foldPlan(events: readonly TimelineEvent[]): StateSnapshot["plan"] {
+  let view = null as StateSnapshot["plan"]["view"];
+  let state: PlanState | "live" = "live";
+  let reason: string | undefined;
   let planId: number | undefined;
-  let lastReset = -1;
-  events.forEach((e, i) => {
+  for (const e of events) {
     const ev = e.event;
     if (ev.type === "plan_update" && e.role === "orch") {
-      if (ev.planId !== undefined && planId !== undefined && ev.planId !== planId) running = false;
+      if (ev.planId !== undefined && planId !== undefined && ev.planId !== planId) { state = "live"; reason = undefined; }
       if (ev.planId !== undefined) planId = ev.planId;
+      view = { planId, steps: ev.steps, explanation: ev.explanation };
     } else if (ev.type === "plan_state") {
-      if (ev.planId !== undefined && planId !== undefined && ev.planId !== planId && ev.state !== "running") return;
-      running = ev.state === "running";
+      if (ev.planId !== undefined && planId !== undefined && ev.planId !== planId && ev.state !== "running") continue;
+      state = ev.state;
+      reason = ev.reason;
       if (ev.planId !== undefined) planId = ev.planId;
-    } else if (resetsPlan(ev, running)) {
-      running = false;
+      if (view) view = { ...view, planId };
+    } else if (ev.type === "user" && !ev.queued && ev.text !== "계획 실행" && !/^\/plan-(?:run|cancel)\b/.test(ev.text) && (isPlanCommandText(ev.text) || state !== "running")) {
+      view = null;
+      state = "live";
+      reason = undefined;
       planId = undefined;
-      lastReset = i;
     }
-  });
-  const lastUser = events.findLastIndex(e => e.event.type === "user");
-  const lastPlanCommand = events.findLastIndex(e => e.event.type === "user" && !e.event.queued && isPlanCommandText(e.event.text));
+  }
+  const steps = view?.steps ?? [];
+  const stepsOmitted = Math.max(0, steps.length - SNAPSHOT_LIMITS.planSteps);
+  return {
+    view: view && { ...view, steps: steps.slice(0, SNAPSHOT_LIMITS.planSteps).map(st => ({ ...st, title: short(st.title, 300) ?? "" })), explanation: short(view.explanation, 1000) },
+    state, reason: short(reason, 500), planId, stepsOmitted,
+  };
+}
+
+/**
+ * Snapshot and past history from the minimal context events older than the first page (id order).
+ * `context` holds only past history for history views (ended plans, reviews, usage totals), newest first
+ * within what the snapshot leaves of CONTEXT_MAX_CHARS. The snapshot is always complete within its caps.
+ */
+export function reduceContext(events: readonly TimelineEvent[]): { context: TimelineEvent[]; snapshot: StateSnapshot } {
   const resolved = new Set<string>();
   for (const e of events) if (e.event.type === "approval_resolved") resolved.add(e.event.id);
+  const pending: PendingApproval[] = [];
+  const conversations = new Map<string, StateSnapshot["conversations"][number] & { last: number }>();
   const latest = new Map<string, number>();
-  const keyOf = (e: TimelineEvent) => {
-    const ev = e.event;
-    return ev.type === "review_result" ? `r${ev.consultId}`
-      : ev.type === "expression" || ev.type === "turn_end" ? `${ev.type}|${e.node}|${e.role ?? ""}`
-        : ev.type === "agent_usage" ? `u|${e.role ?? ""}|${ev.metrics.turnId}`
-          : ev.type === "goal_update" ? "goal" : null;
-  };
-  events.forEach((e, i) => { const key = keyOf(e); if (key) latest.set(key, i); });
-
-  const current: TimelineEvent[] = [];
-  const past: TimelineEvent[] = [];
+  let goal = null as ChatGoal | null;
+  let lastUserAt: number | undefined;
   events.forEach((e, i) => {
     const ev = e.event;
-    const isLatest = () => latest.get(keyOf(e)!) === i;
-    switch (ev.type) {
-      case "user":
-        // From the last reset on only the reset itself, the latest user message and the latest /plan matter.
-        if (i < lastReset) past.push(e);
-        else if (i === lastReset || i === lastUser || i === lastPlanCommand) current.push(e);
-        break;
-      case "plan_update": case "plan_state": (i < lastReset ? past : current).push(e); break;
-      case "approval_request": if (!resolved.has(ev.request.id)) current.push(e); break;
-      case "goal_update": case "expression": case "turn_end": if (isLatest()) current.push(e); break;
-      case "review_result": case "agent_usage": if (isLatest()) past.push(e); break;
-      default: break;
+    if (ev.type === "approval_request" && !resolved.has(ev.request.id)) pending.push({ eventId: e.id, at: e.at, id: ev.request.id, role: ev.request.role, title: short(ev.request.title, 300) ?? "", risk: ev.request.risk });
+    else if (ev.type === "goal_update") goal = ev.goal && { ...ev.goal, objective: short(ev.goal.objective, 1000) ?? "", progress: short(ev.goal.progress, 1000) ?? "" };
+    else if (ev.type === "user") lastUserAt = e.at;
+    else if (ev.type === "expression" || ev.type === "turn_end") {
+      const key = `${e.node}|${e.role ?? ""}`;
+      const c = conversations.get(key) ?? { node: e.node, role: e.role, last: 0 };
+      if (ev.type === "expression") c.expression = ev.expression;
+      else c.turnEnd = { ok: ev.ok, ...(ev.interrupted ? { interrupted: true } : {}), at: e.at };
+      c.last = e.id;
+      conversations.delete(key);
+      conversations.set(key, c);
     }
+    const key = ev.type === "review_result" ? `r${ev.consultId}` : ev.type === "agent_usage" ? `u|${e.role ?? ""}|${ev.metrics.turnId}` : null;
+    if (key) latest.set(key, i);
   });
-  // Only the newest of a long run of checklist updates for the same plan changes what folds out of it.
-  const compact = current.filter((e, i) => {
-    const next = current[i + 1];
-    return !(e.event.type === "plan_update" && next?.event.type === "plan_update" && e.event.planId === next.event.planId && next.role === e.role);
+  const snapshot: StateSnapshot = {
+    plan: foldPlan(events),
+    approvals: { pending: pending.slice(-SNAPSHOT_LIMITS.approvals).reverse(), total: pending.length },
+    goal,
+    conversations: [...conversations.values()].sort((a, b) => b.last - a.last).slice(0, SNAPSHOT_LIMITS.conversations).map(({ last: _, ...c }) => c),
+    ...(lastUserAt !== undefined ? { lastUserAt } : {}),
+  };
+  const past = events.filter((e, i) => {
+    const ev = e.event;
+    if (ev.type === "user" || ev.type === "plan_update" || ev.type === "plan_state") return true;
+    if (ev.type === "review_result") return latest.get(`r${ev.consultId}`) === i;
+    if (ev.type === "agent_usage") return latest.get(`u|${e.role ?? ""}|${ev.metrics.turnId}`) === i;
+    return false;
   });
-  // Unanswered approvals far beyond what anyone can act on are capped to the newest.
-  const approvals = compact.filter(e => e.event.type === "approval_request");
-  const kept = approvals.length > 500 ? compact.filter(e => e.event.type !== "approval_request" || approvals.indexOf(e) >= approvals.length - 500) : compact;
-  const currentChars = kept.reduce((n, e) => n + eventChars(e), 0);
-  return [...newestWithin(past, Math.max(0, CONTEXT_MAX_CHARS - currentChars)), ...kept];
+  return { context: newestWithin(past, CONTEXT_MAX_CHARS - JSON.stringify(snapshot).length), snapshot };
 }
+
+/**
+ * The snapshot as events for the state readers (plan fold, worker state, expressions, instruction time).
+ * It starts with a reset so it reproduces the snapshot whatever was folded before it. Never rendered.
+ */
+export function snapshotEvents(snapshot: StateSnapshot, chatId: number): TimelineEvent[] {
+  let id = -1;
+  const at = (event: AgentEvent, time: number, node: NodeId = "orch", role: Role | null = "orch"): TimelineEvent => ({ id: id--, chatId, node, role, at: time, event });
+  const out: TimelineEvent[] = [at({ type: "user", text: "/plan", attachments: [] }, snapshot.lastUserAt ?? 0, "orch", null)];
+  const { plan } = snapshot;
+  if (plan.view) out.push(at({ type: "plan_update", steps: plan.view.steps, explanation: plan.view.explanation, planId: plan.view.planId }, 0));
+  if (plan.state !== "live") out.push(at({ type: "plan_state", state: plan.state, reason: plan.reason, planId: plan.planId }, 0));
+  for (const c of [...snapshot.conversations].reverse()) {
+    if (c.expression) out.push(at({ type: "expression", expression: c.expression }, 0, c.node, c.role));
+    if (c.turnEnd) out.push(at({ type: "turn_end", ok: c.turnEnd.ok, ...(c.turnEnd.interrupted ? { interrupted: true } : {}) }, c.turnEnd.at, c.node, c.role));
+  }
+  for (const a of [...snapshot.approvals.pending].reverse()) out.push(at({ type: "approval_request", request: { id: a.id, role: a.role, title: a.title, detail: "", risk: a.risk } }, a.at, a.role, a.role));
+  return out;
+}
+
+/** Event types whose original text remote web may read (text messages only), and the field holding it. */
+export const REMOTE_TEXT_FIELDS = {
+  user: "text", text: "text", room_message: "text", peer_message: "text", notice: "text",
+  ask_user: "question", consult_start: "request", consult_end: "summary",
+} as const satisfies Partial<Record<AgentEvent["type"], string>>;
+/** Largest original text remote web returns (UTF-8 bytes); larger ones answer 413. */
+export const REMOTE_TEXT_MAX_BYTES = 2_000_000;
+
+/** One event's original text for remote web: allowed types only, only {id, type, text}. */
+export type RemoteEventText =
+  | { ok: true; id: number; type: keyof typeof REMOTE_TEXT_FIELDS; text: string }
+  | { ok: false; reason: "missing" | "type" | "size"; length?: number };
 
 export interface EventPage {
   /**
@@ -188,29 +246,34 @@ export interface EventPage {
   start: number;
   /** Events older than `start` exist. */
   hasMore: boolean;
-  /**
-   * Only on the first (newest) page: the reduced, bounded state snapshot of older history (reduceContext).
-   * Never rendered as timeline items.
-   */
+  /** Only on the first (newest) page: past history for history views (bounded, see reduceContext). Never rendered. */
   context?: TimelineEvent[];
+  /** Only on the first page: the current state where it begins (bounded aggregate). */
+  snapshot?: StateSnapshot;
 }
 
 /** What the window holds for a chat whose history is loaded in pages. */
 export interface LoadedHistory {
   /** Events in id order (live events are appended; their id may be 0 while streaming). */
   events: TimelineEvent[];
-  /** Context events older than `start` (see EventPage.context). */
+  /** Past-history context events older than `start` (see EventPage.context). */
   context: TimelineEvent[];
   start: number;
   hasMore: boolean;
+  /** The first page's state snapshot and where it applies (that page's start). */
+  snapshot?: StateSnapshot;
+  snapshotAt?: number;
 }
 
-export const historyFromPage = (page: EventPage): LoadedHistory => ({ events: page.events, context: page.context ?? [], start: page.start, hasMore: page.hasMore });
+export const historyFromPage = (page: EventPage): LoadedHistory => ({
+  events: page.events, context: page.context ?? [], start: page.start, hasMore: page.hasMore,
+  ...(page.snapshot && page.hasMore ? { snapshot: page.snapshot, snapshotAt: page.start } : {}),
+});
 
 /**
  * Put an older page in front of what is loaded. Anchors already loaded are not duplicated, and context
  * events now covered by real events are dropped. A page that does not end before the loaded start is
- * ignored (a stale request).
+ * ignored (a stale request). The snapshot stays: it describes the state at its own point.
  */
 export function prependPage(history: LoadedHistory, page: EventPage): LoadedHistory {
   if (page.start >= history.start && history.hasMore) return history;
@@ -222,6 +285,7 @@ export function prependPage(history: LoadedHistory, page: EventPage): LoadedHist
   const persisted = merged.filter(e => e.id).sort((a, b) => a.id - b.id);
   const live = merged.filter(e => !e.id);
   return {
+    ...history,
     events: [...persisted, ...live],
     context: history.context.filter(e => e.id < page.start),
     start: page.start,
@@ -229,9 +293,18 @@ export function prependPage(history: LoadedHistory, page: EventPage): LoadedHist
   };
 }
 
-/** Events for state that depends on the whole history (plan, reviews, expressions): context, then the loaded events. */
-export const stateEvents = (history: Pick<LoadedHistory, "events" | "context">): TimelineEvent[] =>
-  history.context.length ? [...history.context, ...history.events] : history.events;
+/**
+ * Events for state that depends on the whole history: past context, loaded events older than the
+ * snapshot point, the snapshot (which sets the current state there), then the rest. Never rendered.
+ */
+export function stateEvents(history: Pick<LoadedHistory, "events" | "context" | "snapshot" | "snapshotAt">): TimelineEvent[] {
+  if (!history.snapshot || history.snapshotAt === undefined) return history.context.length ? [...history.context, ...history.events] : history.events;
+  const at = history.snapshotAt;
+  const split = history.events.findIndex(e => !e.id || e.id >= at);
+  const before = split < 0 ? history.events : history.events.slice(0, split);
+  const after = split < 0 ? [] : history.events.slice(split);
+  return [...history.context, ...before, ...snapshotEvents(history.snapshot, history.events[0]?.chatId ?? 0), ...after];
+}
 
 /**
  * Live events that arrived while a snapshot (first page) was read, replayed on top of it.

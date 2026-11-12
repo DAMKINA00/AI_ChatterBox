@@ -7,7 +7,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { serialize } from "node:v8";
 import { Store } from "./db";
-import { CLIP_AT, CONTEXT_MAX_CHARS, EVENT_MAX_CHARS, EVENT_PAGE_LIMITS, eventChars, historyFromPage, PAGE_MAX_BYTES, pageEvent, prependPage, reduceContext, minimalContextEvent, replayLive, stateEvents, type EventPage } from "../shared/event-page";
+import { CLIP_AT, CONTEXT_MAX_CHARS, EVENT_MAX_CHARS, EVENT_PAGE_LIMITS, eventChars, historyFromPage, PAGE_MAX_BYTES, pageEvent, prependPage, reduceContext, minimalContextEvent, REMOTE_TEXT_MAX_BYTES, replayLive, SNAPSHOT_LIMITS, stateEvents, type EventPage } from "../shared/event-page";
+import { FULL_EVENT_MAX_CHARS } from "./db";
+import { oneAtATime } from "../renderer/src/lib/full-event";
 import { RunStatsCache } from "./run-stats-cache";
 import { runStatsRows } from "../renderer/src/lib/run-stats-view";
 import { appendEvent } from "../renderer/src/timeline";
@@ -198,10 +200,15 @@ test("hard size bound: big old instructions, approvals with diffs and huge tool 
     const bytes = serialize({ type: "result", id: 1, value: first }).length;
     assert.ok(bytes < PAGE_MAX_BYTES, `first page is ${bytes} bytes`);
     assert.ok(first.events.every(e => eventChars(e) <= EVENT_MAX_CHARS + 200));
-    assert.ok(first.context!.reduce((n, e) => n + eventChars(e), 0) <= CONTEXT_MAX_CHARS);
-    // Unanswered approvals are kept (without detail), answered ones are not.
-    const approvals = first.context!.filter(e => e.event.type === "approval_request");
-    assert.ok(approvals.length > 0 && approvals.every(e => e.event.type === "approval_request" && e.event.request.detail === "" && Number(e.event.request.id.slice(1)) % 2 === 0));
+    assert.ok(first.context!.reduce((n, e) => n + eventChars(e), 0) + JSON.stringify(first.snapshot).length <= CONTEXT_MAX_CHARS);
+    // Unanswered approvals are counted (the newest few listed, without detail); answered ones are not.
+    const { approvals } = first.snapshot!;
+    const older = store.events(chatId).filter(e => e.id < first.start);
+    const answered = new Set(older.flatMap(e => (e.event.type === "approval_resolved" ? [e.event.id] : [])));
+    assert.equal(approvals.total, older.filter(e => e.event.type === "approval_request" && !answered.has(e.event.request.id)).length);
+    assert.ok(approvals.total > SNAPSHOT_LIMITS.approvals);
+    assert.ok(approvals.pending.length === SNAPSHOT_LIMITS.approvals && approvals.pending.every(a => Number(a.id.slice(1)) % 2 === 0));
+    assert.ok(Number(approvals.pending[0].id.slice(1)) > Number(approvals.pending[1].id.slice(1)), "newest first");
     let page = first;
     while (page.hasMore) {
       page = store.eventsPage(chatId, page.start);
@@ -256,15 +263,108 @@ test("over the context budget the current state survives: an old running plan, i
   all.push(at(id++, { type: "plan_update", steps: [{ title: "1단계", status: "completed" }, { title: "2단계", status: "completed" }, { title: "3단계", status: "inProgress" }], planId: 1 } as AgentEvent));
   const minimal = all.flatMap(e => { const m = minimalContextEvent(e); return m ? [m] : []; });
   assert.ok(minimal.reduce((n, e) => n + eventChars(e), 0) > CONTEXT_MAX_CHARS, "the history is over the budget");
-  const context = reduceContext(minimal);
-  assert.ok(context.reduce((n, e) => n + eventChars(e), 0) <= CONTEXT_MAX_CHARS);
-  assert.deepEqual(planOf(context), planOf(all), "the running plan and its latest checklist");
-  assert.equal(planOf(context)?.state, "running");
-  assert.ok(context.some(e => e.event.type === "approval_request" && e.event.request.id === "old"));
-  assert.ok(context.some(e => e.event.type === "goal_update"));
+  const { context, snapshot } = reduceContext(minimal);
+  assert.ok(context.reduce((n, e) => n + eventChars(e), 0) + JSON.stringify(snapshot).length <= CONTEXT_MAX_CHARS);
+  const state = stateEvents({ events: [], context, snapshot, snapshotAt: id });
+  assert.deepEqual(planOf(state), planOf(all), "the running plan and its latest checklist");
+  assert.equal(planOf(state)?.state, "running");
+  assert.deepEqual(snapshot.approvals, { pending: [{ eventId: 6, at: 6, id: "old", role: "w1", title: "오래된 승인", risk: "high" }], total: 1 });
+  assert.equal(snapshot.goal?.objective, "목표");
+  assert.equal(snapshot.lastUserAt, 6007, "the latest instruction time survives the cut");
   // Past history (reviews) was cut, newest kept.
   const reviews = context.filter(e => e.event.type === "review_result");
   assert.ok(reviews.length > 0 && reviews.length < 3000 && reviews.at(-1)!.event.type === "review_result");
+});
+
+test("the snapshot is bounded however plan updates, state changes and approvals pile up", () => {
+  const at = (id: number, event: AgentEvent, node: TimelineEvent["node"] = "orch", role: TimelineEvent["role"] = "orch"): TimelineEvent => ({ id, chatId: 1, node, role, at: id, event });
+  const all: TimelineEvent[] = [at(1, { type: "user", text: "/plan 큰 계획", attachments: [] }, "orch", null)];
+  let id = 2;
+  // 20,000 alternating checklist updates and state changes across plan ids, 600 unanswered approvals,
+  // 300 conversations, then a final plan of 300 steps.
+  for (let i = 0; i < 10_000; i++) {
+    all.push(at(id++, { type: "plan_update", steps: [{ title: big(200), status: "inProgress" }], planId: i % 7 } as AgentEvent));
+    all.push(at(id++, { type: "plan_state", state: i % 3 ? "running" : "proposed", planId: i % 7, reason: big(100) } as AgentEvent));
+  }
+  for (let i = 0; i < 600; i++) all.push(at(id++, { type: "approval_request", request: { id: `p${i}`, role: "w1", title: big(500), detail: "", risk: "low" } }, "w1", "w1"));
+  for (let i = 0; i < 300; i++) all.push(at(id++, { type: "expression", expression: "thinking" }, `consult:${i}`, `w${i}`));
+  all.push(at(id++, { type: "plan_update", steps: Array.from({ length: 300 }, (_, k) => ({ title: `단계 ${k}`, status: "pending" })), planId: 6 } as AgentEvent));
+  all.push(at(id++, { type: "plan_state", state: "running", planId: 6 } as AgentEvent));
+  const minimal = all.flatMap(e => { const m = minimalContextEvent(e); return m ? [m] : []; });
+  const started = performance.now();
+  const { snapshot, context } = reduceContext(minimal);
+  assert.ok(performance.now() - started < 2000);
+  const size = JSON.stringify(snapshot).length;
+  assert.ok(size < 200_000, `snapshot is ${size} characters`);
+  assert.ok(context.reduce((n, e) => n + eventChars(e), 0) + size <= CONTEXT_MAX_CHARS);
+  assert.equal(snapshot.plan.view?.steps.length, SNAPSHOT_LIMITS.planSteps);
+  assert.equal(snapshot.plan.stepsOmitted, 100);
+  assert.equal(snapshot.plan.state, "running");
+  assert.equal(snapshot.approvals.total, 600);
+  assert.equal(snapshot.approvals.pending.length, SNAPSHOT_LIMITS.approvals);
+  assert.equal(snapshot.approvals.pending[0].id, "p599");
+  assert.equal(snapshot.conversations.length, SNAPSHOT_LIMITS.conversations);
+  // Folding the snapshot gives the same plan as the whole history (apart from the step cap).
+  const view = planOf(stateEvents({ events: [], context, snapshot, snapshotAt: id }));
+  const whole = planOf(all);
+  assert.deepEqual({ ...view, steps: view?.steps.length }, { ...whole, steps: SNAPSHOT_LIMITS.planSteps });
+});
+
+test("the snapshot keeps the state where it applies when older pages are loaded in front", () => {
+  withStore((store, chatId) => {
+    store.addEvent(chatId, "orch", null, { type: "user", text: "/plan 계획", attachments: [] });
+    store.addEvent(chatId, "orch", "orch", { type: "plan_update", steps: [{ title: "가", status: "inProgress" }], planId: 1 } as AgentEvent);
+    store.addEvent(chatId, "orch", "orch", { type: "plan_state", state: "running", planId: 1 } as AgentEvent);
+    for (let i = 0; i < EVENT_PAGE_LIMITS.visible * 2 + 10; i++) store.addEvent(chatId, "orch", "orch", { type: "text", text: `진행 ${i}` });
+    const all = store.events(chatId);
+    let history = historyFromPage(store.eventsPage(chatId));
+    assert.ok(history.snapshot && history.hasMore);
+    assert.deepEqual(planOf(stateEvents(history)), planOf(all));
+    while (history.hasMore) {
+      history = prependPage(history, store.eventsPage(chatId, history.start));
+      assert.deepEqual(planOf(stateEvents(history)), planOf(all));
+    }
+  });
+});
+
+test("unanswered approvals beyond the snapshot load page by page", () => {
+  withStore((store, chatId) => {
+    for (let i = 0; i < 600; i++) store.addEvent(chatId, "w1", "w1", { type: "approval_request", request: { id: `q${i}`, role: "w1", title: `승인 ${i}`, detail: big(1000), risk: i % 2 ? "high" : "low" } });
+    store.addEvent(chatId, "w1", "w1", { type: "approval_resolved", id: "q599", decision: "deny" });
+    for (let i = 0; i < EVENT_PAGE_LIMITS.visible + 5; i++) store.addEvent(chatId, "orch", "orch", { type: "text", text: `t${i}` });
+    const first = store.eventsPage(chatId);
+    assert.equal(first.snapshot!.approvals.total, 599);
+    const second = store.pendingApprovals(chatId, first.start, SNAPSHOT_LIMITS.approvals);
+    assert.equal(second.total, 599);
+    assert.deepEqual(second.items.map(a => a.id).slice(0, 2), ["q548", "q547"]);
+    assert.ok(second.items.every(a => !("detail" in a)));
+  });
+});
+
+test("remote original text: text messages only, {id, type, text}, size-limited; desktop originals have a hard cap", () => {
+  withStore((store, chatId) => {
+    const user = store.addEvent(chatId, "orch", null, { type: "user", text: "원문 지시", attachments: [{ id: 1, name: "a.png", mime: "image/png", size: 1, path: "C:/secret/a.png" }] });
+    const tool = store.addEvent(chatId, "orch", "orch", { type: "tool_result", id: "t", ok: true, output: "C:/secret/output" });
+    const consult = store.addEvent(chatId, "orch", "orch", { type: "consult_start", consultId: 1, kind: "review", from: "orch", to: "w1", request: "요청 원문", attachments: [], scope: ["C:/secret"] });
+    const hugeChars = Math.ceil(REMOTE_TEXT_MAX_BYTES / 3) + 10; // three UTF-8 bytes each
+    const huge = store.addEvent(chatId, "orch", "orch", { type: "text", text: "가".repeat(hugeChars) });
+    assert.deepEqual(store.eventText(chatId, user.id), { ok: true, id: user.id, type: "user", text: "원문 지시" });
+    assert.deepEqual(store.eventText(chatId, consult.id), { ok: true, id: consult.id, type: "consult_start", text: "요청 원문" });
+    assert.deepEqual(store.eventText(chatId, tool.id), { ok: false, reason: "type" });
+    assert.deepEqual(store.eventText(chatId, huge.id), { ok: false, reason: "size", length: hugeChars });
+    assert.deepEqual(store.eventText(chatId + 1, user.id), { ok: false, reason: "missing" });
+    const tooBig = store.addEvent(chatId, "orch", "orch", { type: "text", text: "x".repeat(FULL_EVENT_MAX_CHARS) });
+    assert.throws(() => store.event(chatId, tooBig.id), /너무 커서/);
+    assert.equal(store.event(chatId, user.id)?.event.type, "user");
+  });
+});
+
+test("originals load one at a time", async () => {
+  let running = 0, most = 0;
+  const slow = () => oneAtATime(async () => { running++; most = Math.max(most, running); await new Promise(ok => setTimeout(ok, 10)); running--; });
+  const failing = oneAtATime(async () => { throw new Error("x"); });
+  await Promise.all([slow(), failing.catch(() => undefined), slow(), slow()]);
+  assert.equal(most, 1);
 });
 
 test("shortened messages are marked for the view; tool and approval cards keep their own handling", () => {

@@ -12,7 +12,7 @@ import {
   type RemoteAuditEntry, type RemoteAuthProvider, type RemoteProjectRoot, type RemoteWebAction, type RemoteWebInput, type RemoteWebLoginFailure, type RemoteWebSession, type RemoteWebStatus,
 } from "../shared/remote-web";
 import { HttpError, RemoteFeatures, folderId, stripLocalPaths } from "./remote-features";
-import type { EventPage } from "../shared/event-page";
+import type { EventPage, RemoteEventText } from "../shared/event-page";
 import { DSM_DEFAULT_URL, DsmProvider, normalizeDsmUrl, normalizeFingerprint, probeDsm, type AuthProvider, type DsmSettings, type LoginResult } from "./remote-auth";
 
 export type CoreCall = (channel: string, args: unknown[]) => Promise<any>;
@@ -166,6 +166,8 @@ export function normalizeOrigin(value: string): string {
   return url.origin;
 }
 
+/** Minimum gap between original-text requests of one session. */
+const EVENT_TEXT_INTERVAL_MS = 1000;
 /** Minimum gap between run-statistics requests of one session. */
 const RUN_STATS_INTERVAL_MS = 3000;
 
@@ -175,6 +177,9 @@ export class RemoteWeb {
   private listening = false;
   private error?: string;
   private sessions = new Map<string, Session>();
+  /** Original-text requests per session: one at a time, at most one per EVENT_TEXT_INTERVAL_MS. */
+  private textBusy = new Set<string>();
+  private textAt = new Map<string, number>();
   /** Last run-statistics request per session (they read a whole chat in the core). */
   private runStatsAt = new Map<string, number>();
   private streams = new Set<Stream>();
@@ -698,11 +703,22 @@ export class RemoteWeb {
     if (await this.features.handle(method, url, req, res, { key: session.key, user: session.user, ip: session.ip })) return;
     const one = /^\/api\/chats\/(\d{1,12})\/events\/(\d{1,15})$/.exec(path);
     if (one) {
-      // The original of an event a history page shortened (one event, no local paths).
+      // The original text of a shortened text message (instruction, reply, worker result, consult request
+      // or summary, notice, question): {id, type, text} only. Tool and other events are not readable here.
       if (method !== "GET") throw new HttpError(405, "지원하지 않는 요청입니다.");
-      const event = await call("chats:event", [this.chatId(one[1]), Number(one[2])]);
-      if (!event) throw new HttpError(404, "기록이 없습니다.");
-      return this.send(res, 200, { event: stripLocalPaths(event) });
+      const now = this.now();
+      if (this.textBusy.has(session.key) || now - (this.textAt.get(session.key) ?? 0) < EVENT_TEXT_INTERVAL_MS) throw new HttpError(429, "잠시 뒤 다시 시도하세요.");
+      this.textBusy.add(session.key);
+      this.textAt.set(session.key, now);
+      try {
+        const r = await call("chats:eventText", [this.chatId(one[1]), Number(one[2])]) as RemoteEventText;
+        if (!r.ok && r.reason === "missing") throw new HttpError(404, "기록이 없습니다.");
+        if (!r.ok && r.reason === "type") throw new HttpError(403, "원격에서는 이 기록의 원문을 볼 수 없습니다.");
+        if (!r.ok) throw new HttpError(413, `원문이 너무 깁니다(${(r.length ?? 0).toLocaleString("ko-KR")}자). PC 앱에서 확인하세요.`);
+        return this.send(res, 200, { id: r.id, type: r.type, text: r.text });
+      } finally {
+        this.textBusy.delete(session.key);
+      }
     }
     const stats = /^\/api\/chats\/(\d{1,12})\/run-stats$/.exec(path);
     if (stats) {
@@ -731,7 +747,7 @@ export class RemoteWeb {
         return this.send(res, 200, { ...page, events: stripLocalPaths(page.events) });
       }
       const [page, agents, consults] = await Promise.all([call("chats:eventsPage", [id]) as Promise<EventPage>, call("chats:agents", [id]), call("chats:consults", [id])]);
-      return this.send(res, 200, { seq, chat, events: stripLocalPaths(page.events), context: stripLocalPaths(page.context ?? []), start: page.start, hasMore: page.hasMore, agents, consults });
+      return this.send(res, 200, { seq, chat, events: stripLocalPaths(page.events), context: stripLocalPaths(page.context ?? []), ...(page.snapshot ? { snapshot: page.snapshot } : {}), start: page.start, hasMore: page.hasMore, agents, consults });
     }
     if (method !== "POST" || !m[2]) throw new HttpError(405, "지원하지 않는 요청입니다.");
     const body = await this.body(req);

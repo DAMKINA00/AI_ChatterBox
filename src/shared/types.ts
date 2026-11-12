@@ -4,7 +4,7 @@ import type { ProviderUsage } from "./usage";
 import type { AIStudioAction, AIStudioInput, AIStudioStatus, AIStudioUsageRange, AIStudioUsageReport } from "./aistudio";
 import type { DeepSeekAction, DeepSeekBalance, DeepSeekInput, DeepSeekStatus } from "./deepseek";
 import type { RemoteWebAction, RemoteWebInput, RemoteWebStatus } from "./remote-web";
-import type { EventPage } from "./event-page";
+import type { EventPage, PendingApproval } from "./event-page";
 import type { RunStats } from "./run-stats";
 
 /** Rows of the run statistics panel (see renderer/src/lib/run-stats-view.ts). */
@@ -624,6 +624,8 @@ export interface ChatterBoxApi {
   loadEventsPage(chatId: number, before?: number): Promise<EventPage>;
   /** One event with its full payload. */
   loadEvent(chatId: number, eventId: number): Promise<TimelineEvent | undefined>;
+  /** Unanswered approval requests older than `before` (newest first, from `offset`) and their total. */
+  pendingApprovals(chatId: number, before: number, offset?: number): Promise<{ items: PendingApproval[]; total: number }>;
   /** Run statistics rows aggregated in the core (`now` = measure running work up to this time). */
   runStats(chatId: number, now?: number): Promise<RunStatsRows>;
   /** Chat ids whose messages contain the text. */

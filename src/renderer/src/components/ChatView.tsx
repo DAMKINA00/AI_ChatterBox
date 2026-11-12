@@ -22,6 +22,7 @@ import {
 } from "../../../shared/types";
 import { api, cn, errorMessage } from "../lib/utils";
 import { retryHistory, stateEventsOf, useStore } from "../store";
+import { SNAPSHOT_LIMITS, type PendingApproval } from "../../../shared/event-page";
 import { buildItems, chatTimelines, latestExpression, markClipped, planOf } from "../timeline";
 import { GoalBar, PlanHistory, PlanPanel } from "./PlanGoal";
 import { planHistory } from "../lib/plan-history";
@@ -130,8 +131,16 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
       {!node && <ForkOrigin chat={chat} />}
       {!node && <GoalBar chat={chat} />}
       {!node && plan && <PlanPanel chat={chat} plan={plan} onRevise={() => composer.current?.setText("/plan 수정: ")} />}
+      {!node && plan && !!history?.snapshot?.plan.stepsOmitted && history.snapshotAt !== undefined && !events?.some((e) => e.event.type === "plan_update" && e.id >= history.snapshotAt!) && (
+        <div className="mx-auto mt-1 w-[min(860px,calc(100%-32px))] text-[11.5px] text-muted-foreground" data-testid="plan-steps-omitted">
+          체크리스트가 길어 앞 {SNAPSHOT_LIMITS.planSteps}단계만 표시합니다 ({history.snapshot.plan.stepsOmitted}단계 생략).
+        </div>
+      )}
       {!node && <PlanHistory history={ended} />}
       {!node && <ReviewTotalsBar chatId={chat.id} />}
+      {!node && history?.snapshot && history.snapshotAt !== undefined && history.snapshot.approvals.total > 0 && (
+        <OlderApprovals chatId={chat.id} before={history.snapshotAt} first={history.snapshot.approvals.pending} total={history.snapshot.approvals.total} />
+      )}
       <Timeline key={node ?? "all"} items={items} chatId={chat.id} role={streamRole} busy={busy} instructionAt={instructionAt} empty={!events?.length && !history?.hasMore} loading={!events} loadError={loadError}
         hasOlder={!!history?.hasMore} loadingOlder={!!history?.loadingOlder} masterView={!node || node === "orch"} mainView={!node}
         searchOpen={searchOpen} searchQuery={searchQuery} onSearchQuery={setSearchQuery} onCloseSearch={() => { setSearchOpen(false); setSearchQuery(""); }} />
@@ -667,6 +676,56 @@ function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, lo
     </div>
     </MainTimeline.Provider>
     </ChatSearchQuery.Provider>
+  );
+}
+
+/**
+ * Unanswered approval requests in history older than the loaded pages (the snapshot carries the newest
+ * few and the total; more load on request). Usually leftovers of turns that ended without an answer.
+ */
+function OlderApprovals({ chatId, before, first, total }: { chatId: number; before: number; first: PendingApproval[]; total: number }) {
+  const agents = useStore((s) => s.agents[chatId]);
+  const [open, setOpen] = useState(false);
+  const [items, setItems] = useState(first);
+  const [loading, setLoading] = useState(false);
+  const more = async () => {
+    setLoading(true);
+    try {
+      const page = await api.pendingApprovals(chatId, before, items.length);
+      setItems((list) => [...list, ...page.items.filter((a) => !list.some((x) => x.eventId === a.eventId))]);
+    } catch (e) {
+      useStore.getState().toast(errorMessage(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+  return (
+    <div className="mx-auto mt-3 w-[min(860px,calc(100%-32px))] rounded-xl border border-warning/40 bg-warning/5 px-3.5 py-2 text-[12.5px]" data-testid="older-approvals" data-total={total}>
+      <button type="button" className="flex w-full items-center gap-2 text-left" onClick={() => setOpen(!open)} aria-expanded={open}>
+        <ShieldCheck className="size-4 shrink-0 text-warning" />
+        <span className="flex-1">이전 기록에 응답하지 않은 승인 요청 {total}건</span>
+        <ChevronDown className={cn("size-4 text-muted-foreground transition-transform", !open && "-rotate-90")} />
+      </button>
+      {open && (
+        <div className="mt-2 space-y-1">
+          <ul className="space-y-0.5">
+            {items.map((a) => (
+              <li key={a.eventId} className="flex gap-2">
+                <span className={cn("shrink-0", a.risk === "high" ? "text-destructive" : "text-muted-foreground")}>{a.risk === "high" ? "고위험" : "일반"}</span>
+                <span className="shrink-0 font-medium">{roleName(a.role, agents)}</span>
+                <span className="min-w-0 truncate">{a.title}</span>
+              </li>
+            ))}
+          </ul>
+          {items.length < total && (
+            <Button variant="ghost" size="xs" disabled={loading} onClick={() => void more()}>
+              {loading ? <Loader2 className="animate-spin" /> : null} 더 보기 ({total - items.length}건 남음)
+            </Button>
+          )}
+          <div className="text-[11.5px] text-muted-foreground">요청 내용은 이전 기록을 불러오면 대화 안에서 볼 수 있습니다.</div>
+        </div>
+      )}
+    </div>
   );
 }
 

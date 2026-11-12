@@ -27,7 +27,10 @@ import {
   type ReviewResult,
   type TimelineEvent,
 } from "../shared/types";
-import { CONTEXT_EVENT_TYPES, EVENT_MAX_CHARS, EVENT_PAGE_LIMITS, eventChars, minimalContextEvent, pageEvent, QUIET_EVENT_TYPES, reduceContext, type EventPage } from "../shared/event-page";
+import { CONTEXT_EVENT_TYPES, EVENT_MAX_CHARS, EVENT_PAGE_LIMITS, eventChars, minimalContextEvent, pageEvent, QUIET_EVENT_TYPES, reduceContext, REMOTE_TEXT_FIELDS, REMOTE_TEXT_MAX_BYTES, SNAPSHOT_LIMITS, type EventPage, type PendingApproval, type RemoteEventText } from "../shared/event-page";
+
+/** Largest original one request returns (characters; at most two bytes each in the 128MB core frame). */
+export const FULL_EVENT_MAX_CHARS = 16_000_000;
 
 /** Part of a page's character budget kept for the start events of consults open where it begins. */
 const ANCHOR_RESERVE = 8 * EVENT_MAX_CHARS;
@@ -813,7 +816,8 @@ export class Store {
     }
     const page: EventPage = { events: [...anchors, ...events], start, hasMore };
     if (before === undefined) {
-      page.context = hasMore ? reduceContext(this.contextEvents(chatId, start)) : [];
+      if (hasMore) Object.assign(page, reduceContext(this.contextEvents(chatId, start)));
+      else page.context = [];
     }
     return page;
   }
@@ -848,8 +852,41 @@ export class Store {
     }
     return out;
   }
+  /**
+   * Unanswered approval requests older than `before`, newest first, `limit` from `offset` (the snapshot
+   * carries only the newest few), with the total. Read in SQLite without request details.
+   */
+  pendingApprovals(chatId: number, before: number, offset = 0, limit = SNAPSHOT_LIMITS.approvals): { items: PendingApproval[]; total: number } {
+    const where = `FROM chat_events WHERE chat_id = ? AND id < ? AND type = 'approval_request'
+      AND json_extract(payload_json, '$.request.id') NOT IN (
+        SELECT json_extract(payload_json, '$.id') FROM chat_events WHERE chat_id = ? AND id < ? AND type = 'approval_resolved' AND json_extract(payload_json, '$.id') IS NOT NULL)`;
+    const total = Number((this.db.prepare(`SELECT COUNT(*) AS n ${where}`).get(chatId, before, chatId, before) as Row).n);
+    const rows = this.db.prepare(`SELECT id, ts, json_extract(payload_json, '$.request.id') AS rid, json_extract(payload_json, '$.request.role') AS role,
+        substr(json_extract(payload_json, '$.request.title'), 1, 300) AS title, json_extract(payload_json, '$.request.risk') AS risk ${where}
+      ORDER BY id DESC LIMIT ? OFFSET ?`).all(chatId, before, chatId, before, Math.min(Math.max(1, limit), 200), Math.max(0, offset)) as Row[];
+    return { items: rows.map(r => ({ eventId: r.id, at: r.ts, id: String(r.rid), role: r.role, title: r.title ?? "", risk: r.risk === "high" ? "high" : "low" })), total };
+  }
+  /**
+   * The original text of one text-message event for remote web (REMOTE_TEXT_FIELDS); other types, and
+   * texts over REMOTE_TEXT_MAX_BYTES, are refused without reading the text. No other field is returned.
+   */
+  eventText(chatId: number, eventId: number): RemoteEventText {
+    const head = this.db.prepare("SELECT type FROM chat_events WHERE chat_id = ? AND id = ?").get(chatId, eventId) as Row | undefined;
+    if (!head) return { ok: false, reason: "missing" };
+    const type = head.type as keyof typeof REMOTE_TEXT_FIELDS;
+    const field = REMOTE_TEXT_FIELDS[type];
+    if (!field) return { ok: false, reason: "type" };
+    const size = this.db.prepare(`SELECT length(json_extract(payload_json, '$.${field}')) AS chars, length(CAST(json_extract(payload_json, '$.${field}') AS BLOB)) AS bytes FROM chat_events WHERE id = ?`).get(eventId) as Row;
+    if (Number(size.bytes ?? 0) > REMOTE_TEXT_MAX_BYTES) return { ok: false, reason: "size", length: Number(size.chars ?? 0) };
+    const text = (this.db.prepare(`SELECT json_extract(payload_json, '$.${field}') AS t FROM chat_events WHERE id = ?`).get(eventId) as Row).t;
+    return { ok: true, id: eventId, type, text: typeof text === "string" ? text : "" };
+  }
   /** One event with its full payload (a history page may have shortened it). */
   event(chatId: number, eventId: number): TimelineEvent | undefined {
+    // Checked before reading: an original this large would not fit one core frame (128MB) with room to spare.
+    const size = this.db.prepare("SELECT length(payload_json) AS n FROM chat_events WHERE chat_id = ? AND id = ?").get(chatId, eventId) as Row | undefined;
+    if (size && Number(size.n) > FULL_EVENT_MAX_CHARS)
+      throw new Error(`원문이 너무 커서(${(Number(size.n) / 1_000_000).toFixed(1)}백만 자) 앱에서 한 번에 불러올 수 없습니다. 화면에는 줄인 내용만 표시합니다.`);
     const r = this.db.prepare("SELECT * FROM chat_events WHERE chat_id = ? AND id = ?").get(chatId, eventId) as Row | undefined;
     return r ? { id: r.id, chatId: r.chat_id, node: r.node, role: r.role, at: r.ts, event: JSON.parse(r.payload_json) } : undefined;
   }

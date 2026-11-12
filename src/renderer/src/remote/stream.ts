@@ -2,14 +2,14 @@
 // number (its SSE id); a snapshot carries the number reached before it was read. Messages that arrive
 // while the snapshot loads are buffered and replayed on top of it.
 import type { Chat, ChatAgent, Consult, TimelineEvent } from "../../../shared/types";
-import { prependPage, type EventPage } from "../../../shared/event-page";
+import { prependPage, stateEvents, type EventPage, type StateSnapshot } from "../../../shared/event-page";
 import { appendEvent } from "../timeline";
 
 /**
  * Open chat: the loaded history pages (newest first load, older ones on demand) and its team.
  * context/start/hasMore follow shared/event-page.ts; context only feeds pinned state (plan, worker state).
  */
-export interface Detail { events: TimelineEvent[]; agents: ChatAgent[]; consults: Consult[]; context?: TimelineEvent[]; start?: number; hasMore?: boolean }
+export interface Detail { events: TimelineEvent[]; agents: ChatAgent[]; consults: Consult[]; context?: TimelineEvent[]; start?: number; hasMore?: boolean; snapshot?: StateSnapshot; snapshotAt?: number }
 export interface StreamMessage { seq: number; channel: string; args: unknown[] }
 
 /** Apply one stream message for the open chat. */
@@ -40,7 +40,8 @@ const closesStream = (ev: TimelineEvent) => ev.event.type === "text" || ev.event
  * - Worker/consult updates newer than the snapshot are replayed in order.
  */
 export function mergeSnapshot(snapshot: Detail & { seq: number }, buffered: StreamMessage[], chatId: number): Detail {
-  let detail: Detail = { events: snapshot.events, agents: snapshot.agents, consults: snapshot.consults, context: snapshot.context ?? [], start: snapshot.start ?? 0, hasMore: !!snapshot.hasMore };
+  let detail: Detail = { events: snapshot.events, agents: snapshot.agents, consults: snapshot.consults, context: snapshot.context ?? [], start: snapshot.start ?? 0, hasMore: !!snapshot.hasMore,
+    ...(snapshot.snapshot && snapshot.hasMore ? { snapshot: snapshot.snapshot, snapshotAt: snapshot.start } : {}) };
   for (const message of buffered) {
     if (message.channel === "chat:event") {
       const ev = message.args[0] as TimelineEvent;
@@ -85,10 +86,10 @@ export function applyChatUpdate(current: Chat[], versions: Map<number, number>, 
 /** An older history page (immutable events, so no stream sequence is involved) put in front of the loaded ones. */
 export function prependOlder(detail: Detail, page: EventPage): Detail {
   if (!detail.hasMore || detail.start === undefined) return detail;
-  const merged = prependPage({ events: detail.events, context: detail.context ?? [], start: detail.start, hasMore: true }, page);
+  const merged = prependPage({ events: detail.events, context: detail.context ?? [], start: detail.start, hasMore: true, snapshot: detail.snapshot, snapshotAt: detail.snapshotAt }, page);
   return { ...detail, events: merged.events, context: merged.context, start: merged.start, hasMore: merged.hasMore };
 }
 
 /** Context plus loaded events, for state that depends on the whole history. */
 export const detailStateEvents = (detail: Detail | undefined): TimelineEvent[] =>
-  !detail ? [] : detail.context?.length ? [...detail.context, ...detail.events] : detail.events;
+  !detail ? [] : stateEvents({ events: detail.events, context: detail.context ?? [], snapshot: detail.snapshot, snapshotAt: detail.snapshotAt });

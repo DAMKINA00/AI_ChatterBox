@@ -22,6 +22,7 @@ import { api, cn, errorMessage, formatBytes } from "../lib/utils";
 import { useStore } from "../store";
 import { eventText, type Item } from "../timeline";
 import { needsAttention, windowItems } from "../timeline-window";
+import { loadFullEvent } from "../lib/full-event";
 import { Markdown, CopyButton } from "./Markdown";
 import { FileLink } from "./FileLink";
 import { ArtifactPreview } from "./ArtifactPreview";
@@ -273,7 +274,7 @@ function ClippedItem({ item, chatId, nested }: { item: Item; chatId: number; nes
   const [loading, setLoading] = useState(false);
   const pending = useRef<Promise<string> | null>(null);
   const load = useCallback(() => {
-    pending.current ??= Promise.all((item.clippedEventIds ?? []).map((id) => api.loadEvent(chatId, id)))
+    pending.current ??= Promise.all((item.clippedEventIds ?? []).map((id) => loadFullEvent(api.loadEvent, chatId, id)))
       .then((events) => events.flatMap((e) => (e ? [eventText(e.event)] : [])).join("\n\n"))
       .then((text) => { setFull(text); return text; })
       .catch((e) => { pending.current = null; useStore.getState().toast(errorMessage(e)); throw e; });
@@ -523,8 +524,8 @@ const ToolCard = memo(function ToolCard({ item, chatId, nested }: { item: Extrac
     setLoadingFull(true);
     try {
       const [call, result] = await Promise.all([
-        item.callEventId ? api.loadEvent(chatId, item.callEventId) : undefined,
-        item.result?.eventId ? api.loadEvent(chatId, item.result.eventId) : undefined,
+        item.callEventId ? loadFullEvent(api.loadEvent, chatId, item.callEventId) : undefined,
+        item.result?.eventId ? loadFullEvent(api.loadEvent, chatId, item.result.eventId) : undefined,
       ]);
       setFull({
         input: call?.event.type === "tool_call" ? call.event.input : undefined,
@@ -596,7 +597,7 @@ function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval"
     if (!item.eventId) return;
     setLoadingFull(true);
     try {
-      const e = await api.loadEvent(chatId, item.eventId);
+      const e = await loadFullEvent(api.loadEvent, chatId, item.eventId);
       if (e?.event.type === "approval_request") setFullRequest(e.event.request);
     } catch (err) {
       useStore.getState().toast(errorMessage(err));

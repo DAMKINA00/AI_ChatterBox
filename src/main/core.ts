@@ -97,6 +97,8 @@ function registerHandlers(rpc: CoreRpc) {
   // Windows open chats page by page; one long chat can exceed the 128MB core frame (see shared/event-page.ts).
   ipcMain.handle("chats:eventsPage", (_e, id: number, before?: number) => store.eventsPage(id, before));
   ipcMain.handle("chats:event", (_e, id: number, eventId: number) => store.event(id, eventId));
+  ipcMain.handle("chats:eventText", (_e, id: number, eventId: number) => store.eventText(id, eventId));
+  ipcMain.handle("chats:pendingApprovals", (_e, id: number, before: number, offset?: number) => store.pendingApprovals(id, before, offset));
   // Aggregated here: the rows, not tens of thousands of events, cross the RPC (now = live clock or none).
   ipcMain.handle("chats:runStats", (_e, id: number, now?: number) => runStats.rows(id, typeof now === "number" ? now : undefined));
   ipcMain.handle("chats:hasAttachment", (_e, id: number, attachmentId: number) => store.chatHasAttachment(id, attachmentId));

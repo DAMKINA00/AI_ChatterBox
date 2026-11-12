@@ -27,6 +27,7 @@ const api: ChatterBoxApi = {
   loadEvents: (chatId) => ipcRenderer.invoke("chats:events", chatId),
   loadEventsPage: (chatId, before) => ipcRenderer.invoke("chats:eventsPage", chatId, before),
   loadEvent: (chatId, eventId) => ipcRenderer.invoke("chats:event", chatId, eventId),
+  pendingApprovals: (chatId, before, offset) => ipcRenderer.invoke("chats:pendingApprovals", chatId, before, offset),
   runStats: (chatId, now) => ipcRenderer.invoke("chats:runStats", chatId, now),
   searchChats: (q) => ipcRenderer.invoke("chats:search", q),
   send: (chatId, text, attachmentIds, delivery) => ipcRenderer.invoke("chats:send", chatId, text, attachmentIds, delivery),
