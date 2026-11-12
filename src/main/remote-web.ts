@@ -696,6 +696,14 @@ export class RemoteWeb {
     }
     // Extended API (docs/remote-web-features.md); same session/CSRF/Origin/Host checks already passed.
     if (await this.features.handle(method, url, req, res, { key: session.key, user: session.user, ip: session.ip })) return;
+    const one = /^\/api\/chats\/(\d{1,12})\/events\/(\d{1,15})$/.exec(path);
+    if (one) {
+      // The original of an event a history page shortened (one event, no local paths).
+      if (method !== "GET") throw new HttpError(405, "지원하지 않는 요청입니다.");
+      const event = await call("chats:event", [this.chatId(one[1]), Number(one[2])]);
+      if (!event) throw new HttpError(404, "기록이 없습니다.");
+      return this.send(res, 200, { event: stripLocalPaths(event) });
+    }
     const stats = /^\/api\/chats\/(\d{1,12})\/run-stats$/.exec(path);
     if (stats) {
       // Aggregated in the core (the rows only); one request per session every RUN_STATS_INTERVAL_MS.

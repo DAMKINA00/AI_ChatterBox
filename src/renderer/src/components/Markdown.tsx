@@ -15,7 +15,8 @@ function textOf(node: ReactNode): string {
   return "";
 }
 
-export function CopyButton({ text, className, label = "복사" }: { text: string; className?: string; label?: string }) {
+/** `full`: the shown text was shortened; the original is loaded and copied instead. */
+export function CopyButton({ text, className, label = "복사", full }: { text: string; className?: string; label?: string; full?: () => Promise<string> }) {
   const [done, setDone] = useState(false);
   return (
     <button
@@ -24,9 +25,10 @@ export function CopyButton({ text, className, label = "복사" }: { text: string
       aria-label={label}
       title={label}
       onClick={() => {
-        void navigator.clipboard.writeText(text);
-        setDone(true);
-        setTimeout(() => setDone(false), 1200);
+        void (full ? full() : Promise.resolve(text)).then((value) => navigator.clipboard.writeText(value)).then(() => {
+          setDone(true);
+          setTimeout(() => setDone(false), 1200);
+        });
       }}
       className={cn(
         "inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",

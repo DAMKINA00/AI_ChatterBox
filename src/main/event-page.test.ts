@@ -7,14 +7,14 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { serialize } from "node:v8";
 import { Store } from "./db";
-import { CLIP_AT, CONTEXT_MAX_CHARS, EVENT_MAX_CHARS, EVENT_PAGE_LIMITS, eventChars, historyFromPage, PAGE_MAX_BYTES, pageEvent, prependPage, replayLive, stateEvents, type EventPage } from "../shared/event-page";
+import { CLIP_AT, CONTEXT_MAX_CHARS, EVENT_MAX_CHARS, EVENT_PAGE_LIMITS, eventChars, historyFromPage, PAGE_MAX_BYTES, pageEvent, prependPage, reduceContext, minimalContextEvent, replayLive, stateEvents, type EventPage } from "../shared/event-page";
 import { RunStatsCache } from "./run-stats-cache";
 import { runStatsRows } from "../renderer/src/lib/run-stats-view";
 import { appendEvent } from "../renderer/src/timeline";
 import { emptyTeamUpdates, mergeTeamUpdates } from "../renderer/src/lib/history-load";
 import type { ChatAgent, Consult } from "../shared/types";
 import { DEFAULT_SETTINGS, type AgentEvent, type TimelineEvent } from "../shared/types";
-import { buildItems, planOf } from "../renderer/src/timeline";
+import { buildItems, eventText, markClipped, planOf } from "../renderer/src/timeline";
 import { summarizeRunStats } from "../shared/run-stats";
 
 function withStore(run: (store: Store, chatId: number) => void) {
@@ -236,4 +236,57 @@ test("worker and consult updates sent while a chat loads win over the slower lis
   assert.deepEqual(merged.agents.map(a => a.status), ["released"]);
   assert.deepEqual(merged.consults.map(c => [c.id, c.status]), [[5, "done"], [6, "running"]]);
   assert.deepEqual(mergeTeamUpdates([agent(2, "active")], [], emptyTeamUpdates()).agents.map(a => a.id), [2]);
+});
+
+test("over the context budget the current state survives: an old running plan, its checklist and unanswered approvals", () => {
+  const at = (id: number, event: AgentEvent, role: TimelineEvent["role"] = "orch"): TimelineEvent => ({ id, chatId: 1, node: "orch", role, at: id, event });
+  const all: TimelineEvent[] = [
+    at(1, { type: "user", text: "/plan 오래된 계획", attachments: [] }, null),
+    at(2, { type: "plan_update", steps: [{ title: "1단계", status: "completed" }, { title: "2단계", status: "inProgress" }], planId: 1 } as AgentEvent),
+    at(3, { type: "plan_state", state: "proposed", planId: 1 } as AgentEvent),
+    at(4, { type: "user", text: "계획 실행", attachments: [] }, null),
+    at(5, { type: "plan_state", state: "running", planId: 1 } as AgentEvent),
+    at(6, { type: "approval_request", request: { id: "old", role: "w1", title: "오래된 승인", detail: "", risk: "high" } }, "w1"),
+    at(7, { type: "goal_update", goal: { objective: "목표", status: "active", progress: "", turns: 1, updatedAt: 7 } } as AgentEvent),
+  ];
+  // Then a flood of follow-up instructions (the plan keeps running) and review reports.
+  let id = 8;
+  for (let i = 0; i < 6000; i++) all.push(at(id++, { type: "user", text: big(1000), attachments: [] }, null));
+  for (let i = 0; i < 3000; i++) all.push(at(id++, { type: "review_result", consultId: i, review: { verdict: "pass", summary: big(600), findings: [], tests: [] } } as unknown as AgentEvent, "w2"));
+  all.push(at(id++, { type: "plan_update", steps: [{ title: "1단계", status: "completed" }, { title: "2단계", status: "completed" }, { title: "3단계", status: "inProgress" }], planId: 1 } as AgentEvent));
+  const minimal = all.flatMap(e => { const m = minimalContextEvent(e); return m ? [m] : []; });
+  assert.ok(minimal.reduce((n, e) => n + eventChars(e), 0) > CONTEXT_MAX_CHARS, "the history is over the budget");
+  const context = reduceContext(minimal);
+  assert.ok(context.reduce((n, e) => n + eventChars(e), 0) <= CONTEXT_MAX_CHARS);
+  assert.deepEqual(planOf(context), planOf(all), "the running plan and its latest checklist");
+  assert.equal(planOf(context)?.state, "running");
+  assert.ok(context.some(e => e.event.type === "approval_request" && e.event.request.id === "old"));
+  assert.ok(context.some(e => e.event.type === "goal_update"));
+  // Past history (reviews) was cut, newest kept.
+  const reviews = context.filter(e => e.event.type === "review_result");
+  assert.ok(reviews.length > 0 && reviews.length < 3000 && reviews.at(-1)!.event.type === "review_result");
+});
+
+test("shortened messages are marked for the view; tool and approval cards keep their own handling", () => {
+  const at = (id: number, event: AgentEvent, node: TimelineEvent["node"] = "orch", role: TimelineEvent["role"] = "orch"): TimelineEvent => ({ id, chatId: 1, node, role, at: id, event });
+  const events = [
+    at(1, { type: "user", text: big(70_000), attachments: [] }, "orch", null),
+    at(2, { type: "text", text: big(70_000) }),
+    at(3, { type: "consult_start", consultId: 9, kind: "implement", from: "orch", to: "w1", request: big(70_000), attachments: [] }),
+    at(4, { type: "consult_end", consultId: 9, status: "done", summary: "짧은 요약", files: [] }),
+    at(5, { type: "text", text: "짧은 답" }),
+  ].map(pageEvent);
+  assert.deepEqual(events.map(e => !!e.clipped), [true, true, true, false, false]);
+  const items = markClipped(buildItems(events, undefined, false), events);
+  const user = items.find(i => i.kind === "user");
+  const message = items.find(i => i.kind === "message" && i.text.length > 1000);
+  const consult = items.find(i => i.kind === "consult");
+  assert.deepEqual(user?.clippedEventIds, [1]);
+  assert.deepEqual(message?.clippedEventIds, [2]);
+  assert.deepEqual(consult?.clippedEventIds, [3]);
+  assert.equal(items.find(i => i.kind === "message" && i.text === "짧은 답")?.clippedEventIds, undefined);
+  // Nothing shortened: the same array comes back (no re-render).
+  const plain = buildItems([at(6, { type: "text", text: "a" })], undefined, false);
+  assert.equal(markClipped(plain, [at(6, { type: "text", text: "a" })]), plain);
+  assert.equal(eventText({ type: "consult_start", consultId: 1, kind: "review", from: "orch", to: "w1", request: "요청 원문", attachments: [] }), "요청 원문");
 });

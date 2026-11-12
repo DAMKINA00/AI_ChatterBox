@@ -137,6 +137,7 @@ export const REMOTE_API = {
   stream: "/api/stream",
   chats: "/api/chats",                              // GET list (existing) · POST create (A)
   chat: "/api/chats/:id",                           // GET newest history page + chat/agents/consults; ?before=<eventId> = older page only
+  chatEvent: "/api/chats/:id/events",               // GET /<eventId>: one event in full (pages shorten long text)
   chatRunStats: "/api/chats/:id/run-stats",         // GET { rows } aggregated in the core; ?live=1 measures running work to now (rate limited)
   chatSend: "/api/chats/:id/send",                  // POST RemoteSendRequest (existing; extended with attachments)
   chatStop: "/api/chats/:id/stop",

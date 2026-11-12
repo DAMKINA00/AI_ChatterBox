@@ -22,7 +22,7 @@ import {
 } from "../../../shared/types";
 import { api, cn, errorMessage } from "../lib/utils";
 import { retryHistory, stateEventsOf, useStore } from "../store";
-import { buildItems, chatTimelines, latestExpression, planOf } from "../timeline";
+import { buildItems, chatTimelines, latestExpression, markClipped, planOf } from "../timeline";
 import { GoalBar, PlanHistory, PlanPanel } from "./PlanGoal";
 import { planHistory } from "../lib/plan-history";
 import { SLASH_COMMANDS, StatusDialog, type SlashCommand } from "./Commands";
@@ -60,7 +60,8 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
   const all = useMemo(() => stateEventsOf(events, history), [events, history]);
   const consults = useStore((s) => s.consults[chat.id]);
   const busy = chat.status === "working" || chat.status === "approval";
-  const items = useMemo(() => events ? chatTimelines.build(chat.id, events, node, busy) : [], [chat.id, events, node, busy]);
+  // Items a history page shortened are marked so the view can load their original.
+  const items = useMemo(() => events ? markClipped(chatTimelines.build(chat.id, events, node, busy), events) : [], [chat.id, events, node, busy]);
   const instructionAt = useMemo(() => latestInstructionAt(all, chat.createdAt), [all, chat.createdAt]);
   const [dragging, setDragging] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);

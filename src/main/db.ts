@@ -27,7 +27,7 @@ import {
   type ReviewResult,
   type TimelineEvent,
 } from "../shared/types";
-import { CONTEXT_EVENT_TYPES, EVENT_MAX_CHARS, EVENT_PAGE_LIMITS, eventChars, pageEvent, QUIET_EVENT_TYPES, reduceContext, statsEvent, type EventPage } from "../shared/event-page";
+import { CONTEXT_EVENT_TYPES, EVENT_MAX_CHARS, EVENT_PAGE_LIMITS, eventChars, minimalContextEvent, pageEvent, QUIET_EVENT_TYPES, reduceContext, type EventPage } from "../shared/event-page";
 
 /** Part of a page's character budget kept for the start events of consults open where it begins. */
 const ANCHOR_RESERVE = 8 * EVENT_MAX_CHARS;
@@ -813,12 +813,40 @@ export class Store {
     }
     const page: EventPage = { events: [...anchors, ...events], start, hasMore };
     if (before === undefined) {
-      const types = CONTEXT_EVENT_TYPES.map(() => "?").join(",");
-      const older = hasMore ? (this.db.prepare(`SELECT * FROM chat_events WHERE chat_id = ? AND id < ? AND type IN (${types}) ORDER BY id`).all(chatId, start, ...CONTEXT_EVENT_TYPES) as Row[])
-        .map(r => ({ id: r.id, chatId: r.chat_id, node: r.node, role: r.role, at: r.ts, event: JSON.parse(r.payload_json) }) as TimelineEvent) : [];
-      page.context = reduceContext(older);
+      page.context = hasMore ? reduceContext(this.contextEvents(chatId, start)) : [];
     }
     return page;
+  }
+  /**
+   * CONTEXT_EVENT_TYPES events older than `before`, in minimal form, read row by row. Large fields are cut
+   * in SQLite (a user message's text start, an approval without detail and diffs), so long instructions
+   * and big approvals are never parsed whole here.
+   */
+  private contextEvents(chatId: number, before: number): TimelineEvent[] {
+    const types = CONTEXT_EVENT_TYPES.map(() => "?").join(",");
+    const rows = this.db.prepare(`SELECT id, chat_id, node, role, ts, type,
+        CASE type
+          WHEN 'user' THEN json_object('type', 'user', 'text', substr(json_extract(payload_json, '$.text'), 1, 301), 'attachments', json('[]'),
+            'queued', json_extract(payload_json, '$.queued'), 'delivery', json_extract(payload_json, '$.delivery'))
+          WHEN 'approval_request' THEN json_remove(payload_json, '$.request.detail', '$.request.diffs')
+          ELSE payload_json END AS payload
+      FROM chat_events WHERE chat_id = ? AND id < ? AND type IN (${types}) ORDER BY id`);
+    const out: TimelineEvent[] = [];
+    for (const r of rows.iterate(chatId, before, ...CONTEXT_EVENT_TYPES) as Iterable<Row>) {
+      const event = JSON.parse(r.payload) as AgentEvent;
+      if (event.type === "user") {
+        // json_object stores booleans as 0/1 and absent fields as null.
+        const raw = event as unknown as { queued: unknown; delivery: unknown };
+        event.queued = raw.queued === 1 || raw.queued === true ? true : undefined;
+        event.delivery = raw.delivery === "now" || raw.delivery === "next" ? raw.delivery : undefined;
+        if (!event.queued) delete event.queued;
+        if (!event.delivery) delete event.delivery;
+      }
+      if (event.type === "approval_request") event.request.detail ??= "";
+      const minimal = minimalContextEvent({ id: r.id, chatId: r.chat_id, node: r.node, role: r.role, at: r.ts, event });
+      if (minimal) out.push(minimal);
+    }
+    return out;
   }
   /** One event with its full payload (a history page may have shortened it). */
   event(chatId: number, eventId: number): TimelineEvent | undefined {
@@ -830,11 +858,33 @@ export class Store {
    * kept). The core aggregates them; they never cross the RPC as a whole.
    */
   statsEventsAfter(chatId: number, afterId = 0): TimelineEvent[] {
-    // Payloads of other types are not read (counts and times still include them).
-    const rows = this.db.prepare(`SELECT id, chat_id, node, role, ts, type, CASE WHEN type IN ('tool_call','tool_result','approval_request','approval_resolved','approval_auto','turn_end','user') THEN payload_json END AS payload_json
+    // Only the fields the statistics use are extracted in SQLite; no payload is parsed whole in JS.
+    const rows = this.db.prepare(`SELECT id, chat_id, node, role, ts, type,
+        CASE WHEN type IN ('tool_call','tool_result','approval_resolved') THEN json_extract(payload_json, '$.id') END AS pid,
+        CASE WHEN type = 'tool_call' THEN json_extract(payload_json, '$.name') END AS name,
+        CASE WHEN type IN ('tool_result','turn_end') THEN json_extract(payload_json, '$.ok') END AS ok,
+        CASE WHEN type = 'turn_end' THEN json_extract(payload_json, '$.interrupted') END AS interrupted,
+        CASE WHEN type = 'user' THEN json_extract(payload_json, '$.queued') END AS queued,
+        CASE WHEN type IN ('approval_request','approval_auto') THEN json_extract(payload_json, '$.request.id') END AS rid,
+        CASE WHEN type IN ('approval_request','approval_auto') THEN json_extract(payload_json, '$.request.role') END AS rrole,
+        CASE WHEN type = 'approval_resolved' THEN json_extract(payload_json, '$.decision') END AS decision
       FROM chat_events WHERE chat_id = ? AND id > ? ORDER BY id`).all(chatId, afterId) as Row[];
-    return rows.map(r => statsEvent({ id: r.id, chatId: r.chat_id, node: r.node, role: r.role, at: r.ts,
-      event: r.payload_json ? JSON.parse(r.payload_json) : r.type === "text" || r.type === "text_delta" ? { type: r.type, text: "" } : { type: "notice", text: "" } }));
+    const flag = (v: unknown) => v === 1 || v === true;
+    return rows.map(r => {
+      let event: AgentEvent;
+      switch (r.type) {
+        case "tool_call": event = { type: "tool_call", id: String(r.pid ?? ""), name: String(r.name ?? ""), input: "" }; break;
+        case "tool_result": event = { type: "tool_result", id: String(r.pid ?? ""), ok: flag(r.ok), output: "" }; break;
+        case "approval_request": event = { type: "approval_request", request: { id: String(r.rid ?? ""), role: r.rrole, title: "", detail: "", risk: "low" } }; break;
+        case "approval_auto": event = { type: "notice", text: "" }; break;
+        case "approval_resolved": event = { type: "approval_resolved", id: String(r.pid ?? ""), decision: r.decision }; break;
+        case "turn_end": event = { type: "turn_end", ok: flag(r.ok), ...(flag(r.interrupted) ? { interrupted: true } : {}) }; break;
+        case "user": event = { type: "user", text: "", attachments: [], ...(flag(r.queued) ? { queued: true } : {}) }; break;
+        case "text": case "text_delta": event = { type: r.type, text: "" }; break;
+        default: event = { type: "notice", text: "" };
+      }
+      return { id: r.id, chatId: r.chat_id, node: r.node, role: r.role, at: r.ts, event };
+    });
   }
   /** Whether an attachment appears in this chat's history (the event types that carry attachments). */
   chatHasAttachment(chatId: number, attachmentId: number): boolean {

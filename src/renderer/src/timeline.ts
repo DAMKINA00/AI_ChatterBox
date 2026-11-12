@@ -9,7 +9,7 @@ import { currentPlanView, type PlanView } from "../../shared/plan-lifecycle";
 import { roomProvenance, systemBrief, type ConsultFacts, type RoomProvenance } from "../../shared/room-message";
 import type { AgentExpression, AgentEvent, ApprovalDecision, ApprovalRequest, AttachmentRef, ConsultKind, ConsultStatus, FileDiff, NodeId, ReviewResult, Role, TimelineEvent } from "../../shared/types";
 
-export type Item =
+type ItemKinds =
   | { kind: "artifacts"; key: string; paths: string[] }
   /** eventId: the persisted event (fork point); absent for live previews. */
   | { kind: "user"; key: string; text: string; attachments: AttachmentRef[]; at: number; queued?: boolean; delivery?: "now" | "next"; eventId?: number }
@@ -53,6 +53,12 @@ export type Item =
   | { kind: "peer"; key: string; from: Role; to: Role; text: string }
   /** origin "system": an app status line from the group chat; detail keeps its full original text. */
   | { kind: "notice"; key: string; tone: "error" | "auth" | "info"; text: string; detail?: string; origin?: "system" };
+
+/**
+ * clippedEventIds: a history page shortened the event(s) this item shows (long messages, consult requests
+ * or summaries, notices); the full text loads on demand. Tool and approval cards carry their own ids.
+ */
+export type Item = ItemKinds & { clippedEventIds?: number[] };
 
 type View = NodeId | undefined;
 
@@ -563,4 +569,51 @@ export function normalizePlanStepTitle(title: string): string {
  */
 export function planOf(events: readonly TimelineEvent[]): PlanView | null {
   return currentPlanView(events);
+}
+
+/**
+ * Marks items whose events a history page shortened (TimelineEvent.clipped), so the view can say so and
+ * load the original. Tool calls/results and approvals are handled by their own cards. Returns `items`
+ * itself when nothing was shortened.
+ */
+export function markClipped(items: Item[], events: readonly TimelineEvent[]): Item[] {
+  const byId = new Set<number>();
+  const byConsult = new Map<number, number[]>();
+  for (const e of events) {
+    if (!e.clipped || !e.id) continue;
+    const ev = e.event;
+    if (ev.type === "tool_call" || ev.type === "tool_result" || ev.type === "approval_request") continue;
+    if (ev.type === "consult_start" || ev.type === "consult_end") byConsult.set(ev.consultId, [...(byConsult.get(ev.consultId) ?? []), e.id]);
+    else byId.add(e.id);
+  }
+  if (!byId.size && !byConsult.size) return items;
+  const mark = (list: Item[]): Item[] => {
+    let changed = false;
+    const out = list.map(item => {
+      let next = item;
+      if (item.kind === "consult") {
+        const children = mark(item.children);
+        const ids = byConsult.get(item.consultId);
+        if (children !== item.children || ids) next = { ...item, children, ...(ids ? { clippedEventIds: ids } : {}) };
+      } else if (item.kind !== "tool" && item.kind !== "approval") {
+        const id = "eventId" in item && item.eventId ? item.eventId : /^e(\d+)$/.test(item.key) ? Number(item.key.slice(1)) : 0;
+        if (id && byId.has(id)) next = { ...item, clippedEventIds: [id] };
+      }
+      if (next !== item) changed = true;
+      return next;
+    });
+    return changed ? out : list;
+  };
+  return mark(items);
+}
+
+/** The readable text of a full event, for showing and copying the original of a shortened item. */
+export function eventText(ev: AgentEvent): string {
+  switch (ev.type) {
+    case "user": case "text": case "room_message": case "peer_message": case "notice": case "fork_context": return ev.text;
+    case "ask_user": return ev.question;
+    case "consult_start": return ev.request;
+    case "consult_end": return ev.summary;
+    default: return JSON.stringify(ev, null, 2);
+  }
 }

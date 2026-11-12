@@ -72,56 +72,110 @@ export const QUIET_EVENT_TYPES = new Set(["tool_call", "tool_result", "agent_usa
 
 const short = (text: string | undefined, n: number) => (text && text.length > n ? `${text.slice(0, n)}…` : text);
 
+/** Minimal form of a context event (what the state readers use), or null when it is never needed. */
+export function minimalContextEvent(e: TimelineEvent): TimelineEvent | null {
+  const ev = e.event;
+  let event: AgentEvent | null = null;
+  switch (ev.type) {
+    case "user": event = { type: "user", text: short(ev.text, 300) ?? "", attachments: [], ...(ev.queued ? { queued: true } : {}), ...(ev.delivery ? { delivery: ev.delivery } : {}) }; break;
+    case "plan_update": event = { ...ev, steps: ev.steps.slice(0, 100).map(s => ({ ...s, title: short(s.title, 300) ?? "" })), explanation: short(ev.explanation, 1000) }; break;
+    case "plan_state": event = { ...ev, reason: short(ev.reason, 500) }; break;
+    case "approval_request": event = { type: "approval_request", request: { ...ev.request, title: short(ev.request.title, 300) ?? "", detail: "", diffs: undefined } }; break;
+    case "approval_resolved": case "review_result": case "expression": case "turn_end": case "agent_usage": case "goal_update": event = ev; break;
+    default: return null;
+  }
+  return pageEvent({ ...e, event });
+}
+
+const isPlanCommandText = (text: string) => /^\/plan(?:\s|$)/.test(text);
+/** A user event that ends the shown plan, given the plan state at that point (same rule as currentPlanView). */
+const resetsPlan = (ev: AgentEvent, running: boolean) =>
+  ev.type === "user" && !ev.queued && ev.text !== "계획 실행" && !/^\/plan-(?:run|cancel)\b/.test(ev.text) && (isPlanCommandText(ev.text) || !running);
+
+/** Oldest-first list → newest entries that fit `budget` characters, in id order. */
+function newestWithin(events: TimelineEvent[], budget: number): TimelineEvent[] {
+  let start = events.length;
+  for (let chars = 0; start > 0; start--) {
+    const size = eventChars(events[start - 1]);
+    if (chars + size > budget) break;
+    chars += size;
+  }
+  return events.slice(start);
+}
+
 /**
- * Bounded state snapshot from the CONTEXT_EVENT_TYPES events older than the first page (id order).
- * Only what the state readers use survives, in a small form:
- * - user: text start (plan command detection, instruction time), no attachments
- * - plan_update / plan_state: titles and reasons shortened
- * - review_result: the latest per consult; expression / turn_end: the latest per conversation;
- *   agent_usage: the latest per role and turn; goal_update: the latest
- * - approval_request: only ones still unanswered, without detail or diffs; approval_resolved: dropped
- * Then the oldest entries go first until the snapshot fits CONTEXT_MAX_CHARS.
+ * Bounded state snapshot of the history older than the first page, from minimal context events in id
+ * order (minimalContextEvent). It has two parts:
+ * - current state, always kept: the plan as it stands (events from its last reset on, without the user
+ *   messages that did not change it, plus the latest user and /plan messages), unanswered approvals, the
+ *   latest goal, and the latest expression and turn end of each conversation;
+ * - past history, kept newest first within what is left of CONTEXT_MAX_CHARS: earlier instructions and
+ *   plans (ended plans), the latest review of each consult, the latest usage of each role and turn.
+ * The result is the past part followed by the current part, each in id order; folding it gives the same
+ * plan, worker state and approvals as the whole history.
  */
 export function reduceContext(events: readonly TimelineEvent[]): TimelineEvent[] {
+  // Plan: find the last reset; the plan state depends only on what follows it.
+  let running = false;
+  let planId: number | undefined;
+  let lastReset = -1;
+  events.forEach((e, i) => {
+    const ev = e.event;
+    if (ev.type === "plan_update" && e.role === "orch") {
+      if (ev.planId !== undefined && planId !== undefined && ev.planId !== planId) running = false;
+      if (ev.planId !== undefined) planId = ev.planId;
+    } else if (ev.type === "plan_state") {
+      if (ev.planId !== undefined && planId !== undefined && ev.planId !== planId && ev.state !== "running") return;
+      running = ev.state === "running";
+      if (ev.planId !== undefined) planId = ev.planId;
+    } else if (resetsPlan(ev, running)) {
+      running = false;
+      planId = undefined;
+      lastReset = i;
+    }
+  });
+  const lastUser = events.findLastIndex(e => e.event.type === "user");
+  const lastPlanCommand = events.findLastIndex(e => e.event.type === "user" && !e.event.queued && isPlanCommandText(e.event.text));
   const resolved = new Set<string>();
   for (const e of events) if (e.event.type === "approval_resolved") resolved.add(e.event.id);
   const latest = new Map<string, number>();
-  events.forEach((e, i) => {
+  const keyOf = (e: TimelineEvent) => {
     const ev = e.event;
-    const key = ev.type === "review_result" ? `r${ev.consultId}`
+    return ev.type === "review_result" ? `r${ev.consultId}`
       : ev.type === "expression" || ev.type === "turn_end" ? `${ev.type}|${e.node}|${e.role ?? ""}`
         : ev.type === "agent_usage" ? `u|${e.role ?? ""}|${ev.metrics.turnId}`
           : ev.type === "goal_update" ? "goal" : null;
-    if (key) latest.set(key, i);
-  });
-  const kept: TimelineEvent[] = [];
+  };
+  events.forEach((e, i) => { const key = keyOf(e); if (key) latest.set(key, i); });
+
+  const current: TimelineEvent[] = [];
+  const past: TimelineEvent[] = [];
   events.forEach((e, i) => {
     const ev = e.event;
-    let event: AgentEvent | null = null;
+    const isLatest = () => latest.get(keyOf(e)!) === i;
     switch (ev.type) {
-      case "user": event = { type: "user", text: short(ev.text, 300) ?? "", attachments: [], ...(ev.queued ? { queued: true } : {}), ...(ev.delivery ? { delivery: ev.delivery } : {}) }; break;
-      case "plan_update": event = { ...ev, steps: ev.steps.slice(0, 100).map(s => ({ ...s, title: short(s.title, 300) ?? "" })), explanation: short(ev.explanation, 1000) }; break;
-      case "plan_state": event = { ...ev, reason: short(ev.reason, 500) }; break;
-      case "approval_request":
-        if (!resolved.has(ev.request.id)) event = { type: "approval_request", request: { ...ev.request, title: short(ev.request.title, 300) ?? "", detail: "", diffs: undefined } };
+      case "user":
+        // From the last reset on only the reset itself, the latest user message and the latest /plan matter.
+        if (i < lastReset) past.push(e);
+        else if (i === lastReset || i === lastUser || i === lastPlanCommand) current.push(e);
         break;
-      case "approval_resolved": break;
-      case "review_result": case "expression": case "turn_end": case "agent_usage": case "goal_update": {
-        const ev2 = ev as AgentEvent;
-        const key = ev2.type === "review_result" ? `r${ev2.consultId}`
-          : ev2.type === "agent_usage" ? `u|${e.role ?? ""}|${ev2.metrics.turnId}`
-            : ev2.type === "goal_update" ? "goal" : `${ev2.type}|${e.node}|${e.role ?? ""}`;
-        if (latest.get(key) === i) event = ev2;
-        break;
-      }
+      case "plan_update": case "plan_state": (i < lastReset ? past : current).push(e); break;
+      case "approval_request": if (!resolved.has(ev.request.id)) current.push(e); break;
+      case "goal_update": case "expression": case "turn_end": if (isLatest()) current.push(e); break;
+      case "review_result": case "agent_usage": if (isLatest()) past.push(e); break;
       default: break;
     }
-    if (event) kept.push(pageEvent({ ...e, event }));
   });
-  let chars = kept.reduce((sum, e) => sum + eventChars(e), 0);
-  let drop = 0;
-  while (chars > CONTEXT_MAX_CHARS && drop < kept.length) chars -= eventChars(kept[drop++]);
-  return drop ? kept.slice(drop) : kept;
+  // Only the newest of a long run of checklist updates for the same plan changes what folds out of it.
+  const compact = current.filter((e, i) => {
+    const next = current[i + 1];
+    return !(e.event.type === "plan_update" && next?.event.type === "plan_update" && e.event.planId === next.event.planId && next.role === e.role);
+  });
+  // Unanswered approvals far beyond what anyone can act on are capped to the newest.
+  const approvals = compact.filter(e => e.event.type === "approval_request");
+  const kept = approvals.length > 500 ? compact.filter(e => e.event.type !== "approval_request" || approvals.indexOf(e) >= approvals.length - 500) : compact;
+  const currentChars = kept.reduce((n, e) => n + eventChars(e), 0);
+  return [...newestWithin(past, Math.max(0, CONTEXT_MAX_CHARS - currentChars)), ...kept];
 }
 
 export interface EventPage {
@@ -199,20 +253,4 @@ export function replayLive(snapshot: TimelineEvent[], buffered: readonly Timelin
     events = append(events, e);
   }
   return events;
-}
-
-/** Run statistics only need timing and ids; this is an event in that minimal form. */
-export function statsEvent(e: TimelineEvent): TimelineEvent {
-  const ev = e.event;
-  switch (ev.type) {
-    case "tool_call": return { ...e, event: { type: "tool_call", id: ev.id, name: ev.name, input: "" } };
-    case "tool_result": return { ...e, event: { type: "tool_result", id: ev.id, ok: ev.ok, output: "" } };
-    case "approval_request": return { ...e, event: { type: "approval_request", request: { ...ev.request, detail: "", diffs: undefined } } };
-    case "approval_auto": return { ...e, event: { ...ev, request: { ...ev.request, detail: "", diffs: undefined } } };
-    case "turn_end": return { ...e, event: { type: "turn_end", ok: ev.ok, ...(ev.interrupted ? { interrupted: true } : {}) } };
-    case "approval_resolved": return e;
-    case "user": return { ...e, event: { type: "user", text: "", attachments: [], ...(ev.queued ? { queued: true } : {}) } };
-    case "text_delta": case "text": return { ...e, event: { type: ev.type, text: "" } };
-    default: return { ...e, event: { type: "notice", text: "" } };
-  }
 }

@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { REMOTE_EVENTS, REMOTE_LIMITS, type RemoteChatResponse, type RemoteSearchResponse } from "../../../shared/remote-web";
 import { CONSULT_KIND_LABEL, roleName, type AttachmentRef, type Chat, type ChatAgent, type ChatStatus, type Consult, type ConsultStatus, type RunStatsRows, type TimelineEvent } from "../../../shared/types";
-import { buildItems, planOf, type Item } from "../timeline";
+import { buildItems, eventText, markClipped, planOf, type Item } from "../timeline";
 import { forkEventId } from "../lib/fork";
 import { consultCardReview, consultCardStatus } from "../lib/review-summary";
 import { needsAttention } from "../timeline-window";
@@ -265,7 +265,7 @@ function StatusBadge({ status }: { status: ChatStatus }) {
 function ChatPane({ chat, detail, onOlder, sourceExists, onOpenChat, onBack, onSettings, onError }: { chat: Chat; detail?: Detail; onOlder: (page: EventPage) => void; sourceExists: boolean; onOpenChat: (id: number) => void; onBack: () => void; onSettings: () => void; onError: (e: unknown) => void }) {
   const [statsOpen, setStatsOpen] = useState(false);
   const live = chat.status === "working" || chat.status === "approval";
-  const items = useMemo(() => (detail ? buildItems(detail.events, undefined, live) : []), [detail, live]);
+  const items = useMemo(() => (detail ? markClipped(buildItems(detail.events, undefined, live), detail.events) : []), [detail, live]);
   // Pinned state (plan, worker state) covers the whole history: loaded pages plus the older context.
   const all = useMemo(() => detailStateEvents(detail), [detail]);
   const plan = useMemo(() => (detail ? planOf(all) : null), [detail, all]);
@@ -422,7 +422,34 @@ function TeamPanel({ chat, agents, consults, events, items, plan, pending, onPla
   );
 }
 
-function ItemView({ item, chat, agents, consults, live, onError, onForked, nested = false }: { item: Item; chat: Chat; agents: ChatAgent[]; consults: Consult[]; live: boolean; onError: (e: unknown) => void; onForked: (chat: Chat) => void; nested?: boolean }) {
+type ItemProps = { item: Item; chat: Chat; agents: ChatAgent[]; consults: Consult[]; live: boolean; onError: (e: unknown) => void; onForked: (chat: Chat) => void; nested?: boolean };
+
+/** Items a history page shortened say so and can show their original text. */
+function ItemView(props: ItemProps) {
+  if (!props.item.clippedEventIds?.length) return <ItemBody {...props} />;
+  return <div className="grid gap-1"><ItemBody {...props} /><ClippedOriginal chatId={props.chat.id} ids={props.item.clippedEventIds} onError={props.onError} /></div>;
+}
+
+function ClippedOriginal({ chatId, ids, onError }: { chatId: number; ids: number[]; onError: (e: unknown) => void }) {
+  const [text, setText] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const load = async () => {
+    setLoading(true);
+    try {
+      const events = await Promise.all(ids.map(id => request<{ event: TimelineEvent }>(`${url("/api/chats/:id/events", chatId)}/${id}`)));
+      setText(events.map(r => eventText(r.event.event)).join("\n\n"));
+    } catch (e) { onError(e); } finally { setLoading(false); }
+  };
+  return (
+    <div className="rounded-md border border-dashed px-2.5 py-1.5 text-[12px] text-muted-foreground">
+      {text === null
+        ? <div className="flex flex-wrap items-center gap-2">내용이 길어 일부만 표시했습니다.<Btn variant="outline" className="min-h-8 px-2 text-[12px]" disabled={loading} onClick={() => void load()}>{loading ? <LoaderCircle className="animate-spin" /> : null} 원문 보기</Btn></div>
+        : <><div className="mb-1">원문</div><pre className="max-h-96 overflow-auto rounded-md bg-code-bg p-2 font-mono text-[11.5px] whitespace-pre-wrap break-all text-foreground">{text}</pre></>}
+    </div>
+  );
+}
+
+function ItemBody({ item, chat, agents, consults, live, onError, onForked, nested = false }: ItemProps) {
   const forkId = nested ? undefined : forkEventId(item);
   switch (item.kind) {
     case "user":

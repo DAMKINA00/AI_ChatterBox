@@ -332,10 +332,15 @@ test("the event stream only delivers the selected chat's events", async (t) => {
 });
 
 test("history pages and run statistics: older pages by ?before=, statistics aggregated in the core and rate limited", async (t) => {
-  const s = await setup(t, { "chats:runStats": { total: { eventCount: 3 }, roles: [], consults: [] } });
+  const s = await setup(t, { "chats:runStats": { total: { eventCount: 3 }, roles: [], consults: [] }, "chats:event": { id: 7, chatId: 1, node: "orch", role: null, at: 1, event: { type: "user", text: "원문", attachments: [{ id: 3, name: "a.png", mime: "image/png", size: 1, path: "C:/secret/a.png" }] } } });
   const { cookie } = await s.login();
   assert.equal((await s.request("/api/chats/1?before=500", { cookie })).status, 200);
   assert.equal((await s.request("/api/chats/1?before=abc", { cookie })).status, 400);
+  // The original of a shortened event, without local paths.
+  const one = await (await s.request("/api/chats/1/events/7", { cookie })).json() as { event: { event: { text: string; attachments: Record<string, unknown>[] } } };
+  assert.equal(one.event.event.text, "원문");
+  assert.deepEqual(Object.keys(one.event.event.attachments[0]).sort(), ["id", "mime", "name", "size"]);
+  assert.deepEqual(s.calls.find(([c]) => c === "chats:event")?.[1], [1, 7]);
   assert.deepEqual(s.calls.filter(([c]) => c === "chats:eventsPage").map(([, a]) => a), [[1, 500]]);
   const stats = await s.request("/api/chats/1/run-stats?live=1", { cookie });
   assert.equal(stats.status, 200);

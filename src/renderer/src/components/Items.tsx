@@ -20,7 +20,7 @@ import { artifactFileLabel } from "../../../shared/artifact-markdown";
 import { CONSULT_KIND_LABEL, MASTER_LABEL, roleName, roleTone, type AgentExpression, type ApprovalRequest, type AttachmentRef, type FileDiff, type Role } from "../../../shared/types";
 import { api, cn, errorMessage, formatBytes } from "../lib/utils";
 import { useStore } from "../store";
-import type { Item } from "../timeline";
+import { eventText, type Item } from "../timeline";
 import { needsAttention, windowItems } from "../timeline-window";
 import { Markdown, CopyButton } from "./Markdown";
 import { FileLink } from "./FileLink";
@@ -260,7 +260,53 @@ function ToolGroup({ items, chatId, nested }: { items: ToolItem[]; chatId: numbe
   );
 }
 
+/** Inside an item a history page shortened: loads the original text (shared by the copy button and the bar). */
+const ClipContext = createContext<(() => Promise<string>) | undefined>(undefined);
+
 const ItemView = memo(function ItemView({ item, chatId, nested }: { item: Item; chatId: number; nested: boolean }) {
+  return item.clippedEventIds?.length ? <ClippedItem item={item} chatId={chatId} nested={nested} /> : <ItemBody item={item} chatId={chatId} nested={nested} />;
+});
+
+/** A shortened item: shown as sent, marked, with its original one click away (copy uses the original). */
+function ClippedItem({ item, chatId, nested }: { item: Item; chatId: number; nested: boolean }) {
+  const [full, setFull] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const pending = useRef<Promise<string> | null>(null);
+  const load = useCallback(() => {
+    pending.current ??= Promise.all((item.clippedEventIds ?? []).map((id) => api.loadEvent(chatId, id)))
+      .then((events) => events.flatMap((e) => (e ? [eventText(e.event)] : [])).join("\n\n"))
+      .then((text) => { setFull(text); return text; })
+      .catch((e) => { pending.current = null; useStore.getState().toast(errorMessage(e)); throw e; });
+    return pending.current;
+  }, [chatId, item.clippedEventIds]);
+  const open = async () => {
+    setLoading(true);
+    try { await load(); } catch { /* toast shown */ } finally { setLoading(false); }
+  };
+  return (
+    <ClipContext.Provider value={load}>
+      <ItemBody item={item} chatId={chatId} nested={nested} />
+      <div className={cn("mt-1 rounded-md border border-dashed px-3 py-1.5 text-[12px] text-muted-foreground", !nested && "ml-12")} data-testid="clipped-item" data-chat-search-ignore>
+        {full === null ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <span>내용이 길어 일부만 표시했습니다.</span>
+            <Button variant="outline" size="xs" data-testid="clipped-full" disabled={loading} onClick={() => void open()}>
+              {loading ? <Loader2 className="animate-spin" /> : null} 원문 불러오기
+            </Button>
+          </div>
+        ) : (
+          <div className="relative">
+            <div className="mb-1 flex items-center gap-2"><span>원문</span><CopyButton text={full} label="원문 복사" /></div>
+            <pre data-testid="clipped-original" className="max-h-96 overflow-auto rounded-md bg-code-bg p-2.5 font-mono text-[12px] whitespace-pre-wrap text-foreground select-text">{full}</pre>
+          </div>
+        )}
+      </div>
+    </ClipContext.Provider>
+  );
+}
+
+const ItemBody = memo(function ItemBody({ item, chatId, nested }: { item: Item; chatId: number; nested: boolean }) {
+  const clipFull = useContext(ClipContext);
   const agents = useStore((s) => s.agents[chatId]);
   const forkId = nested ? undefined : forkEventId(item);
   switch (item.kind) {
@@ -305,7 +351,7 @@ const ItemView = memo(function ItemView({ item, chatId, nested }: { item: Item; 
               <MessageBody text={item.text} streaming={item.streaming} fold={!!item.room} />
               {item.streaming && <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse-dot rounded-sm bg-primary align-text-bottom" />}
               {!item.streaming && (
-                <CopyButton text={item.text} className="absolute -top-6 right-0 opacity-0 group-hover:opacity-100" label="메시지 복사" />
+                <CopyButton text={item.text} full={clipFull} className="absolute -top-6 right-0 opacity-0 group-hover:opacity-100" label="메시지 복사" />
               )}
             </div>
           </div>
