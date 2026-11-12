@@ -36,12 +36,21 @@ test("the monitor payload is ChatterBox's accounts in order with labels, flags, 
   assert.deepEqual(p.deepseek, { state: "ready", balances: [{ currency: "USD", total: "5.20" }] });
 });
 
-test("nothing secret goes to the monitor: no email, folder, token, key or path in an error", () => {
-  const withSecrets = [...ACCOUNTS.slice(0, 2), account("gpt-2", "PUBLIC 1", 51, { usage: { checkedAt: NOW, error: "spawn C:\\Users\\damki\\codex.exe ENOENT (token sk-abc)" } })];
+test("nothing secret goes to the monitor: errors only as fixed texts, private-looking labels replaced", () => {
+  const withSecrets = [
+    account("claude-1", "me@example.com", 29),
+    account("gpt-1", "PREVATE", 57, { usage: { checkedAt: NOW, error: "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.secret" } }),
+    account("gpt-2", "C:\\keys\\work", 51, { usage: { checkedAt: NOW, error: "spawn C:\\Users\\damki\\codex.exe ENOENT (token sk-abc)" } }),
+    account("gpt-3", "sk-proj-abcdef123456", 15, { usage: { checkedAt: NOW, error: "token sk-live-998877 rejected by /opt/tools/codex" } }),
+    account("grok-1", "ghp_a1b2c3d4e5f6a7b8c9d0e1", 1),
+  ];
   const usage: UsageInfo = { ...USAGE, deepseek: { state: "error", balances: [], error: "401 https://api.deepseek.com/user/balance" }, geminiWeb: { status: "available", detail: "me@gmail.com", checkedAt: NOW } };
-  const text = JSON.stringify(monitorAccountsPayload(withSecrets, usage, NOW));
-  assert.doesNotMatch(text, /@|AppData|Users|configDir|"auth"|email|sk-|https?:|deepseek\.com|toppedUp|granted|geminiWeb/, text);
-  assert.match(text, /자세한 내용은 데스크톱 앱에서 확인/);
+  const payload = monitorAccountsPayload(withSecrets, usage, NOW);
+  const text = JSON.stringify(payload);
+  assert.doesNotMatch(text, /@|AppData|Users|keys|configDir|"auth"|email|sk-|ghp_|Bearer|eyJ|\/opt|https?:|deepseek\.com|toppedUp|granted|geminiWeb/i, text);
+  assert.deepEqual(payload.groups.flatMap(g => g.accounts.map(a => a.label)), ["계정 1", "PREVATE", "계정 2", "계정 3", "계정 1"]);
+  assert.deepEqual(payload.groups[1].accounts.map(a => a.error), ["로그인이 필요합니다", "CLI를 찾지 못했습니다", "사용량 조회에 실패했습니다"]);
+  assert.equal(payload.deepseek?.error, "로그인이 필요합니다");
 });
 
 test("the feed pushes after usage updates and account changes, coalesced, without asking the core to refresh", async () => {

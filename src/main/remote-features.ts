@@ -5,7 +5,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmdirSync, statSync } from "node:fs";
 import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { DEFAULT_SETTINGS, type AgentKind, type ApprovalMode, type AttachmentRef, type Chat, type CliAccountStatus, type ModelOption, type Project, type TimelineEvent, type UsageInfo } from "../shared/types";
-import { safeUsageText, usageGroups } from "../shared/usage-view";
+import { publicUsageError, publicUsageGroups, usageGroups } from "../shared/usage-view";
 import type { AIStudioUsageReport } from "../shared/aistudio";
 import {
   REMOTE_ATTACHMENT_TYPES, REMOTE_COMMANDS, REMOTE_EVENTS, REMOTE_FOLDER_NAME_PATTERN, REMOTE_LIMITS, REMOTE_NUMBER_SETTINGS,
@@ -56,8 +56,6 @@ export function stripLocalPaths<T>(value: T): T {
 /** File identity of a folder (volume + file index), used to pin an allowed root (D1). */
 export const folderId = (path: string) => { const s = statSync(path, { bigint: true }); return `${s.dev}:${s.ino}`; };
 
-/** Error texts go out only without emails, local paths or URLs (a CLI error may quote them). */
-export const remoteSafeText = safeUsageText;
 
 /** AI Studio usage groups are keyed by account email; remote answers number them instead. */
 export function anonymizeAccounts(report: AIStudioUsageReport): AIStudioUsageReport {
@@ -486,11 +484,12 @@ export class RemoteFeatures {
     }
     // The same view the desktop panel builds (shared/usage-view.ts) from ChatterBox's account store.
     const [usage, accounts] = await Promise.all([this.ctx.call("usage:get", [refresh]) as Promise<UsageInfo>, this.ctx.call("cli-accounts:list", []) as Promise<CliAccountStatus[]>]);
-    const groups = usageGroups(accounts, usage).map(g => ({ ...g, accounts: g.accounts.map(r => (r.error ? { ...r, error: remoteSafeText(r.error) } : r)) }));
+    // Labels that look private are replaced and errors go out only as fixed texts (shared/usage-view.ts).
+    const groups = publicUsageGroups(usageGroups(accounts, usage));
     const d = usage.deepseek;
     const body: RemoteUsageResponse = {
       groups,
-      ...(d ? { deepseek: { state: d.state, balances: d.balances, ...(d.error ? { error: remoteSafeText(d.error) } : {}), ...(d.updatedAt ? { updatedAt: d.updatedAt } : {}) } } : {}),
+      ...(d ? { deepseek: { state: d.state, balances: d.balances, ...(d.error ? { error: publicUsageError(d.error) } : {}), ...(d.updatedAt ? { updatedAt: d.updatedAt } : {}) } } : {}),
     };
     this.ctx.send(res, 200, body);
   }

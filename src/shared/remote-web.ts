@@ -350,7 +350,7 @@ export interface RemoteProjectPatch { name?: string; archived?: boolean; setting
  * GET /api/usage?refresh=0|1 (refresh at most once per REMOTE_LIMITS.usageRefreshSeconds per session → 429).
  * The same view as the desktop usage panel (shared/usage-view.ts): CLI accounts exactly as in ChatterBox's
  * account store (label, enabled, auth state, remaining, window, reset time, check time) and the DeepSeek
- * balance. No email, folder, API key or raw provider data; error texts with paths or emails are replaced.
+ * balance. No email, folder, API key or raw provider data; errors only as a code and its fixed text, labels that look like an email, path or token become "계정 N".
  */
 export interface RemoteUsageResponse {
   groups: UsageKindGroup[];

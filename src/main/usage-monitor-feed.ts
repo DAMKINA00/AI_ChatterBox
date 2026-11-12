@@ -2,7 +2,7 @@
 // The monitor keeps no account list of its own: it shows exactly these accounts, labels, enabled flags and
 // readings. Only ids, labels, flags and numbers go out (no email, token, folder or API key).
 import type { CliAccountStatus, UsageInfo } from "../shared/types";
-import { safeUsageText, usageGroups, type UsageKindGroup } from "../shared/usage-view";
+import { publicUsageError, publicUsageGroups, usageGroups, type UsageKindGroup } from "../shared/usage-view";
 import type { DeepSeekBalance } from "../shared/deepseek";
 
 /** Major version of the `chatterbox-accounts` message; the monitor announces the one it reads in its state. */
@@ -17,13 +17,12 @@ export interface MonitorAccountsPayload {
 }
 
 export function monitorAccountsPayload(accounts: CliAccountStatus[], usage: UsageInfo, now = Date.now()): MonitorAccountsPayload {
-  const groups = usageGroups(accounts, usage).map(g => ({
-    ...g, accounts: g.accounts.map(r => ({ ...r, label: r.label.slice(0, 80), ...(r.error ? { error: safeUsageText(r.error) } : {}) })),
-  }));
+  // Labels that look private are replaced and errors go out only as fixed texts (shared/usage-view.ts).
+  const groups = publicUsageGroups(usageGroups(accounts, usage));
   const d = usage.deepseek;
   return {
     version: MONITOR_ACCOUNTS_VERSION, sentAt: now, groups,
-    ...(d ? { deepseek: { state: d.state, balances: d.balances.map(b => ({ currency: b.currency, total: b.total })), ...(d.error ? { error: safeUsageText(d.error) } : {}) } } : {}),
+    ...(d ? { deepseek: { state: d.state, balances: d.balances.map(b => ({ currency: b.currency, total: b.total })), ...(d.error ? { error: publicUsageError(d.error) } : {}) } } : {}),
   };
 }
 

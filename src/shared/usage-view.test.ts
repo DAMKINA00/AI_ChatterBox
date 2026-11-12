@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { CliAccountId, CliAccountStatus, UsageInfo } from "./types";
-import { deepSeekBalanceText, usageGroups, usageSummary } from "./usage-view";
+import { USAGE_ERROR_TEXT, deepSeekBalanceText, publicAccountLabel, publicUsageError, publicUsageRow, usageErrorCode, usageGroups, usageSummary } from "./usage-view";
 
 const NOW = 1_800_000_000_000;
 function account(accountId: CliAccountId, label: string, used?: number, extra: Partial<CliAccountStatus> = {}): CliAccountStatus {
@@ -55,4 +55,24 @@ test("rows carry no email, folder or auth detail; errors and the DeepSeek balanc
   assert.equal(deepSeekBalanceText({ state: "ready", balances: [{ currency: "USD", total: "5.20", granted: "0", toppedUp: "5.20" }] }), "5.20 USD");
   assert.equal(deepSeekBalanceText({ state: "unconfigured", balances: [] }), "키 미설정");
   assert.equal(deepSeekBalanceText(undefined), "조회 중");
+});
+
+test("errors leave this PC only as a fixed text per code; private-looking labels become '계정 N'", () => {
+  const cases: [string, string][] = [
+    ["Authorization: Bearer abc.def", "login_required"], ["401 Unauthorized", "login_required"], ["로그인이 필요합니다", "login_required"],
+    ["spawn C:\\Users\\x\\codex.exe ENOENT", "not_installed"], ["Grok CLI를 찾지 못했습니다. 설치 경로를 확인해 주세요.", "not_installed"],
+    ["429 Too Many Requests", "rate_limited"], ["request timed out after 30s", "timeout"], ["connect ECONNREFUSED 127.0.0.1:2048", "network"],
+    ["token sk-live-998877 rejected by /opt/tools/codex", "failed"], ["", "failed"],
+  ];
+  for (const [text, code] of cases) assert.equal(usageErrorCode(text), code, text);
+  const row = publicUsageRow({ ...usageGroups([account("gpt-2", "PUBLIC 1", 10)], {})[0].accounts[0], error: "token sk-live-998877 at /opt/x", display: null });
+  assert.deepEqual([row.error, row.errorCode, row.label], [USAGE_ERROR_TEXT.failed, "failed", "PUBLIC 1"]);
+  assert.equal(publicUsageError("401 Unauthorized: Bearer xyz"), USAGE_ERROR_TEXT.login_required);
+  assert.equal(publicUsageError("Bearer xyz"), USAGE_ERROR_TEXT.failed, "no hint: the generic text, never the original");
+  for (const label of ["me@example.com", "C:\\keys", "/opt/work", "~/codex", "https://x.example", "sk-proj-abc123", "Bearer abc", "ghp_abcd1234", "a1b2c3d4e5f6g7h8i9j0k1", ""])
+    assert.equal(publicAccountLabel("gpt-3", label), "계정 3", label);
+  for (const label of ["PREVATE", "PUBLIC 1", "기본 클로드", "Work account 2", "TEAM-SHARED"])
+    assert.equal(publicAccountLabel("gpt-3", label), label);
+  // The desktop keeps the original texts; only the public view changes them.
+  assert.equal(usageGroups([account("gpt-1", "me@example.com", 10)], {})[0].accounts[0].label, "me@example.com");
 });

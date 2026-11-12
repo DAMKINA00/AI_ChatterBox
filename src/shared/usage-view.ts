@@ -65,9 +65,53 @@ function windowsOf(u: ProviderUsage): Pick<UsageAccountRow, "windows"> {
   return Object.keys(windows).length ? { windows } : {};
 }
 
-/** Text that may leave this PC (remote web, the usage monitor) without emails, local paths or URLs. */
-export const safeUsageText = (text: string) =>
-  /@|[A-Za-z]:[\\/]|\\\\|\/(?:Users|home)\/|https?:\/\//i.test(text) ? "조회 실패(자세한 내용은 데스크톱 앱에서 확인)" : text.slice(0, 300);
+// ---- what may leave this PC (remote web, the usage monitor)
+// An error's original text never leaves: it can quote tokens, paths, emails or URLs. Only one of these
+// codes and its fixed text does; the desktop app keeps showing the original.
+
+export const USAGE_ERROR_TEXT = {
+  login_required: "로그인이 필요합니다",
+  not_installed: "CLI를 찾지 못했습니다",
+  rate_limited: "조회 한도에 걸렸습니다. 잠시 뒤 다시 조회합니다",
+  timeout: "조회 시간이 초과되었습니다",
+  network: "네트워크 오류로 조회하지 못했습니다",
+  failed: "사용량 조회에 실패했습니다",
+} as const;
+export type UsageErrorCode = keyof typeof USAGE_ERROR_TEXT;
+
+/** The kind of a usage/balance error, from its original (local) text. Anything unknown is "failed". */
+export function usageErrorCode(text: string): UsageErrorCode {
+  if (/찾지 못|설치|not installed|not found|ENOENT/i.test(text)) return "not_installed";
+  if (/429|rate.?limit|too many requests|한도에 걸/i.test(text)) return "rate_limited";
+  if (/로그인|인증|sign.?in|log.?in|unauthori[sz]ed|forbidden|\b40[13]\b|auth/i.test(text)) return "login_required";
+  if (/timed? ?out|시간 초과|ETIMEDOUT/i.test(text)) return "timeout";
+  if (/ECONN|ENOTFOUND|EAI_AGAIN|network|네트워크|fetch failed|socket/i.test(text)) return "network";
+  return "failed";
+}
+
+/**
+ * Labels are the user's own names for accounts. One that looks like an email, a path, a URL or a token
+ * (key prefixes such as sk-/ghp_, "Bearer", or a 20+ character run of letters and digits) is replaced by
+ * "계정 N" (N = the account's number) wherever it leaves this PC.
+ */
+export function publicAccountLabel(accountId: CliAccountId, label: string): string {
+  const looksPrivate = /@|[\\/]|^[A-Za-z]:|^~|https?:|www\.|[\x00-\x1f]/i.test(label)
+    || /\bbearer\b|\b(?:sk|pk|rk|ghp|gho|ghs|github_pat|xox[abprs]|AKIA|AIza)[-_A-Za-z0-9]{4,}/i.test(label)
+    || /(?=[A-Za-z0-9_\-+=]*\d)(?=[A-Za-z0-9_\-+=]*[A-Za-z])[A-Za-z0-9_\-+=]{20,}/.test(label);
+  return looksPrivate || !label.trim() ? `계정 ${accountId.slice(accountId.lastIndexOf("-") + 1)}` : label.slice(0, 80);
+}
+
+/** A row as it may leave this PC: label by publicAccountLabel, error only as a code and its fixed text. */
+export function publicUsageRow(row: UsageAccountRow): UsageAccountRow & { errorCode?: UsageErrorCode } {
+  const { error, ...rest } = row;
+  const code = error ? usageErrorCode(error) : undefined;
+  return { ...rest, label: publicAccountLabel(row.accountId, row.label), ...(code ? { error: USAGE_ERROR_TEXT[code], errorCode: code } : {}) };
+}
+
+export const publicUsageGroups = (groups: UsageKindGroup[]): UsageKindGroup[] =>
+  groups.map(g => ({ ...g, accounts: g.accounts.map(publicUsageRow) }));
+
+export const publicUsageError = (text: string) => USAGE_ERROR_TEXT[usageErrorCode(text)];
 
 /** Accounts grouped by family in the account store's order; families without accounts are left out. */
 export function usageGroups(accounts: CliAccountStatus[], usage: UsageInfo): UsageKindGroup[] {
