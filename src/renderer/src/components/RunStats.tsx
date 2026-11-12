@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import type { RunStats } from "../../../shared/run-stats";
-import type { Chat } from "../../../shared/types";
+import type { Chat, TimelineEvent } from "../../../shared/types";
 import { formatDuration, PENDING_TOOL_LABEL, RUN_STATS_NOTE, runStatsFlags, runStatsRows, type RunStatsRow } from "../lib/run-stats-view";
-import { cn } from "../lib/utils";
+import { api, cn } from "../lib/utils";
 import { useStore } from "../store";
 import { Dialog, DialogContent } from "./ui";
 
@@ -10,7 +10,22 @@ const running = (chat: Chat) => chat.status === "working" || chat.status === "ap
 
 /** Recorded spans of tool runs and approval waits, per chat / role / consult. Opened from the chat header. */
 export function RunStatsDialog({ chat, open, onOpenChange }: { chat: Chat; open: boolean; onOpenChange: (open: boolean) => void }) {
-  const events = useStore((s) => s.events[chat.id]);
+  const loaded = useStore((s) => s.events[chat.id]);
+  const hasMore = useStore((s) => !!s.history[chat.id]?.hasMore);
+  // A chat loaded in pages measures every event: the minimal stats form of all of them, plus live ones.
+  const [stored, setStored] = useState<TimelineEvent[] | null>(null);
+  useEffect(() => {
+    if (!open || !hasMore) { setStored(null); return; }
+    let alive = true;
+    void api.loadStatsEvents(chat.id).then((list) => { if (alive) setStored(list); }).catch(() => undefined);
+    return () => { alive = false; };
+  }, [open, hasMore, chat.id]);
+  const events = useMemo(() => {
+    if (!hasMore) return loaded;
+    if (!stored) return undefined;
+    const last = stored.at(-1)?.id ?? 0;
+    return [...stored, ...(loaded ?? []).filter((e) => !e.id || e.id > last)];
+  }, [hasMore, loaded, stored]);
   const agents = useStore((s) => s.agents[chat.id]);
   const consults = useStore((s) => s.consults[chat.id]);
   const live = running(chat);

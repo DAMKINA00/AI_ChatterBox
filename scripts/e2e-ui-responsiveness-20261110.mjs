@@ -116,8 +116,11 @@ try {
     return { a: a.id, b: b.id };
   }, data);
   await app.evaluate(({ ipcMain }, payload) => {
-    ipcMain.removeHandler("chats:events");
-    ipcMain.handle("chats:events", (_e, id) => (id === payload.chatId ? payload.events : []));
+    ipcMain.removeHandler("chats:eventsPage");
+    ipcMain.handle("chats:eventsPage", (_e, id) => {
+      const events = id === payload.chatId ? payload.events : [];
+      return { events, start: events[0]?.id ?? 0, hasMore: false, context: [] };
+    });
     globalThis.__fixtureChatId = payload.chatId;
   }, { chatId: ids.a, events: history(ids.a) });
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.setBackgroundThrottling(false));

@@ -146,7 +146,10 @@ function groupItems(items: Item[]): ItemEntry[] {
   return entries;
 }
 
-export const ItemList = memo(function ItemList({ items, chatId, nested = false, live = false, paginate = true }: { items: Item[]; chatId: number; nested?: boolean; live?: boolean; paginate?: boolean }) {
+/** Older history still on disk (chats load page by page); `load` fetches the page before the loaded ones. */
+export interface OlderHistory { loading: boolean; load: () => void }
+
+export const ItemList = memo(function ItemList({ items, chatId, nested = false, live = false, paginate = true, older }: { items: Item[]; chatId: number; nested?: boolean; live?: boolean; paginate?: boolean; older?: OlderHistory }) {
   const searching = !!useContext(ChatSearchQuery).trim();
   const pageSize = nested ? 20 : 100;
   const root = useRef<HTMLDivElement>(null);
@@ -176,21 +179,28 @@ export const ItemList = memo(function ItemList({ items, chatId, nested = false, 
     if (saved?.element.isConnected && scroll) scroll.scrollTop += saved.element.getBoundingClientRect().top - saved.top;
     anchor.current = null;
   }, [first]);
+  // Scrolling up to the top shows earlier loaded items first, then loads the page before them.
+  const loadOlder = !hidden && older && !older.loading ? older.load : undefined;
   useEffect(() => {
-    if (nested || !hidden) return;
+    if (nested || (!hidden && !loadOlder)) return;
     const scroll = root.current?.closest('[data-testid="timeline"]');
     if (!scroll) return;
     let previousTop = scroll.scrollTop;
     const onScroll = () => {
-      if (scroll.scrollTop < previousTop && scroll.scrollTop < 120) showEarlier();
+      if (scroll.scrollTop < previousTop && scroll.scrollTop < 120) (hidden ? showEarlier : loadOlder)?.();
       previousTop = scroll.scrollTop;
     };
     scroll.addEventListener("scroll", onScroll);
     return () => scroll.removeEventListener("scroll", onScroll);
-  }, [nested, hidden, showEarlier]);
+  }, [nested, hidden, showEarlier, loadOlder]);
   return (
     <div ref={root} className={cn("flex flex-col", nested ? "gap-0.5" : "gap-1")} data-testid={nested ? "nested-history" : "history-list"}>
       {hidden > 0 && <Button variant="ghost" size="sm" data-testid="load-earlier" onClick={showEarlier}>이전 기록 더 보기 · {hidden}개</Button>}
+      {!hidden && older && (
+        <Button variant="ghost" size="sm" data-testid="load-older" disabled={older.loading} onClick={older.load}>
+          {older.loading ? <><Loader2 className="animate-spin" /> 이전 기록을 불러오는 중…</> : "이전 기록 불러오기"}
+        </Button>
+      )}
       {entries.map((entry) =>
         <div key={entry.kind === "tool-group" ? entry.items[0].key : entry.item.key} data-history-entry>
           {entry.kind === "tool-group" ? (
@@ -459,6 +469,29 @@ const ToolCard = memo(function ToolCard({ item, chatId, nested }: { item: Extrac
   const state = !item.result ? "running" : item.result.ok ? "ok" : "fail";
   const shell = item.name === "Bash" || item.name === "PowerShell" || item.name === "명령";
   const brief = item.input.split("\n").find((l) => l.trim() && l.trim() !== "{") ?? "";
+  // History pages shorten long input/output; the full text is one event away.
+  const [full, setFull] = useState<{ input?: string; output?: string }>({});
+  const [loadingFull, setLoadingFull] = useState(false);
+  const clipped = (!!item.inputClipped && full.input === undefined) || (!!item.result?.clipped && full.output === undefined);
+  const loadFull = async () => {
+    setLoadingFull(true);
+    try {
+      const [call, result] = await Promise.all([
+        item.inputClipped && item.callEventId ? api.loadEvent(chatId, item.callEventId) : undefined,
+        item.result?.clipped && item.result.eventId ? api.loadEvent(chatId, item.result.eventId) : undefined,
+      ]);
+      setFull({
+        input: call?.event.type === "tool_call" ? call.event.input : undefined,
+        output: result?.event.type === "tool_result" ? result.event.output : undefined,
+      });
+    } catch (e) {
+      useStore.getState().toast(errorMessage(e));
+    } finally {
+      setLoadingFull(false);
+    }
+  };
+  const input = full.input ?? item.input;
+  const output = full.output ?? item.result?.output ?? "";
   return (
     <div className={cn("overflow-hidden rounded-lg border bg-card", !nested && "ml-3.5")} data-testid="tool-card">
       <button type="button" className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-accent/60" aria-expanded={showOpen} disabled={searching} onClick={() => setOpen(!open)}>
@@ -476,7 +509,7 @@ const ToolCard = memo(function ToolCard({ item, chatId, nested }: { item: Extrac
           {item.diffs?.length ? (
             <DiffList files={item.diffs} defaultOpen />
           ) : (
-            <pre data-chat-search-text className="max-h-64 overflow-auto rounded-md bg-code-bg p-2.5 font-mono text-[12px] whitespace-pre-wrap select-text">{item.input}</pre>
+            <pre data-chat-search-text className="max-h-64 overflow-auto rounded-md bg-code-bg p-2.5 font-mono text-[12px] whitespace-pre-wrap select-text">{input}</pre>
           )}
           {item.result && (
             <div className="relative">
@@ -487,10 +520,16 @@ const ToolCard = memo(function ToolCard({ item, chatId, nested }: { item: Extrac
                   !item.result.ok && "text-destructive",
                 )}
               >
-                {item.result.output || "(출력 없음)"}
+                {output || "(출력 없음)"}
               </pre>
-              {item.result.output && <CopyButton text={item.result.output} className="absolute top-1 right-1" />}
+              {output && !clipped && <CopyButton text={output} className="absolute top-1 right-1" />}
             </div>
+          )}
+          {clipped && (
+            <Button variant="outline" size="xs" data-testid="tool-full" disabled={loadingFull} onClick={() => void loadFull()}>
+              {loadingFull ? <Loader2 className="animate-spin" /> : null}
+              전체 내용 불러오기 ({Math.max(item.inputClipped ?? 0, item.result?.clipped ?? 0).toLocaleString("ko-KR")}자)
+            </Button>
           )}
         </div>
       )}

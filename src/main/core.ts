@@ -91,6 +91,11 @@ function registerHandlers(rpc: CoreRpc) {
   ipcMain.handle("chats:consults", (_e, id: number) => store.listConsults(id));
   ipcMain.handle("chats:agents", (_e, id: number) => store.listAgents(id));
   ipcMain.handle("chats:events", (_e, id: number) => store.events(id));
+  // Windows open chats page by page; one long chat can exceed the 128MB core frame (see shared/event-page.ts).
+  ipcMain.handle("chats:eventsPage", (_e, id: number, before?: number) => store.eventsPage(id, before));
+  ipcMain.handle("chats:event", (_e, id: number, eventId: number) => store.event(id, eventId));
+  ipcMain.handle("chats:statsEvents", (_e, id: number) => store.statsEvents(id));
+  ipcMain.handle("chats:hasAttachment", (_e, id: number, attachmentId: number) => store.chatHasAttachment(id, attachmentId));
   ipcMain.handle("chats:search", (_e, q: string) => (q.trim() ? store.searchChats(q.trim()) : []));
   const notDeleting = (id: number) => { if (remoteDeleting.has(id)) throw new Error("채팅을 삭제하는 중입니다."); };
   ipcMain.handle("chats:send", (_e, id: number, text: string, attachmentIds: number[], delivery?: "now" | "next") => { notDeleting(id); return chats.send(id, text, attachmentIds, delivery); });

@@ -126,8 +126,11 @@ async function installMocks(app) {
 
 async function installSyntheticEvents(app, chatId, events) {
   await app.evaluate(({ ipcMain }, payload) => {
-    ipcMain.removeHandler("chats:events");
-    ipcMain.handle("chats:events", (_event, id) => id === payload.chatId ? payload.events : []);
+    ipcMain.removeHandler("chats:eventsPage");
+    ipcMain.handle("chats:eventsPage", (_event, id) => {
+      const events = id === payload.chatId ? payload.events : [];
+      return { events, start: events[0]?.id ?? 0, hasMore: false, context: [] };
+    });
   }, { chatId, events });
 }
 

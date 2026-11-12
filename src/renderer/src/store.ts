@@ -15,6 +15,7 @@ import type {
   TimelineEvent,
   UsageInfo,
 } from "../../shared/types";
+import { historyFromPage, prependPage, stateEvents } from "../../shared/event-page";
 import { api, errorMessage } from "./lib/utils";
 import { appendEvent, chatTimelines } from "./timeline";
 
@@ -30,6 +31,15 @@ interface Toast {
   tone: "error" | "info";
 }
 
+/** Paging state of a loaded chat (its events are in `events`). */
+export interface HistoryState {
+  /** Context events older than `start` (pinned state only; never rendered). */
+  context: TimelineEvent[];
+  start: number;
+  hasMore: boolean;
+  loadingOlder?: boolean;
+}
+
 interface State {
   ready: boolean;
   projects: Project[];
@@ -37,6 +47,9 @@ interface State {
   consults: Record<number, Consult[]>;
   agents: Record<number, ChatAgent[]>;
   events: Record<number, TimelineEvent[]>;
+  history: Record<number, HistoryState>;
+  /** Why a chat's history could not be loaded (shown with a retry instead of an endless spinner). */
+  loadErrors: Record<number, string>;
   selection: Selection | null;
   expanded: Record<string, boolean>;
   usage: UsageInfo;
@@ -55,6 +68,10 @@ interface State {
   setSearch(s: string): void;
   toggle(key: string, value?: boolean): void;
   select(sel: Selection | null): Promise<void>;
+  /** Load the page before the oldest loaded event; resolves false when nothing more could be loaded. */
+  loadOlder(chatId: number): Promise<boolean>;
+  /** Load older pages until `found` holds for the loaded events (e.g. a consult's start) or the history ends. */
+  loadUntil(chatId: number, found: (events: TimelineEvent[]) => boolean): Promise<void>;
   loadModels(agent: AgentKind): Promise<void>;
   refreshCli(): Promise<void>;
 
@@ -69,6 +86,9 @@ interface State {
 }
 
 let toastSeq = 0;
+/** Live events of chats whose first page is still loading; replayed on top of the page. */
+const loadingLive = new Map<number, TimelineEvent[]>();
+const loadingPages = new Map<number, Promise<void>>();
 
 function loadExpanded(): Record<string, boolean> {
   try {
@@ -78,6 +98,51 @@ function loadExpanded(): Record<string, boolean> {
   }
 }
 
+/**
+ * Newest page of a chat (with its context), workers and consults. A failure is kept in loadErrors so the
+ * chat shows the reason and a retry; concurrent selects of the same chat share one request.
+ */
+function loadFirstPage(chatId: number): Promise<void> {
+  const running = loadingPages.get(chatId);
+  if (running) return running;
+  loadingLive.set(chatId, []);
+  useStore.setState((s) => {
+    const { [chatId]: _, ...loadErrors } = s.loadErrors;
+    return { loadErrors };
+  });
+  const task = Promise.all([api.loadEventsPage(chatId), api.listConsults(chatId), api.listAgents(chatId)])
+    .then(([page, consults, agents]) => {
+      const loaded = historyFromPage(page);
+      const lastId = loaded.events.findLast((e) => e.id)?.id ?? 0;
+      let events = loaded.events;
+      // Events that arrived while the page was read: newer persisted ones and live previews.
+      for (const e of loadingLive.get(chatId) ?? []) if (!e.id || e.id > lastId) events = appendEvent(events, e);
+      useStore.setState((s) => ({
+        events: { ...s.events, [chatId]: events },
+        history: { ...s.history, [chatId]: { context: loaded.context, start: loaded.start, hasMore: loaded.hasMore } },
+        consults: { ...s.consults, [chatId]: consults },
+        agents: { ...s.agents, [chatId]: agents },
+      }));
+    })
+    .catch((e) => {
+      useStore.setState((s) => ({ loadErrors: { ...s.loadErrors, [chatId]: errorMessage(e) } }));
+    })
+    .finally(() => {
+      loadingLive.delete(chatId);
+      loadingPages.delete(chatId);
+    });
+  loadingPages.set(chatId, task);
+  return task;
+}
+
+/** The history to load again after a failure (retry button). */
+export const retryHistory = (chatId: number) => loadFirstPage(chatId);
+
+/** Loaded events plus the older context, for state that depends on the whole history (plan, reviews, expressions). */
+export function stateEventsOf(events: TimelineEvent[] | undefined, history: HistoryState | undefined): TimelineEvent[] {
+  return events ? stateEvents({ events, context: history?.context ?? [] }) : [];
+}
+
 export const useStore = create<State>((set, get) => ({
   ready: false,
   projects: [],
@@ -85,6 +150,8 @@ export const useStore = create<State>((set, get) => ({
   consults: {},
   agents: {},
   events: {},
+  history: {},
+  loadErrors: {},
   selection: null,
   expanded: loadExpanded(),
   usage: {},
@@ -133,6 +200,7 @@ export const useStore = create<State>((set, get) => ({
         for (const e of batch) {
           const list = changed.get(e.chatId) ?? s.events[e.chatId];
           if (list) changed.set(e.chatId, appendEvent(list, e));
+          else loadingLive.get(e.chatId)?.push(e);
         }
         return changed.size ? { events: { ...s.events, ...Object.fromEntries(changed) } } : s;
       });
@@ -216,15 +284,37 @@ export const useStore = create<State>((set, get) => ({
       get().toggle(`p${chat.projectId}`, true);
       if (sel.node) get().toggle(`c${chat.id}`, true);
     }
-    if (!get().events[sel.chatId]) {
-      const [events, consults, agents] = await Promise.all([api.loadEvents(sel.chatId), api.listConsults(sel.chatId), api.listAgents(sel.chatId)]);
-      set((s) => ({
-        events: { ...s.events, [sel.chatId]: events },
-        consults: { ...s.consults, [sel.chatId]: consults },
-        agents: { ...s.agents, [sel.chatId]: agents },
-      }));
-    }
+    if (!get().events[sel.chatId]) await loadFirstPage(sel.chatId);
     if (chat?.unread) void api.markViewed(sel.chatId);
+  },
+
+  async loadOlder(chatId) {
+    const history = get().history[chatId];
+    if (!history?.hasMore || history.loadingOlder) return false;
+    set((s) => ({ history: { ...s.history, [chatId]: { ...history, loadingOlder: true } } }));
+    try {
+      const page = await api.loadEventsPage(chatId, history.start);
+      set((s) => {
+        const current = s.history[chatId];
+        const events = s.events[chatId];
+        if (!current || !events) return s;
+        const merged = prependPage({ ...current, events }, page);
+        return { events: { ...s.events, [chatId]: merged.events }, history: { ...s.history, [chatId]: { context: merged.context, start: merged.start, hasMore: merged.hasMore } } };
+      });
+      return true;
+    } catch (e) {
+      get().toast(`이전 기록을 불러오지 못했습니다: ${errorMessage(e)}`);
+      set((s) => (s.history[chatId] ? { history: { ...s.history, [chatId]: { ...s.history[chatId], loadingOlder: false } } } : s));
+      return false;
+    }
+  },
+
+  async loadUntil(chatId, found) {
+    for (;;) {
+      const events = get().events[chatId];
+      if (!events || found(events) || !get().history[chatId]?.hasMore) return;
+      if (!(await get().loadOlder(chatId))) return;
+    }
   },
 
   async refreshCli() {
@@ -279,7 +369,7 @@ export const useStore = create<State>((set, get) => ({
   async createChat(projectId) {
     try {
       const c = await api.createChat(projectId);
-      set((s) => ({ chats: [c, ...s.chats], events: { ...s.events, [c.id]: [] }, consults: { ...s.consults, [c.id]: [] }, agents: { ...s.agents, [c.id]: [] } }));
+      set((s) => ({ chats: [c, ...s.chats], events: { ...s.events, [c.id]: [] }, history: { ...s.history, [c.id]: { context: [], start: 0, hasMore: false } }, consults: { ...s.consults, [c.id]: [] }, agents: { ...s.agents, [c.id]: [] } }));
       await get().select({ chatId: c.id });
       return c;
     } catch (e) {

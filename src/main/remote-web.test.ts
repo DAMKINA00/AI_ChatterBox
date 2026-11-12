@@ -35,6 +35,7 @@ async function setup(t: { after(fn: () => unknown): void }, results: Record<stri
       if (channel in results) return results[channel];
       if (channel === "chats:list") return [{ id: 1, title: "작업", status: "working" }];
       if (channel === "projects:list") return [{ id: 9, name: "P", archived: false, folder: "D:\\secret", settings: {} }];
+      if (channel === "chats:eventsPage") return { events: [], start: 0, hasMore: false, ...(args[1] === undefined ? { context: [] } : {}) };
       if (channel === "chats:approve") return "once";
       if (channel === "chats:answerAsk") return true;
       return [];
@@ -270,7 +271,7 @@ test("reads chats/history and forwards instructions, stop, approvals and answers
   assert.equal((await post("/api/chats/1/approve", { approvalId: "a1", decision: "deny" })).status, 200);
   assert.equal((await post("/api/chats/1/approve", { approvalId: "a1", decision: "always" })).status, 400);
   assert.equal((await post("/api/chats/1/answer", { askId: "q1", answer: "A안" })).status, 200);
-  assert.deepEqual(s.calls.filter(([c]) => !["chats:list", "projects:list", "chats:events", "chats:agents", "chats:consults"].includes(c)), [
+  assert.deepEqual(s.calls.filter(([c]) => !["chats:list", "projects:list", "chats:eventsPage", "chats:agents", "chats:consults"].includes(c)), [
     ["remote:send", [1, "새 지시", [], "now"]],
     ["chats:stop", [1]],
     ["chats:approve", [1, "a1", "deny"]],

@@ -12,6 +12,7 @@ import {
   type RemoteAuditEntry, type RemoteAuthProvider, type RemoteProjectRoot, type RemoteWebAction, type RemoteWebInput, type RemoteWebLoginFailure, type RemoteWebSession, type RemoteWebStatus,
 } from "../shared/remote-web";
 import { HttpError, RemoteFeatures, folderId, stripLocalPaths } from "./remote-features";
+import type { EventPage } from "../shared/event-page";
 import { DSM_DEFAULT_URL, DsmProvider, normalizeDsmUrl, normalizeFingerprint, probeDsm, type AuthProvider, type DsmSettings, type LoginResult } from "./remote-auth";
 
 export type CoreCall = (channel: string, args: unknown[]) => Promise<any>;
@@ -690,6 +691,12 @@ export class RemoteWeb {
     }
     // Extended API (docs/remote-web-features.md); same session/CSRF/Origin/Host checks already passed.
     if (await this.features.handle(method, url, req, res, { key: session.key, user: session.user, ip: session.ip })) return;
+    const stats = /^\/api\/chats\/(\d{1,12})\/stats-events$/.exec(path);
+    if (stats) {
+      // Run statistics of a chat loaded in pages: every event in the minimal timing form (no tool text).
+      if (method !== "GET") throw new HttpError(405, "지원하지 않는 요청입니다.");
+      return this.send(res, 200, { events: await call("chats:statsEvents", [this.chatId(stats[1])]) });
+    }
     const m = /^\/api\/chats\/([^/]+)(?:\/(stop|approve|answer))?$/.exec(path);
     if (!m) throw new HttpError(404, "없는 주소입니다.");
     const id = this.chatId(m[1]);
@@ -699,9 +706,15 @@ export class RemoteWeb {
       const chats = await call("chats:list", []) as { id: number }[];
       const chat = chats.find(c => c.id === id);
       if (!chat) throw new HttpError(404, "채팅이 없습니다.");
-      // shortcut: the whole history is sent at once (as the desktop window loads it); paginate if chats grow very large.
-      const [events, agents, consults] = await Promise.all([call("chats:events", [id]), call("chats:agents", [id]), call("chats:consults", [id])]);
-      return this.send(res, 200, { seq, chat, events: stripLocalPaths(events), agents, consults });
+      // History comes in pages (shared/event-page.ts): the newest one here, older ones with ?before=<event id>.
+      const before = url.searchParams.get("before");
+      if (before !== null) {
+        if (!/^\d{1,15}$/.test(before)) throw new HttpError(400, "기록 위치가 올바르지 않습니다.");
+        const page = await call("chats:eventsPage", [id, Number(before)]) as EventPage;
+        return this.send(res, 200, { ...page, events: stripLocalPaths(page.events) });
+      }
+      const [page, agents, consults] = await Promise.all([call("chats:eventsPage", [id]) as Promise<EventPage>, call("chats:agents", [id]), call("chats:consults", [id])]);
+      return this.send(res, 200, { seq, chat, events: stripLocalPaths(page.events), context: stripLocalPaths(page.context ?? []), start: page.start, hasMore: page.hasMore, agents, consults });
     }
     if (method !== "POST" || !m[2]) throw new HttpError(405, "지원하지 않는 요청입니다.");
     const body = await this.body(req);

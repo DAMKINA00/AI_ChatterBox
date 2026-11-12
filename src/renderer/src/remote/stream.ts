@@ -2,9 +2,14 @@
 // number (its SSE id); a snapshot carries the number reached before it was read. Messages that arrive
 // while the snapshot loads are buffered and replayed on top of it.
 import type { Chat, ChatAgent, Consult, TimelineEvent } from "../../../shared/types";
+import { prependPage, type EventPage } from "../../../shared/event-page";
 import { appendEvent } from "../timeline";
 
-export interface Detail { events: TimelineEvent[]; agents: ChatAgent[]; consults: Consult[] }
+/**
+ * Open chat: the loaded history pages (newest first load, older ones on demand) and its team.
+ * context/start/hasMore follow shared/event-page.ts; context only feeds pinned state (plan, worker state).
+ */
+export interface Detail { events: TimelineEvent[]; agents: ChatAgent[]; consults: Consult[]; context?: TimelineEvent[]; start?: number; hasMore?: boolean }
 export interface StreamMessage { seq: number; channel: string; args: unknown[] }
 
 /** Apply one stream message for the open chat. */
@@ -35,7 +40,7 @@ const closesStream = (ev: TimelineEvent) => ev.event.type === "text" || ev.event
  * - Worker/consult updates newer than the snapshot are replayed in order.
  */
 export function mergeSnapshot(snapshot: Detail & { seq: number }, buffered: StreamMessage[], chatId: number): Detail {
-  let detail: Detail = { events: snapshot.events, agents: snapshot.agents, consults: snapshot.consults };
+  let detail: Detail = { events: snapshot.events, agents: snapshot.agents, consults: snapshot.consults, context: snapshot.context ?? [], start: snapshot.start ?? 0, hasMore: !!snapshot.hasMore };
   for (const message of buffered) {
     if (message.channel === "chat:event") {
       const ev = message.args[0] as TimelineEvent;
@@ -76,3 +81,14 @@ export function applyChatUpdate(current: Chat[], versions: Map<number, number>, 
   versions.set(chat.id, seq);
   return current.some(c => c.id === chat.id) ? current.map(c => (c.id === chat.id ? chat : c)) : [chat, ...current];
 }
+
+/** An older history page (immutable events, so no stream sequence is involved) put in front of the loaded ones. */
+export function prependOlder(detail: Detail, page: EventPage): Detail {
+  if (!detail.hasMore || detail.start === undefined) return detail;
+  const merged = prependPage({ events: detail.events, context: detail.context ?? [], start: detail.start, hasMore: true }, page);
+  return { ...detail, events: merged.events, context: merged.context, start: merged.start, hasMore: merged.hasMore };
+}
+
+/** Context plus loaded events, for state that depends on the whole history. */
+export const detailStateEvents = (detail: Detail | undefined): TimelineEvent[] =>
+  !detail ? [] : detail.context?.length ? [...detail.context, ...detail.events] : detail.events;

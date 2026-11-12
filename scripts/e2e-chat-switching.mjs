@@ -33,8 +33,8 @@ try {
   for (let i = 300; i < 350; i++) add({ type: "text", text: `history message ${i}` });
   await app.evaluate(({ ipcMain, BrowserWindow }, { a, b, events }) => {
     globalThis.switchLoads = [];
-    for (const channel of ["chats:events", "cli:info", "usage:get", "chats:approve"]) ipcMain.removeHandler(channel);
-    ipcMain.handle("chats:events", (_e, id) => { globalThis.switchLoads.push(id); return id === a ? events : [{ id: 9999, chatId: b, at: Date.now(), node: "orch", role: "orch", event: { type: "text", text: "other chat only" } }]; });
+    for (const channel of ["chats:eventsPage", "cli:info", "usage:get", "chats:approve"]) ipcMain.removeHandler(channel);
+    ipcMain.handle("chats:eventsPage", (_e, id) => { globalThis.switchLoads.push(id); const list = id === a ? events : [{ id: 9999, chatId: b, at: Date.now(), node: "orch", role: "orch", event: { type: "text", text: "other chat only" } }]; return { events: list, start: list[0]?.id ?? 0, hasMore: false, context: [] }; });
     ipcMain.handle("cli:info", () => []);
     ipcMain.handle("usage:get", () => ({}));
     ipcMain.handle("chats:approve", (_e, chatId, id, decision) => {

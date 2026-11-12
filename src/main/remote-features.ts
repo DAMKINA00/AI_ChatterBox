@@ -4,7 +4,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmdirSync, statSync } from "node:fs";
 import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
-import { DEFAULT_SETTINGS, type AgentKind, type ApprovalMode, type AttachmentRef, type Chat, type CliAccountStatus, type ModelOption, type Project, type TimelineEvent, type UsageInfo } from "../shared/types";
+import { DEFAULT_SETTINGS, type AgentKind, type ApprovalMode, type AttachmentRef, type Chat, type CliAccountStatus, type ModelOption, type Project, type UsageInfo } from "../shared/types";
 import { safeUsageText, usageGroups } from "../shared/usage-view";
 import type { AIStudioUsageReport } from "../shared/aistudio";
 import {
@@ -63,17 +63,6 @@ export const remoteSafeText = safeUsageText;
 export function anonymizeAccounts(report: AIStudioUsageReport): AIStudioUsageReport {
   if (!report?.groups?.account) return report;
   return { ...report, groups: { ...report.groups, account: report.groups.account.map((g, i) => ({ ...g, key: `계정 ${i + 1}` })) } };
-}
-
-/** Ids of attachment refs anywhere inside an event (user attachments, consult attachments, generated images). */
-function attachmentIds(value: unknown, out = new Set<number>()): Set<number> {
-  if (Array.isArray(value)) value.forEach(v => attachmentIds(v, out));
-  else if (value && typeof value === "object") {
-    const o = value as Record<string, unknown>;
-    if (typeof o.id === "number" && typeof o.mime === "string" && typeof o.name === "string") out.add(o.id);
-    for (const v of Object.values(o)) attachmentIds(v, out);
-  }
-  return out;
 }
 
 const toRemoteUpload = ({ id, uuid, name, mime, size }: RemoteUpload): RemoteUpload => ({ id, uuid, name, mime, size });
@@ -457,8 +446,8 @@ export class RemoteFeatures {
     const raw = url.searchParams.get("chat") ?? "";
     if (!/^\d{1,12}$/.test(raw)) throw new HttpError(400, "채팅을 지정하세요.");
     const chatId = Number(raw);
-    const events = await this.ctx.call("chats:events", [chatId]) as TimelineEvent[];
-    if (!events.some(e => attachmentIds(e.event).has(id))) {
+    // A targeted lookup: loading the whole history per image would read hundreds of MB in long chats.
+    if (!(await this.ctx.call("chats:hasAttachment", [chatId, id]))) {
       const uuid = url.searchParams.get("uuid");
       if (!(await this.uploads(chatId)).some(u => u.id === id && u.uuid === uuid)) throw new HttpError(404, "첨부가 없습니다.");
     }

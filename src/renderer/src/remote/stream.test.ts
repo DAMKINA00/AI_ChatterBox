@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { Chat, Consult, TimelineEvent } from "../../../shared/types";
 import { buildItems } from "../timeline";
 import { withoutDeleted } from "./logic";
-import { applyChatUpdate, applyMessage, mergeChats, mergeSnapshot, type StreamMessage } from "./stream";
+import { applyChatUpdate, applyMessage, detailStateEvents, mergeChats, mergeSnapshot, prependOlder, type StreamMessage } from "./stream";
 
 const ev = (id: number, event: TimelineEvent["event"], chatId = 1): TimelineEvent => ({ id, chatId, node: "orch", role: "orch", at: id, event });
 const approval = ev(12, { type: "approval_request", request: { id: "a1", role: "w1", title: "명령 실행", detail: "npm test", risk: "low" } });
@@ -94,4 +94,20 @@ test("a chat list snapshot read before chat:deleted does not bring the chat back
   // A late single-chat snapshot (partial merge) is filtered the same way.
   chats = withoutDeleted(mergeChats(chats, versions, [chat(2)], 4, true), deleted);
   assert.deepEqual(chats.map(c => c.id), [1]);
+});
+
+test("history pages: the snapshot keeps its paging fields, an older page goes in front, live updates keep flowing", () => {
+  const snapshot = { seq: 5, events: [ev(20, { type: "text", text: "최근" })], agents: [], consults: [],
+    context: [ev(3, { type: "user", text: "/plan 예전 지시", attachments: [] })], start: 20, hasMore: true };
+  let detail = mergeSnapshot(snapshot, [msg(6, "chat:event", ev(21, { type: "text", text: "새 응답" }))], 1);
+  assert.equal(detail.hasMore, true);
+  assert.equal(detail.start, 20);
+  assert.deepEqual(detailStateEvents(detail).map(e => e.id), [3, 20, 21]);
+  detail = prependOlder(detail, { events: [ev(3, { type: "user", text: "/plan 예전 지시", attachments: [] }), ev(10, { type: "text", text: "예전" })], start: 3, hasMore: false });
+  assert.deepEqual(detail.events.map(e => e.id), [3, 10, 20, 21]);
+  assert.deepEqual(detail.context, []);
+  assert.equal(detail.hasMore, false);
+  // Messages after the merge still apply on top (seq handling is unchanged).
+  detail = applyMessage(detail, 1, msg(7, "chat:event", ev(22, { type: "text", text: "더 새로운" })));
+  assert.deepEqual(detail.events.map(e => e.id), [3, 10, 20, 21, 22]);
 });

@@ -1,7 +1,7 @@
 // Remote web UI served by src/main/remote-web.ts: chats (create, rename, archive, delete, search), live
 // timeline, instructions and commands, approvals, uploads, projects, usage and the page theme.
 // Reuses the desktop timeline fold (buildItems/planOf/appendEvent); Markdown is rendered without raw HTML.
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   ArrowLeft, BarChart3, Flag, FolderKanban, LoaderCircle, LogOut, Monitor, Moon, Pause, Play,
   Plus, Search, Settings2, Square, Sun, Users, X,
@@ -19,7 +19,8 @@ import { ChatSettings } from "./ChatSettings";
 import { Composer } from "./Composer";
 import { chatGroups, formatBytes, INLINE_IMAGE, nextTheme, THEME_LABEL, withoutDeleted, type ProjectRef } from "./logic";
 import { ProjectsSheet, useProjects } from "./Projects";
-import { applyChatUpdate, applyMessage, mergeChats, mergeSnapshot, type Detail, type StreamMessage } from "./stream";
+import { applyChatUpdate, applyMessage, detailStateEvents, mergeChats, mergeSnapshot, prependOlder, type Detail, type StreamMessage } from "./stream";
+import type { EventPage } from "../../../shared/event-page";
 import { useTheme } from "./theme";
 import { Btn, Card, Clip, ConfirmHost, errorText, FIELD, Md } from "./ui";
 import { UsageSheet } from "./Usage";
@@ -189,7 +190,7 @@ function Workspace({ onLoggedOut }: { onLoggedOut: () => void }) {
         <ChatList chats={chats} projects={projects} selected={selected} onSelect={setSelected} onNewChat={id => void newChat(id)} onError={fail} />
       </aside>
       <main className={cn("min-w-0 flex-1", !selected && "hidden md:block")}>
-        {chat ? <ChatPane key={chat.id} chat={chat} detail={detail} sourceExists={!!chat.fork && chats.some(c => c.id === chat.fork!.sourceChatId)}
+        {chat ? <ChatPane key={chat.id} chat={chat} detail={detail} onOlder={page => setDetail(d => (d ? prependOlder(d, page) : d))} sourceExists={!!chat.fork && chats.some(c => c.id === chat.fork!.sourceChatId)}
           onOpenChat={id => { setSelected(id); void loadChats(); }} onBack={() => setSelected(null)} onSettings={() => setSheet("chat")} onError={fail} />
           : <div className="flex h-full items-center justify-center text-muted-foreground">채팅을 선택하세요.</div>}
       </main>
@@ -261,14 +262,32 @@ function StatusBadge({ status }: { status: ChatStatus }) {
     status === "error" && "border-destructive/50 text-destructive", status === "done" && "text-success")}>{STATUS_LABEL[status]}</span>;
 }
 
-function ChatPane({ chat, detail, sourceExists, onOpenChat, onBack, onSettings, onError }: { chat: Chat; detail?: Detail; sourceExists: boolean; onOpenChat: (id: number) => void; onBack: () => void; onSettings: () => void; onError: (e: unknown) => void }) {
+function ChatPane({ chat, detail, onOlder, sourceExists, onOpenChat, onBack, onSettings, onError }: { chat: Chat; detail?: Detail; onOlder: (page: EventPage) => void; sourceExists: boolean; onOpenChat: (id: number) => void; onBack: () => void; onSettings: () => void; onError: (e: unknown) => void }) {
   const [statsOpen, setStatsOpen] = useState(false);
   const live = chat.status === "working" || chat.status === "approval";
   const items = useMemo(() => (detail ? buildItems(detail.events, undefined, live) : []), [detail, live]);
-  const plan = useMemo(() => (detail ? planOf(detail.events) : null), [detail]);
+  // Pinned state (plan, worker state) covers the whole history: loaded pages plus the older context.
+  const all = useMemo(() => detailStateEvents(detail), [detail]);
+  const plan = useMemo(() => (detail ? planOf(all) : null), [detail, all]);
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
-  useEffect(() => { if (stick.current) scroller.current?.scrollTo({ top: scroller.current.scrollHeight }); }, [items]);
+  // Height before an older page went in on top, so the reader stays where they were.
+  const before = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (el && before.current !== null) { el.scrollTop += el.scrollHeight - before.current; before.current = null; return; }
+    if (stick.current) el?.scrollTo({ top: el.scrollHeight });
+  }, [items]);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const loadOlder = async () => {
+    if (!detail?.hasMore || detail.start === undefined || loadingOlder) return;
+    setLoadingOlder(true);
+    try {
+      const page = await request<EventPage>(url("/api/chats/:id", chat.id, { before: String(detail.start) }));
+      if (page.events.length) before.current = scroller.current?.scrollHeight ?? null;
+      onOlder(page);
+    } catch (e) { onError(e); } finally { setLoadingOlder(false); }
+  };
   const [pending, setPending] = useState(false);
   const act = async (path: string, body: unknown = {}) => {
     setPending(true);
@@ -289,7 +308,7 @@ function ChatPane({ chat, detail, sourceExists, onOpenChat, onBack, onSettings, 
         <Btn variant="ghost" disabled={!detail} onClick={() => setStatsOpen(true)} aria-label="실행 통계" title="실행 통계"><BarChart3 /></Btn>
         <Btn variant="ghost" onClick={onSettings} aria-label="채팅 설정" title="채팅 설정"><Settings2 /></Btn>
       </header>
-      {statsOpen && detail && <RunStatsSheet chat={chat} events={detail.events} agents={agents} consults={detail.consults} onClose={() => setStatsOpen(false)} />}
+      {statsOpen && detail && <PagedRunStats chat={chat} detail={detail} agents={agents} onError={onError} onClose={() => setStatsOpen(false)} />}
       <ForkOriginBar chat={chat} exists={sourceExists} onOpen={onOpenChat} />
       {chat.status === "interrupted" && (
         <div className="flex flex-wrap items-center gap-2 border-b border-warning/50 bg-warning/10 px-3 py-2 text-[13px] md:px-6">
@@ -299,14 +318,35 @@ function ChatPane({ chat, detail, sourceExists, onOpenChat, onBack, onSettings, 
         </div>
       )}
       <GoalBar chat={chat} pending={pending} onClear={() => void command("goal", "clear")} />
-      <TeamPanel chat={chat} agents={agents} consults={detail?.consults ?? []} events={detail?.events ?? []} items={items} plan={plan} pending={pending} onPlan={name => void command(name)} />
+      <TeamPanel chat={chat} agents={agents} consults={detail?.consults ?? []} events={all} items={items} plan={plan} pending={pending} onPlan={name => void command(name)} />
       <div ref={scroller} onScroll={e => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; }} className="flex-1 overflow-y-auto px-3 py-4 md:px-6">
         {!detail ? <div className="flex justify-center p-6 text-muted-foreground"><LoaderCircle className="size-5 animate-spin" /></div>
-          : <div className="mx-auto grid max-w-3xl gap-3">{items.map(item => <ItemView key={item.key} item={item} chat={chat} agents={agents} consults={detail?.consults ?? []} live={live} onError={onError} onForked={c => onOpenChat(c.id)} />)}</div>}
+          : <div className="mx-auto grid max-w-3xl gap-3">
+            {detail.hasMore && <Btn variant="ghost" className="justify-self-center" disabled={loadingOlder} onClick={() => void loadOlder()}>{loadingOlder ? <LoaderCircle className="animate-spin" /> : null} 이전 기록 불러오기</Btn>}
+            {items.map(item => <ItemView key={item.key} item={item} chat={chat} agents={agents} consults={detail?.consults ?? []} live={live} onError={onError} onForked={c => onOpenChat(c.id)} />)}</div>}
       </div>
       <Composer chat={chat} onError={onError} />
     </div>
   );
+}
+
+/** Run statistics need every event; a chat loaded in pages fetches them in the minimal timing form. */
+function PagedRunStats({ chat, detail, agents, onError, onClose }: { chat: Chat; detail: Detail; agents: ChatAgent[]; onError: (e: unknown) => void; onClose: () => void }) {
+  const [stored, setStored] = useState<TimelineEvent[] | null>(null);
+  useEffect(() => {
+    if (!detail.hasMore) return;
+    let alive = true;
+    request<{ events: TimelineEvent[] }>(url("/api/chats/:id/stats-events", chat.id)).then(r => { if (alive) setStored(r.events); }).catch(onError);
+    return () => { alive = false; };
+  }, [chat.id, detail.hasMore, onError]);
+  const events = useMemo(() => {
+    if (!detail.hasMore) return detail.events;
+    if (!stored) return null;
+    const last = stored.at(-1)?.id ?? 0;
+    return [...stored, ...detail.events.filter(e => !e.id || e.id > last)];
+  }, [detail, stored]);
+  if (!events) return null;
+  return <RunStatsSheet chat={chat} events={events} agents={agents} consults={detail.consults} onClose={onClose} />;
 }
 
 const GOAL_LABEL = { active: "진행 중", complete: "완료", blocked: "막힘", paused: "멈춤" } as const;

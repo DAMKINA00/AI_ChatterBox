@@ -27,6 +27,7 @@ import {
   type ReviewResult,
   type TimelineEvent,
 } from "../shared/types";
+import { CLIP_AT, CONTEXT_EVENT_TYPES, EVENT_PAGE_LIMITS, lightEvent, QUIET_EVENT_TYPES, statsEvent, type EventPage } from "../shared/event-page";
 
 // v1 tables (workspaces, sessions, events) are left alone; V3 migrates them.
 const SCHEMA = `
@@ -86,6 +87,8 @@ CREATE TABLE IF NOT EXISTS chat_events (
   payload_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS chat_events_chat ON chat_events(chat_id, id);
+-- History pages look up context/anchor events by type without reading tool output.
+CREATE INDEX IF NOT EXISTS chat_events_chat_type ON chat_events(chat_id, type, id);
 CREATE TABLE IF NOT EXISTS attachments (
   id INTEGER PRIMARY KEY,
   chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
@@ -764,6 +767,66 @@ export class Store {
       .prepare("SELECT * FROM chat_events WHERE chat_id = ? ORDER BY id")
       .all(chatId)
       .map((r: Row) => ({ id: r.id, chatId: r.chat_id, node: r.node, role: r.role, at: r.ts, event: JSON.parse(r.payload_json) }));
+  }
+  /**
+   * One page of history, newest first in selection and id order in the result (see shared/event-page.ts).
+   * `before` = load events older than this id; omitted = the newest page, which also carries the context.
+   */
+  eventsPage(chatId: number, before?: number): EventPage {
+    const upper = before ?? Number.MAX_SAFE_INTEGER;
+    const rows: Row[] = [];
+    let visible = 0;
+    let chars = 0;
+    // iterate() stops reading as soon as a limit is reached.
+    for (const r of this.db.prepare("SELECT * FROM chat_events WHERE chat_id = ? AND id < ? ORDER BY id DESC LIMIT ?").iterate(chatId, upper, EVENT_PAGE_LIMITS.events) as Iterable<Row>) {
+      rows.push(r);
+      const size = (r.payload_json as string).length;
+      chars += r.type === "tool_call" || r.type === "tool_result" || r.type === "approval_auto" ? Math.min(size, CLIP_AT) : size;
+      if (!QUIET_EVENT_TYPES.has(r.type as string)) visible++;
+      if (visible >= EVENT_PAGE_LIMITS.visible || chars >= EVENT_PAGE_LIMITS.chars) break;
+    }
+    rows.reverse();
+    const toEvent = (r: Row): TimelineEvent => ({ id: r.id, chatId: r.chat_id, node: r.node, role: r.role, at: r.ts, event: lightEvent(JSON.parse(r.payload_json)) });
+    if (!rows.length) return { events: [], start: upper, hasMore: false, ...(before === undefined ? { context: [] } : {}) };
+    const start = rows[0].id as number;
+    const hasMore = !!this.db.prepare("SELECT 1 FROM chat_events WHERE chat_id = ? AND id < ? LIMIT 1").get(chatId, start);
+    // Consults still open where the page begins: their start event gives the page's worker events a card.
+    const pageConsults = new Set(rows.flatMap(r => (/^consult:(\d+)$/.exec(r.node)?.[1] ? [Number(r.node.slice(8))] : [])));
+    let anchors: TimelineEvent[] = [];
+    if (hasMore && pageConsults.size) {
+      const ended = new Set((this.db.prepare("SELECT json_extract(payload_json, '$.consultId') AS consult FROM chat_events WHERE chat_id = ? AND type = 'consult_end' AND id < ?").all(chatId, start) as Row[]).map(r => r.consult));
+      anchors = (this.db.prepare("SELECT * FROM chat_events WHERE chat_id = ? AND type = 'consult_start' AND id < ? AND json_extract(payload_json, '$.consultId') IN (SELECT value FROM json_each(?)) ORDER BY id").all(chatId, start, JSON.stringify([...pageConsults])) as Row[])
+        .map(toEvent)
+        .filter(e => e.event.type === "consult_start" && !ended.has(e.event.consultId));
+    }
+    const page: EventPage = { events: [...anchors, ...rows.map(toEvent)], start, hasMore };
+    if (before === undefined) {
+      const types = CONTEXT_EVENT_TYPES.map(() => "?").join(",");
+      page.context = hasMore ? (this.db.prepare(`SELECT * FROM chat_events WHERE chat_id = ? AND id < ? AND type IN (${types}) ORDER BY id`).all(chatId, start, ...CONTEXT_EVENT_TYPES) as Row[]).map(toEvent) : [];
+    }
+    return page;
+  }
+  /** One event with its full payload (a history page may have shortened it). */
+  event(chatId: number, eventId: number): TimelineEvent | undefined {
+    const r = this.db.prepare("SELECT * FROM chat_events WHERE chat_id = ? AND id = ?").get(chatId, eventId) as Row | undefined;
+    return r ? { id: r.id, chatId: r.chat_id, node: r.node, role: r.role, at: r.ts, event: JSON.parse(r.payload_json) } : undefined;
+  }
+  /** Every event in the minimal form run statistics need (no tool text), for chats loaded in pages. */
+  statsEvents(chatId: number): TimelineEvent[] {
+    // Payloads of other types are not read (counts and times still include them).
+    const rows = this.db.prepare(`SELECT id, chat_id, node, role, ts, type, CASE WHEN type IN ('tool_call','tool_result','approval_request','approval_resolved','approval_auto','turn_end') THEN payload_json END AS payload_json
+      FROM chat_events WHERE chat_id = ? ORDER BY id`).all(chatId) as Row[];
+    return rows.map(r => statsEvent({ id: r.id, chatId: r.chat_id, node: r.node, role: r.role, at: r.ts, event: r.payload_json ? JSON.parse(r.payload_json) : { type: "notice", text: "" } }));
+  }
+  /** Whether an attachment appears in this chat's history (the event types that carry attachments). */
+  chatHasAttachment(chatId: number, attachmentId: number): boolean {
+    const rows = this.db.prepare("SELECT payload_json FROM chat_events WHERE chat_id = ? AND type IN ('user','consult_start','fork_context','image_generation') AND instr(payload_json, ?) > 0")
+      .all(chatId, `"id":${attachmentId},`) as Row[];
+    return rows.some(r => {
+      const ev = JSON.parse(r.payload_json) as AgentEvent;
+      const refs = ev.type === "image_generation" ? (ev.attachment ? [ev.attachment] : []) : "attachments" in ev ? ev.attachments : [];
+      return refs.some(a => a.id === attachmentId);
+    });
   }
   hasUserEvent(chatId: number): boolean {
     return !!this.db.prepare("SELECT 1 FROM chat_events WHERE chat_id = ? AND type = 'user' LIMIT 1").get(chatId);

@@ -3,7 +3,7 @@ import { ClipboardCheck } from "lucide-react";
 import type { Consult, ReviewResult } from "../../../shared/types";
 import { cn } from "../lib/utils";
 import { findingLocation, NO_STRUCTURED_REVIEW, reviewCountsText, reviewDigest, reviewRunNote, reviewsFromEvents, reviewTotalsText, SEVERITY_LABEL, summarizeReviews, TEST_STATUS_LABEL, VERDICT_LABEL } from "../lib/review-summary";
-import { useStore } from "../store";
+import { stateEventsOf, useStore } from "../store";
 import { Badge } from "./ui";
 
 const VERDICT_TONE: Record<ReviewResult["verdict"], string> = {
@@ -94,8 +94,10 @@ export function ReviewResultView({ review, status, compact = false }: { review?:
 /** Team total of review consults in this chat (structured reports only; missing reports listed apart). */
 export function ReviewTotalsBar({ chatId }: { chatId: number }) {
   const consults = useStore((s) => s.consults[chatId]);
-  const events = useStore((s) => s.events[chatId]);
-  const fromEvents = useMemo(() => reviewsFromEvents(events), [events]);
+  const loaded = useStore((s) => s.events[chatId]);
+  const history = useStore((s) => s.history[chatId]);
+  // Review results of older, not yet loaded pages come with the history context.
+  const fromEvents = useMemo(() => reviewsFromEvents(stateEventsOf(loaded, history)), [loaded, history]);
   const totals = useMemo(() => summarizeReviews(consults, fromEvents), [consults, fromEvents]);
   if (!totals.total) return null;
   const { findings, tests } = totals;

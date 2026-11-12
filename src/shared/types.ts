@@ -4,6 +4,7 @@ import type { ProviderUsage } from "./usage";
 import type { AIStudioAction, AIStudioInput, AIStudioStatus, AIStudioUsageRange, AIStudioUsageReport } from "./aistudio";
 import type { DeepSeekAction, DeepSeekBalance, DeepSeekInput, DeepSeekStatus } from "./deepseek";
 import type { RemoteWebAction, RemoteWebInput, RemoteWebStatus } from "./remote-web";
+import type { EventPage } from "./event-page";
 
 export type AgentKind = "claude" | "codex" | "gemini" | "grok" | "deepseek";
 export const GEMINI_WEB_MODEL = "gemini-web-argon";
@@ -450,8 +451,9 @@ export type AgentEvent =
   | { type: "user"; text: string; attachments: AttachmentRef[]; queued?: boolean; delivery?: "now" | "next" }
   | { type: "text_delta"; text: string }
   | { type: "text"; text: string }
-  | { type: "tool_call"; id: string; name: string; input: string; diffs?: FileDiff[] }
-  | { type: "tool_result"; id: string; ok: boolean; output: string }
+  /** clipped: original length when a history page sent a shortened input/output (see shared/event-page.ts). */
+  | { type: "tool_call"; id: string; name: string; input: string; diffs?: FileDiff[]; clipped?: number }
+  | { type: "tool_result"; id: string; ok: boolean; output: string; clipped?: number }
   | { type: "file_change"; id: string; files: FileDiff[]; ok: boolean }
   | { type: "approval_request"; request: ApprovalRequest }
   | { type: "approval_resolved"; id: string; decision: ApprovalDecision | "auto" | "expired" }
@@ -610,7 +612,14 @@ export interface ChatterBoxApi {
   markViewed(id: number): Promise<void>;
   listConsults(chatId: number): Promise<Consult[]>;
   listAgents(chatId: number): Promise<ChatAgent[]>;
+  /** Whole history at once (tests and small chats only; windows use loadEventsPage). */
   loadEvents(chatId: number): Promise<TimelineEvent[]>;
+  /** Newest page (with context) when `before` is omitted, else the page before that event id. */
+  loadEventsPage(chatId: number, before?: number): Promise<EventPage>;
+  /** One event with its full payload. */
+  loadEvent(chatId: number, eventId: number): Promise<TimelineEvent | undefined>;
+  /** Every event in the minimal form run statistics need. */
+  loadStatsEvents(chatId: number): Promise<TimelineEvent[]>;
   /** Chat ids whose messages contain the text. */
   searchChats(q: string): Promise<number[]>;
   send(chatId: number, text: string, attachmentIds: number[], delivery?: "now" | "next"): Promise<void>;

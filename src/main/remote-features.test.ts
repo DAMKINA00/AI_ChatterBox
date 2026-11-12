@@ -99,7 +99,11 @@ async function setup(t: { after(fn: () => unknown): void }) {
         store.addUserEvent(chatId, { type: "user", text, attachments: store.attachmentsFor(ids) }, ids); // as chats.send does before its first await
         return;
       }
-      case "chats:events": return [...(args[0] === 1 ? [{ id: 7, chatId: 1, node: "orch", role: null, at: 1, event: { type: "user", text: "x", attachments: [state.attachments.get(50)] } }] : []), ...store.events(args[0])];
+      case "chats:events": case "chats:eventsPage": {
+        const events = [...(args[0] === 1 ? [{ id: 7, chatId: 1, node: "orch", role: null, at: 1, event: { type: "user", text: "x", attachments: [state.attachments.get(50)] } }] : []), ...store.events(args[0])];
+        return channel === "chats:events" ? events : { events, start: events[0]?.id ?? 0, hasMore: false, ...(args[1] === undefined ? { context: [] } : {}) };
+      }
+      case "chats:hasAttachment": return (args[0] === 1 && args[1] === 50) || store.chatHasAttachment(args[0], args[1]);
       case "chats:agents": case "chats:consults": return [];
       case "models:list": return args[0] === "claude" ? [{ id: "opus", label: "Opus" }, { id: "sonnet", label: "Sonnet" }] : [{ id: "m1", label: "M1" }];
       case "projects:create": { const p = { id: state.nextId++, name: args[0].name, folder: args[0].folder, archived: false, createdAt: 2, settings: args[0].settings }; state.projects.push(p); return p; }

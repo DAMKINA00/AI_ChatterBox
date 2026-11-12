@@ -20,7 +20,8 @@ export type Item =
   | { kind: "message"; key: string; role: Role; node: NodeId; text: string; streaming: boolean; expression: AgentExpression; at: number; eventId?: number; room?: true; origin?: "result" }
   /** Read-only transcript a forked chat started from. */
   | { kind: "fork"; key: string; text: string; attachments: AttachmentRef[]; at: number }
-  | { kind: "tool"; key: string; role: Role; id: string; name: string; input: string; diffs?: FileDiff[]; result?: { ok: boolean; output: string } }
+  /** inputClipped/result.clipped: a history page shortened the text; callEventId/eventId fetch the full event. */
+  | { kind: "tool"; key: string; role: Role; id: string; name: string; input: string; diffs?: FileDiff[]; callEventId?: number; inputClipped?: number; result?: { ok: boolean; output: string; eventId?: number; clipped?: number } }
   | { kind: "files"; key: string; role: Role; files: FileDiff[]; ok: boolean }
   | { kind: "approval"; key: string; request: ApprovalRequest; decision?: ApprovalDecision | "auto" | "expired" }
   | { kind: "auto"; key: string; request: ApprovalRequest; decision: "allow" | "deny"; reason: string; reused?: boolean }
@@ -442,12 +443,12 @@ export function apply(items: Item[], e: TimelineEvent, expression?: AgentExpress
     case "tool_call":
       // The orchestrator's consult/ask tools and expression helper are not shown as timeline cards.
       if (ev.name.includes("chatterbox_bridge") || ev.name === "set_expression" || ev.name === "mcp__chatterbox_bridge__set_expression") return closeStream(items, role, node);
-      return [...closeStream(items, role, node), { kind: "tool", key: key, role, id: ev.id, name: ev.name, input: ev.input, diffs: ev.diffs }];
+      return [...closeStream(items, role, node), { kind: "tool", key: key, role, id: ev.id, name: ev.name, input: ev.input, diffs: ev.diffs, ...(ev.clipped ? { callEventId: e.id, inputClipped: ev.clipped } : {}) }];
     case "tool_result": {
       const i = items.findLastIndex((x) => x.kind === "tool" && x.id === ev.id);
       if (i < 0) return items;
       const copy = items.slice();
-      copy[i] = { ...(copy[i] as Extract<Item, { kind: "tool" }>), result: { ok: ev.ok, output: ev.output } };
+      copy[i] = { ...(copy[i] as Extract<Item, { kind: "tool" }>), result: { ok: ev.ok, output: ev.output, ...(ev.clipped ? { eventId: e.id, clipped: ev.clipped } : {}) } };
       return copy;
     }
     case "file_change":

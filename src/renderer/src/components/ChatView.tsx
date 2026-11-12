@@ -21,7 +21,7 @@ import {
   type TimelineEvent,
 } from "../../../shared/types";
 import { api, cn, errorMessage } from "../lib/utils";
-import { useStore } from "../store";
+import { retryHistory, stateEventsOf, useStore } from "../store";
 import { buildItems, chatTimelines, latestExpression, planOf } from "../timeline";
 import { GoalBar, PlanHistory, PlanPanel } from "./PlanGoal";
 import { planHistory } from "../lib/plan-history";
@@ -54,16 +54,20 @@ import { RunStatsDialog } from "./RunStats";
 
 export function ChatView({ chat, project, node }: { chat: Chat; project: Project; node?: NodeId }) {
   const events = useStore((s) => s.events[chat.id]);
+  const history = useStore((s) => s.history[chat.id]);
+  const loadError = useStore((s) => s.loadErrors[chat.id]);
+  // Pinned state reads the whole history: the loaded pages plus the older context events.
+  const all = useMemo(() => stateEventsOf(events, history), [events, history]);
   const consults = useStore((s) => s.consults[chat.id]);
   const busy = chat.status === "working" || chat.status === "approval";
   const items = useMemo(() => events ? chatTimelines.build(chat.id, events, node, busy) : [], [chat.id, events, node, busy]);
-  const instructionAt = useMemo(() => latestInstructionAt(events ?? [], chat.createdAt), [events, chat.createdAt]);
+  const instructionAt = useMemo(() => latestInstructionAt(all, chat.createdAt), [all, chat.createdAt]);
   const [dragging, setDragging] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const composer = useRef<ComposerHandle>(null);
-  const plan = useMemo(() => planOf(events ?? []), [events]);
-  const ended = useMemo(() => planHistory(events ?? []), [events]);
+  const plan = useMemo(() => planOf(all), [all]);
+  const ended = useMemo(() => planHistory(all), [all]);
   const canAttach = !node || node === "orch";
 
   useEffect(() => {
@@ -89,8 +93,14 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
     return node === "orch" ? `${MASTER_LABEL} 대화` : roleName(node as "orch", agents);
   }, [node, consults, agents]);
   const streamRole: Role | undefined = node?.startsWith("consult:") ? consults?.find(c => c.id === Number(node.slice(8)))?.toRole : node as Role | undefined;
-  const masterExpression = useMemo(() => latestExpression(events ?? [], "orch"), [events]);
-  const announcement = useStatusAnnouncement(chat.status, events);
+  const masterExpression = useMemo(() => latestExpression(all, "orch"), [all]);
+  const announcement = useStatusAnnouncement(chat.status, all);
+  // A consult view needs the consult's own start event; older pages load until it is there.
+  useEffect(() => {
+    const consultId = node?.startsWith("consult:") ? Number(node.slice(8)) : null;
+    if (consultId === null || !history?.hasMore) return;
+    void useStore.getState().loadUntil(chat.id, (list) => list.some((e) => e.event.type === "consult_start" && e.event.consultId === consultId));
+  }, [chat.id, node, history?.hasMore]);
 
   return (
     <div
@@ -121,7 +131,8 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
       {!node && plan && <PlanPanel chat={chat} plan={plan} onRevise={() => composer.current?.setText("/plan 수정: ")} />}
       {!node && <PlanHistory history={ended} />}
       {!node && <ReviewTotalsBar chatId={chat.id} />}
-      <Timeline key={node ?? "all"} items={items} chatId={chat.id} role={streamRole} busy={busy} instructionAt={instructionAt} empty={!events?.length} loading={!events} masterView={!node || node === "orch"} mainView={!node}
+      <Timeline key={node ?? "all"} items={items} chatId={chat.id} role={streamRole} busy={busy} instructionAt={instructionAt} empty={!events?.length && !history?.hasMore} loading={!events} loadError={loadError}
+        hasOlder={!!history?.hasMore} loadingOlder={!!history?.loadingOlder} masterView={!node || node === "orch"} mainView={!node}
         searchOpen={searchOpen} searchQuery={searchQuery} onSearchQuery={setSearchQuery} onCloseSearch={() => { setSearchOpen(false); setSearchQuery(""); }} />
       {chat.status === "interrupted" && <InterruptedBanner chat={chat} />}
       {node && node !== "orch" ? (
@@ -301,7 +312,10 @@ function ChatHeader({ chat, project, nodeLabel, masterExpression, onSearch }: { 
 function TeamChips({ chat }: { chat: Chat }) {
   const agents = useStore((s) => s.agents[chat.id]);
   const consults = useStore((s) => s.consults[chat.id]);
-  const events = useStore((s) => s.events[chat.id]);
+  const loaded = useStore((s) => s.events[chat.id]);
+  const history = useStore((s) => s.history[chat.id]);
+  // Worker state, expressions and usage totals cover the whole history, not only the loaded pages.
+  const events = useMemo(() => (loaded ? stateEventsOf(loaded, history) : undefined), [loaded, history]);
   const selection = useStore((s) => s.selection);
   const select = useStore((s) => s.select);
   const ordered = useMemo(
@@ -549,7 +563,8 @@ function useStatusAnnouncement(status: ChatStatus, events: TimelineEvent[] | und
   return text;
 }
 
-function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, masterView, mainView, searchOpen, searchQuery, onSearchQuery, onCloseSearch }: { items: ReturnType<typeof buildItems>; chatId: number; role?: Role; busy: boolean; instructionAt: number; empty: boolean; loading: boolean; masterView: boolean; mainView: boolean; searchOpen: boolean; searchQuery: string; onSearchQuery: (q: string) => void; onCloseSearch: () => void }) {
+function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, loadError, hasOlder, loadingOlder, masterView, mainView, searchOpen, searchQuery, onSearchQuery, onCloseSearch }: { items: ReturnType<typeof buildItems>; chatId: number; role?: Role; busy: boolean; instructionAt: number; empty: boolean; loading: boolean; loadError?: string; hasOlder: boolean; loadingOlder: boolean; masterView: boolean; mainView: boolean; searchOpen: boolean; searchQuery: string; onSearchQuery: (q: string) => void; onCloseSearch: () => void }) {
+  const loadOlder = useCallback(() => void useStore.getState().loadOlder(chatId), [chatId]);
   const ref = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
   const stick = useRef(true);
@@ -586,6 +601,12 @@ function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, ma
     <MainTimeline.Provider value={mainView}>
     <div className="relative flex min-h-0 flex-1 flex-col">
       {searchOpen && <ChatSearch root={ref} revision={items} query={searchQuery} onQuery={onSearchQuery} onClose={onCloseSearch} />}
+      {searchOpen && hasOlder && (
+        <div className="flex items-center justify-center gap-2 border-b px-4 py-1 text-[12px] text-muted-foreground" data-testid="search-partial">
+          불러온 기록에서만 찾습니다.
+          <Button variant="ghost" size="xs" disabled={loadingOlder} onClick={loadOlder}>{loadingOlder ? <Loader2 className="animate-spin" /> : null} 이전 기록 불러오기</Button>
+        </div>
+      )}
       <div
         ref={ref}
         className="min-h-0 flex-1 overflow-y-auto"
@@ -599,14 +620,20 @@ function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, ma
         }}
       >
         <div className="mx-auto max-w-[860px] px-6 py-6">
-          {loading ? (
-            <div className="flex justify-center py-20 text-muted-foreground">
+          {loading && loadError ? (
+            <div className="flex flex-col items-center gap-3 py-20 text-center text-[13px]" role="alert" data-testid="history-error">
+              <div className="text-destructive">대화 기록을 불러오지 못했습니다.</div>
+              <div className="max-w-md break-words text-muted-foreground">{loadError}</div>
+              <Button size="sm" variant="outline" onClick={() => void retryHistory(chatId)}><RotateCcw /> 다시 시도</Button>
+            </div>
+          ) : loading ? (
+            <div className="flex justify-center py-20 text-muted-foreground" data-testid="history-loading">
               <Loader2 className="size-5 animate-spin" />
             </div>
           ) : empty ? (
             <EmptyChat />
           ) : (
-            <ItemList items={history} chatId={chatId} live={busy} />
+            <ItemList items={history} chatId={chatId} live={busy} older={hasOlder ? { loading: loadingOlder, load: loadOlder } : undefined} />
           )}
           {busy && (
             <div className="mt-4 flex items-center gap-2 text-[12px] text-muted-foreground" data-testid="working">
