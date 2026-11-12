@@ -425,7 +425,7 @@ test("#7 usage and AI Studio usage carry no emails or folders; refresh is rate l
   assert.deepEqual([Math.round(claude.display.remaining), claude.display.window, claude.display.resetsAt, claude.checkedAt], [71, "주간", 1_800_003_600, 1_800_000_000_000]);
   const off = usage.groups[1].accounts[1];
   assert.deepEqual([off.enabled, off.authStatus, off.display], [false, "required", null]);
-  assert.match(off.error, /자세한 내용은 데스크톱/, "an error quoting a local path is replaced");
+  assert.deepEqual([off.error, off.errorCode], ["CLI를 찾지 못했습니다", "not_installed"], "only a fixed text by error code goes out");
   assert.deepEqual(usage.deepseek, { state: "ready", balances: [{ currency: "USD", total: "5.20", granted: "0", toppedUp: "5.20" }] });
   assert.equal(await s.status(s.get("/api/usage?refresh=1")), 200);
   assert.equal(await s.status(s.get("/api/usage?refresh=1")), 429);

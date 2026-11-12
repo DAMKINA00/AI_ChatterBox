@@ -160,7 +160,7 @@
 ### 3.4 사용량 (B, 읽기 전용)
 | 메서드·경로 | 응답 | 코어 | 비고 |
 |---|---|---|---|
-| `GET /api/usage?refresh=0|1` | `200 RemoteUsageResponse { groups: UsageKindGroup[], deepseek? }` (2026-11-12 변경, 아래 절) | `usage:get`, `cli-accounts:list` | 데스크톱 사용량 패널과 같은 보기(`shared/usage-view.ts`). 이메일·`configDir`·경로 없음, 경로·이메일이 든 오류 문구는 대체. `refresh=1`은 세션당 60초에 1회(초과 시 429) |
+| `GET /api/usage?refresh=0|1` | `200 RemoteUsageResponse { groups: UsageKindGroup[], deepseek? }` (2026-11-12 변경, 아래 절) | `usage:get`, `cli-accounts:list` | 데스크톱 사용량 패널과 같은 보기(`shared/usage-view.ts`). 이메일·`configDir`·경로 없음, 오류는 코드별 고정 문구만, 이메일·경로·토큰처럼 보이는 라벨은 `계정 N`(docs/usage-monitor-protocol.md). `refresh=1`은 세션당 60초에 1회(초과 시 429) |
 | `GET /api/aistudio/usage?range=` | `200 { report }` | `aistudio:usage` | 읽기 전용 |
 
 ### 3.5 클라이언트 전용
@@ -354,7 +354,7 @@
   - 삭제된 계정에 남은 값이나 폐기된 Gemini CLI 값은 표시하지 않습니다.
 - `GET /api/usage` 응답이 `{ usage: UsageInfo, accounts }`에서 `{ groups, deepseek? }`로 바뀌었습니다.
   - 원본 사용량 데이터를 보내지 않습니다(Gemini 웹 상세 문구 포함).
-  - 계정 행에는 이메일·폴더가 없고, 오류 문구에 경로·이메일·URL이 있으면 일반 문구로 바꿉니다.
+  - 계정 행에는 이메일·폴더가 없습니다. 오류는 원문 대신 코드별 고정 문구만 보내고, 이메일·경로·토큰처럼 보이는 라벨은 `계정 N`으로 바꿉니다(규칙: `docs/usage-monitor-protocol.md`).
 - 함께 빌드되는 AIUsageMonitor는 자체 설정(`%LOCALAPPDATA%\AIUsageMonitor\settings.json`의 추가 계정·알림 임계값)과 자체 조회를 그대로 씁니다. 바꾸려면 그 저장소를 수정해야 하므로 선택지만 보고했습니다.
 
 ### 구현 중 계약 변경 (2026-10-30, 클로드 2호에게 통지함)
