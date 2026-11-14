@@ -6,7 +6,6 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmdirSync
 import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { DEFAULT_SETTINGS, type AgentKind, type ApprovalMode, type AttachmentRef, type Chat, type CliAccountStatus, type ModelOption, type Project, type UsageInfo } from "../shared/types";
 import { publicUsageError, publicUsageGroups, usageGroups } from "../shared/usage-view";
-import type { AIStudioUsageReport } from "../shared/aistudio";
 import {
   REMOTE_ATTACHMENT_TYPES, REMOTE_COMMANDS, REMOTE_EVENTS, REMOTE_FOLDER_NAME_PATTERN, REMOTE_LIMITS, REMOTE_NUMBER_SETTINGS,
   REMOTE_PROJECT_SETTING_KEYS, REMOTE_UPLOAD_BUDGET, REMOTE_UPLOAD_UUID, normalizeRemoteFileName,
@@ -58,7 +57,7 @@ export const folderId = (path: string) => { const s = statSync(path, { bigint: t
 
 
 /** AI Studio usage groups are keyed by account email; remote answers number them instead. */
-export function anonymizeAccounts(report: AIStudioUsageReport): AIStudioUsageReport {
+export function anonymizeAccounts(report: import("../shared/aistudio").AIStudioUsageReport): import("../shared/aistudio").AIStudioUsageReport {
   if (!report?.groups?.account) return report;
   return { ...report, groups: { ...report.groups, account: report.groups.account.map((g, i) => ({ ...g, key: `계정 ${i + 1}` })) } };
 }
@@ -189,13 +188,6 @@ export class RemoteFeatures {
       return true;
     }
     if (get && path === "/api/usage") { await this.usage(url, res, session); return true; }
-    if (get && path === "/api/aistudio/usage") {
-      const range = url.searchParams.get("range") ?? undefined;
-      if (range !== undefined && !["24h", "7d", "30d"].includes(range)) throw new HttpError(400, "지원하지 않는 기간입니다.");
-      send(res, 200, { report: anonymizeAccounts(await call("aistudio:usage", [range]) as AIStudioUsageReport) });
-      return true;
-    }
-
     let m = /^\/api\/projects\/(\d{1,12})\/update$/.exec(path);
     if (m && post) { await this.updateProject(Number(m[1]), req, res, session); return true; }
 

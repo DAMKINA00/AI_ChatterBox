@@ -3,7 +3,6 @@ import { ArrowDown, BarChart3, Check, ChevronDown, CircleAlert, History, ImagePl
 import {
   APPROVAL_MODE_LABEL,
   AGENT_LABEL,
-  GEMINI_WEB_MODEL,
   parseOrchestrator,
   roleName,
   MASTER_LABEL,
@@ -173,13 +172,13 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
   );
 }
 
-function ProviderControls({ agent, web = false, apiProvider = agent === "deepseek", master = false, children }: { agent: AgentKind; web?: boolean; apiProvider?: boolean; master?: boolean; children: ReactNode }) {
+function ProviderControls({ agent, apiProvider = agent === "deepseek", master = false, children }: { agent: AgentKind; apiProvider?: boolean; master?: boolean; children: ReactNode }) {
   const cli = useStore(s => s.cli.find(c => c.agent === agent));
   const refresh = useStore(s => s.refreshCli);
   const [checking, setChecking] = useState(false);
-  const inactive = agent !== "gemini" && !web && !apiProvider && cli?.authStatus !== "authenticated";
+  const inactive = !apiProvider && cli?.authStatus !== "authenticated";
   const status = !cli?.path ? "CLI 미설치" : cli.authStatus === "required" ? "로그인 필요" : "로그인 확인 필요";
-  return <div className="flex shrink-0 flex-nowrap items-center gap-1.5" data-testid={master ? "orch-badge" : "provider-controls"} data-provider={agent} data-state={web ? "web" : apiProvider ? "api" : inactive ? "inactive" : "ready"}>
+  return <div className="flex shrink-0 flex-nowrap items-center gap-1.5" data-testid={master ? "orch-badge" : "provider-controls"} data-provider={agent} data-state={apiProvider ? "api" : inactive ? "inactive" : "ready"}>
     <div className={cn("flex min-w-0 items-center gap-1.5", inactive && "opacity-45 grayscale")}>{children}</div>
     {inactive && <button type="button" disabled={checking} className="rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground" aria-label={`${master ? "마스터 " : ""}${AGENT_LABEL[agent]} 로그인 상태 다시 확인`} title="로그인이 확인되지 않았습니다. 로그인 후 눌러서 다시 확인하세요. 모델 설정은 변경할 수 있습니다." onClick={async () => {
       setChecking(true);
@@ -288,7 +287,7 @@ function ChatHeader({ chat, project, nodeLabel, masterExpression, onSearch }: { 
             resetLabel={`프로젝트 값 사용 (${label("codex", project.settings.codexModel)})`}
           />
         </ProviderControls>
-        <ProviderControls agent="gemini" web={geminiModel === GEMINI_WEB_MODEL}>
+        <ProviderControls agent="gemini">
           <AgentAvatar kind="gemini" size={24} alt="제미나이 캐릭터" />
           <span className="text-[12px] text-muted-foreground">제미나이</span>
           <ModelPicker

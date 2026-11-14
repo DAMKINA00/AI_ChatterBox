@@ -36,15 +36,15 @@ test("four-provider agents migrate to DeepSeek without losing identity, web acco
     for (const [index, agent] of old.entries()) {
       store.updateAgent(agent.id, {
         sessionId: `legacy-session-${index + 1}`,
-        ...(agent.kind === "gemini" ? { webAccountId: "gemini-4" } : {}),
         ...(agent.kind === "grok" ? { status: "released" as const } : {}),
       });
     }
     const event = store.addEvent(chat.id, old[2].key, old[2].key, { type: "text", text: "legacy Gemini event" });
-    const expected = store.listAgents(chat.id).map(({ id, kind, number, nickname, job, sessionId, status, webAccountId }) => ({ id, kind, number, nickname, job, sessionId, status, webAccountId }));
+    const expected = store.listAgents(chat.id).map(({ id, kind, number, nickname, job, sessionId, status }) => ({ id, kind, number, nickname, job, sessionId, status }));
     store.close(); store = undefined;
 
     const legacy = new DatabaseSync(path);
+    legacy.prepare("UPDATE agents SET web_account_id = ? WHERE id = ?").run("gemini-4", old[2].id);
     legacy.exec(`ALTER TABLE agents RENAME TO agents_current;
       CREATE TABLE agents (id INTEGER PRIMARY KEY, chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
       kind TEXT NOT NULL CHECK(kind IN ('claude','gpt','gemini','grok')), number INTEGER NOT NULL, nickname TEXT NOT NULL,
@@ -57,8 +57,10 @@ test("four-provider agents migrate to DeepSeek without losing identity, web acco
     legacy.close();
 
     store = new Store(path);
-    assert.deepEqual(store.listAgents(chat.id).map(({ id, kind, number, nickname, job, sessionId, status, webAccountId }) => ({ id, kind, number, nickname, job, sessionId, status, webAccountId })), expected);
-    assert.equal(store.agent(old[2].id)?.webAccountId, "gemini-4");
+    assert.deepEqual(store.listAgents(chat.id).map(({ id, kind, number, nickname, job, sessionId, status }) => ({ id, kind, number, nickname, job, sessionId, status })), expected);
+    const history = new DatabaseSync(path, { readOnly: true });
+    try { assert.equal((history.prepare("SELECT web_account_id FROM agents WHERE id = ?").get(old[2].id) as any).web_account_id, "gemini-4"); }
+    finally { history.close(); }
     assert.equal(store.agent(old[3].id)?.status, "released");
     const restoredEvent = store.events(chat.id).find((entry) => entry.id === event.id);
     assert.deepEqual(restoredEvent && { node: restoredEvent.node, role: restoredEvent.role, event: restoredEvent.event }, { node: event.node, role: event.role, event: event.event });

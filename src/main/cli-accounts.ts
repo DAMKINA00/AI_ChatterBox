@@ -1,7 +1,7 @@
-// CLI accounts per family (Claude / Codex / Grok). `*-1` is the CLI's own default directory and
+// CLI accounts per family (Claude / Codex / Antigravity / Grok). `*-1` is the CLI's own default directory and
 // keeps today's behavior; added accounts get a fresh directory under the app data folder and run
-// with CLAUDE_CONFIG_DIR / CODEX_HOME / GROK_HOME pointing at it.
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+// with their CLI config directory or isolated Antigravity HOME pointing at it.
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import {
   CLI_ACCOUNT_KINDS,
@@ -17,6 +17,7 @@ import {
   type CliAccountPolicy,
   type ResolvedCliAccount,
 } from "../shared/types";
+import { ANTIGRAVITY_TOKEN_FILES, antigravityProfileDir } from "./antigravity-profile";
 import type { ProviderUsage } from "../shared/usage";
 
 export const CLI_LOW_REMAINING = 10;
@@ -32,10 +33,10 @@ export const OWNER_MARKER = ".chatterbox-cli-account.json";
 
 const samePath = (a: string, b: string) => process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
 
-export const CLI_ENV_VAR: Record<CliAccountKind, string> = { claude: "CLAUDE_CONFIG_DIR", gpt: "CODEX_HOME", grok: "GROK_HOME" };
+export const CLI_ENV_VAR: Partial<Record<CliAccountKind, string>> = { claude: "CLAUDE_CONFIG_DIR", gpt: "CODEX_HOME", grok: "GROK_HOME" };
 /** Official sign-in / sign-out subcommands (claude auth --help, codex --help, grok --help). */
-export const CLI_LOGIN_ARGS: Record<CliAccountKind, string[]> = { claude: ["auth", "login"], gpt: ["login"], grok: ["login"] };
-export const CLI_LOGOUT_ARGS: Record<CliAccountKind, string[]> = { claude: ["auth", "logout"], gpt: ["logout"], grok: ["logout"] };
+export const CLI_LOGIN_ARGS: Record<CliAccountKind, string[]> = { claude: ["auth", "login"], gpt: ["login"], gemini: ["acp", "--login"], grok: ["login"] };
+export const CLI_LOGOUT_ARGS: Record<CliAccountKind, string[]> = { claude: ["auth", "logout"], gpt: ["logout"], gemini: ["-p", "/logout", "--output-format", "json"], grok: ["logout"] };
 
 interface Settings { getSetting(key: string): string | undefined; setSetting(key: string, value: string): void }
 
@@ -190,7 +191,13 @@ export function resolveAccountPolicy(kind: CliAccountKind, project: CliAccountPo
 
 /** Environment for a CLI process on this account; empty for the default directory. */
 export function accountEnv(account: Pick<CliAccount, "kind" | "configDir"> | undefined): Record<string, string> {
-  return account?.configDir ? { [CLI_ENV_VAR[account.kind]]: account.configDir } : {};
+  if (account?.kind === "gemini" && account.configDir) return {
+    USERPROFILE: account.configDir, HOME: account.configDir,
+    // agy stores credentials in this profile instead of the Windows-wide keyring in SSH mode.
+    SSH_CONNECTION: "127.0.0.1 0 127.0.0.1 0", AGY_CLI_DISABLE_AUTO_UPDATE: "true",
+  };
+  const variable = account && CLI_ENV_VAR[account.kind];
+  return account?.configDir && variable ? { [variable]: account.configDir } : {};
 }
 
 function validUsage(value: any): CliAccount["usage"] | undefined {
@@ -364,7 +371,21 @@ export class CliAccounts {
     return { ...a };
   }
 
-  /** Deletes an added account and only the directory this app created for it. */
+  /** Sign out an added profile without touching the shared Windows keyring or its saved conversations. */
+  clearAntigravityCredentials(id: CliAccountId) {
+    const account = this.must(id);
+    if (account.kind !== "gemini" || !account.configDir || !this.owned(id, account.createdAt))
+      throw new Error("앱이 만든 Antigravity 계정 폴더에서만 로그아웃할 수 있습니다.");
+    const dir = antigravityProfileDir(account.configDir);
+    if (!existsSync(dir)) return;
+    if (!samePath(realpathSync.native(dir), dir)) throw new Error("로그인 저장소가 다른 위치로 연결되어 있어 정리하지 않았습니다.");
+    for (const name of readdirSync(dir).filter(name => ANTIGRAVITY_TOKEN_FILES.some(base => name === base || name.startsWith(base + ".")))) {
+      const file = join(dir, name), stat = lstatSync(file);
+      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("로그인 파일이 일반 파일이 아니어서 정리하지 않았습니다.");
+      rmSync(file);
+    }
+  }
+
   remove(id: CliAccountId) {
     const a = this.must(id);
     if (!a.configDir) throw new Error("기본 계정은 삭제할 수 없습니다.");

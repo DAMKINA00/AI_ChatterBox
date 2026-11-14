@@ -24,7 +24,7 @@ async function fixture(provider = "codex") {
     assignmentEffort: async () => ({ effort: "medium" }),
     route: () => "consult:1", emit: (_c: number, _n: string, _r: string, e: AgentEvent) => events.push(e),
     onDriverEvent: (_c: number, _r: string, e: AgentEvent) => observed.push(e),
-    codex: () => ({}), claudeExe: () => "unused", aiStudio: () => ({}), grokExe: () => "unused",
+    codex: () => ({}), claudeExe: () => "unused", geminiExe: () => "unused", grokExe: () => "unused",
     bridgeScript: join(folder, "bridge.js"), tmpDir: folder,
   };
   const judge = new ApprovalJudge(chats, () => ({ instruction: "프로젝트 수정과 검증", consult: { who: "reviewer", kind: "review", message: "검토 후 수정", scope } }));

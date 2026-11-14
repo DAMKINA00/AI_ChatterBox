@@ -56,6 +56,17 @@ test("account card marks the default and disables its delete action, with unknow
   assert.match(errored, /정보 없음/);
 });
 
+test("Antigravity card shows one Gemini window with the smaller remaining amount", async () => {
+  const { CliAccountCard } = await components();
+  for (const [weekly, fiveHour, remaining, window] of [[20, 70, 30, "5시간"], [80, 10, 20, "주간"]] as const) {
+    const html = renderToStaticMarkup(createElement(CliAccountCard, { account: { ...account("gemini-1", "gemini"), usage: { checkedAt: 1, weekly: { usedPercent: weekly }, fiveHour: { usedPercent: fiveHour } } }, pending: false, update: () => {}, run: () => {} }));
+    assert.equal((html.match(/role="progressbar"/g) ?? []).length, 1);
+    assert.match(html, new RegExp(`aria-label="gemini-1 ${window} 잔여량"`));
+    assert.match(html, new RegExp(`aria-valuenow="${remaining}"`));
+    assert.doesNotMatch(html, /Argon|Claude and GPT/);
+  }
+});
+
 test("policy field preserves inherited, auto and missing fixed account selections", async () => {
   const { CliAccountPolicyField } = await components();
   const render = (props: Record<string, unknown>) => renderToStaticMarkup(createElement(CliAccountPolicyField, { kind: "claude", accounts: [account()], onChange: () => {}, ...props }));

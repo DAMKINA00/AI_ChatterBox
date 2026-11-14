@@ -44,7 +44,7 @@ test("nothing secret goes to the monitor: errors only as fixed texts, private-lo
     account("gpt-3", "sk-proj-abcdef123456", 15, { usage: { checkedAt: NOW, error: "token sk-live-998877 rejected by /opt/tools/codex" } }),
     account("grok-1", "ghp_a1b2c3d4e5f6a7b8c9d0e1", 1),
   ];
-  const usage: UsageInfo = { ...USAGE, deepseek: { state: "error", balances: [], error: "401 https://api.deepseek.com/user/balance" }, geminiWeb: { status: "available", detail: "me@gmail.com", checkedAt: NOW } };
+  const usage: UsageInfo = { ...USAGE, deepseek: { state: "error", balances: [], error: "401 https://api.deepseek.com/user/balance" } };
   const payload = monitorAccountsPayload(withSecrets, usage, NOW);
   const text = JSON.stringify(payload);
   assert.doesNotMatch(text, /@|AppData|Users|keys|configDir|"auth"|email|sk-|ghp_|Bearer|eyJ|\/opt|https?:|deepseek\.com|toppedUp|granted|geminiWeb/i, text);

@@ -6,8 +6,7 @@ import { REMOTE_UPLOAD_BUDGET, REMOTE_UPLOAD_STORAGE, type RemoteUploadKey } fro
 import { ForkError } from "./chat-fork";
 import { connect } from "node:net";
 import { execFileSync } from "node:child_process";
-import { CLI_ACCOUNT_KINDS, type AgentKind, type ApprovalDecision, type ChatForkOptions, type CliAccountId, type CliAccountKind, type CliAccountPolicies, type ProjectSettings, type Theme, type GeminiWebAccountId } from "../shared/types";
-import type { AIStudioAction, AIStudioInput } from "../shared/aistudio";
+import { CLI_ACCOUNT_KINDS, type AgentKind, type ApprovalDecision, type ChatForkOptions, type CliAccountId, type CliAccountKind, type CliAccountPolicies, type ProjectSettings, type Theme } from "../shared/types";
 import { Store } from "./db";
 import { RunStatsCache } from "./run-stats-cache";
 import { ChatManager } from "./chats";
@@ -38,7 +37,7 @@ function registerHandlers(rpc: CoreRpc) {
     channels.push(channel);
     rpc.handle(channel, async (...args) => {
       if (preparingUpdate && channel !== "window:save") throw new Error("업데이트 적용을 준비하고 있습니다. 새 작업은 재시작 후 보내 주세요.");
-      const backgroundRead = ["usage:get", "cli:info", "models:list", "aistudio:usage"].includes(channel);
+      const backgroundRead = ["usage:get", "cli:info", "models:list"].includes(channel);
       if (!backgroundRead) pendingCalls++;
       try { return await handler(undefined, ...args); }
       finally { if (!backgroundRead) pendingCalls--; }
@@ -189,56 +188,6 @@ function registerHandlers(rpc: CoreRpc) {
     else if (action !== "status") throw new Error("지원하지 않는 DeepSeek 설정 작업입니다.");
     return service.status();
   });
-  ipcMain.handle("aistudio:usage", (_e, range) => chats.aiStudio().usage(range));
-  ipcMain.handle("aistudio", async (_e, action: AIStudioAction, input: AIStudioInput = {}) => {
-    const studio = chats.aiStudio();
-    if (action === "save") studio.save(input);
-    else if (action === "launch") await studio.launch();
-    else if (action === "start") await studio.start();
-    else if (action === "stop") await studio.json("/api/control/stop", {});
-    else if (action === "refresh") await studio.account(action, input);
-    else if (action === "enable") {
-      const accounts = chats.geminiWebAccounts();
-      const ids = input.accountId ? studio.linkedWebAccounts(input.accountId) : [];
-      const previous = accounts.list().filter(a => ids.includes(a.accountId));
-      try {
-        for (const account of previous) accounts.update(account.accountId, { enabled: input.enabled });
-        await studio.account(action, input);
-      } catch (error) {
-        for (const account of previous) accounts.update(account.accountId, { enabled: account.enabled });
-        throw error;
-      }
-    }
-    else if (action === "sync-web") await chats.syncStudioWeb(input.accountId as GeminiWebAccountId);
-    else if (action !== "status") throw new Error("지원하지 않는 AI Studio 요청입니다.");
-    return studio.status();
-  });
-  ipcMain.handle("gemini:web", (_e, action: string, accountId: GeminiWebAccountId = "gemini-1") => {
-    const browser = chats.geminiWeb(accountId);
-    if (action === "login") return browser.login();
-    if (action === "open") return browser.open();
-    if (action === "refresh") return browser.refresh();
-    if (action === "status") return browser.status();
-    throw new Error("지원하지 않는 웹 연결 요청입니다.");
-  });
-  ipcMain.handle("gemini:web-accounts", async (_e, action: string, input?: { accountId?: GeminiWebAccountId; label?: string; enabled?: boolean }) => {
-    const accounts = chats.geminiWebAccounts();
-    if (action === "list") return accounts.list();
-    if (action === "add") return accounts.add();
-    if ((action === "logout" || action === "remove") && input?.accountId)
-      return chats.disconnectWebAccount(input.accountId, action === "remove");
-    if (action === "update" && input?.accountId) {
-      const previous = accounts.list().find(a => a.accountId === input.accountId);
-      const updated = accounts.update(input.accountId, input);
-      const linked = chats.aiStudio().linkedAccount(input.accountId);
-      if (linked && input.enabled !== undefined) {
-        try { await chats.aiStudio().account("enable", { accountId: linked, enabled: input.enabled }); }
-        catch (error) { if (previous) accounts.update(input.accountId, { enabled: previous.enabled }); throw error; }
-      }
-      return updated;
-    }
-    throw new Error("지원하지 않는 웹 계정 관리 요청입니다.");
-  });
   ipcMain.handle("cli-accounts:list", () => chats.listCliAccounts());
   ipcMain.handle("cli-accounts:create", (_e, kind: CliAccountKind, label?: string) => {
     if (!(CLI_ACCOUNT_KINDS as readonly string[]).includes(kind)) throw new Error("지원하지 않는 CLI 계열입니다.");
@@ -293,7 +242,6 @@ export async function runCore(dataDir: string, pipe: string, token: string, test
       chat: chat => rpc.emit("chat:updated", chat),
       consult: consult => rpc.emit("consult:updated", consult),
       usage: usage => rpc.emit("usage", usage),
-      webLogin: status => rpc.emit("gemini:web-login", status),
     }, dataDir, join(import.meta.dirname, "bridge-mcp.js").replace(/app\.asar([\\/])/, "app.asar.unpacked$1"));
     orchestrator = new Orchestrator(chats);
     const channels = registerHandlers(rpc);

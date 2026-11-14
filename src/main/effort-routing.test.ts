@@ -14,8 +14,9 @@ function fixture() {
   const project = store.createProject("test", root, DEFAULT_SETTINGS);
   const chat = store.createChat(project.id, "test");
   const chats = new ChatManager(store, { agents() {}, chat() {}, consult() {}, usage() {}, event() {} }, root, "unused");
-  chats.models = async (agent) => [{ id: agent === "claude" ? "opus" : agent === "codex" ? "gpt-6-astra" : "gemini-test-medium", label: agent, isDefault: true,
-    reasoningEfforts: agent === "gemini" ? ["medium", "high"] : ["medium", "high", "xhigh"] }];
+  chats.models = async (agent) => [{ id: agent === "claude" ? "opus" : agent === "codex" ? "gpt-6-astra" : "gemini-4-argon-medium", label: agent, isDefault: true,
+    reasoningEfforts: ["medium", "high", "xhigh"] }];
+  chats.cliInfo = () => [{ agent: "gemini", path: "fake-agy" }];
   const engine = new Orchestrator(chats) as any;
   engine.instructions.set(chat.id, { id: 1, mode: "delegated", asks: 0, reviews: 0, startedAt: Date.now(), requests: new Map(), queued: [], pinned: [] });
   const sent: { role: Role; effort?: string }[] = [];
@@ -27,7 +28,7 @@ function fixture() {
   return { store, project, chat, chats, engine, sent, async close() { await engine.judge.dispose(); await chats.dispose(); store.close(); rmSync(root, { recursive: true, force: true }); } };
 }
 
-test("master defaults to auto; parallel assignments keep separate effort and leave AI Studio effort to the service", async () => {
+test("master defaults to auto; parallel assignments keep separate effort and resolve native Antigravity effort", async () => {
   const f = fixture();
   try {
     assert.equal((await f.chats.assignmentEffort(f.chat.id, "orch")).effort, "");
@@ -38,9 +39,9 @@ test("master defaults to auto; parallel assignments keep separate effort and lea
       { to: gemini.nickname, kind: "writing", message: "write dialogue", reason: "complex character voice: xhigh", effort: "xhigh" },
     ] });
     assert.ok(!response.isError);
-    assert.deepEqual(f.sent.sort((a, b) => a.role.localeCompare(b.role)), [{ role: claude.key, effort: "medium" }, { role: gemini.key, effort: "" }]);
+    assert.deepEqual(f.sent.sort((a, b) => a.role.localeCompare(b.role)), [{ role: claude.key, effort: "medium" }, { role: gemini.key, effort: "xhigh" }]);
     const records = f.store.listConsults(f.chat.id).sort((a, b) => a.toRole.localeCompare(b.toRole));
-    assert.deepEqual(records.map((c) => [c.requestedEffort, c.effort, c.status]), [["medium", "medium", "done"], ["xhigh", "", "done"]]);
+    assert.deepEqual(records.map((c) => [c.requestedEffort, c.effort, c.status]), [["medium", "medium", "done"], ["xhigh", "xhigh", "done"]]);
   } finally { await f.close(); }
 });
 

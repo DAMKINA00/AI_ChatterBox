@@ -20,11 +20,12 @@ function fixture(options: { dualInvestigation?: boolean } = {}) {
   const chat = store.createChat(project.id, "test");
   const chats = new ChatManager(store, { agents() {}, chat() {}, consult() {}, usage() {}, event() {} }, root, "unused");
   chats.models = async (agent) => [{
-    id: agent === "claude" ? "opus" : agent === "codex" ? "gpt-6-astra" : "gemini-test-medium",
+    id: agent === "claude" ? "opus" : agent === "codex" ? "gpt-6-astra" : "gemini-4-argon-medium",
     label: agent,
     isDefault: true,
     reasoningEfforts: ["medium", "high", "xhigh"],
   }];
+  chats.cliInfo = () => [{ agent: "gemini", path: "fake-agy" }, { agent: "grok", path: "fake-grok" }, { agent: "claude", path: "fake-claude" }, { agent: "codex", path: "fake-codex" }];
   const engine = new Orchestrator(chats) as any;
   engine.instructions.set(chat.id, {
     id: 1,
@@ -309,7 +310,7 @@ test("a coordinator may choose work kinds but must still obtain promised peer re
   }
 });
 
-test("AI Studio participates in writing and technical discussions", async () => {
+test("Antigravity participates in writing and technical discussions", async () => {
   const f = fixture();
   try {
     const leader = f.store.createAgent(f.chat.id, "claude", "writing leader");
@@ -334,7 +335,7 @@ test("AI Studio participates in writing and technical discussions", async () => 
     assert.match(textOf(writing), /문장 취합/);
     assert.equal(f.sent.length, 2);
     assert.ok(f.sent.every((item) => item.input.noWrites === false));
-    assert.ok(f.sent.every((item) => item.effort === (item.role === gemini.key ? "" : "high")));
+    assert.ok(f.sent.every((item) => item.effort === "high"));
     assert.ok(f.store.listConsults(f.chat.id).every((item) => item.status === "done"));
 
     const sentBeforeTechnical = f.sent.length;
@@ -486,11 +487,11 @@ test("workers use ask_parallel for direct peer reviews and reject nested overlap
     assert.equal(result.isError, false);
     const nested = f.store.listConsults(f.chat.id).filter(c => c.fromRole === leader.key);
     assert.equal(nested.length, 2);
-    assert.ok(nested.every(c => c.kind === "review" && c.effort === (c.toRole === b.key ? "" : "high") && c.status === "done"));
+    assert.ok(nested.every(c => c.kind === "review" && c.effort === "high" && c.status === "done"));
   } finally { await f.close(); }
 });
 
-test("explicit AI Studio and Grok images need a real artifact, not a completion claim", async () => {
+test("explicit Antigravity and Grok images need a real artifact, not a completion claim", async () => {
   const f = fixture();
   try {
     for (const kind of ["gemini", "grok"] as const) {
@@ -512,7 +513,7 @@ test("explicit AI Studio and Grok images need a real artifact, not a completion 
   } finally { await f.close(); }
 });
 
-test("AI Studio and Grok can lead a discussion and collect actual peer results", async () => {
+test("Antigravity and Grok can lead a discussion and collect actual peer results", async () => {
   const f = fixture();
   try {
     const peer = f.store.createAgent(f.chat.id, "claude", "peer");

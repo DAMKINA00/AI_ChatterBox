@@ -1,5 +1,14 @@
 # AI_ChatterBox
 
+
+### Antigravity CLI·다중 계정 통합 (0.4.51)
+
+Gemini는 AI Studio 대신 설치된 Antigravity CLI(`agy`)의 모델·실행·승인 연결을 사용합니다. 기존 AI Studio·Gemini 웹 모델 설정은 CLI Argon으로 이전하고 대화 기록은 유지합니다. Gemini 웹 드라이버·브라우저·웹 계정 관리·연결 API와 AI Studio 설정·동기화·자동 설치 기능을 제거했습니다. 아래 이전 버전 기록의 Gemini 웹·AI Studio 설명은 현재 동작에 적용되지 않습니다.
+
+CLI 계정 관리에서 Antigravity도 계정을 최대 10개까지 추가하고 각 CLI에 로그인·로그아웃·상태 조회를 사용할 수 있습니다. 추가 계정은 별도 HOME과 CLI의 파일 기반 인증을 사용해 로그인·대화·사용량을 분리하며, 고정·잔여량·우선 순서 정책으로 배정합니다. 기본 계정은 평소 Antigravity 앱·CLI·IDE의 공유 로그인을 사용합니다.
+
+남은 사용량은 Codex와 Grok 사이에 표시하며, 별도 사용량 모니터와 원격 웹에도 동일한 계정·조회 시각·초기화 시각을 전달합니다. 사용량은 Gemini Models 그룹의 주간·5시간 중 적게 남은 한도 하나만 표시합니다. 별도 Argon·Claude/GPT 모델 한도는 제외합니다. 성공한 사용량 조회는 해당 CLI 계정의 로그인 상태에도 반영됩니다.
+
 채팅 하나에 지시하면 **마스터**가 계획을 세우고, 일의 양에 맞춰 **클로드 N호**(Claude Code), **지피티 N호**(Codex), **제미나이 N호**(Gemini 웹 또는 AI Studio), **그록 N호**(Grok CLI), **딥시크 N호**(DeepSeek API) 작업자를 꾸려 구현과 리뷰를 나눠 맡기는 Windows 데스크톱 앱입니다 (Electron + React + TypeScript).
 
 ![GPT 오케스트레이터가 GPT에 구현, Claude에 리뷰를 맡긴 화면](docs/screenshots/v2-fix-gpt.png)
@@ -129,9 +138,9 @@
 - 도중에 한도가 부족해지면 초안·맥락을 보존하고 마스터가 새 계정을 선택해 이어서 배정합니다. 모두 작업 중이거나 잔여량이 부족하면 완료·초기화를 기다립니다. 지정 계정과 실제 실행 계정을 결과에 기록합니다.
 
 ### 마스터와 다섯 계열 작업자
-- 마스터는 요청 이해, 작업 배정, 결과 검토, 최종 취합을 담당합니다. 간단한 답변과 사전 확인은 직접 하고 본격적인 분석·구현·이미지·문서 제작은 작업자에게 맡깁니다. Claude / Codex / Grok CLI, AI Studio Argon, DeepSeek API를 마스터로 선택할 수 있습니다. Gemini 웹은 작업자 전용입니다.
-- CLI 작업자는 각자 세션에서 승인된 범위의 파일을 고칩니다. 기본은 기술 작업 Claude, 이미지 Codex, 글쓰기 Gemini이며, 사용자가 작업자를 명시하면 그 지정을 우선합니다. Grok 이미지 요청도 자신의 도구로 실행하고 실제 이미지 첨부가 있어야 완료 처리합니다. Gemini 웹은 로컬 파일·명령·MCP를 사용할 수 없습니다.
-- 마스터·Claude·Codex·Gemini·Grok·DeepSeek 모델을 프로젝트마다 정하고, 채팅 상단에서 채팅별로 바꿀 수 있습니다. Gemini는 Web과 AI Studio만 선택합니다. Grok은 공식 CLI가 보고하는 모델과 추론 수준을 표시합니다.
+- 마스터는 요청 이해, 작업 배정, 결과 검토, 최종 취합을 담당합니다. 간단한 답변과 사전 확인은 직접 하고 본격적인 분석·구현·이미지·문서 제작은 작업자에게 맡깁니다. Claude / Codex / Antigravity / Grok CLI와 DeepSeek API를 마스터로 선택할 수 있습니다.
+- CLI 작업자는 각자 세션에서 승인된 범위의 파일을 고칩니다. 기본은 기술 작업 Claude, 이미지 Codex, 글쓰기 Gemini이며, 사용자가 작업자를 명시하면 그 지정을 우선합니다. Grok 이미지 요청도 자신의 도구로 실행하고 실제 이미지 첨부가 있어야 완료 처리합니다.
+- 마스터·Claude·Codex·Gemini·Grok·DeepSeek 모델을 프로젝트마다 정하고, 채팅 상단에서 채팅별로 바꿀 수 있습니다. Gemini는 Antigravity CLI 계정의 실제 모델 목록에서 선택합니다. Grok은 공식 CLI가 보고하는 모델과 추론 수준을 표시합니다.
 
 ### 승인 정책과 안전장치
 - 마스터와 작업자의 파일 수정과 명령 실행에 같은 승인 설정을 적용합니다. 프로젝트 기본값을 정하고 채팅별로 바꿀 수 있습니다. **마스터 자동 승인**은 별도의 판단 세션이 맡고 고위험 요청·실패·시간 초과·추가 결정은 사용자 카드로 돌아옵니다.
@@ -164,7 +173,7 @@
   1. `%LOCALAPPDATA%\OpenAI\Codex\bin\<ver>\codex.exe`
   2. PATH
   3. `~\.codex\packages\standalone\releases`
-- **제미나이 작업자를 쓸 경우(선택):** Gemini 웹 계정을 연결합니다. AI Studio · Argon은 별도 로컬 AIStudio2API가 필요합니다. [Gemini 설치 안내](docs/gemini-pro.md) · [Gemini 웹 연결](docs/gemini-web.md) · [AI Studio 연결](docs/aistudio-argon.md)
+- **제미나이 작업자를 쓸 경우(선택):** Antigravity CLI를 설치하고 CLI 계정 관리에서 로그인합니다. [Gemini 설치 안내](docs/gemini-pro.md)
 
 - **Grok 작업자 또는 마스터(선택):** `npm install -g @xai-official/grok` 후 `grok login`. Windows 공식 네이티브 실행 파일 `%USERPROFILE%\.grok\bin\grok.exe`를 자동 탐색합니다. ACP 세션과 승인 hook을 지원하는 CLI가 필요합니다. [공식 CLI 안내](https://docs.x.ai/build/cli/reference).
 

@@ -24,7 +24,7 @@ const settings = {
   orchestratorModel: "claude:opus",
   claudeModel: "opus",
   codexModel: "gpt-6-astra",
-  geminiModel: "aistudio:gemini-4-argon",
+  geminiModel: "gemini-4-argon-medium",
   orchestratorEffort: "auto",
   claudeEffort: "auto",
   codexEffort: "auto",
@@ -52,7 +52,7 @@ const modelMetadata = {
     { id: "gpt-5-limited", label: "GPT Limited", reasoningEfforts: ["medium", "high"], defaultReasoningEffort: "high" },
   ],
   gemini: [
-    { id: "gemini-pro", label: "Gemini Pro", isDefault: true, reasoningEfforts: ["low", "medium", "high"], defaultReasoningEffort: "high" },
+    { id: "gemini-4-argon-medium", label: "Antigravity · Argon", isDefault: true, reasoningEfforts: ["low", "medium", "high"], defaultReasoningEffort: "high" },
   ],
 };
 
@@ -146,9 +146,9 @@ try {
   await page.getByLabel("새 프로젝트").first().click();
   const newProjectDialog = page.getByRole("dialog").filter({ hasText: "새 프로젝트" });
   await newProjectDialog.waitFor({ state: "visible" });
-  const defaultClaudeWorkers = newProjectDialog.locator("label").filter({ hasText: "동시 클로드 작업자" }).locator("input");
-  const defaultGptWorkers = newProjectDialog.locator("label").filter({ hasText: "동시 지피티 작업자" }).locator("input");
-  const defaultGeminiWorkers = newProjectDialog.locator("label").filter({ hasText: "동시 제미나이 작업자" }).locator("input");
+  const defaultClaudeWorkers = newProjectDialog.locator("label").filter({ hasText: "권장 클로드 작업자" }).locator("input");
+  const defaultGptWorkers = newProjectDialog.locator("label").filter({ hasText: "권장 지피티 작업자" }).locator("input");
+  const defaultGeminiWorkers = newProjectDialog.locator("label").filter({ hasText: "권장 제미나이 작업자" }).locator("input");
   check(
     "new projects use the default worker counts",
     (await defaultClaudeWorkers.inputValue()) === "3" && (await defaultGptWorkers.inputValue()) === "3" && (await defaultGeminiWorkers.inputValue()) === "1",
@@ -156,7 +156,7 @@ try {
   check(
     "project settings have no time-limit field and explain manual stopping",
     (await newProjectDialog.locator("label").filter({ hasText: "지시당 시간" }).count()) === 0 &&
-      (await newProjectDialog.getByText("작업 시간은 무제한입니다. 필요하면 중지 버튼으로 멈출 수 있습니다.", { exact: true }).count()) === 1,
+      (await newProjectDialog.getByText("인원·배정·리뷰 숫자는 계획 참고값입니다. 진행 중인 작업을 횟수로 차단하지 않으며 중지 버튼으로 멈출 수 있습니다.", { exact: true }).count()) === 1,
   );
   await newProjectDialog.getByRole("button", { name: "취소", exact: true }).click();
   await page.waitForSelector('[role="dialog"]', { state: "detached" });
@@ -202,9 +202,9 @@ try {
   check("worker menu excludes low when metadata does not allow it", !codexMenuText?.includes("low") && codexMenuText?.includes("medium") && codexMenuText.includes("high") && codexMenuText.includes("xhigh"), codexMenuText);
   await page.getByRole("menuitem", { name: "high", exact: true }).click();
   const geminiPicker = dialog.getByLabel("제미나이 모델");
-  check("Gemini worker uses the managed AI Studio model", (await geminiPicker.textContent())?.includes("AI Studio · Argon"));
+  check("Gemini worker uses the native CLI model", (await geminiPicker.textContent())?.includes("Antigravity · Argon"));
   const geminiEffort = dialog.getByLabel("제미나이 작업자 추론 수준");
-  check("Gemini worker effort is managed by AI Studio", await geminiEffort.isDisabled() && (await geminiEffort.textContent())?.includes("AI Studio 모델 설정"));
+  check("Gemini worker effort is selected from native CLI metadata", await geminiEffort.isEnabled() && (await geminiEffort.textContent())?.includes("자동 배정"));
   await dialog.getByRole("button", { name: "저장", exact: true }).click();
   await page.waitForSelector('[role="dialog"]', { state: "detached" });
   check("project effort changes persist", persistedProject().codexEffort === "high", JSON.stringify(persistedProject()));

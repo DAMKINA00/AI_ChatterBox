@@ -26,7 +26,7 @@ export function App() {
 
   const chat = selection ? chats.find((c) => c.id === selection.chatId) : undefined;
   const project = chat ? projects.find((p) => p.id === chat.projectId) : undefined;
-  const missing = cli.filter((c) => c.agent !== "deepseek" && c.agent !== "gemini" && !c.path);
+  const missing = cli.filter((c) => c.agent !== "deepseek" && !c.path);
 
   if (!ready)
     return (

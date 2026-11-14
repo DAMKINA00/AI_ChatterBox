@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, mkdirSync } from "node:fs";
 import { build } from "esbuild";
 import { chromium } from "playwright-core";
 
@@ -39,7 +39,7 @@ try {
   await page.addStyleTag({ content: readFileSync("out/renderer/assets/" + cssName, "utf8") });
   await page.evaluate(() => {
     const make = (kind, n) => ({ accountId: kind + "-" + n, kind, label: kind + " 계정 " + n, configDir: n === 1 ? null : "test", createdAt: Date.now(), enabled: true, isDefault: n === 1, runningWorkers: 0, authStatus: n === 1 ? "required" : "unknown", auth: n === 1 ? { loggedIn: false, checkedAt: Date.now() } : undefined, usage: { checkedAt: Date.now() } });
-    let accounts = ["claude", "gpt", "grok"].map(kind => make(kind, 1));
+    let accounts = ["claude", "gpt", "gemini", "grok"].map(kind => make(kind, 1));
     let policies = { grok: { mode: "auto" } };
     const projects = [{ id: 1, name: "계정 테스트", folder: "C:/Apps", settings: { accountPolicy: { claude: { mode: "fixed", accountId: "claude-2" } } } }];
     window.dropAccount = id => { accounts = accounts.filter(a => a.accountId !== id); };
@@ -61,7 +61,7 @@ try {
       },
       usage: async wait => { record("usage", wait); if (window.failUsage) throw new Error("사용량 조회 실패"); return window.usageValue ?? { accounts: Object.fromEntries(accounts.map(a => [a.accountId, copy(a.usage ?? {})])) }; },
       listProjects: async () => { record("listProjects"); return copy(projects); },
-      models: async () => [],
+      models: async agent => agent === "gemini" ? [{ id: "gemini-4-argon-medium", label: "Antigravity · Argon", reasoningEfforts: ["low", "medium", "high"], isDefault: true }] : [],
       cliInfo: async () => [],
       updateProject: async (id, patch) => { record("project", id, patch); return { id, ...patch }; },
     };
@@ -186,7 +186,7 @@ try {
   });
   await page.getByTestId("usage-refresh").click();
   await page.waitForFunction(() => window.uiStore.getState().usage.codex?.weekly?.usedPercent === 17);
-  check(await page.getByTestId("usage-bar").filter({ hasText: "지피티" }).getByText("83%", { exact: true }).isVisible(), "account-list rejection does not block refreshed usage");
+  check(await page.getByTestId("usage-bar").count() === 0 && await page.evaluate(() => window.uiStore.getState().usage.codex.weekly.usedPercent === 17), "failed account lists preserve refreshed readings without inventing account rows");
   await page.evaluate(() => { window.failList = false; window.failUsage = true; });
   await page.getByTestId("usage-refresh").click();
   await page.waitForFunction(() => window.uiStore.getState().cliAccounts.length > 0);
@@ -195,13 +195,35 @@ try {
   const geminiModelPicker = page.getByRole("button", { name: "모델 테스트", exact: true });
   await geminiModelPicker.click();
   const geminiMenuText = await page.getByRole("menu").textContent();
-  check(geminiMenuText?.includes("제미나이 웹 · Argon") && geminiMenuText.includes("AI Studio · Argon") && !geminiMenuText.includes("Pro 자동 선택") && !geminiMenuText.includes("직접 입력"), "Gemini worker exposes only Web and AI Studio models");
-  await page.getByRole("menuitem").filter({ hasText: "aistudio:gemini-4-argon" }).click();
-  check(await page.evaluate(() => window.getModelValue() === "aistudio:gemini-4-argon"), "AI Studio selection stores the fixed model id");
-  await page.evaluate(() => window.showModel(["claude", "codex", "gemini", "grok", "deepseek"], "gemini:aistudio:gemini-4-argon"));
+  check(geminiMenuText?.includes("Antigravity CLI 계정 관리") && !geminiMenuText.includes("AI Studio"), "Gemini picker manages the native CLI with no AI Studio control");
+  await page.getByRole("menuitem").filter({ hasText: "gemini-4-argon-medium" }).click();
+  check(await page.evaluate(() => window.getModelValue() === "gemini-4-argon-medium"), "native Antigravity selection stores its real model id");
+  await page.evaluate(() => window.showModel(["claude", "codex", "gemini", "grok", "deepseek"], "gemini:gemini-4-argon-medium"));
   await geminiModelPicker.click();
   const masterMenuText = await page.getByRole("menu").textContent();
-  check(masterMenuText?.includes("AI Studio · Argon") && !masterMenuText.includes("제미나이 웹 · Argon"), "Gemini master picker exposes AI Studio only");
+  check(masterMenuText?.includes("Antigravity · Argon") && !masterMenuText.includes("제미나이 웹 · Argon") && !masterMenuText.includes("AI Studio"), "Gemini master uses native CLI models");
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => window.showAccounts());
+  await page.getByRole("button", { name: "Antigravity", exact: true }).click();
+  await card("gemini-1").waitFor();
+  check(await page.getByTestId("cli-account-create").isEnabled(), "Antigravity can create CLI accounts like Claude and Codex");
+  await page.getByTestId("cli-account-create").click();
+  await card("gemini-2").waitFor();
+  check(await page.getByTestId("cli-account-create").isEnabled(), "additional Antigravity CLI accounts remain available");
+  await card("gemini-2").getByRole("button", { name: "로그인", exact: true }).click();
+  check(await page.evaluate(() => window.calls.some(c => c[0] === "login" && c[1] === "gemini-2")), "added Antigravity CLI uses its own login action");
+  await card("gemini-1").getByRole("button", { name: "로그인", exact: true }).click();
+  check(await page.evaluate(() => window.calls.some(c => c[0] === "login" && c[1] === "gemini-1")), "Antigravity uses the common CLI login action");
+  await card("gemini-1").getByRole("button", { name: "상태 새로고침", exact: true }).click();
+  check((await card("gemini-1").textContent()).includes("로그인됨"), "Antigravity uses the common account status and quota display");
+  check(await card("gemini-1").getByRole("progressbar").count() === 1 && await card("gemini-1").getByRole("progressbar").getAttribute("aria-valuenow") === "60", "Antigravity shows only the smaller remaining Gemini window");
+  check(!(await card("gemini-1").textContent()).includes("Claude and GPT") && !(await card("gemini-1").textContent()).includes("Argon"), "excluded model groups are absent from account usage");
+  await page.evaluate(() => window.showUsage());
+  await page.getByText("안티그래비티", { exact: true }).waitFor();
+  const rows = await page.locator('[data-testid=usage-bar], [aria-label="안티그래비티 계정별 잔여량"]').allTextContents();
+  check(rows.findIndex(s => s.includes("지피티")) < rows.findIndex(s => s.includes("안티그래비티")) && rows.findIndex(s => s.includes("안티그래비티")) < rows.findIndex(s => s.includes("그록")), "usage puts Antigravity between Codex and Grok");
+  mkdirSync(".scratch/antigravity-ui", { recursive: true });
+  await page.screenshot({ path: ".scratch/antigravity-ui/usage.png" });
   check(errors.length === 0, "no browser runtime errors: " + errors.join(", "));
   console.log("CLI accounts UI browser checks passed: " + checks);
 } finally {

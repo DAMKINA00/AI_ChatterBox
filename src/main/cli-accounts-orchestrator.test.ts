@@ -50,7 +50,7 @@ function fixture() {
 }
 const body = (r: any) => r.content.map((c: any) => c.text).join("\n");
 
-test("CLI account schemas reach spawn, ask and parallel tasks without replacing webAccountId", async () => {
+test("all CLI account schemas reach spawn, ask and parallel tasks without retired web accounts", async () => {
   const f = fixture();
   try {
     let tools: any[] = [];
@@ -62,11 +62,12 @@ test("CLI account schemas reach spawn, ask and parallel tasks without replacing 
       assert.equal(schema.accountId.type, "string");
       assert.equal(schema.clearAccountId.type, "boolean");
       const pattern = new RegExp(schema.accountId.pattern);
-      for (const id of ["claude-1", "gpt-10", "grok-9"]) assert.equal(pattern.test(id), true);
-      for (const id of ["gpt-0", "gpt-11", "gpt-01", "codex-1", "gemini-1", "../gpt-1"]) assert.equal(pattern.test(id), false);
-      assert.ok(schema.webAccountId);
+      for (const id of ["claude-1", "gpt-10", "gemini-1", "gemini-10", "grok-9"]) assert.equal(pattern.test(id), true);
+      for (const id of ["gpt-0", "gpt-11", "gpt-01", "codex-1", "gemini-11", "../gpt-1"]) assert.equal(pattern.test(id), false);
+      assert.equal(schema.webAccountId, undefined);
     }
-    assert.deepEqual(tool("cli_accounts").inputSchema.properties.kind.enum, ["claude", "gpt", "grok"]);
+    assert.deepEqual(tool("cli_accounts").inputSchema.properties.kind.enum, ["claude", "gpt", "gemini", "grok"]);
+    assert.equal(tool("gemini_web_accounts"), undefined);
     assert.equal(tool("cli_accounts").inputSchema.additionalProperties, false);
     const checkSchema = (value: any): void => {
       if (!value || typeof value !== "object") return;

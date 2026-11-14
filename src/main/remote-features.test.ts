@@ -110,7 +110,7 @@ async function setup(t: { after(fn: () => unknown): void }) {
       case "remote:att-bytes": await new Promise(ok => setTimeout(ok, 20)); return saveRemoteUpload(store, files, args[0], args[1], args[2], args[3], args[4]);
       case "attachment:info": return state.attachments.get(args[0]) ?? store.attachment(args[0]);
       case "usage:get": return {
-        claude: { fiveHour: null }, gemini: { weekly: { usedPercent: 1 } }, geminiWeb: { status: "available", detail: "me@example.com 로그인", checkedAt: 1 },
+        claude: { fiveHour: null }, gemini: { weekly: { usedPercent: 1 } },
         accounts: { "gpt-9": { weekly: { usedPercent: 5 } } }, deepseek: { state: "ready", balances: [{ currency: "USD", total: "5.20", granted: "0", toppedUp: "5.20" }] },
       };
       case "cli-accounts:list": return [
@@ -414,7 +414,7 @@ test("attachment downloads need the owning chat; images inline, others as downlo
   assert.match(d.headers.get("content-disposition")!, /^attachment/);
 });
 
-test("#7 usage and AI Studio usage carry no emails or folders; refresh is rate limited; snapshots strip paths", async (t) => {
+test("#7 usage carries no emails or folders; refresh is rate limited; snapshots strip paths", async (t) => {
   const s = await setup(t);
   const usage = await (await s.get("/api/usage")).json() as any;
   assert.ok(!JSON.stringify(usage).includes("@example.com") && !JSON.stringify(usage).includes(".claude") && !/AppData|Users/.test(JSON.stringify(usage)), JSON.stringify(usage));
@@ -429,11 +429,7 @@ test("#7 usage and AI Studio usage carry no emails or folders; refresh is rate l
   assert.deepEqual(usage.deepseek, { state: "ready", balances: [{ currency: "USD", total: "5.20", granted: "0", toppedUp: "5.20" }] });
   assert.equal(await s.status(s.get("/api/usage?refresh=1")), 200);
   assert.equal(await s.status(s.get("/api/usage?refresh=1")), 429);
-  assert.equal(await s.status(s.get("/api/aistudio/usage?range=1y")), 400);
-  const studio = await (await s.get("/api/aistudio/usage?range=7d")).json() as any;
-  assert.ok(!JSON.stringify(studio).includes("@"), JSON.stringify(studio));
-  assert.deepEqual(studio.report.groups.account.map((g: any) => g.key), ["계정 1", "계정 2"]);
-  assert.equal(anonymizeAccounts({ groups: { account: [{ key: "x@y" }] } } as any).groups.account[0].key, "계정 1");
+  assert.equal(await s.status(s.get("/api/aistudio/usage?range=7d")), 404, "retired service endpoint is removed");
   const snap = await (await s.get("/api/chats/1")).json() as any;
   assert.deepEqual(Object.keys(snap.events[0].event.attachments[0]).sort(), ["id", "mime", "name", "size"]);
   assert.deepEqual(stripLocalPaths({ a: [{ id: 1, name: "n", mime: "m", size: 1, path: "C:\\x" }], path: "kept-not-attachment" }), { a: [{ id: 1, name: "n", mime: "m", size: 1 }], path: "kept-not-attachment" });

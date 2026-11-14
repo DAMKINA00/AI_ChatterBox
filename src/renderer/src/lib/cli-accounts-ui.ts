@@ -4,7 +4,7 @@ import type { UsageWindow } from "../../../shared/usage";
 
 export const CLI_KINDS = CLI_ACCOUNT_KINDS;
 export type CliKind = CliAccountKind;
-export const CLI_KIND_LABEL: Record<CliKind, string> = { claude: "Claude", gpt: "Codex", grok: "Grok" };
+export const CLI_KIND_LABEL: Record<CliKind, string> = { claude: "Claude", gpt: "Codex", gemini: "Antigravity", grok: "Grok" };
 
 export function multipleCliAccounts(accounts: CliAccountStatus[] | undefined, kind: CliKind): CliAccountStatus[] {
   const list = accounts?.filter(account => account.kind === kind) ?? [];

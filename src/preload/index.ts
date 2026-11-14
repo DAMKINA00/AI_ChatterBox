@@ -47,8 +47,6 @@ const api: ChatterBoxApi = {
 
   cliInfo: (checkAuth) => ipcRenderer.invoke("cli:info", checkAuth),
   models: (agent) => ipcRenderer.invoke("models:list", agent),
-  geminiWeb: (action, accountId) => ipcRenderer.invoke("gemini:web", action, accountId),
-  geminiWebAccounts: (action, input) => ipcRenderer.invoke("gemini:web-accounts", action, input),
   cliAccounts: {
     list: () => ipcRenderer.invoke("cli-accounts:list"),
     create: (kind, label) => ipcRenderer.invoke("cli-accounts:create", kind, label),
@@ -60,9 +58,7 @@ const api: ChatterBoxApi = {
     getPolicy: () => ipcRenderer.invoke("cli-accounts:get-policy"),
     setPolicy: (policies) => ipcRenderer.invoke("cli-accounts:set-policy", policies),
   },
-  aiStudio: (action, input) => ipcRenderer.invoke("aistudio", action, input),
   deepSeek: (action, input) => ipcRenderer.invoke("deepseek", action, input),
-  aiStudioUsage: (range) => ipcRenderer.invoke("aistudio:usage", range),
   remoteWeb: (action, input) => ipcRenderer.invoke("remote-web", action, input),
   getTheme: () => ipcRenderer.invoke("theme:get"),
   setTheme: (theme) => ipcRenderer.invoke("theme:set", theme),
@@ -76,7 +72,6 @@ const api: ChatterBoxApi = {
   onConsultUpdated: (cb) => on("consult:updated", cb),
   onAgentsUpdated: (cb) => on("agents:updated", cb),
   onUsage: (cb) => on("usage", cb),
-  onGeminiWebLogin: (cb) => on("gemini:web-login", cb),
   onSelectChat: (cb) => on("select-chat", cb),
   onChatDeleted: (cb) => on("chat:deleted", cb),
   onProjectsUpdated: (cb) => on("projects:updated", cb),

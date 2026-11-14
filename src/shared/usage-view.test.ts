@@ -76,3 +76,22 @@ test("errors leave this PC only as a fixed text per code; private-looking labels
   // The desktop keeps the original texts; only the public view changes them.
   assert.equal(usageGroups([account("gpt-1", "me@example.com", 10)], {})[0].accounts[0].label, "me@example.com");
 });
+
+
+test("Antigravity account usage appears between Codex and Grok on every shared usage display", () => {
+  const groups = usageGroups([...accounts, account("gemini-1", "Native account", 53)], {});
+  assert.deepEqual(groups.map(g => g.kind), ["claude", "gpt", "gemini", "grok"]);
+  assert.equal(groups[2].name, "안티그래비티");
+  assert.equal(groups[2].accounts[0].display!.remaining, 47);
+  assert.equal(groups[2].accounts[0].checkedAt, NOW);
+});
+
+test("Antigravity always displays the smaller remaining weekly/5-hour window", () => {
+  for (const [weekly, fiveHour, expected, window] of [[20, 70, 30, "5시간"], [80, 10, 20, "주간"], [100, 0, 0, "주간"], [10, 100, 0, "5시간"]] as const) {
+    const reading = { checkedAt: NOW, weekly: { usedPercent: weekly, resetsAt: 101 }, fiveHour: { usedPercent: fiveHour, resetsAt: 202 } };
+    const row = usageGroups([account("gemini-1", "Native", undefined, { usage: reading })], {})[0].accounts[0];
+    assert.equal(row.display?.remaining, expected);
+    assert.equal(row.display?.window, window);
+    assert.equal(row.display?.resetsAt, window === "주간" ? 101 : 202);
+  }
+});

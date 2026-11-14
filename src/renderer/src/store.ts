@@ -232,7 +232,6 @@ export const useStore = create<State>((set, get) => ({
         return { consults: { ...s.consults, [c.chatId]: next } };
       }),
     );
-    api.onGeminiWebLogin((status) => get().toast(`제미나이 웹 계정 ${status.accountId.slice(7)} · ${status.message}`, "info"));
     api.onAgentsUpdated((chatId, list) => {
       const loading = loadingTeam.get(chatId);
       if (loading) loading.agents = list;

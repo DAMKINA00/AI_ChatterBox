@@ -14,7 +14,6 @@ import {
   type AgentEvent,
   type AttachmentRef,
   type ChatAgent,
-  type GeminiWebAccountId,
   type Role,
   type Chat,
   type ChatStatus,
@@ -167,7 +166,6 @@ function convertV1Event(e: any): AgentEvent | null {
 export interface ConsultAssignment {
   model?: string;
   accountId?: string;
-  webAccountId?: string;
   attach: string[];
   discussion?: { topic: string; peers: string[] };
 }
@@ -211,7 +209,7 @@ function projectSettings(json: string): ProjectSettings {
     gptStrengths: ["이미지 생성·편집, 시각 자료 제작. 구현·테스트·문서 작성은 맥락에 따라 배정."],
     gptCautions: ["이미지 생성 도구의 실제 사용 가능 여부를 확인합니다. 소스 분석은 기본적으로 클로드를 우선 고려합니다.", "일반 분석·구현·테스트·문서와 모션그래픽은 클로드 우선입니다. 이미지 도구가 필요하거나 교차검증의 필요성이 크거나 클로드가 실행 불가·과부하일 때 배정합니다."],
     geminiStrengths: ["사용자 지정 제미나이 작업, 문서 요약·자료 비교와 추가 관점의 검토. 클로드가 바쁘거나 사용 한도에 도달했을 때 보조 담당.", "웹·CLI 모두 글쓰기 전담. 문장 다듬기, 캐릭터 대사·시나리오, 문서 본문 작성·요약·번역을 우선 배정합니다."],
-    geminiCautions: ["Google AI Pro 계정에서 실제 제공되는 Gemini 모델만 사용합니다. Ultra 전용 모델·API 결제로 전환하지 않습니다. 일반 업무는 클로드 우선, 이미지 생성은 지피티, 중요한 오류는 기존 클로드·지피티 양쪽 조사 규칙을 유지합니다.", "코드 분석·구현·디버깅·테스트·기술 리뷰·교차검증은 맡기지 않습니다. 검증된 사실과 캐릭터 말투를 유지하고 텍스트만 반환합니다. 실제 파일 반영은 클로드·지피티가 수행합니다. Google AI Pro 계정에서 제공되는 모델만 사용합니다."],
+    geminiCautions: ["AI Studio는 승인과 작업 범위 안에서 로컬 도구를 사용합니다. Gemini 웹은 로컬 파일·명령·MCP를 실행할 수 없습니다. 실제 계정에서 제공되는 모델과 도구만 사용합니다.", "Google AI Pro 계정에서 실제 제공되는 Gemini 모델만 사용합니다. Ultra 전용 모델·API 결제로 전환하지 않습니다. 일반 업무는 클로드 우선, 이미지 생성은 지피티, 중요한 오류는 기존 클로드·지피티 양쪽 조사 규칙을 유지합니다.", "코드 분석·구현·디버깅·테스트·기술 리뷰·교차검증은 맡기지 않습니다. 검증된 사실과 캐릭터 말투를 유지하고 텍스트만 반환합니다. 실제 파일 반영은 클로드·지피티가 수행합니다. Google AI Pro 계정에서 제공되는 모델만 사용합니다."],
   };
   for (const [key, values] of Object.entries(previous)) if (values.includes(saved[key])) delete saved[key];
   const settings = { ...DEFAULT_SETTINGS, ...saved };
@@ -293,7 +291,6 @@ const toAgent = (r: Row): ChatAgent => ({
   nickname: r.nickname,
   job: r.job,
   sessionId: r.session_id,
-  webAccountId: r.web_account_id ?? undefined,
   ...(isCliAccountId(r.cli_account_id) ? { cliAccountId: r.cli_account_id } : {}),
   ...(isCliAccountId(r.session_account_id) ? { sessionAccountId: r.session_account_id } : {}),
   ...(isCliAccountId(r.session_account_id) && Number.isFinite(r.session_account_gen) ? { sessionAccountGeneration: r.session_account_gen } : {}),
@@ -430,13 +427,13 @@ export class Store {
    * `cliAccountId: null` returns the worker to the project/global policy; releasing a worker also
    * drops its assignment. A new `sessionAccountId` replaces the session generation with the given one.
    */
-  updateAgent(id: number, patch: { sessionId?: string; status?: "active" | "released"; job?: string; webAccountId?: GeminiWebAccountId; cliAccountId?: CliAccountId | null; sessionAccountId?: CliAccountId; sessionAccountGeneration?: number }) {
+  updateAgent(id: number, patch: { sessionId?: string; status?: "active" | "released"; job?: string; cliAccountId?: CliAccountId | null; sessionAccountId?: CliAccountId; sessionAccountGeneration?: number }) {
     const a = this.agent(id)!;
     const cliAccountId = patch.cliAccountId === null || patch.status === "released" ? null : patch.cliAccountId ?? a.cliAccountId ?? null;
     const generation = patch.sessionAccountId !== undefined ? patch.sessionAccountGeneration ?? null : patch.sessionAccountGeneration ?? a.sessionAccountGeneration ?? null;
     this.db
-      .prepare("UPDATE agents SET session_id = ?, status = ?, job = ?, web_account_id = ?, cli_account_id = ?, session_account_id = ?, session_account_gen = ? WHERE id = ?")
-      .run(patch.sessionId ?? a.sessionId, patch.status ?? a.status, patch.job ?? a.job, patch.webAccountId ?? a.webAccountId ?? null,
+      .prepare("UPDATE agents SET session_id = ?, status = ?, job = ?, cli_account_id = ?, session_account_id = ?, session_account_gen = ? WHERE id = ?")
+      .run(patch.sessionId ?? a.sessionId, patch.status ?? a.status, patch.job ?? a.job,
         cliAccountId, patch.sessionAccountId ?? a.sessionAccountId ?? null, generation, id);
     return this.agent(id)!;
   }
@@ -679,23 +676,6 @@ export class Store {
       this.db.exec("COMMIT");
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
-  disconnectWebAccount(accountId: GeminiWebAccountId) {
-    if (!/^gemini-([1-9]|10)$/.test(accountId)) throw new Error("등록되지 않은 웹 계정입니다.");
-    const prefix = `web:${accountId}:/app/%`;
-    this.db.exec("BEGIN");
-    try {
-      this.db.prepare(`UPDATE agents SET
-        session_id = CASE WHEN session_id LIKE ? THEN NULL ELSE session_id END,
-        web_account_id = CASE WHEN web_account_id = ? THEN NULL ELSE web_account_id END
-        WHERE kind = 'gemini' AND (session_id LIKE ? OR web_account_id = ?)`).run(prefix, accountId, prefix, accountId);
-      this.db.prepare("DELETE FROM settings WHERE key LIKE 'orchSession:%:gemini' AND value LIKE ?").run(prefix);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
   private clearChatSettings(id: number) {
     for (const prefix of ["orchSession", "teamMessages", "gemini-web-context", "aistudio-context", "deepseek-context", "runInstruction"])
       this.db.prepare("DELETE FROM settings WHERE key LIKE ?").run(`${prefix}:${id}:%`);

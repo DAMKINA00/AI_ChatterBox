@@ -1,3 +1,5 @@
+> 0.4.51에서 Gemini 웹 연동은 제거되었습니다. 이 문서는 이전 버전 기록입니다. 현재 연결은 [Antigravity CLI 안내](gemini-pro.md)를 참고하세요.
+
 # Gemini 웹 계정 관리
 
 ## 연결

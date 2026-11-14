@@ -6,7 +6,7 @@ import { CLI_ACCOUNT_KINDS, type CliAccountId, type CliAccountKind, type CliAcco
 import type { DeepSeekBalance } from "./deepseek";
 import { pickUsage, type ProviderUsage, type UsageDisplay } from "./usage";
 
-export const USAGE_KIND_NAME: Record<CliAccountKind, string> = { claude: "클로드", gpt: "지피티", grok: "그록" };
+export const USAGE_KIND_NAME: Record<CliAccountKind, string> = { claude: "클로드", gpt: "지피티", gemini: "안티그래비티", grok: "그록" };
 
 /** One CLI account as usage displays show it. No email, folder or other local detail. */
 export interface UsageAccountRow {
@@ -52,7 +52,7 @@ export function usageAccountRow(account: CliAccountStatus, usage: UsageInfo): Us
   return {
     accountId: account.accountId, kind: account.kind, label: account.label, enabled: account.enabled, isDefault: account.isDefault,
     authStatus: account.authStatus, runningWorkers: account.runningWorkers,
-    display: u && !u.error ? pickUsage(u) : null,
+    display: u && !u.error ? pickUsage(u, account.kind === "gemini") : null,
     ...(u?.error ? { error: u.error } : {}),
     ...(typeof checkedAt === "number" && Number.isFinite(checkedAt) ? { checkedAt } : {}),
     ...(u && !u.error ? windowsOf(u) : {}),

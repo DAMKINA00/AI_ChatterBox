@@ -6,6 +6,7 @@ import { CLI_KINDS, CLI_KIND_LABEL, cliCheckedText, cliRemaining, type CliKind }
 import { useStore } from "../store";
 import { Badge, Button, Dialog, DialogContent, DialogFooter, Input } from "./ui";
 import { CliAccountPolicyField } from "./CliAccountPolicyField";
+import { pickUsage } from "../../../shared/usage";
 
 export function CliAccountCard({ account, pending, update, run }: {
   account: CliAccountStatus;
@@ -17,6 +18,8 @@ export function CliAccountCard({ account, pending, update, run }: {
   const [confirm, setConfirm] = useState<"logout" | "remove">();
   useEffect(() => setLabel(account.label), [account.label]);
   const busy = account.runningWorkers > 0;
+  const geminiDisplay = account.kind === "gemini" ? pickUsage(account.usage, true) : null;
+  const windows: ("fiveHour" | "weekly")[] = account.kind === "gemini" ? [geminiDisplay?.window === "5시간" ? "fiveHour" : "weekly"] : ["fiveHour", "weekly"];
   return (
     <section className="grid content-start gap-3 rounded-xl border bg-card p-4" data-testid="cli-account" data-account-id={account.accountId} aria-label={account.label}>
       <div className="flex flex-wrap items-center gap-2 text-[12px]">
@@ -37,16 +40,19 @@ export function CliAccountCard({ account, pending, update, run }: {
       </p>
       {account.authStatus === "unknown" && <p className="text-[11.5px] text-muted-foreground">로그인 창에서 로그인을 마친 뒤 상태 새로고침을 눌러주세요.</p>}
       <div className="grid gap-2 text-[12px]" data-testid="cli-account-usage">
-        {(["fiveHour", "weekly"] as const).map(key => {
-          const remaining = account.usage?.error ? undefined : cliRemaining(account.usage?.[key]);
+        {windows.map(key => {
+          const value = account.usage?.[key];
+          const remaining = account.usage?.error ? undefined : cliRemaining(value);
+          const name = key === "fiveHour" ? "5시간" : "주간";
           return <div key={key} className="flex items-center gap-2">
-            <span className="w-10 text-muted-foreground">{key === "fiveHour" ? "5시간" : "주간"}</span>
-            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted" role="progressbar" aria-label={`${account.accountId} ${key === "fiveHour" ? "5시간" : "주간"} 잔여량`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={remaining} aria-valuetext={remaining === undefined ? "정보 없음" : `${Math.round(remaining)}% 남음`}>
+            <span className="w-10 text-muted-foreground">{name}</span>
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted" role="progressbar" aria-label={`${account.accountId} ${name} 잔여량`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={remaining} aria-valuetext={remaining === undefined ? "정보 없음" : `${Math.round(remaining)}% 남음`} title={value?.resetsAt ? `${new Date(value.resetsAt > 1e12 ? value.resetsAt : value.resetsAt * 1000).toLocaleString("ko-KR")} 초기화` : undefined}>
               {remaining !== undefined && <div className={remaining <= 10 ? "h-full bg-destructive" : "h-full bg-primary"} style={{ width: `${remaining}%` }} />}
             </div>
             <span className="w-20 text-right tabular-nums">{remaining === undefined ? "정보 없음" : `${Math.round(remaining)}% 남음`}</span>
           </div>;
         })}
+        {account.kind === "gemini" && <span className="text-[11px] text-muted-foreground">Gemini Models의 주간·5시간 중 적게 남은 한도만 표시합니다.</span>}
         {account.usage?.error && <span className="text-destructive">{account.usage.error}</span>}
         <span className="text-[11px] text-muted-foreground">{cliCheckedText(account.usage?.checkedAt ?? account.auth?.checkedAt)}</span>
       </div>
@@ -62,7 +68,7 @@ export function CliAccountCard({ account, pending, update, run }: {
       <Dialog open={!!confirm} onOpenChange={open => { if (!open) setConfirm(undefined); }}>
         <DialogContent title={confirm === "remove" ? "CLI 계정 삭제" : "CLI 계정 로그아웃"} description={`${account.label} (${account.accountId})`}>
           <p className="text-[13px]">{confirm === "remove" ? "이 계정과 저장된 로그인 정보를 삭제하시겠습니까?" : "이 계정에서 로그아웃하시겠습니까? 다시 사용하려면 로그인해야 합니다."}</p>
-          {confirm === "logout" && account.isDefault && <p role="alert" className="text-[13px] text-destructive">평소 터미널에서 쓰는 기본 CLI 로그인(~/.claude, ~/.codex, ~/.grok)도 함께 끊깁니다.</p>}
+          {confirm === "logout" && account.isDefault && <p role="alert" className="text-[13px] text-destructive">평소 터미널에서 쓰는 기본 CLI 로그인(~/.claude, ~/.codex, Antigravity 공유 로그인, ~/.grok)도 함께 끊깁니다.</p>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setConfirm(undefined)}>취소</Button>
             <Button type="button" variant="destructive" disabled={pending || busy || (confirm === "remove" && account.isDefault)} onClick={() => { if (confirm) run(confirm); setConfirm(undefined); }}>{confirm === "remove" ? "삭제 확인" : "로그아웃 확인"}</Button>
@@ -124,6 +130,7 @@ export function CliAccountsDialog({ open, onOpenChange }: { open: boolean; onOpe
         {error && <div role="alert" className="flex gap-2 rounded-lg border border-destructive/50 p-3 text-[12px] text-destructive"><CircleAlert className="size-4 shrink-0" />{error}</div>}
         {notice && <p role="status" className="rounded-lg border border-primary/30 bg-primary/5 p-3 text-[12px]">{notice}</p>}
         <section className="grid gap-2 rounded-lg border p-3">
+          {kind === "gemini" && <p className="text-[12px] text-muted-foreground">Antigravity 추가 계정은 CLI별 폴더에 로그인과 대화를 따로 저장합니다. 로그인 콘솔에 표시된 Google 인증 링크를 열고 안내에 따라 인증을 마친 뒤 상태를 새로고침하세요. 기본 계정은 평소 CLI 로그인을 사용합니다.</p>}
           <h3 className="text-[12px] font-medium">앱 전역 계정 선택 · {CLI_KIND_LABEL[kind]}</h3>
           <CliAccountPolicyField kind={kind} accounts={accounts} value={policy[kind]} disabled={pending || !loaded} onChange={value => { if (value) void manage(() => api.cliAccounts.setPolicy({ ...policy, [kind]: value })); }} />
         </section>

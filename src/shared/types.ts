@@ -1,7 +1,6 @@
 // Types shared by main, preload and renderer.
-import { AISTUDIO_MODEL, isAIStudioModel } from "./aistudio";
+import { isAIStudioModel } from "./aistudio";
 import type { ProviderUsage } from "./usage";
-import type { AIStudioAction, AIStudioInput, AIStudioStatus, AIStudioUsageRange, AIStudioUsageReport } from "./aistudio";
 import type { DeepSeekAction, DeepSeekBalance, DeepSeekInput, DeepSeekStatus } from "./deepseek";
 import type { RemoteWebAction, RemoteWebInput, RemoteWebStatus } from "./remote-web";
 import type { EventPage, PendingApproval } from "./event-page";
@@ -11,47 +10,20 @@ import type { RunStats } from "./run-stats";
 export interface RunStatsRows { total: RunStats; roles: { key: string; label: string; stats: RunStats }[]; consults: { key: string; label: string; stats: RunStats }[] }
 
 export type AgentKind = "claude" | "codex" | "gemini" | "grok" | "deepseek";
-export const GEMINI_WEB_MODEL = "gemini-web-argon";
-/** Legacy CLI selections now use AI Studio; existing Web/AIS selections stay intact. */
-export const normalizeGeminiModel = (model: string): string => model === GEMINI_WEB_MODEL || isAIStudioModel(model) ? model : AISTUDIO_MODEL;
+/** Retired AI Studio and Web selections migrate to the native CLI. */
+export const ANTIGRAVITY_MODEL = "gemini-4-argon-medium";
+export const normalizeGeminiModel = (model: string): string => !model || isAIStudioModel(model) || model.startsWith("gemini-web-") || !model.startsWith("gemini-") || model === "gemini-pro" ? ANTIGRAVITY_MODEL : model;
 export const normalizeOrchestratorModel = (model: string): OrchestratorModel => (model.startsWith("gemini:") ? `gemini:${normalizeGeminiModel(model.slice(7))}` : model) as OrchestratorModel;
-export type GeminiWebAccountId = `gemini-${1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10}`;
 export const GEMINI_WRITING_INSTRUCTIONS = "기본 글쓰기 담당은 Gemini다. 사용자가 다른 작업을 명시적으로 지정하면 해당 요청을 수행한다. 사용 가능한 도구만 사용하고, 없는 기능이나 실행하지 않은 결과를 꾸며내지 않는다.";
 
-export interface GeminiWebUsage {
-  status: "unknown" | "available" | "limited" | "error";
-  detail: string;
-  checkedAt: number;
-  remaining?: number;
-  limit?: number;
-  resetText?: string;
-  current?: { usedPercent: number; resetText?: string };
-  weekly?: { usedPercent: number; resetText?: string };
-}
-
-export interface GeminiWebStatus {
-  accountId: GeminiWebAccountId;
-  state: "closed" | "login_required" | "ready" | "busy" | "error";
-  message: string;
-  model?: string;
-  checkedAt: number;
-  usage: GeminiWebUsage;
-}
-
-export interface GeminiWebAccountStatus extends GeminiWebStatus {
-  label: string;
-  enabled: boolean;
-  remainingPercent?: number;
-}
-
 /** CLI account families. Codex uses the worker kind "gpt". */
-export const CLI_ACCOUNT_KINDS = ["claude", "gpt", "grok"] as const;
+export const CLI_ACCOUNT_KINDS = ["claude", "gpt", "gemini", "grok"] as const;
 export type CliAccountKind = (typeof CLI_ACCOUNT_KINDS)[number];
 export type CliAccountId = `${CliAccountKind}-${1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10}`;
 export const MAX_CLI_ACCOUNTS = 10;
 
 export function isCliAccountId(value: unknown): value is CliAccountId {
-  return typeof value === "string" && /^(claude|gpt|grok)-([1-9]|10)$/.test(value);
+  return typeof value === "string" && /^(claude|gpt|gemini|grok)-([1-9]|10)$/.test(value);
 }
 export function cliAccountKindOf(id: CliAccountId): CliAccountKind {
   return id.slice(0, id.lastIndexOf("-")) as CliAccountKind;
@@ -59,7 +31,7 @@ export function cliAccountKindOf(id: CliAccountId): CliAccountKind {
 export const defaultCliAccountId = (kind: CliAccountKind): CliAccountId => `${kind}-1`;
 /** Account family of a CLI agent; null for agents without CLI accounts. */
 export function cliAccountKindForAgent(agent: AgentKind): CliAccountKind | null {
-  return agent === "claude" ? "claude" : agent === "codex" ? "gpt" : agent === "grok" ? "grok" : null;
+  return agent === "claude" ? "claude" : agent === "codex" ? "gpt" : agent === "grok" ? "grok" : agent === "gemini" ? "gemini" : null;
 }
 
 export interface CliAccount {
@@ -168,7 +140,6 @@ export interface ChatAgent {
   job: string;
   sessionId: string | null;
   /** Gemini web account explicitly selected by the master; absent on legacy/unbound workers. */
-  webAccountId?: GeminiWebAccountId;
   /** CLI account explicitly assigned by the master; absent = project/global policy. */
   cliAccountId?: CliAccountId;
   /** CLI account that created `sessionId`; a different account never resumes it. */
@@ -221,7 +192,7 @@ export interface ProjectSettings {
   claudeModel: string;
   /** GPT worker model id (Codex model/list). */
   codexModel: string;
-  /** Gemini Web or AI Studio model ID. */
+  /** Native Antigravity CLI model ID. */
   geminiModel: string;
   grokModel: string;
   grokStrengths: string;
@@ -274,7 +245,7 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   orchestratorModel: "claude:opus",
   claudeModel: "opus",
   codexModel: "gpt-6-astra",
-  geminiModel: AISTUDIO_MODEL,
+  geminiModel: ANTIGRAVITY_MODEL,
   grokModel: "",
   grokStrengths: "사용자가 지정한 작업, 조사·구현·이미지 생성과 동료 협업.",
   grokCautions: "실제 CLI·모델·도구 제공 여부를 확인하고 불가능한 기능은 실행한 것처럼 보고하지 않습니다.",
@@ -288,7 +259,7 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   grokEffort: "auto",
   deepseekEffort: "auto",
   geminiStrengths: "문장 다듬기, 대사·시나리오, 문서 작성·요약·번역을 우선 배정하며 명시적으로 지정한 다른 작업도 수행합니다.",
-  geminiCautions: "AI Studio는 승인과 작업 범위 안에서 로컬 도구를 사용합니다. Gemini 웹은 로컬 파일·명령·MCP를 실행할 수 없습니다. 실제 계정에서 제공되는 모델과 도구만 사용합니다.",
+  geminiCautions: "Antigravity CLI는 승인과 작업 범위 안에서 로컬 도구를 사용합니다. 실제 CLI 계정에서 제공되는 모델과 도구만 사용합니다.",
   reviewGate: true,
   maxConsults: 100,
   maxReviews: 20,
@@ -470,7 +441,6 @@ export type AgentEvent =
   | { type: "fork_context"; text: string; attachments: AttachmentRef[] }
   | { type: "ask_user"; id: string; question: string; options: string[] }
   | { type: "ask_user_answer"; id: string; answer: string }
-  | { type: "notice"; text: string; webAccountId?: GeminiWebAccountId; cliAccountId?: CliAccountId }
   /** Checklist from the orchestrator's native plan tool (Claude TodoWrite / Codex update_plan). */
   /**
    * planId: the instruction the plan belongs to (the /plan instruction for a proposal and its run, otherwise
@@ -483,6 +453,7 @@ export type AgentEvent =
   | { type: "plan_state"; state: PlanState; planId?: number; reason?: string }
   | { type: "goal_update"; goal: ChatGoal | null }
   | { type: "turn_end"; ok: boolean; error?: string; interrupted?: boolean }
+  | { type: "notice"; text: string; cliAccountId?: CliAccountId }
   | { type: "error"; message: string; kind?: "auth" | "missing_cli" | "process" };
 
 /**
@@ -560,7 +531,6 @@ export interface UsageInfo {
   gemini?: ProviderUsage;
   grok?: ProviderUsage;
   deepseek?: DeepSeekBalance;
-  geminiWeb?: GeminiWebUsage;
   /** Per CLI account; the family keys above keep the `*-1` values. */
   accounts?: Partial<Record<CliAccountId, ProviderUsage>>;
 }
@@ -582,8 +552,6 @@ export interface CliAccountsApi {
 export interface ChatterBoxApi {
   cliAccounts: CliAccountsApi;
   deepSeek(action: DeepSeekAction, input?: DeepSeekInput): Promise<DeepSeekStatus>;
-  aiStudio(action: AIStudioAction, input?: AIStudioInput): Promise<AIStudioStatus>;
-  aiStudioUsage(range?: AIStudioUsageRange): Promise<AIStudioUsageReport>;
   // projects
   listProjects(): Promise<Project[]>;
   createProject(input: { name: string; folder: string; settings: ProjectSettings }): Promise<Project>;
@@ -651,8 +619,6 @@ export interface ChatterBoxApi {
   // misc
   cliInfo(checkAuth?: boolean): Promise<CliInfo[]>;
   models(agent: AgentKind): Promise<ModelOption[]>;
-  geminiWeb(action: "status" | "open" | "login" | "refresh", accountId?: GeminiWebAccountId): Promise<GeminiWebStatus>;
-  geminiWebAccounts(action: "list" | "add" | "update" | "logout" | "remove", input?: { accountId?: GeminiWebAccountId; label?: string; enabled?: boolean }): Promise<GeminiWebAccountStatus[]>;
   remoteWeb(action: RemoteWebAction, input?: RemoteWebInput): Promise<RemoteWebStatus>;
   getTheme(): Promise<Theme>;
   setTheme(theme: Theme): Promise<void>;
@@ -666,7 +632,6 @@ export interface ChatterBoxApi {
   onConsultUpdated(cb: (consult: Consult) => void): () => void;
   onAgentsUpdated(cb: (chatId: number, agents: ChatAgent[]) => void): () => void;
   onUsage(cb: (u: UsageInfo) => void): () => void;
-  onGeminiWebLogin(cb: (status: GeminiWebStatus) => void): () => void;
   /** Main asks to show a chat (tray notification clicked). */
   onSelectChat(cb: (chatId: number) => void): () => void;
   /** A chat was deleted from the remote web. */

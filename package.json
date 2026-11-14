@@ -1,9 +1,9 @@
 {
   "name": "ai-chatterbox",
   "productName": "AI_ChatterBox",
-  "version": "0.4.48",
+  "version": "0.4.51",
   "private": true,
-  "description": "Desktop agent team for Claude Code, Codex, Grok, DeepSeek API, Gemini Web and AI Studio",
+  "description": "Desktop agent team for Claude Code, Codex, Antigravity CLI, Grok and DeepSeek API",
   "main": "out/main/index.js",
   "type": "module",
   "scripts": {
@@ -35,10 +35,6 @@
         "to": "icon.png"
       },
       {
-        "from": "scripts/install-aistudio.ps1",
-        "to": "scripts/install-aistudio.ps1"
-      },
-      {
         "from": ".scratch/usage-monitor-publish",
         "to": "usage-monitor",
         "filter": [
@@ -48,7 +44,8 @@
       }
     ],
     "asarUnpack": [
-      "out/main/bridge-mcp.js"
+      "out/main/bridge-mcp.js",
+      "out/main/antigravity-hook.js"
     ],
     "win": {
       "requestedExecutionLevel": "asInvoker",

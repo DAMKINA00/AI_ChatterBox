@@ -1,12 +1,11 @@
 import { useEffect, useMemo } from "react";
 import { ChevronDown, RotateCcw } from "lucide-react";
-import { GEMINI_WEB_MODEL, type AgentKind, type ModelOption } from "../../../shared/types";
+import { type AgentKind, type ModelOption } from "../../../shared/types";
 import { cn } from "../lib/utils";
 import { useStore } from "../store";
 import { Button, DropdownMenu, DropdownMenuCheckItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger, Tooltip } from "./ui";
 
 const EFFORT_ORDER = ["low", "medium", "high", "xhigh"];
-const WEB_EFFORT_TITLE = "제미나이 웹은 medium/high/xhigh 추론 수준을 제공하지 않습니다. 웹 서비스가 모델 설정을 관리합니다.";
 
 export function effortLabel(value: string | null | undefined): string {
   if (!value) return "CLI 기본값";
@@ -81,12 +80,10 @@ export function EffortPicker({
   const models = useStore((s) => s.models);
   const modelErrors = useStore((s) => s.modelErrors);
   const loadModels = useStore((s) => s.loadModels);
-  const webModel = agent === "gemini" && model === GEMINI_WEB_MODEL;
-  const aiStudioModel = agent === "gemini" && !webModel;
 
   useEffect(() => {
-    if (!webModel && !aiStudioModel) void loadModels(agent);
-  }, [agent, aiStudioModel, loadModels, webModel]);
+    void loadModels(agent);
+  }, [agent, loadModels]);
 
   const options = useMemo(() => effortOptions(models, agent, model, worker), [models, agent, model, worker]);
   const metadata = models[agent];
@@ -102,30 +99,6 @@ export function EffortPicker({
     else status = "이 모델에서 지원하지 않는 요청값입니다";
   }
   const statusTitle = status ? `${effortLabel(value)} · ${status}` : undefined;
-
-  if (webModel || aiStudioModel) {
-    const title = webModel ? WEB_EFFORT_TITLE : "현재 AI Studio 연결은 모델의 기본 추론 설정을 사용합니다.";
-    return (
-      <Tooltip content={title}>
-        <span className="inline-flex" title={title}>
-          <Button
-            variant="outline"
-            size={compact ? "xs" : "default"}
-            disabled
-            aria-label={ariaLabel}
-            title={title}
-            data-testid="effort-picker"
-            data-effort={value}
-            data-effort-status={webModel ? "web" : "aistudio"}
-            className={cn("justify-between font-normal", compact && "max-w-28", !compact && "min-w-32", className)}
-          >
-            <span className="truncate">{webModel ? "웹 모델 설정" : "AI Studio 모델 설정"}</span>
-            <ChevronDown className="opacity-60" />
-          </Button>
-        </span>
-      </Tooltip>
-    );
-  }
 
   return (
     <DropdownMenu>

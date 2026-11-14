@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Store } from "./db";
-import { DEFAULT_SETTINGS } from "../shared/types";
+import { ANTIGRAVITY_MODEL, DEFAULT_SETTINGS } from "../shared/types";
 
 const legacySettings = {
   claudeStrengths: "legacy Claude",
@@ -24,6 +24,25 @@ const legacySettings = {
   approvalMode: "orchestrator",
   delegateHighRisk: false,
 };
+
+test("retired Web selections migrate to CLI without deleting worker or dialogue history", () => {
+  const f = freshStore();
+  try {
+    const worker = f.store.createAgent(f.chatId, "gemini", "continue existing dialogue");
+    f.store.updateAgent(worker.id, { sessionId: "web:gemini-4:/app/old-conversation" });
+    f.store.addEvent(f.chatId, worker.key, worker.key, { type: "text", text: "기존 웹 대화" });
+    for (const model of ["gemini-web-argon", "gemini-web-pro", "aistudio:gemini-4-argon"]) {
+      f.store.updateProject(f.projectId, { settings: { ...DEFAULT_SETTINGS, geminiModel: model, orchestratorModel: `gemini:${model}` } });
+      assert.equal(f.store.project(f.projectId)!.settings.geminiModel, ANTIGRAVITY_MODEL);
+      assert.equal(f.store.project(f.projectId)!.settings.orchestratorModel, `gemini:${ANTIGRAVITY_MODEL}`);
+      const chat = f.store.updateChat(f.chatId, { geminiModelOverride: model, orchestratorModelOverride: `gemini:${model}` });
+      assert.equal(chat.geminiModelOverride, ANTIGRAVITY_MODEL);
+      assert.equal(chat.orchestratorModelOverride, `gemini:${ANTIGRAVITY_MODEL}`);
+    }
+    assert.equal(f.store.agent(worker.id)!.sessionId, "web:gemini-4:/app/old-conversation");
+    assert.ok(f.store.events(f.chatId).some(e => e.event.type === "text" && e.event.text === "기존 웹 대화"));
+  } finally { f.store.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
 
 function seedLegacyDb() {
   const root = mkdtempSync(join(tmpdir(), "aichatterbox-gemini-storage-"));
@@ -217,10 +236,10 @@ test("Gemini model override persists, reloads, clears with null, and reloads cle
   let store: Store | undefined = f.store;
   try {
     assert.equal(store.chat(f.chatId)!.geminiModelOverride, null);
-    assert.equal(store.updateChat(f.chatId, { geminiModelOverride: "aistudio:gemini-4-argon", touch: true }).geminiModelOverride, "aistudio:gemini-4-argon");
+    assert.equal(store.updateChat(f.chatId, { geminiModelOverride: "gemini-4-argon-medium", touch: true }).geminiModelOverride, "gemini-4-argon-medium");
     store.close();
     store = new Store(f.dbPath);
-    assert.equal(store.chat(f.chatId)!.geminiModelOverride, "aistudio:gemini-4-argon");
+    assert.equal(store.chat(f.chatId)!.geminiModelOverride, "gemini-4-argon-medium");
     assert.equal(store.updateChat(f.chatId, { geminiModelOverride: null, touch: true }).geminiModelOverride, null);
     store.close();
     store = new Store(f.dbPath);

@@ -95,7 +95,7 @@ function assignmentText(a: ConsultAssignment | undefined, c: Consult): string {
   const parts = [
     a?.model && `모델=${a.model}`,
     (c.effort || c.requestedEffort) && `추론=${c.effort || c.requestedEffort}`,
-    (a?.accountId || a?.webAccountId) && `계정=${a.accountId ?? a.webAccountId}`,
+    a?.accountId && `계정=${a.accountId}`,
     a?.attach.length && `첨부=${a.attach.join(", ")}`,
     a?.discussion && `토의=${clip(a.discussion.topic, 120)}(${a.discussion.peers.join(", ")})`,
   ].filter(Boolean);

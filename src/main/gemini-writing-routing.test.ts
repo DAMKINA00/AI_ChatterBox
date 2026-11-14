@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { DEFAULT_SETTINGS, GEMINI_WEB_MODEL, type AgentEvent, type Role } from "../shared/types";
+import { DEFAULT_SETTINGS, ANTIGRAVITY_MODEL, type AgentEvent, type Role } from "../shared/types";
 import { Store } from "./db";
 import { ChatManager } from "./chats";
 import { completionIssue } from "./dispatch";
@@ -16,7 +16,7 @@ type Sent = { role: Role; effort?: string; input: AgentInput };
 function fixture(options: { geminiModel?: string; geminiStrengths?: string } = {}) {
   const root = mkdtempSync(join(tmpdir(), "cbx-gemini-writing-routing-"));
   const dbPath = join(root, "test.db");
-  const geminiModel = options.geminiModel ?? GEMINI_WEB_MODEL;
+  const geminiModel = options.geminiModel ?? ANTIGRAVITY_MODEL;
   const settings = {
     ...DEFAULT_SETTINGS,
     geminiModel,
@@ -27,6 +27,7 @@ function fixture(options: { geminiModel?: string; geminiStrengths?: string } = {
   const chat = store.createChat(project.id, "test");
   const chats = new ChatManager(store, { agents() {}, chat() {}, consult() {}, usage() {}, event() {} }, root, "unused");
   chats.cliInfo = () => [
+    { agent: "gemini", path: "fake-agy" },
     { agent: "claude", path: null, error: "stub" },
     { agent: "codex", path: null, error: "stub" },
   ];
@@ -95,29 +96,22 @@ function fixture(options: { geminiModel?: string; geminiStrengths?: string } = {
 const call = (engine: any, chatId: number, caller: Role, kind: string, to: string) =>
   engine.call(chatId, caller, "ask", { to, kind, scope: ["delegated/**"], message: `${kind} 요청`, reason: "writing routing regression", effort: "medium" });
 
-test("AI Studio accepts explicit code, review and writing; web retains local-tool limits", async () => {
-  for (const geminiModel of [GEMINI_WEB_MODEL, "gemini-test-medium"]) {
-    const f = fixture({ geminiModel });
-    try {
-      const worker = f.store.createAgent(f.chat.id, "gemini", "assigned work");
-      if (geminiModel === GEMINI_WEB_MODEL) f.store.updateAgent(worker.id, { webAccountId: "gemini-4" });
-      for (const kind of ["implement", "review", "opinion", "writing"] as const) {
-        const result = await call(f.engine, f.chat.id, "orch", kind, worker.nickname);
-        const blocked = geminiModel === GEMINI_WEB_MODEL && kind === "implement";
-        assert.equal(result.isError, blocked, `${geminiModel} ${kind}`);
-        if (!blocked) {
-          assert.equal(f.sent.at(-1)!.input.noWrites, geminiModel === GEMINI_WEB_MODEL);
-          assert.match(f.sent.at(-1)!.input.text, /고칠 수 있는 범위: delegated\/\*\*/);
-        }
-        else assert.match(result.content[0].text, /로컬 파일/);
-      }
-      assert.ok(f.store.listConsults(f.chat.id).every(c => c.status === "done"));
-    } finally { await f.close(); }
-  }
+test("Antigravity accepts explicit code, review and writing", async () => {
+  const f = fixture();
+  try {
+    const worker = f.store.createAgent(f.chat.id, "gemini", "assigned work");
+    for (const kind of ["implement", "review", "opinion", "writing"] as const) {
+      const result = await call(f.engine, f.chat.id, "orch", kind, worker.nickname);
+      assert.equal(result.isError, false, kind);
+      assert.ok(!f.sent.at(-1)!.input.noWrites);
+      assert.match(f.sent.at(-1)!.input.text, /고칠 수 있는 범위: delegated\/\*\*/);
+    }
+    assert.ok(f.store.listConsults(f.chat.id).every(c => c.status === "done"));
+  } finally { await f.close(); }
 });
 
-test("AI Studio peers can request implementation as well as review", async () => {
-  const f = fixture({ geminiModel: "gemini-test-medium" });
+test("Antigravity peers can request implementation as well as review", async () => {
+  const f = fixture({ geminiModel: "gemini-4-argon-medium" });
   try {
     const gemini = f.store.createAgent(f.chat.id, "gemini", "technical peer");
     const claude = f.store.createAgent(f.chat.id, "claude", "technical work");
@@ -144,12 +138,11 @@ test("explicit assignments override default specialities while preserving custom
     assert.deepEqual(new Set(capabilities.gemini.supportedKinds), new Set(["implement", "review", "opinion", "writing"]));
     assert.equal(capabilities.gemini.fileWrites, true);
     assert.equal(capabilities.gemini.localTools, true);
-    assert.equal(capabilities.gemini.webOnly, false);
   } finally { await f.close(); }
 });
 
 test("a writing result does not satisfy the code review gate, while its kind survives DB reload", async () => {
-  const f = fixture({ geminiModel: "gemini-test-medium" });
+  const f = fixture({ geminiModel: "gemini-4-argon-medium" });
   try {
     const claude = f.store.createAgent(f.chat.id, "claude", "implementation");
     const gemini = f.store.createAgent(f.chat.id, "gemini", "writing");

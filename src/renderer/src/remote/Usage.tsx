@@ -1,9 +1,8 @@
 // Read-only usage sheet (D5): the desktop usage panel's view of ChatterBox's accounts, API balance and AI Studio request log.
 import { useCallback, useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
-import type { AIStudioUsageRange, AIStudioUsageStats } from "../../../shared/aistudio";
 import type { DeepSeekBalance } from "../../../shared/deepseek";
-import { REMOTE_LIMITS, type RemoteAIStudioUsageResponse, type RemoteUsageResponse } from "../../../shared/remote-web";
+import { REMOTE_LIMITS, type RemoteUsageResponse } from "../../../shared/remote-web";
 import { deepSeekBalanceText, type UsageAccountRow } from "../../../shared/usage-view";
 import { cn } from "../lib/utils";
 import { AuthError, request, url } from "./api";
@@ -66,46 +65,7 @@ export function UsageSheet({ onClose, onAuthError }: { onClose: () => void; onAu
             </div>
           )}
         </section>}
-        <AIStudioReport onAuthError={onAuthError} />
       </div>
     </Modal>
-  );
-}
-
-const RANGES: [AIStudioUsageRange, string][] = [["24h", "24시간"], ["7d", "7일"], ["30d", "30일"]];
-const n = (v: number) => v.toLocaleString("ko-KR");
-const statLine = (s: AIStudioUsageStats) => `요청 ${n(s.requests)} (성공 ${n(s.succeeded)} · 실패 ${n(s.failed)} · 한도 ${n(s.rateLimited)}) · 토큰 ${n(s.totalTokens)}`;
-
-function AIStudioReport({ onAuthError }: { onAuthError: (e: unknown) => void }) {
-  const [range, setRange] = useState<AIStudioUsageRange>("24h");
-  const [report, setReport] = useState<RemoteAIStudioUsageResponse["report"]>();
-  const [error, setError] = useState<string>();
-  useEffect(() => {
-    let alive = true;
-    setError(undefined);
-    request<RemoteAIStudioUsageResponse>(url("/api/aistudio/usage", undefined, { range }))
-      .then(r => { if (alive) setReport(r.report); })
-      .catch(e => { if (e instanceof AuthError) onAuthError(e); else if (alive) { setReport(undefined); setError(errorText(e)); } });
-    return () => { alive = false; };
-  }, [range, onAuthError]);
-  return (
-    <section className="grid gap-2">
-      <div className="flex items-center gap-2">
-        <h3 className="flex-1 text-[13px] font-medium">AI Studio 사용 기록</h3>
-        <div role="group" aria-label="기간" className="flex gap-1">
-          {RANGES.map(([r, label]) => <Btn key={r} variant={r === range ? "default" : "outline"} className="min-h-8 px-2 text-[12px]" aria-pressed={r === range} onClick={() => setRange(r)}>{label}</Btn>)}
-        </div>
-      </div>
-      <ErrorLine error={error} />
-      {report && <>
-        <div className="text-[12.5px]">{statLine(report.totals)}</div>
-        {(["model", "account"] as const).map(g => report.groups[g].length > 0 && (
-          <details key={g} className="text-[12.5px]">
-            <summary className="cursor-pointer text-muted-foreground">{g === "model" ? "모델별" : "계정별"} {report.groups[g].length}개</summary>
-            <ul className="mt-1 grid gap-1">{report.groups[g].map(s => <li key={s.key}><span className="font-medium">{s.key}</span> · {statLine(s)}</li>)}</ul>
-          </details>
-        ))}
-      </>}
-    </section>
   );
 }

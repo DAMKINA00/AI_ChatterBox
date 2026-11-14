@@ -5,6 +5,12 @@ import { homedir } from "node:os";
 
 const exe = (name: string) => (process.platform === "win32" ? `${name}.exe` : name);
 
+export function findGemini(override?: string): string | null {
+  if (override) return existsSync(override) ? override : null;
+  const local = join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "agy", "bin", exe("agy"));
+  return onPath("agy") ?? (existsSync(local) ? local : null);
+}
+
 export function findGrok(override?: string): string | null {
   if (override && existsSync(override)) return override;
   const local = join(process.env.GROK_HOME || join(homedir(), ".grok"), "bin", exe("grok"));

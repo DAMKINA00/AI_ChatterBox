@@ -5,8 +5,9 @@
 import { chatOrchestrator, roleName, CONSULT_KIND_LABEL, type AgentEvent, type ApprovalRequest, type ConsultKind, type Role, type UsageInfo, type CliAccountId } from "../shared/types";
 import type { ChatManager } from "./chats";
 import type { ApprovalInput, JudgeAnswer } from "./approvals";
-import { AIStudioDriver, ChatCompletionDriver } from "./drivers/aistudio";
-import { isAIStudioModel } from "../shared/aistudio";
+import { ChatCompletionDriver } from "./drivers/aistudio";
+import { GeminiDriver } from "./drivers/gemini";
+import { dirname, join } from "node:path";
 import { GrokDriver } from "./drivers/grok";
 import { ClaudeDriver } from "./drivers/claude";
 import { CodexDriver } from "./drivers/codex";
@@ -60,7 +61,6 @@ export class ApprovalJudge {
     const chat = this.chats.store.chat(chatId)!;
     const project = this.chats.store.project(chat.projectId)!;
     const { agent, model } = chatOrchestrator(chat, project);
-    if (agent === "gemini" && !isAIStudioModel(model)) throw new Error("Gemini 웹은 승인 판단 마스터로 사용할 수 없습니다.");
     const token = accountId ? this.chats.accountToken(accountId) : "";
     const accountEnv = accountId ? this.chats.cliAccounts().env(accountId) : {};
     const { effort } = await this.chats.assignmentEffort(chatId, "orch");
@@ -121,7 +121,7 @@ export class ApprovalJudge {
             },
             host,
           )
-        : agent === "gemini" && isAIStudioModel(model) ? new AIStudioDriver(opts, { service: this.chats.aiStudio() }, host)
+        : agent === "gemini" ? new GeminiDriver({ ...opts, exePath: this.chats.geminiExe() }, { bridge: this.chats.bridge, hookScript: join(dirname(this.chats.bridgeScript), "antigravity-hook.js"), tmpDir: this.chats.tmpDir }, host)
         : agent === "grok" ? new GrokDriver({ ...opts, exePath: this.chats.grokExe() }, () => ({}), host)
         : agent === "deepseek" ? new ChatCompletionDriver(opts, { provider: "deepseek", service: this.chats.deepSeek() }, host)
         : new CodexDriver(opts, this.chats.codex(accountId), host);

@@ -1,5 +1,4 @@
 // Remote web access (browser → Caddy → 127.0.0.1 → this app). Shared by main, preload and renderer.
-import type { AIStudioUsageRange, AIStudioUsageReport } from "./aistudio";
 import type { ApprovalMode, AgentKind, Chat, CliAccountId, ModelOption, ProjectSettings } from "./types";
 import type { DeepSeekBalance } from "./deepseek";
 import type { UsageKindGroup } from "./usage-view";
@@ -161,7 +160,6 @@ export const REMOTE_API = {
   attachment: "/api/attachments/:id",               // GET file bytes, ?chat=<chatId> required (ownership check; 404 otherwise); an unsent upload also needs &uuid=
   attachmentRemove: "/api/attachments/:id/remove",  // POST RemoteAttachmentRemove → drops the record of an unsent remote upload, then collection deletes the file (later if locked)
   usage: "/api/usage",                              // GET ?refresh=0|1 (read-only, D5)
-  aiStudioUsage: "/api/aistudio/usage",             // GET ?range=
 } as const;
 export type RemoteApiPath = (typeof REMOTE_API)[keyof typeof REMOTE_API];
 
@@ -359,8 +357,6 @@ export interface RemoteUsageResponse {
   deepseek?: Pick<DeepSeekBalance, "state" | "balances" | "error" | "updatedAt">;
 }
 /** GET /api/aistudio/usage?range= */
-export interface RemoteAIStudioUsageQuery { range?: AIStudioUsageRange }
-export interface RemoteAIStudioUsageResponse { report: AIStudioUsageReport }
 
 // ---------- SSE events
 

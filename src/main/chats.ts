@@ -7,7 +7,6 @@ import { homedir } from "node:os";
 import { safeStorage } from "electron";
 import { join, dirname } from "node:path";
 import {
-  GEMINI_WEB_MODEL,
   chatOrchestrator,
   cliAccountKindForAgent,
   cliAccountKindOf,
@@ -36,19 +35,17 @@ import {
   type TimelineEvent,
   type UsageInfo,
   type ModelOption,
-  type GeminiWebStatus,
 } from "../shared/types";
 import type { ChatPatch, Store } from "./db";
 import { LocalBridge } from "./local-bridge";
 import { ApprovalService, type ApprovalInput, type JudgeAnswer } from "./approvals";
-import { findClaude, findCodex, findGrok } from "./locate";
+import { findClaude, findCodex, findGrok, findGemini } from "./locate";
 import { GrokDriver, listGrokModels, readGrokAuth, readGrokUsage } from "./drivers/grok";
 import { readClaudeAuth, readClaudeAuthDetail } from "./cli-auth";
 import { CLI_LOGIN_ARGS, CLI_LOGOUT_ARGS, CliAccounts, accountEnv, cliRemaining, priorityFailure, priorityFailureActive, priorityRecovered, prioritySkipReason, resolveAccountPolicy, sanitizePolicies, type PriorityEvidence, type PriorityFailure, type PriorityFailureReason } from "./cli-accounts";
-import { GeminiWebDriver, type WebContext } from "./drivers/gemini-web";
-import { GeminiWebAccounts } from "./drivers/gemini-web-accounts";
-import { conversationAccount } from "./drivers/gemini-web-protocol";
-import type { GeminiWebAccountId } from "../shared/types";
+import { GeminiDriver } from "./drivers/gemini";
+import { listGeminiModels, clearGeminiModels } from "./drivers/gemini-protocol";
+import { readGeminiUsage } from "./drivers/gemini-usage";
 import { ClaudeDriver, claudeUsageText, listClaudeModels } from "./drivers/claude";
 import { resolveEffort, workerEffort } from "./effort";
 import { parseClaudeUsageText } from "../shared/usage";
@@ -56,7 +53,6 @@ import { CodexDriver, CodexServer } from "./drivers/codex";
 import { AttachmentStore } from "./attachments";
 import { ForkError, buildForkSnapshot, parseForkOptions } from "./chat-fork";
 import type { AgentDriver, AgentInput, DriverHost } from "./drivers/types";
-import { AIStudioService } from "./aistudio";
 import { ChatCompletionDriver, type StudioMessage } from "./drivers/aistudio";
 import { DeepSeekService } from "./deepseek";
 import { AISTUDIO_MODEL, isAIStudioModel } from "../shared/aistudio";
@@ -67,7 +63,6 @@ export interface Sink {
   chat(chat: Chat): void;
   consult(c: Consult): void;
   usage(u: UsageInfo): void;
-  webLogin?(status: GeminiWebStatus): void;
 }
 
 /** Live-only events (not persisted). */
@@ -124,8 +119,6 @@ export class ChatManager {
   private usageState: UsageInfo = {};
   private grokUsageRefresh = new Map<CliAccountId, Promise<void>>();
   private deepseekBalanceRefresh?: { key: string | undefined; promise: Promise<void> };
-  private webAccounts?: GeminiWebAccounts;
-  private studio?: AIStudioService;
   private deepseek?: DeepSeekService;
   private attachments: AttachmentStore;
   /** Where a role's events currently go (its own node, or a consult it is serving). */
@@ -147,7 +140,7 @@ export class ChatManager {
     }
     // API balances must be refreshed with the currently configured credential.
     delete this.usageState.deepseek;
-    delete this.usageState.gemini; // Retire cached Antigravity usage without touching Web/AIS accounts.
+
     this.approvals = new ApprovalService({
       emit: (chatId, node, role, event) => this.emit(chatId, node, role, event),
       log: (chatId, role, action, risk, decision, scope, by, reason) =>
@@ -189,6 +182,7 @@ export class ChatManager {
         error: claude ? undefined : "claude.exe를 찾지 못했습니다. PowerShell에서 irm https://claude.ai/install.ps1 | iex 로 설치하고 로그인하세요.",
       },
       { agent: "codex", path: codex, error: codex ? undefined : "codex.exe를 찾지 못했습니다. Codex 앱 또는 Codex CLI를 설치하세요." },
+      { agent: "gemini", path: findGemini(this.store.getSetting("geminiPath")), error: findGemini(this.store.getSetting("geminiPath")) ? undefined : "Antigravity CLI(agy)를 설치하고 로그인하세요." },
       { agent: "grok", path: grok, error: grok ? undefined : "Grok CLI를 찾지 못했습니다. npm install -g @xai-official/grok 설치 후 grok login을 실행하세요." },
       { agent: "deepseek", path: this.deepSeek().status().apiKeySet ? "DeepSeek API" : null, error: this.deepSeek().status().apiKeySet ? undefined : "DeepSeek API 설정에서 API 키를 저장하세요." },
     ];
@@ -207,6 +201,7 @@ export class ChatManager {
       if (!cached || cached.expires <= Date.now()) {
         const check = async (): Promise<CliInfo["authStatus"]> => {
           if (info.agent === "claude") return readClaudeAuth(info.path!, this.tmpDir);
+          if (info.agent === "gemini") return readGeminiUsage(info.path!, this.tmpDir).then(() => "authenticated" as const).catch(e => /로그인/.test(String(e)) ? "required" as const : "unknown" as const);
           if (info.agent === "grok") return readGrokAuth(info.path!, this.tmpDir);
           const server = this.codex();
           await server.ensure();
@@ -233,20 +228,16 @@ export class ChatManager {
     return exe;
   }
 
+  geminiExe(): string {
+    const exe = findGemini(this.store.getSetting("geminiPath"));
+    if (!exe) throw new Error("Antigravity CLI(agy)를 찾지 못했습니다. 설치 경로를 확인하세요.");
+    return exe;
+  }
+
   grokExe(): string {
     const exe = findGrok(this.store.getSetting("grokPath"));
     if (!exe) throw new Error("Grok CLI를 찾지 못했습니다. npm install -g @xai-official/grok 설치 후 로그인하세요.");
     return exe;
-  }
-
-  aiStudio() {
-    return this.studio ??= new AIStudioService(this.store, {
-      encrypt: value => {
-        if (!safeStorage.isEncryptionAvailable()) throw new Error("Windows 보안 저장소를 사용할 수 없습니다.");
-        return safeStorage.encryptString(value).toString("base64");
-      },
-      decrypt: value => safeStorage.decryptString(Buffer.from(value, "base64")),
-    });
   }
 
   deepSeek() {
@@ -257,44 +248,6 @@ export class ChatManager {
       },
       decrypt: value => safeStorage.decryptString(Buffer.from(value, "base64")),
     });
-  }
-
-  geminiWebAccounts() {
-    return this.webAccounts ??= new GeminiWebAccounts(this.dataDir, this.store, undefined, status => {
-      this.sink.webLogin?.(status);
-      if (this.aiStudio().linkedAccount(status.accountId)) void this.syncStudioWeb(status.accountId, false).catch(() => undefined);
-    });
-  }
-  async syncStudioWeb(accountId: GeminiWebAccountId, show = true) {
-    const account = this.geminiWebAccounts().list().find(a => a.accountId === accountId);
-    if (!account) throw new Error("등록되지 않은 웹 계정입니다.");
-    if (show) await this.aiStudio().launch();
-    await this.aiStudio().syncWeb(accountId, account.enabled, () => this.geminiWeb(accountId).studioState(show));
-  }
-  geminiWeb(accountId: GeminiWebAccountId = "gemini-1") {
-    return this.geminiWebAccounts().browser(accountId);
-  }
-  async disconnectWebAccount(accountId: GeminiWebAccountId, remove: boolean) {
-    const affected = () => this.store.listChats().flatMap(chat => this.store.listAgents(chat.id)
-      .filter(agent => agent.kind === "gemini" && (agent.webAccountId === accountId || conversationAccount(agent.sessionId) === accountId)));
-    const ensureIdle = () => {
-      const agents = affected();
-      if (agents.some(agent => this.liveDriver(agent.chatId, agent.key)?.running))
-        throw new Error("이 계정에 연결된 작업자가 실행 중입니다. 작업을 마친 뒤 다시 시도하세요.");
-      return agents;
-    };
-    ensureIdle();
-    return this.geminiWebAccounts().disconnect(accountId, remove, async () => {
-      ensureIdle();
-      await this.aiStudio().disconnectWeb(accountId);
-      const agents = ensureIdle();
-      this.store.disconnectWebAccount(accountId);
-      for (const agent of agents) await this.disposeRole(agent.chatId, agent.key);
-      for (const chatId of new Set(agents.map(agent => agent.chatId))) this.agentsChanged(chatId);
-    });
-  }
-  usesGeminiWeb(chat: Chat) {
-    return (chat.geminiModelOverride ?? this.store.project(chat.projectId)!.settings.geminiModel) === GEMINI_WEB_MODEL;
   }
 
   /** Model list as the given CLI account sees it; no account = the default (`*-1`) account. */
@@ -308,7 +261,7 @@ export class ChatManager {
     const cached = this.modelLists.get(key);
     if (cached && cached.expires > Date.now()) return cached.promise;
     const env = account ? this.cliAccounts().env(account) : {};
-    const promise = agent === "grok" ? listGrokModels(this.grokExe(), this.tmpDir, env) : agent === "codex" ? this.codex(account).models() : agent === "gemini" ? Promise.resolve([ { id: GEMINI_WEB_MODEL, label: "웹 · Gemini 4 Argon", reasoningEfforts: [] }, { id: AISTUDIO_MODEL, label: "AI Studio · Argon", reasoningEfforts: [], isDefault: true }])
+    const promise = agent === "grok" ? listGrokModels(this.grokExe(), this.tmpDir, env) : agent === "codex" ? this.codex(account).models() : agent === "gemini" ? listGeminiModels(this.geminiExe(), this.tmpDir, env)
       : listClaudeModels(this.claudeExe(), this.tmpDir, env).then((list) => list.map((m) => ({
         id: m.value, label: m.displayName, isDefault: m.value === "opus",
         reasoningEfforts: m.supportsEffort ? m.supportedEffortLevels ?? [] : [],
@@ -322,10 +275,6 @@ export class ChatManager {
     const chat = this.store.chat(chatId)!;
     const cfg = this.roleConfig(chat, this.store.project(chat.projectId)!, role);
     if (assignmentModel) cfg.model = assignmentModel;
-    if (cfg.agent === "gemini" && (cfg.model === GEMINI_WEB_MODEL || isAIStudioModel(cfg.model))) {
-      if (role !== "orch") workerEffort("auto", requested); // Workers still record the master's assignment; this transport uses default thinking.
-      return { requestedEffort: requested ?? "", effort: "" };
-    }
     const choice = role === "orch" ? cfg.effort === "auto" ? "" : cfg.effort : workerEffort(cfg.effort, requested);
     if (!choice) return { requestedEffort: requested ?? "", effort: "" };
     // Validate against the account that will actually run the role.
@@ -336,21 +285,10 @@ export class ChatManager {
     return { requestedEffort: requested ?? choice, effort: resolveEffort(choice, model) };
   }
 
-  webAccountInfo(chatId: number) {
-    const workers = this.store.listAgents(chatId).filter(a => a.kind === "gemini");
-    return this.geminiWebAccounts().list().map(account => ({
-      ...account,
-      workers: workers.filter(a => a.webAccountId === account.accountId || conversationAccount(a.sessionId) === account.accountId)
-        .map(a => ({ nickname: a.nickname, status: a.status, assignedAccountId: a.webAccountId ?? null, lastConversationAccountId: conversationAccount(a.sessionId) })),
-    }));
-  }
-
   async teamCapabilities(chat: Chat) {
     const project = this.store.project(chat.projectId)!;
     const installed = this.cliInfo();
     const gptModel = chat.codexModelOverride ?? project.settings.codexModel;
-    const geminiWeb = this.usesGeminiWeb(chat);
-    const geminiStudio = isAIStudioModel(chat.geminiModelOverride ?? project.settings.geminiModel);
     let imageGeneration: boolean | null = null;
     let codexAuthenticated: boolean | null = null;
     if (installed.find((c) => c.agent === "codex")?.path) {
@@ -393,7 +331,7 @@ export class ChatManager {
       claude: { installed: !!installed.find((c) => c.agent === "claude")?.path, model: chat.claudeModelOverride ?? project.settings.claudeModel, reasoningEfforts: effortLevels.claude, effortSetting: project.settings.claudeEffort, imageGeneration: false, authentication: "실행 시 확인", usage: this.usageState.claude },
       gpt: { installed: !!installed.find((c) => c.agent === "codex")?.path, model: gptModel, reasoningEfforts: effortLevels.codex, effortSetting: project.settings.codexEffort, imageGeneration, authenticated: codexAuthenticated, usage: this.usageState.codex },
       grok: { installed: !!installed.find(c => c.agent === "grok")?.path, model: chat.grokModelOverride ?? project.settings.grokModel, reasoningEfforts: effortLevels.grok, effortSetting: project.settings.grokEffort, imageGeneration: null, authentication: "Grok 로그인과 도구는 실행 시 확인", usage: this.usageState.grok },
-      gemini: { installed: true, model: chat.geminiModelOverride ?? project.settings.geminiModel, reasoningEfforts: [], effortSetting: geminiWeb ? "웹 모델 설정" : "AI Studio 모델 설정", imageGeneration: null, aiStudio: geminiStudio ? await this.aiStudio().status() : undefined, videoGeneration: geminiStudio && this.aiStudio().settings().videoEnabled, authentication: geminiStudio ? "호출 시 AIStudio2API를 자동 설치·실행하고 연결된 계정으로 서비스를 시작한다. OFFLINE만으로 배정을 거부하지 않는다. 계정이 없으면 Gemini 웹 계정 관리의 AI Studio 연결을 안내한다." : "계정별 로그인·잔여량은 webAccounts에서 확인하고 gemini_web_accounts로 갱신", enabled: project.settings.maxGeminiWorkers > 0, webAccounts: geminiWeb ? this.webAccountInfo(chat.id) : undefined, webOnly: geminiWeb, localTools: !geminiWeb, fileWrites: !geminiWeb, supportedKinds: geminiWeb ? ["writing", "opinion", "review"] : ["implement", "writing", "opinion", "review"], role: "기본은 글쓰기, 사용자가 지정하면 해당 작업 우선" },
+      gemini: { installed: !!installed.find(c => c.agent === "gemini")?.path, model: chat.geminiModelOverride ?? project.settings.geminiModel, reasoningEfforts: effortLevels.gemini, effortSetting: project.settings.geminiEffort, usage: this.usageState.gemini, authentication: "CLI 계정 관리에서 Antigravity 로그인·상태 확인", enabled: project.settings.maxGeminiWorkers > 0, localTools: true, fileWrites: true, supportedKinds: ["implement", "writing", "opinion", "review"] },
     };
   }
 
@@ -426,17 +364,17 @@ export class ChatManager {
    * (`*-1`) account's values so a single-account setup reads exactly as before.
    */
   mergeUsage(u: UsageInfo, accountId?: CliAccountId, token?: string, startedAt = Date.now()) {
-    const family = { claude: "claude", codex: "gpt", grok: "grok" } as const;
+    const family = { claude: "claude", codex: "gpt", gemini: "gemini", grok: "grok" } as const;
     if (accountId && !isCliAccountId(accountId)) accountId = undefined;
     // A reading that started before the account was logged out, removed or re-created is dropped.
     if (accountId && token !== undefined && !this.isCurrentAccount(accountId, token)) return;
     const isDefault = !accountId || accountId === defaultCliAccountId(cliAccountKindOf(accountId));
-    for (const k of ["claude", "codex", "grok"] as const) {
+    for (const k of ["claude", "codex", "gemini", "grok"] as const) {
       const next = u[k];
       if (!next) continue;
       const id = accountId && cliAccountKindOf(accountId) === family[k] ? accountId : defaultCliAccountId(family[k]);
       // Claude/Codex live updates can be partial (one window only); Grok is a complete snapshot.
-      const partial = k !== "grok";
+      const partial = k === "claude" || k === "codex";
       const accounts = { ...this.usageState.accounts };
       const cur = partial ? accounts[id] ?? {} : {};
       accounts[id] = partial && !next.error ? { ...cur, ...next, fiveHour: next.fiveHour ?? cur.fiveHour, weekly: next.weekly ?? cur.weekly, error: undefined } : next;
@@ -453,7 +391,6 @@ export class ChatManager {
         this.usageState = { ...this.usageState, [k]: { fiveHour: next.fiveHour ?? old.fiveHour, weekly: next.weekly ?? old.weekly } };
       } else this.usageState = { ...this.usageState, [k]: next };
     }
-    if (u.geminiWeb) this.usageState = { ...this.usageState, geminiWeb: u.geminiWeb };
     if (u.deepseek) this.usageState = { ...this.usageState, deepseek: u.deepseek };
     // Remember the last values so the sidebar isn't empty on the next launch.
     if (!this.disposing) this.store.setSetting("usage", JSON.stringify(this.usageState));
@@ -492,6 +429,23 @@ export class ChatManager {
     return promise;
   }
 
+  private geminiUsageRefresh = new Map<CliAccountId, Promise<void>>();
+  refreshGeminiUsage(id: CliAccountId = defaultCliAccountId("gemini")): Promise<void> {
+    const running = this.geminiUsageRefresh.get(id);
+    if (running) return running;
+    const token = this.accountToken(id), startedAt = Date.now();
+    const promise = Promise.resolve().then(() => readGeminiUsage(this.geminiExe(), this.tmpDir, this.cliAccounts().env(id)))
+      .then(usage => {
+        if (this.disposing || !this.isCurrentAccount(id, token)) return;
+        this.cliAccounts().setAuth(id, { loggedIn: true, checkedAt: Date.now() });
+        this.mergeUsage({ gemini: { ...usage, updatedAt: Date.now() } }, id, token, startedAt);
+      })
+      .catch(error => { if (!this.disposing) this.mergeUsage({ gemini: { error: error instanceof Error ? error.message : "Antigravity 사용량 조회에 실패했습니다." } }, id, token, startedAt); })
+      .finally(() => { if (this.geminiUsageRefresh.get(id) === promise) this.geminiUsageRefresh.delete(id); });
+    this.geminiUsageRefresh.set(id, promise);
+    return promise;
+  }
+
   resetDeepSeekBalance() {
     this.mergeUsage({ deepseek: { state: this.deepSeek().status().apiKeySet ? "loading" : "unconfigured", balances: [] } });
   }
@@ -512,6 +466,7 @@ export class ChatManager {
       Promise.resolve().then(() => this.codex().readUsage()),
       Promise.resolve().then(() => this.refreshClaudeUsage()),
       Promise.resolve().then(() => this.refreshGrokUsage()),
+      Promise.resolve().then(() => this.refreshGeminiUsage()),
       Promise.resolve().then(() => this.refreshDeepSeekBalance()),
       // Added CLI accounts: only enabled ones; each reads its own directory.
       ...this.cliAccounts().list().filter(a => a.configDir && a.enabled).map(a => Promise.resolve().then(() => this.refreshAccountUsage(a.accountId))),
@@ -543,8 +498,10 @@ export class ChatManager {
 
   /** Invalidates every reading in flight for the account (login/logout/removal start and end). */
   private bumpAccount(id: CliAccountId) {
+    if (cliAccountKindOf(id) === "gemini") clearGeminiModels();
     this.accountEpochs.set(id, (this.accountEpochs.get(id) ?? 0) + 1);
     this.grokUsageRefresh.delete(id);
+    this.geminiUsageRefresh.delete(id);
     this.authChecks.clear();
     for (const key of [...this.modelLists.keys()]) if (key.endsWith(`:${id}`)) this.modelLists.delete(key);
   }
@@ -677,7 +634,8 @@ export class ChatManager {
     const chat = this.store.chat(chatId);
     const project = chat && this.store.project(chat.projectId);
     if (!chat || !project) return null;
-    const kind = cliAccountKindForAgent(this.roleConfig(chat, project, role).agent);
+    const config = this.roleConfig(chat, project, role);
+    const kind = cliAccountKindForAgent(config.agent);
     if (!kind) return null;
     const policy = this.resolveAccountPolicy(kind, project.settings);
     if (policy.mode === "fixed" && policy.source !== "default") return policy;
@@ -708,6 +666,7 @@ export class ChatManager {
   private cliExe(kind: CliAccountKind): string {
     if (kind === "claude") return this.claudeExe();
     if (kind === "grok") return this.grokExe();
+    if (kind === "gemini") return this.geminiExe();
     const exe = findCodex(this.store.getSetting("codexPath"));
     if (!exe) throw new Error(this.cliInfo()[1].error);
     return exe;
@@ -723,6 +682,7 @@ export class ChatManager {
     const kind = cliAccountKindOf(id);
     if (kind === "claude") await this.refreshClaudeUsage(id);
     else if (kind === "grok") await this.refreshGrokUsage(id);
+    else if (kind === "gemini") await this.refreshGeminiUsage(id);
     else await this.codex(id).readUsage();
   }
 
@@ -736,6 +696,10 @@ export class ChatManager {
     if (kind === "claude") {
       const detail = await readClaudeAuthDetail(this.claudeExe(), this.tmpDir, env);
       if (detail.status !== "unknown") auth = { loggedIn: detail.status === "authenticated", ...(detail.email ? { email: detail.email } : {}) };
+    } else if (kind === "gemini") {
+      clearGeminiModels();
+      try { await readGeminiUsage(this.geminiExe(), this.tmpDir, env); auth = { loggedIn: true }; }
+      catch (error) { if (/로그인/.test(String(error))) auth = { loggedIn: false }; }
     } else if (kind === "grok") {
       const status = await readGrokAuth(this.grokExe(), this.tmpDir, env);
       if (status !== "unknown") auth = { loggedIn: status === "authenticated" };
@@ -765,7 +729,7 @@ export class ChatManager {
       catch { /* unknown stays unknown */ }
       if (!this.isCurrentAccount(accountId, token)) return;
       if (auth && !auth.loggedIn) {
-        this.mergeUsage({ [{ claude: "claude", gpt: "codex", grok: "grok" }[cliAccountKindOf(accountId)]]: { error: "로그인이 필요합니다." } } as UsageInfo, accountId, token);
+        this.mergeUsage({ [{ claude: "claude", gpt: "codex", gemini: "gemini", grok: "grok" }[cliAccountKindOf(accountId)]]: { error: "로그인이 필요합니다." } } as UsageInfo, accountId, token);
         return;
       }
       try { await this.withTimeout(this.refreshAccountUsage(accountId), 45_000, "사용량 조회 시간 초과"); }
@@ -836,9 +800,12 @@ export class ChatManager {
     this.beginAccountChange(id);
     try {
       await this.releaseAccountProcesses(id);
-      const exe = this.cliExe(account.kind);
-      await new Promise<void>((resolve, reject) => execFile(exe, CLI_LOGOUT_ARGS[account.kind], { cwd: account.configDir ?? this.tmpDir, windowsHide: true, timeout: 30_000, env: { ...process.env, ...accountEnv(account) } },
+      if (account.kind === "gemini" && account.configDir) this.cliAccounts().clearAntigravityCredentials(id);
+      else {
+        const exe = this.cliExe(account.kind);
+        await new Promise<void>((resolve, reject) => execFile(exe, CLI_LOGOUT_ARGS[account.kind], { cwd: account.configDir ?? this.tmpDir, windowsHide: true, timeout: 30_000, env: { ...process.env, ...accountEnv(account) } },
         (error, _stdout, stderr) => error ? reject(new Error(`로그아웃에 실패했습니다: ${String(stderr || error.message).trim().slice(0, 300)}`)) : resolve()));
+      }
       this.cliAccounts().setAuth(id, { loggedIn: false, checkedAt: Date.now() }, account.createdAt);
       return this.listCliAccounts();
     } finally {
@@ -913,7 +880,9 @@ export class ChatManager {
 
   /** The stored session unless it belongs to another account; then sessionAccount says whose it was. */
   private sessionForAccount(chat: Chat, role: Role, agent: AgentKind, accountId: CliAccountId | undefined, account: { createdAt: number } | undefined): { nativeId: string | null; sessionAccount?: CliAccountId; staleGeneration?: boolean } {
-    const nativeId = this.nativeIdOf(chat, role, agent);
+    let nativeId = this.nativeIdOf(chat, role, agent);
+    // Old AI Studio ids are not native agy conversations. Keep the chat history and start with a handoff.
+    if (agent === "gemini" && accountId) nativeId = nativeId?.startsWith("agy:") ? nativeId.slice(4) : null;
     if (!accountId || !nativeId) return { nativeId };
     const owner = this.sessionAccountOf(chat, role, agent);
     const sessionAccount = owner?.accountId ?? defaultCliAccountId(cliAccountKindOf(accountId));
@@ -929,7 +898,7 @@ export class ChatManager {
   startsFreshSession(chatId: number, role: Role): boolean {
     const chat = this.store.chat(chatId)!;
     const cfg = this.roleConfig(chat, this.store.project(chat.projectId)!, role);
-    if (cfg.agent === "deepseek" || (cfg.agent === "gemini" && isAIStudioModel(cfg.model))) {
+    if (cfg.agent === "deepseek") {
       try {
         const saved = JSON.parse(this.store.getSetting(this.completionContextKey(chatId, role, cfg.agent, cfg.model)) ?? "[]");
         return !Array.isArray(saved) || !saved.length;
@@ -951,7 +920,7 @@ export class ChatManager {
         .map((c, i) => `${i + 1}. 요청: ${clip(c.request, 1500)}\n   응답 요약: ${clip(c.responseSummary ?? "(요약 없음)", 1500)}`);
     }
     return [`[AI_ChatterBox 계정 전환 인계 — CLI 계정 ${from} → ${to}]`,
-      "이전 CLI 대화는 다른 계정에 저장되어 이어서 열 수 없어 새 세션으로 시작합니다. 아래는 지난 요청·응답 요약입니다. 필요한 사실은 파일과 결과로 다시 확인하세요.",
+      "이전 대화를 현재 실행 환경에서 직접 이어 열 수 없어 새 세션으로 시작합니다. 아래는 지난 요청·응답 요약입니다. 필요한 사실은 파일과 결과로 다시 확인하세요.",
       turns.length ? turns.join("\n") : "(인계할 완료 기록이 없습니다.)", "[인계 끝]"].join("\n");
   }
 
@@ -1023,6 +992,7 @@ export class ChatManager {
   }
 
   private saveNativeId(chatId: number, role: Role, agent: AgentKind, id: string, accountId?: CliAccountId, generation?: number) {
+    if (agent === "gemini" && accountId) id = `agy:${id}`;
     if (role === "orch") {
       if (agent === "gemini" || agent === "grok" || agent === "deepseek") this.store.setSetting(`orchSession:${chatId}:${agent}`, id);
       else this.updateChat(chatId, agent === "claude" ? { orchClaudeSessionId: id } : { orchCodexThreadId: id });
@@ -1072,7 +1042,6 @@ export class ChatManager {
     const project = this.store.project(chat.projectId)!;
     const cfg = this.roleConfig(chat, project, role);
     if (assignmentModel) cfg.model = assignmentModel;
-    if (role === "orch" && cfg.agent === "gemini" && cfg.model === GEMINI_WEB_MODEL) throw new Error("마스터는 AI Studio 모델을 선택하세요. Gemini 웹은 작업자로 사용할 수 있습니다.");
     const effort = assignmentEffort ?? (await this.assignmentEffort(chatId, role)).effort;
     const instructions = this.instructionsFor?.(chat, project, role, cfg.agent);
     const resolved = this.roleAccount(chatId, role);
@@ -1124,7 +1093,10 @@ export class ChatManager {
     // account). Another account, or a removed and re-created one, starts fresh with a handoff.
     const stored = this.sessionForAccount(chat, role, cfg.agent, accountId, account);
     const nativeId = stored.nativeId, sessionAccount = stored.sessionAccount;
-    const handoff = sessionAccount ? this.handoffText(chatId, role, stored.staleGeneration && sessionAccount === accountId ? `${sessionAccount}(삭제된 이전 계정)` : sessionAccount, accountId!) : undefined;
+    const priorGemini = cfg.agent === "gemini" && accountId ? this.nativeIdOf(chat, role, cfg.agent) : null;
+    const legacyGemini = priorGemini && !priorGemini.startsWith("agy:");
+    const handoff = legacyGemini ? this.handoffText(chatId, role, "이전 Gemini 연결", accountId!)
+      : sessionAccount ? this.handoffText(chatId, role, stored.staleGeneration && sessionAccount === accountId ? `${sessionAccount}(삭제된 이전 계정)` : sessionAccount, accountId!) : undefined;
     const opts = {
       cwd: project.folder,
       nativeId,
@@ -1159,31 +1131,13 @@ export class ChatManager {
       );
     } else if (cfg.agent === "grok") {
       driver = new GrokDriver({ ...driverOpts, exePath: this.grokExe() }, () => this.toolsFor?.(this.store.chat(chatId)!, role, "grok") ?? {}, host);
-    } else if (cfg.agent === "gemini" && cfg.model === GEMINI_WEB_MODEL) {
-      const contextKey = `gemini-web-context:${chatId}:${role}`;
-      driver = new GeminiWebDriver(driverOpts, this.geminiWebAccounts(), host, {
-        load: (): WebContext => {
-          try {
-            const saved = JSON.parse(this.store.getSetting(contextKey) ?? "null");
-            if (saved && Array.isArray(saved.history)) return {
-              history: saved.history.filter((turn: any) => typeof turn?.request === "string" && typeof turn?.response === "string"),
-              pending: typeof saved.pending?.request === "string" && typeof saved.pending?.partial === "string" ? saved.pending : undefined,
-            };
-          } catch { /* Existing stored dialogue remains available below. */ }
-          const events = this.store.events(chatId);
-          return { history: this.store.listConsults(chatId).filter(c => c.toRole === role && c.status === "done").map(c => ({
-            request: c.request,
-            response: events.filter(e => e.role === role && e.node === `consult:${c.id}` && e.event.type === "text")
-              .map(e => e.event.type === "text" ? e.event.text : "").join("\n\n") || c.responseSummary || "",
-          })) };
-        },
-        save: context => this.store.setSetting(contextKey, JSON.stringify(context)),
-      });
-    } else if (cfg.agent === "deepseek" || (cfg.agent === "gemini" && isAIStudioModel(cfg.model))) {
+    } else if (cfg.agent === "gemini") {
+      driver = new GeminiDriver({ ...driverOpts, exePath: this.geminiExe() }, { bridge: this.bridge, hookScript: join(dirname(this.bridgeScript), "antigravity-hook.js"), tmpDir: this.tmpDir, sessionKey: `${chatId}-${role}`, mcpServers: () => this.toolsFor?.(this.store.chat(chatId)!, role, "gemini") ?? {} }, host);
+    } else if (cfg.agent === "deepseek") {
       const key = this.completionContextKey(chatId, role, cfg.agent, cfg.model);
       driver = new ChatCompletionDriver(driverOpts, {
         provider: cfg.agent,
-        service: cfg.agent === "deepseek" ? this.deepSeek() : this.aiStudio(),
+        service: this.deepSeek(),
         bridgeUrl: () => this.toolsFor?.(this.store.chat(chatId)!, role, cfg.agent)?.chatterbox_bridge?.env?.CHATTERBOX_URL,
         context: {
           load: (): StudioMessage[] => {
@@ -1390,7 +1344,6 @@ export class ChatManager {
     await Promise.all(all.map((l) => l?.driver.dispose().catch(() => undefined)));
     await Promise.all([...this.codexServers.keys()].map(id => this.closeCodexServer(id).catch(() => undefined)));
     this.codexServers.clear();
-    await this.webAccounts?.dispose();
     this.bridge.stop();
   }
 }

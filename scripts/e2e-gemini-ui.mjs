@@ -99,10 +99,10 @@ function persistedProject() {
 }
 
 async function isolateModelListing(app) {
-  // Model pickers render only the managed Gemini Web/AI Studio choices; no CLI listing or model turn is allowed.
+  // Model pickers render only the native CLI choices; no CLI listing or model turn is allowed.
   await app.evaluate(({ ipcMain }) => {
     ipcMain.removeHandler("models:list");
-    ipcMain.handle("models:list", async () => []);
+    ipcMain.handle("models:list", async (_e, agent) => agent === "gemini" ? [{ id: "gemini-4-argon-medium", label: "Antigravity · Argon", isDefault: true, reasoningEfforts: ["medium", "high"] }, { id: "gemini-4-hydrogen-high", label: "Gemini 4 Hydrogen", reasoningEfforts: ["high"] }] : []);
   });
 }
 
@@ -166,27 +166,27 @@ try {
   );
 
   const geminiPicker = page.getByLabel("이 채팅의 제미나이 모델");
-  check("Gemini header model picker renders AI Studio", (await geminiPicker.textContent())?.includes("AI Studio · Argon"));
+  check("Gemini header model picker renders Antigravity CLI", (await geminiPicker.textContent())?.includes("Antigravity · Argon"));
   await geminiPicker.click();
   const geminiMenuText = await page.getByRole("menu").textContent();
-  check("Gemini worker exposes only Web and AI Studio models", geminiMenuText?.includes("제미나이 웹 · Argon") && geminiMenuText.includes("AI Studio · Argon") && !geminiMenuText.includes("Pro 자동 선택") && !geminiMenuText.includes("직접 입력"), geminiMenuText);
-  await page.getByRole("menuitem").filter({ hasText: "gemini-web-argon" }).click();
-  await page.waitForFunction(() => document.querySelector('[aria-label="이 채팅의 제미나이 모델"]')?.textContent?.includes("제미나이 웹 · Argon"));
+  check("Gemini worker offers native CLI and no web controls", geminiMenuText?.includes("Antigravity CLI 계정 관리") && !geminiMenuText.includes("제미나이 웹") && !geminiMenuText.includes("AI Studio"), geminiMenuText);
+  await page.getByRole("menuitem").filter({ hasText: "gemini-4-hydrogen-high" }).click();
+  await page.waitForFunction(() => document.querySelector('[aria-label="이 채팅의 제미나이 모델"]')?.textContent?.includes("Gemini 4 Hydrogen"));
   await geminiPicker.click();
   const reset = page.getByRole("menuitem", { name: /프로젝트 값 사용/ });
   check("Gemini chat override can return to the project value", (await reset.count()) === 1);
   await reset.click();
-  await page.waitForFunction(() => document.querySelector('[aria-label="이 채팅의 제미나이 모델"]')?.textContent?.includes("AI Studio · Argon"));
+  await page.waitForFunction(() => document.querySelector('[aria-label="이 채팅의 제미나이 모델"]')?.textContent?.includes("Antigravity · Argon"));
 
   const dialog = await openSettings(page);
   const projectGeminiPicker = dialog.getByLabel("제미나이 모델");
-  check("project Gemini model picker uses the managed AI Studio label", (await projectGeminiPicker.textContent())?.includes("AI Studio · Argon"));
+  check("project Gemini model picker uses the native Antigravity label", (await projectGeminiPicker.textContent())?.includes("Antigravity · Argon"));
   await projectGeminiPicker.click();
-  check("project Gemini model list exposes the fixed AI Studio model", (await page.getByRole("menuitem").filter({ hasText: "aistudio:gemini-4-argon" }).count()) === 1);
+  check("project Gemini model list exposes the native CLI model", (await page.getByRole("menuitem").filter({ hasText: "gemini-4-argon-medium" }).count()) === 1);
   await page.keyboard.press("Escape");
   await dialog.getByLabel("제미나이가 잘 맡는 작업").fill("저장된 Gemini 강점");
   await dialog.getByLabel("제미나이 작업자 주의점").fill("저장된 Gemini 주의점");
-  const maxGemini = dialog.locator("label").filter({ hasText: "동시 제미나이 작업자" }).locator("input");
+  const maxGemini = dialog.locator("label").filter({ hasText: "권장 제미나이 작업자" }).locator("input");
   await maxGemini.fill("0");
   check("Gemini worker limit accepts zero as disabled", (await maxGemini.inputValue()) === "0");
   await dialog.getByRole("button", { name: "저장", exact: true }).click();

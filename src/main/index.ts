@@ -164,7 +164,7 @@ function createWindow() {
 
 function registerUi(channels: string[], rpc: CoreRpc) {
   const internal = new Set(["attachment:info", "window:save", "files:resolve-link", "remote:chat-patch", "remote:project-patch", "remote:chat-delete", "remote:chat-fork", "remote:attachment-remove", "remote:att-bytes", "remote:uploads", "remote:send"]);
-  const local = new Set(["theme:set", "aistudio"]);
+  const local = new Set(["theme:set"]);
   for (const channel of channels.filter(channel => !internal.has(channel) && !local.has(channel))) {
     ipcMain.handle(channel, async (_event, ...args) => {
       const result = await rpc.call(channel, args);
@@ -185,14 +185,6 @@ function registerUi(channels: string[], rpc: CoreRpc) {
   ipcMain.handle("theme:set", async (_event, theme: Theme) => {
     await rpc.call("theme:set", [theme]);
     nativeTheme.themeSource = theme;
-  });
-  ipcMain.handle("aistudio", async (_event, action: string, input = {}) => {
-    if (action === "open") {
-      const status = await rpc.call("aistudio", ["launch"]);
-      await shell.openExternal(status.settings.baseUrl);
-      return status;
-    }
-    return rpc.call("aistudio", [action, input]);
   });
   // Remote web settings stay in the UI process (the server lives here); the core never sees the password hash.
   remote = new RemoteWeb({
@@ -260,7 +252,7 @@ app.whenReady().then(async () => {
       windowSetting = boot.window;
       nativeTheme.themeSource = boot.theme as Theme;
       chatCache = boot.chats;
-      const events = new Set(["chat:event", "chat:updated", "consult:updated", "agents:updated", "usage", "gemini:web-login"]);
+      const events = new Set(["chat:event", "chat:updated", "consult:updated", "agents:updated", "usage"]);
       rpc.onEvent = (channel, args) => {
         if (!events.has(channel)) return;
         if (channel === "chat:updated") {

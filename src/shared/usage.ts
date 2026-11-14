@@ -31,10 +31,12 @@ export const FIVE_HOUR_SWITCH_AT = 10;
 
 const remainingOf = (w: UsageWindow) => Math.max(0, Math.min(100, 100 - w.usedPercent));
 
-export function pickUsage(u: ProviderUsage | undefined): UsageDisplay | null {
+export function pickUsage(u: ProviderUsage | undefined, lowestRemaining = false): UsageDisplay | null {
   if (!u) return null;
   const five = u.fiveHour ? remainingOf(u.fiveHour) : undefined;
-  if (u.fiveHour && five !== undefined && five <= FIVE_HOUR_SWITCH_AT)
+  if (lowestRemaining && u.fiveHour && five !== undefined && (!u.weekly || five < remainingOf(u.weekly)))
+    return { window: "5시간", remaining: five, resetsAt: u.fiveHour.resetsAt, warn: five <= FIVE_HOUR_SWITCH_AT, ...(!u.weekly ? { note: "주간 정보 없음" } : {}) };
+  if (!lowestRemaining && u.fiveHour && five !== undefined && five <= FIVE_HOUR_SWITCH_AT)
     return { window: "5시간", remaining: five, resetsAt: u.fiveHour.resetsAt, warn: true };
   if (u.weekly) return { window: "주간", remaining: remainingOf(u.weekly), resetsAt: u.weekly.resetsAt, warn: false };
   if (u.monthly) return { window: "월간", remaining: remainingOf(u.monthly), resetsAt: u.monthly.resetsAt, warn: false };

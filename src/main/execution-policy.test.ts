@@ -30,19 +30,19 @@ function engine() {
 }
 const write: any = { role: "orch", node: "orch", title: "Write", detail: "a", key: "Write", writes: true, paths: ["a"] };
 
-test("AI Studio model switches hand over context without mixing model histories", () => {
+test("native Antigravity model switches retain the CLI conversation; provider switches hand over context", () => {
   const { chats, orchestrator: o } = engine();
   const settings = new Map<string, string>();
   chats.store.getSetting = (key: string) => settings.get(key);
   chats.store.setSetting = (key: string, value: string) => settings.set(key, value);
-  chats.store.project = () => ({ settings: { orchestratorModel: "gemini:aistudio:previous-model" } });
+  chats.store.project = () => ({ settings: { orchestratorModel: "claude:opus" } });
   chats.store.events = () => [{ role: "orch", event: { type: "text", text: "previous verified result" } }];
   const chat = { id: 1, projectId: 1, orchestratorModelOverride: null };
   assert.equal(o.handover(chat), "");
-  const studio = { ...chat, orchestratorModelOverride: "gemini:aistudio:gemini-4-argon" };
+  const studio = { ...chat, orchestratorModelOverride: "gemini:gemini-4-argon-medium" };
   assert.match(o.handover(studio), /previous verified result/);
   assert.equal(o.handover(studio), "");
-  assert.match(o.handover({ ...studio, orchestratorModelOverride: "gemini:aistudio:another-model" }), /previous verified result/);
+  assert.equal(o.handover({ ...studio, orchestratorModelOverride: "gemini:gemini-4-hydrogen-high" }), "");
   assert.match(o.handover(chat), /previous verified result/);
 });
 

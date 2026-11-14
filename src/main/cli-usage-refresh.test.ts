@@ -61,7 +61,7 @@ function fakeGrok(replies: Array<{ result?: unknown; error?: { code?: number; me
 
 const grokUsage = { config: { currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", end: END }, creditUsagePercent: 20 } };
 
-test("refreshUsage settles a synchronous Codex failure without invoking removed Gemini CLI and still refreshes Grok", async () => {
+test("refreshUsage settles a synchronous Codex failure records Gemini failure and still refreshes Grok", async () => {
   const f = fixture({ gemini: { weekly: { usedPercent: 42 } } });
   const exec = mock.method(childProcess, "execFile", () => { throw new Error("Removed Gemini CLI must not run"); });
   const grok = fakeGrok([{ result: grokUsage }]);
@@ -69,8 +69,8 @@ test("refreshUsage settles a synchronous Codex failure without invoking removed 
     (f.chats as any).codex = () => { throw new Error("codex missing"); };
     await f.chats.refreshUsage();
     assert.deepEqual(f.chats.usage().grok?.weekly?.usedPercent, 20);
-    assert.equal(f.chats.usage().gemini, undefined);
-    assert.equal(exec.mock.callCount(), 0);
+    assert.match(f.chats.usage().gemini?.error ?? "", /Antigravity/);
+    assert.ok(exec.mock.callCount() >= 1);
     assert.equal(typeof f.chats.usage().grok?.updatedAt, "number");
   } finally {
     exec.mock.restore(); grok.restore();

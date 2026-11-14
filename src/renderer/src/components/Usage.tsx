@@ -1,16 +1,13 @@
 import { useEffect, useState } from "react";
-import { ChevronRight, Globe2, KeyRound, RotateCw, Settings, Smartphone, Sparkles, Terminal } from "lucide-react";
+import { ChevronRight, KeyRound, RotateCw, Settings, Smartphone, Terminal } from "lucide-react";
 import type { UsageDisplay } from "../../../shared/usage";
 
-const KIND_COLOR = { claude: "bg-claude", gpt: "bg-gpt", grok: "bg-grok" } as const;
+const KIND_COLOR = { claude: "bg-claude", gpt: "bg-gpt", gemini: "bg-gemini", grok: "bg-grok" } as const;
 import { api, cn, errorMessage } from "../lib/utils";
 import { useStore } from "../store";
 import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, Tooltip } from "./ui";
 import { usageGroups, type UsageAccountRow, type UsageKindGroup } from "../../../shared/usage-view";
 import { CliAccountsDialog } from "./CliAccountsDialog";
-import { GeminiWebDialog } from "./GeminiWebDialog";
-import { AIStudioDialog } from "./AIStudioDialog";
-import { AIStudioUsage } from "./AIStudioUsage";
 import { DeepSeekDialog } from "./DeepSeekDialog";
 import { DeepSeekBalance } from "./DeepSeekBalance";
 import { RemoteWebDialog } from "./RemoteWebDialog";
@@ -48,7 +45,7 @@ function Bar({ name, d, color, error, updatedAt, disabled }: { name: string; d: 
 
 /** One family from the ChatterBox account store: a single bar for one account, a labelled bar per account otherwise. */
 export function CliUsageBars({ group, color }: { group: UsageKindGroup; color: string }) {
-  const bar = (row: UsageAccountRow, name: string) => <Bar name={name} d={row.display} color={color} error={row.error} updatedAt={row.checkedAt} disabled={!row.enabled} />;
+  const bar = (row: UsageAccountRow, name: string) => <Bar name={name} d={row.display && group.kind === "gemini" ? { ...row.display, note: "Gemini Models · 주간/5시간 중 최소 잔여량" } : row.display} color={color} error={row.error} updatedAt={row.checkedAt} disabled={!row.enabled} />;
   if (group.accounts.length === 1) return <div title={group.accounts[0].label}>{bar(group.accounts[0], group.name)}</div>;
   return <section className="space-y-1" data-testid={`cli-usage-${group.kind}`} aria-label={`${group.name} 계정별 잔여량`}>
     <div className="text-[11px] font-medium text-muted-foreground">{group.name}</div>
@@ -69,8 +66,6 @@ export async function refreshUsageAndAccounts(wait = false): Promise<void> {
 /** Remaining usage: weekly by default, the 5-hour window when it has ≤ 10% left. */
 export function UsageBar() {
   const [cliOpen, setCliOpen] = useState(false);
-  const [webOpen, setWebOpen] = useState(false);
-  const [aiStudioOpen, setAiStudioOpen] = useState(false);
   const [deepseekOpen, setDeepseekOpen] = useState(false);
   const [remoteOpen, setRemoteOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -104,19 +99,9 @@ export function UsageBar() {
                 <span className="mt-0.5 block text-[11px] font-normal">계정과 API 연결을 관리하세요</span>
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={() => setWebOpen(true)} data-testid="gemini-web-manage" className="group gap-3 rounded-lg px-3 py-2.5">
-                <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-gemini/10"><Globe2 className="!text-gemini" /></span>
-                <span className="min-w-0 flex-1"><span className="block text-[12px] font-medium">제미나이 웹 계정 관리</span><span className="mt-0.5 block text-[11px] text-muted-foreground">Google 로그인 · 계정 전환</span></span>
-                <ChevronRight className="!size-3.5 opacity-40 group-data-[highlighted]:opacity-100" />
-              </DropdownMenuItem>
               <DropdownMenuItem onSelect={() => setCliOpen(true)} data-testid="cli-accounts-manage" className="group gap-3 rounded-lg px-3 py-2.5">
                 <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10"><Terminal className="!text-primary" /></span>
-                <span className="min-w-0 flex-1"><span className="block text-[12px] font-medium">CLI 계정 관리</span><span className="mt-0.5 block text-[11px] text-muted-foreground">Claude · Codex · Grok 로그인과 계정 선택</span></span>
-                <ChevronRight className="!size-3.5 opacity-40 group-data-[highlighted]:opacity-100" />
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => setAiStudioOpen(true)} data-testid="aistudio-manage" className="group gap-3 rounded-lg px-3 py-2.5">
-                <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10"><Sparkles className="!text-primary" /></span>
-                <span className="min-w-0 flex-1"><span className="block text-[12px] font-medium">AI Studio · Argon</span><span className="mt-0.5 block text-[11px] text-muted-foreground">서비스 연결 · 계정 라우팅</span></span>
+                <span className="min-w-0 flex-1"><span className="block text-[12px] font-medium">CLI 계정 관리</span><span className="mt-0.5 block text-[11px] text-muted-foreground">Claude · Codex · Antigravity · Grok 로그인과 계정 선택</span></span>
                 <ChevronRight className="!size-3.5 opacity-40 group-data-[highlighted]:opacity-100" />
               </DropdownMenuItem>
               <DropdownMenuItem onSelect={() => setDeepseekOpen(true)} data-testid="deepseek-manage" className="group gap-3 rounded-lg px-3 py-2.5">
@@ -131,7 +116,6 @@ export function UsageBar() {
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuLabel className="px-3">사용 기록</DropdownMenuLabel>
-              <AIStudioUsage compact onOpen={() => setAiStudioOpen(true)} />
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
@@ -139,8 +123,6 @@ export function UsageBar() {
       {usageGroups(cliAccounts, usage).map(group => <CliUsageBars key={group.kind} group={group} color={KIND_COLOR[group.kind]} />)}
       <DeepSeekBalance compact />
       <CliAccountsDialog open={cliOpen} onOpenChange={setCliOpen} />
-      <GeminiWebDialog open={webOpen} onOpenChange={setWebOpen} />
-      <AIStudioDialog open={aiStudioOpen} onOpenChange={setAiStudioOpen} />
       <DeepSeekDialog open={deepseekOpen} onOpenChange={setDeepseekOpen} />
       <RemoteWebDialog open={remoteOpen} onOpenChange={setRemoteOpen} />
     </div>

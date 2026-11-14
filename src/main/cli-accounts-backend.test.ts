@@ -90,8 +90,14 @@ test("account store: defaults keep the CLI directory, added accounts get a fresh
   try {
     const settings = settingsStub();
     const accounts = new CliAccounts(join(root, "cli-accounts"), settings);
-    assert.deepEqual(accounts.list().map(a => [a.accountId, a.configDir]), [["claude-1", null], ["gpt-1", null], ["grok-1", null]]);
+    assert.deepEqual(accounts.list().map(a => [a.accountId, a.configDir]), [["claude-1", null], ["gpt-1", null], ["gemini-1", null], ["grok-1", null]]);
     assert.deepEqual(accounts.env("claude-1"), {});
+    assert.deepEqual(accounts.env("gemini-1"), {});
+    const gemini = accounts.create("gemini");
+    assert.equal(gemini.accountId, "gemini-2");
+    assert.equal(accounts.env("gemini-2").USERPROFILE, gemini.configDir);
+    assert.equal(accounts.env("gemini-2").HOME, gemini.configDir);
+    assert.ok(accounts.env("gemini-2").SSH_CONNECTION);
     // An unverified leftover is neither adopted nor deleted: its number is skipped.
     mkdirSync(join(root, "cli-accounts", "gpt-2"), { recursive: true });
     writeFileSync(join(root, "cli-accounts", "gpt-2", "auth.json"), "{}");
@@ -888,4 +894,29 @@ test("failed judge disposal preserves the account directory across repeated remo
     }
     session.driver.dispose = async () => {};
   } finally { await judge.dispose(); await f.close(); }
+});
+
+
+test("Antigravity logout clears only the added profile credentials and retains its settings and conversation", () => {
+  const root = mkdtempSync(join(tmpdir(), "cbx-agy-logout-"));
+  try {
+    const settings = settingsStub(), accounts = new CliAccounts(join(root, "accounts"), settings);
+    const a = accounts.create("gemini", "A"), b = accounts.create("gemini", "B");
+    const dir = (home: string) => join(home, ".gemini", "antigravity-cli");
+    for (const account of [a, b]) {
+      mkdirSync(dir(account.configDir!), { recursive: true });
+      for (const name of ["antigravity-oauth-token", "antigravity-oauth-token.bak", "settings.json", "conversation.json"])
+        writeFileSync(join(dir(account.configDir!), name), "fixture");
+    }
+    accounts.clearAntigravityCredentials(a.accountId);
+    assert.equal(existsSync(join(dir(a.configDir!), "antigravity-oauth-token")), false);
+    assert.equal(existsSync(join(dir(a.configDir!), "antigravity-oauth-token.bak")), false);
+    assert.equal(existsSync(join(dir(a.configDir!), "settings.json")), true);
+    assert.equal(existsSync(join(dir(a.configDir!), "conversation.json")), true);
+    assert.equal(existsSync(join(dir(b.configDir!), "antigravity-oauth-token")), true);
+    assert.throws(() => accounts.clearAntigravityCredentials("gemini-1"), /앱이 만든/);
+    const reloaded = new CliAccounts(join(root, "accounts"), settings);
+    assert.deepEqual(reloaded.list("gemini").map(a => a.accountId), ["gemini-1", "gemini-2", "gemini-3"]);
+    assert.notEqual(accounts.env(a.accountId).USERPROFILE, accounts.env(b.accountId).USERPROFILE);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
