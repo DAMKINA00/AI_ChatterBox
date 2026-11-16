@@ -33,6 +33,19 @@ function newer(a: number[], b: number[]): boolean {
 export function latestModels(agent: AgentKind, list: ModelOption[], selected: string[] = []): PickerModel[] {
   const keep = new Set<string>();
   const usable = list.filter((m) => !m.hidden && !m.deprecated);
+  if (agent === "gemini") {
+    const families = new Map<string, ModelOption>();
+    for (const model of usable) {
+      const family = model.id.replace(/-(low|medium|high|xhigh|max)$/, "");
+      const current = families.get(family);
+      if (!current || selected.includes(model.id) || (!selected.includes(current.id) &&
+        (model.isDefault || (!current.isDefault && /-medium$/.test(model.id))))) families.set(family, model);
+    }
+    const out: PickerModel[] = [...families.values()];
+    for (const id of selected) if (id && !usable.some(model => model.id === id))
+      out.push({ ...(list.find(model => model.id === id) ?? { id, label: id }), old: true });
+    return out;
+  }
   const familyOf = agent === "claude" ? claudeFamily : codexFamily;
   // Claude aliases (no version in the id) stand for the newest model of their family.
   const aliasFamilies = new Set(agent === "claude" ? usable.filter((m) => !familyOf(m.id)).map((m) => m.id) : []);

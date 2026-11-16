@@ -155,12 +155,14 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
                 latestModels(a, models[a]!, current.agent === a ? [current.id] : []).map((m) => (
                   <DropdownMenuCheckItem
                     key={m.id}
+                    data-model-id={m.id}
+                    title={m.id}
                     checked={current.agent === a && current.id === m.id}
                     onSelect={() => onChange(make(a, m.id))}
                   >
                     <span className="flex-1 truncate">{shortModelLabel(a, m.label)}</span>
                     {m.old && <span className="text-[11px] text-warning">이전 버전</span>}
-                    <span className="font-mono text-[11px] text-muted-foreground">{m.id}</span>
+                    {a !== "gemini" && <span className="font-mono text-[11px] text-muted-foreground">{m.id}</span>}
                   </DropdownMenuCheckItem>
                 ))}
               {a !== "gemini" && <DropdownMenuItem

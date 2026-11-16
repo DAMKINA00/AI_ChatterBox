@@ -56,3 +56,20 @@ test("Free-text id not in the list stays visible", () => {
   assert.equal(l.at(-1)!.id, "my-custom-model");
   assert.equal(l.at(-1)!.old, true);
 });
+
+test("Gemini offers one entry per model family; effort variants remain separate metadata", () => {
+  const list = ["gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high", "gemini-4-hydrogen-high", "gemini-4-hydrogen-xhigh", "gemini-orchestration-g1-pro"]
+    .map(id => ({ id, label: id, reasoningEfforts: ["medium", "high", "xhigh"] }));
+  assert.deepEqual(ids(latestModels("gemini", list)), ["gemini-4-argon-medium", "gemini-4-hydrogen-high", "gemini-orchestration-g1-pro"]);
+  const selected = latestModels("gemini", list, ["gemini-4-hydrogen-xhigh"]);
+  assert.deepEqual(ids(selected), ["gemini-4-argon-medium", "gemini-4-hydrogen-xhigh", "gemini-orchestration-g1-pro"]);
+  assert.deepEqual(selected[1].reasoningEfforts, ["medium", "high", "xhigh"]);
+  assert.equal(list.length, 6, "native execution metadata keeps every variant");
+});
+
+test("Gemini retains an unavailable saved selection without duplicating available effort variants", () => {
+  const list = ["gemini-4-argon-medium", "gemini-4-argon-high"].map(id => ({id,label:id}));
+  const result = latestModels("gemini", list, ["gemini-old-medium"]);
+  assert.deepEqual(ids(result), ["gemini-4-argon-medium", "gemini-old-medium"]);
+  assert.equal(result[1].old, true);
+});

@@ -9,6 +9,7 @@ const bundle = await build({
     import { createRoot } from "react-dom/client";
     import { CliAccountsDialog } from "./src/renderer/src/components/CliAccountsDialog";
     import { ModelPicker } from "./src/renderer/src/components/ModelPicker";
+    import { EffortPicker } from "./src/renderer/src/components/EffortPicker";
     import { UsageBar } from "./src/renderer/src/components/Usage";
     import { useStore } from "./src/renderer/src/store";
     import { ProjectDialog } from "./src/renderer/src/components/ProjectDialog";
@@ -22,6 +23,7 @@ const bundle = await build({
     window.showUsage = () => root.render(<TooltipProvider><UsageBar /></TooltipProvider>);
     window.showModel = (agents, value) => { modelValue = value; root.render(<TooltipProvider><ModelPicker agents={agents} value={value} onChange={next => { modelValue = next; }} ariaLabel="모델 테스트" /></TooltipProvider>); };
     window.getModelValue = () => modelValue;
+    window.showGeminiEffort = () => root.render(<TooltipProvider><EffortPicker agent="gemini" model="gemini-4-argon-medium" value="auto" onChange={value => { window.effortValue = value; }} ariaLabel="추론 테스트" /></TooltipProvider>);
     window.showAccounts();
   `, resolveDir: process.cwd(), sourcefile: "cli-accounts-ui-harness.tsx", loader: "tsx" },
   bundle: true, write: false, format: "iife", platform: "browser", jsx: "automatic", logLevel: "error",
@@ -197,7 +199,7 @@ try {
   await geminiModelPicker.click();
   const geminiMenuText = await page.getByRole("menu").textContent();
   check(geminiMenuText?.includes("Antigravity CLI 계정 관리") && !geminiMenuText.includes("AI Studio"), "Gemini picker manages the native CLI with no AI Studio control");
-  await page.getByRole("menuitem").filter({ hasText: "gemini-4-argon-medium" }).click();
+  await page.locator('[role="menuitem"][data-model-id="gemini-4-argon-medium"]').click();
   check(await page.evaluate(() => window.getModelValue() === "gemini-4-argon-medium"), "native Antigravity selection stores its real model id");
   await page.evaluate(() => window.showModel(["claude", "codex", "gemini", "grok", "deepseek"], "gemini:gemini-4-argon-medium"));
   await geminiModelPicker.click();
@@ -248,15 +250,25 @@ try {
   await page.evaluate(async () => {
     const info = {gemini:{id:"gemini-4-argon-medium",label:"Gemini 4 Argon (Medium)"},codex:{id:"gpt-6.1-sol",label:"GPT-6.1-Sol"},deepseek:{id:"DeepSeek-Chat",label:"DeepSeek Chat"},grok:{id:"grok-4.7",label:"Grok 4.7"}};
     window.uiStore.setState({models:Object.fromEntries(Object.entries(info).map(([agent, model]) => [agent,[model]]))});
+    window.uiStore.setState({models:{...window.uiStore.getState().models,gemini:[
+      {...info.gemini,reasoningEfforts:["medium","high"]},
+      {id:"gemini-4-argon-high",label:"Gemini 4 Argon (High)",reasoningEfforts:["medium","high"]}
+    ]}});
     window.showModel(["codex","gemini","grok","deepseek"], "codex:gpt-6.1-sol");
   });
   await geminiModelPicker.click();
-  for (const [id, label] of [["gemini-4-argon-medium","4 Argon (Medium)"],["gpt-6.1-sol","6.1-Sol"],["DeepSeek-Chat","Chat"],["grok-4.7","Grok 4.7"]]) {
-    const item = page.getByRole("menuitem").filter({hasText:id}).first();
+  for (const [id, label] of [["gemini-4-argon-medium","4 Argon"],["gpt-6.1-sol","6.1-Sol"],["DeepSeek-Chat","Chat"],["grok-4.7","Grok 4.7"]]) {
+    const item = page.locator(`[role="menuitem"][data-model-id="${id}"]`);
     check((await item.locator("span.flex-1").textContent()) === label, `short display label for ${id}`);
   }
+  check(await page.locator('[role="menuitem"][data-model-id^="gemini-4-argon-"]').count() === 1, "Gemini effort variants do not duplicate model choices");
+  check(!(await page.locator('[role="menuitem"][data-model-id="gemini-4-argon-medium"]').textContent()).match(/Medium|High|medium|high/), "Gemini model choice omits effort labels and variant IDs");
   await page.getByRole("menuitem").filter({hasText:"gpt-6.1-sol"}).click();
   check(await page.evaluate(() => window.getModelValue() === "codex:gpt-6.1-sol"), "short labels preserve the exact model id");
+  await page.evaluate(() => window.showGeminiEffort());
+  await page.getByRole("button", {name:"추론 테스트",exact:true}).click();
+  await page.getByRole("menuitem", {name:"high",exact:true}).click();
+  check(await page.evaluate(() => window.effortValue === "high"), "Gemini reasoning remains independently selectable");
   await page.evaluate(() => {
     window.chatterbox.cliInfo = async (auth, agent) => {
       if (auth && agent === "gemini") return new Promise(resolve => { window.releaseGeminiCheck = () => resolve([{agent:"gemini",path:"fixture-cli",authStatus:"required"}]); });
