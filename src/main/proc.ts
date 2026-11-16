@@ -11,7 +11,7 @@ export function readLines(child: ChildProcess, onLine: (line: string) => void): 
 /** child.kill() only kills the direct child on Windows; the CLIs spawn MCP servers and shells. */
 export function killTree(child: ChildProcess): void {
   if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) return;
-  if (process.platform === "win32") spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+  if (process.platform === "win32") spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
   else child.kill("SIGTERM");
 }
 

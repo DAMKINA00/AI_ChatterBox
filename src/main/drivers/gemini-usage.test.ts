@@ -103,14 +103,23 @@ test("accepts a complete JSON snapshot even after exit or timeout and ends stdin
       queueMicrotask(() => callback(error, stdout, ""));
       return { stdin: { end: () => { ended = true; } } };
     }) as any);
+    // Default account: no profile env, so requireAntigravityLogin passes without a token file.
+    const profile: Record<string, string> = { CHATTERBOX_FIXTURE_PROFILE: "C:\\secret\\profile" };
+    const before = { ...profile }, globalFlag = process.env.AGY_CLI_DISABLE_AUTO_UPDATE;
     try {
-      assert.deepEqual(await readGeminiUsage("C:\\secret\\agy.exe", "C:\\secret\\cwd"), {
+      assert.deepEqual(await readGeminiUsage("C:\\secret\\agy.exe", "C:\\secret\\cwd", profile), {
         weekly: { usedPercent: 50, resetsAt: null },
       });
     } finally { patched.mock.restore(); }
     assert.equal(ended, true);
     assert.deepEqual(seen?.args, ["-p", "/usage", "--output-format", "json"]);
     assert.equal(seen?.options.timeout, 45_000);
+    assert.equal(seen?.options.windowsHide, true);
+    // Usage reads never self-update agy; the account profile and caller/global environments stay intact.
+    assert.equal(seen?.options.env.AGY_CLI_DISABLE_AUTO_UPDATE, "true");
+    assert.equal(seen?.options.env.CHATTERBOX_FIXTURE_PROFILE, "C:\\secret\\profile");
+    assert.deepEqual(profile, before);
+    assert.equal(process.env.AGY_CLI_DISABLE_AUTO_UPDATE, globalFlag);
   }
 });
 

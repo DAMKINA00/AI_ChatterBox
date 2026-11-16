@@ -41,7 +41,7 @@ export function readGeminiUsage(exe: string, cwd: string, env: Record<string, st
     const fail = () => reject(new Error(GEMINI_USAGE_ERROR));
     try {
       requireAntigravityLogin(env);
-      const child = execFile(exe, ["-p", "/usage", "--output-format", "json"], { cwd, windowsHide: true, timeout: 45_000, maxBuffer: MAX_BUFFER, env: { ...process.env, ...env } }, (error, stdout, stderr) => {
+      const child = execFile(exe, ["-p", "/usage", "--output-format", "json"], { cwd, windowsHide: true, timeout: 45_000, maxBuffer: MAX_BUFFER, env: { ...process.env, ...env, AGY_CLI_DISABLE_AUTO_UPDATE: "true" } }, (error, stdout, stderr) => {
         const usage = parseGeminiUsage(stdout);
         // A complete read-only snapshot remains valid if process teardown subsequently times out.
         if (usage) return resolve(usage);
