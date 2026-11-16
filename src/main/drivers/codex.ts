@@ -6,6 +6,7 @@ import type { ProjectListResponse } from "../codex-schema/v2/ProjectListResponse
 import type { ProjectCreateParams } from "../codex-schema/v2/ProjectCreateParams";
 import type { FileDiff, ModelOption, UsageInfo, TokenCounts, AgentMetrics } from "../../shared/types";
 import { readLines } from "../proc";
+import { unwrapPowerShell } from "../execution-policy";
 import { classifyWindow, type UsageWindow } from "../../shared/usage";
 import { fileNote, IMAGE_MIMES, type AgentDriver, type AgentInput, type DriverHost, type DriverOptions } from "./types";
 import type { RequestId, ServerNotification, ServerRequest, InitializeResponse, ClientRequest } from "../codex-schema";
@@ -242,10 +243,12 @@ function toUsage(r: RateLimitSnapshot): UsageInfo {
   return { codex: out };
 }
 
-/** Strip Codex's Windows wrapper: "powershell.exe" -Command '…' → … */
+/**
+ * Strip Codex's Windows wrapper: "powershell.exe" -Command '…' / "…" → …
+ * Only a whole-command wrapper is unwrapped; anything else is kept verbatim so policy sees the real command.
+ */
 export function innerCommand(cmd: string): string {
-  const m = /-Command\s+'([\s\S]*)'\s*$/.exec(cmd);
-  return m ? m[1].replace(/''/g, "'") : cmd;
+  return unwrapPowerShell(cmd) ?? cmd;
 }
 
 function toDiffs(changes: FileUpdateChange[]): FileDiff[] {
@@ -464,6 +467,18 @@ export class CodexDriver implements AgentDriver {
     return true;
   }
 
+  /**
+   * Codex approval replies carry only a decision, so the CLI reports a decline as "rejected by user".
+   * Tell the worker the app's actual reason in its running turn (and show it in the chat).
+   */
+  private tellDenied(title: string, target: string, reason: string | undefined, cancelled?: boolean) {
+    if (cancelled) return; // stop/abort: the turn is ending anyway
+    const why = reason?.trim() || "사유가 기록되지 않았습니다.";
+    const text = `[AI_ChatterBox 승인 거절] ${title}${target ? ` (${target.slice(0, 300)})` : ""}: ${why}`;
+    this.host.emit({ type: "notice", text });
+    void this.steer({ text, attachments: [] }).catch(() => undefined);
+  }
+
   private finishTurn(r: CodexTurnResult) {
     const waiters = this.turnWaiters;
     this.turnWaiters = [];
@@ -504,10 +519,14 @@ export class CodexDriver implements AgentDriver {
             command: cmd,
             paths: p.cwd ? [p.cwd] : [],
           })
-          .then(({ verdict: v }) => {
-            const decision: CommandExecutionApprovalDecision = v === "deny" ? "decline" : "accept";
+          .then((r) => {
+            const decision: CommandExecutionApprovalDecision = r.verdict === "deny" ? "decline" : "accept";
             this.server.respond(req.id, { decision });
-          }).catch(() => this.server.respond(req.id, { decision: "decline" }));
+            if (r.verdict === "deny") this.tellDenied("명령 실행", cmd, r.reason, r.cancelled);
+          }).catch((error) => {
+            this.server.respond(req.id, { decision: "decline" });
+            this.tellDenied("명령 실행", cmd, `승인 처리 오류로 거절되었습니다: ${error instanceof Error ? error.message : String(error)}`);
+          });
         return true;
       }
       case "item/fileChange/requestApproval": {
@@ -524,10 +543,14 @@ export class CodexDriver implements AgentDriver {
             diffs,
             writes: true,
           })
-          .then(({ verdict: v }) => {
-            const decision: FileChangeApprovalDecision = v === "deny" ? "decline" : "accept";
+          .then((r) => {
+            const decision: FileChangeApprovalDecision = r.verdict === "deny" ? "decline" : "accept";
             this.server.respond(req.id, { decision });
-          }).catch(() => this.server.respond(req.id, { decision: "decline" }));
+            if (r.verdict === "deny") this.tellDenied("파일 변경", diffs.map((d) => d.path).join(", "), r.reason, r.cancelled);
+          }).catch((error) => {
+            this.server.respond(req.id, { decision: "decline" });
+            this.tellDenied("파일 변경", diffs.map((d) => d.path).join(", "), `승인 처리 오류로 거절되었습니다: ${error instanceof Error ? error.message : String(error)}`);
+          });
         return true;
       }
       case "item/permissions/requestApproval":

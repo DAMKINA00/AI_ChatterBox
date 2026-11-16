@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isReadCommand, isMutatingTool } from "./execution-policy";
+import { isReadCommand, isMutatingTool, unwrapPowerShell } from "./execution-policy";
+import { innerCommand } from "./drivers/codex";
 import { Orchestrator } from "./orchestrator";
 import { ChatManager } from "./chats";
 
@@ -15,6 +16,83 @@ test("planning command gate rejects composition and executable read options", ()
   assert.equal(isMutatingTool("run_command", JSON.stringify({ command: "Set-Content a.txt x" })), true);
   assert.equal(isMutatingTool("run_command", "broken JSON"), true);
   for (const tool of ["write_file", "edit_file", "save_video"]) assert.equal(isMutatingTool(tool, "{}"), true);
+});
+
+test("read pipelines are allowed only when every stage is a known read and no stage runs or writes", () => {
+  for (const command of [
+    "Get-Content README.md | Select-Object -First 50",
+    "git log --oneline -20 | Select-String fix",
+    "Get-ChildItem src -Recurse | Sort-Object Length | Format-Table Name",
+    "rg -n isReadCommand src | Measure-Object",
+    "git ls-files '*AGENTS.md' '*Process*.cs'",
+    "git log -C --stat",
+    "Select-String -Path a.txt -Pattern 'x|y'",
+  ]) assert.equal(isReadCommand(command), true, command);
+  for (const command of [
+    "Get-Content a | Set-Content b",
+    "Get-Content a | ForEach-Object { Remove-Item $_ }",
+    "Get-Content a | Out-File b",
+    "Get-Content a || del b",
+    "Get-Content a |",
+    "| Get-Content a",
+    "Select-Object -First 1",
+    "git status | git push",
+    "Get-Content 'unterminated",
+  ]) assert.equal(isReadCommand(command), false, command);
+});
+
+test("options that run programs or create variables are rejected per argument, quoted or not", () => {
+  for (const command of [
+    'rg --pre="processor.exe" pattern .',
+    "rg --pre='processor.exe' pattern .",
+    'rg "--pre=processor.exe" pattern .',
+    "rg --pre processor.exe pattern .",
+    "rg --pre-glob '*.pdf' x",
+    "rg -z pattern .",
+    "rg -iz pattern .",
+    "rg --search-zip pattern .",
+    "rg --hostname-bin=evil x",
+    'git diff "--output=out.txt"',
+    "git show --textconv HEAD",
+    "git log --ext-diff",
+    "git -c core.pager=evil log",
+    "git log -c",
+    "Get-Content a -OutVariable x",
+    "Get-Content a -OutV x",
+    "Get-Content a -ov:x",
+    "Get-ChildItem -PipelineVariable p",
+    "Get-ChildItem . -exec x",
+  ]) assert.equal(isReadCommand(command), false, command);
+});
+
+test("PowerShell wrappers are unwrapped only when the whole command is the wrapper", () => {
+  const exe = '"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"';
+  assert.equal(unwrapPowerShell(`${exe} -Command "git ls-files '*AGENTS.md' '*Process*.cs'"`), "git ls-files '*AGENTS.md' '*Process*.cs'");
+  assert.equal(unwrapPowerShell(`${exe} -Command 'git log --oneline'`), "git log --oneline");
+  assert.equal(unwrapPowerShell(`${exe} -Command 'Select-String -Pattern ''a b'' x.txt'`), "Select-String -Pattern 'a b' x.txt");
+  assert.equal(unwrapPowerShell(`pwsh.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-Content a.txt"`), "Get-Content a.txt");
+  assert.equal(unwrapPowerShell(`powershell -c "git status"`), "git status");
+  for (const command of [
+    `Set-Content a x; ${exe} -Command 'git status'`,
+    `del a & powershell.exe -Command "git status"`,
+    `${exe} -Command "git status"; del a`,
+    `${exe} -Command "git status" extra`,
+    `${exe} -Command 'git status' 'more'`,
+    `${exe} -Command "Get-Content "'$_.FullName"`,
+    `${exe} -Command "dir C:\\"`,
+    `${exe} -EncodedCommand ZABpAHIA`,
+    `${exe} -File script.ps1`,
+    `${exe} -ExecutionPolicy Evil -Command "git status"`,
+    `${exe} -Command git status`,
+    `cmd.exe /c "git status"`,
+    `"C:\\tools\\powershell.exe.bat" -Command "git status"`,
+  ]) assert.equal(unwrapPowerShell(command), null, command);
+  // Codex: whole wrapper → policy sees the script; anything else stays verbatim and is judged as a mutation.
+  assert.equal(isReadCommand(innerCommand(`${exe} -Command "git ls-files '*AGENTS.md'"`)), true);
+  assert.equal(isReadCommand(innerCommand(`${exe} -Command 'Get-Content a | Select-Object -First 5'`)), true);
+  assert.equal(isReadCommand(innerCommand(`Set-Content a x; ${exe} -Command 'git status'`)), false);
+  assert.equal(isReadCommand(innerCommand(`${exe} -Command "Set-Content a x"`)), false);
+  assert.equal(isReadCommand(innerCommand(`${exe} -Command 'rg --pre=evil x .'`)), false);
 });
 
 function engine() {
@@ -183,6 +261,25 @@ test("critical routing persists on resume, cannot be downgraded, and gates write
   assert.equal(chats.approvalGuard(1, write), null);
   events.push({ id: 99, event: { type: "user", text: "ordinary request" } });
   assert.equal(o.newInstruction(1, "ordinary request", true).dualInvestigation, undefined);
+});
+
+test("during dual investigation workers may read (pipelines included) but writes stay blocked with a worker-facing reason", async () => {
+  const { chats, orchestrator: o } = engine();
+  chats.store.listAgents = () => [
+    { key: "w1", kind: "claude", nickname: "클로드 1호", status: "active" },
+    { key: "w2", kind: "gpt", nickname: "지피티 1호", status: "active" },
+  ];
+  o.instructions.set(1, { id: 17, mode: "delegated", dualInvestigation: true, asks: 0, queued: [], pinned: [] });
+  o.running.set(1, new Map([["w2", { consultId: 30, kind: "opinion", scope: [] }]]));
+  const worker = { ...write, role: "w2", writes: false };
+  for (const command of ["git ls-files '*AGENTS.md'", "Get-Content a.txt | Select-Object -First 20", "git log --oneline | Select-String fix"])
+    assert.equal(chats.approvalGuard(1, { ...worker, command }), null, command);
+  for (const input of [{ ...worker, command: "Set-Content a.txt x" }, { ...worker, command: "rg --pre=\"evil.exe\" x ." }, { ...write, role: "w2" }]) {
+    const reason = chats.approvalGuard(1, input);
+    assert.match(reason, /양쪽 독립 조사 중에는 읽기 전용 명령만/);
+    assert.doesNotMatch(reason, /조사시킨 뒤/);
+  }
+  assert.match(chats.approvalGuard(1, write), /양쪽 조사가 필요합니다/);
 });
 
 test("missing completion is repaired only once on the same instruction and stopped work is not restarted", async () => {
