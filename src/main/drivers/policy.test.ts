@@ -193,12 +193,39 @@ test("image failure prevents a successful worker turn; readonly turns disable na
 
 test("Codex never grants session-wide native approval that bypasses changed app settings", async () => {
   const f = codex();
-  f.driver.onServerRequest({ id: 1, method: "item/commandExecution/requestApproval", params: { command: "npm test", threadId: "thread" } } as any);
+  f.driver.onServerRequest({ id: 1, method: "item/commandExecution/requestApproval", params: { command: "npm test", threadId: "thread", turnId: "turn" } } as any);
   await new Promise((r) => setImmediate(r));
   assert.equal(f.approvals, 1);
   assert.deepEqual(f.replies[0].value, { decision: "accept" });
   f.driver.onServerRequest({ id: 2, method: "item/permissions/requestApproval", params: {} } as any);
   assert.deepEqual(f.replies[1].value, { permissions: {}, scope: "turn" });
+});
+
+test("Codex sends the unwrapped command to approval and tells the worker why a request was declined", async () => {
+  const f = codex();
+  await f.driver.send({ text: "investigate", attachments: [] });
+  const exe = '"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"';
+  (f.driver as any).host.approve = async (input: any) => { f.inputs.push(input); return { verdict: "deny", reason: "양쪽 독립 조사 중에는 읽기 전용 명령만 실행할 수 있어 앱이 자동 거절했습니다." }; };
+  f.driver.onServerRequest({ id: 7, method: "item/commandExecution/requestApproval", params: { command: `${exe} -Command "Set-Content a.txt x"`, threadId: "thread", turnId: "turn" } } as any);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(f.inputs.at(-1).command, "Set-Content a.txt x");
+  assert.deepEqual(f.replies.at(-1), { id: 7, value: { decision: "decline" } });
+  const steer = f.calls.find((c) => c.method === "turn/steer");
+  assert.ok(steer, "the decline reason is steered into the running turn");
+  assert.match(steer!.params.input.at(-1).text, /승인 거절.*명령 실행.*Set-Content a\.txt x.*읽기 전용 명령만/);
+  assert.ok(f.events.some((e) => e.type === "notice" && /승인 거절/.test(e.text)));
+  // An approval failure is declined and reported as a failure, not as a user rejection.
+  (f.driver as any).host.approve = async () => { throw new Error("closed"); };
+  f.driver.onServerRequest({ id: 8, method: "item/commandExecution/requestApproval", params: { command: "git status", threadId: "thread", turnId: "turn" } } as any);
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(f.replies.at(-1), { id: 8, value: { decision: "decline" } });
+  assert.match(f.calls.filter((c) => c.method === "turn/steer").at(-1)!.params.input.at(-1).text, /승인 처리 오류.*closed/);
+  // Stop/abort cancellations are not echoed into a turn that is ending.
+  const steers = f.calls.filter((c) => c.method === "turn/steer").length;
+  (f.driver as any).host.approve = async () => ({ verdict: "deny", cancelled: true, reason: "작업이 중지되었습니다." });
+  f.driver.onServerRequest({ id: 9, method: "item/commandExecution/requestApproval", params: { command: "git status", threadId: "thread", turnId: "turn" } } as any);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(f.calls.filter((c) => c.method === "turn/steer").length, steers);
 });
 
 test("Claude readonly turns deny edits and shell mutations even when host would approve", async () => {

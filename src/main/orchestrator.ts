@@ -1387,7 +1387,13 @@ export class Orchestrator {
     if (!mutation) return null;
     if (this.stopped.has(chatId)) return "작업이 중지되었습니다.";
     const investigation = this.investigationIssue(chatId);
-    if (investigation) return investigation;
+    if (investigation) {
+      if (input.role === "orch") return investigation;
+      // The master's instruction is meaningless to the worker being blocked: say what was classified and what is allowed.
+      const what = input.command ? `명령 \`${input.command.slice(0, 200)}\`` : "파일 변경";
+      return `양쪽 독립 조사 중에는 읽기 전용 명령만 실행할 수 있어 앱이 자동 거절했습니다. ${what}이(가) 변경으로 분류되었습니다. ` +
+        "git status/diff/log/show/ls-files/rev-parse, Get-Content·Get-ChildItem·Get-Item·Select-String·rg 등 단일 읽기 명령이나 Select-Object·Sort-Object 등으로 이어진 읽기 파이프를 사용하세요.";
+    }
     if (input.role === "orch") {
       if (this.scopeLocks.get(chatId)?.length) return "작업자가 파일을 변경 중입니다. 작업이 끝난 뒤 마스터의 직접 변경을 다시 요청하세요.";
     } else {

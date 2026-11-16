@@ -2,7 +2,7 @@
 // one CodexDriver per thread.
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync } from "node:fs";
-import { innerShellCommand } from "../execution-policy";
+import { unwrapPowerShell } from "../execution-policy";
 import type { ProjectListResponse } from "../codex-schema/v2/ProjectListResponse";
 import type { ProjectCreateParams } from "../codex-schema/v2/ProjectCreateParams";
 import type { FileDiff, ModelOption, UsageInfo, TokenCounts, AgentMetrics } from "../../shared/types";
@@ -245,7 +245,7 @@ function toUsage(r: RateLimitSnapshot): UsageInfo {
 
 /** Strip Codex's Windows wrapper: "powershell.exe" -Command '…' → … */
 export function innerCommand(cmd: string): string {
-  return innerShellCommand(cmd);
+  return unwrapPowerShell(cmd) ?? cmd;
 }
 
 function toDiffs(changes: FileUpdateChange[]): FileDiff[] {
@@ -490,8 +490,9 @@ export class CodexDriver implements AgentDriver {
     }
   }
 
-  private approvalDenied(turnId: string, reason: string) {
-    const text = `[AI ChatterBox 승인 거절 사유] ${reason}`;
+  private approvalDenied(turnId: string, title: string, target: string, reason: string, cancelled?: boolean) {
+    if (cancelled) return;
+    const text = `[AI ChatterBox 승인 거절 사유] ${title}${target ? ` (${target.slice(0, 300)})` : ""}: ${reason}`;
     this.host.emit({ type: "notice", text });
     // The native decline response has no reason field; steer only the turn that requested approval.
     if (this.turnId === turnId) void this.steer({ text, attachments: [] }).catch(() => undefined);
@@ -511,13 +512,13 @@ export class CodexDriver implements AgentDriver {
             command: cmd,
             paths: p.cwd ? [p.cwd] : [],
           })
-          .then(({ verdict: v, reason }) => {
+          .then(({ verdict: v, reason, cancelled }) => {
             const decision: CommandExecutionApprovalDecision = v === "deny" ? "decline" : "accept";
             this.server.respond(req.id, { decision });
-            if (v === "deny") this.approvalDenied(p.turnId, reason || "승인 정책에서 요청을 거절했습니다. 앱의 승인 기록을 확인하세요.");
-          }).catch(() => {
+            if (v === "deny") this.approvalDenied(p.turnId, "명령 실행", cmd, reason || "승인 정책에서 요청을 거절했습니다. 앱의 승인 기록을 확인하세요.", cancelled);
+          }).catch(error => {
             this.server.respond(req.id, { decision: "decline" });
-            this.approvalDenied(p.turnId, "승인 요청을 처리하지 못했습니다. 앱의 승인 기록을 확인하세요.");
+            this.approvalDenied(p.turnId, "명령 실행", cmd, `승인 요청을 처리하지 못했습니다. 승인 처리 오류: ${error instanceof Error ? error.message : String(error)}`);
           });
         return true;
       }
@@ -535,13 +536,13 @@ export class CodexDriver implements AgentDriver {
             diffs,
             writes: true,
           })
-          .then(({ verdict: v, reason }) => {
+          .then(({ verdict: v, reason, cancelled }) => {
             const decision: FileChangeApprovalDecision = v === "deny" ? "decline" : "accept";
             this.server.respond(req.id, { decision });
-            if (v === "deny") this.approvalDenied(p.turnId, reason || "승인 정책에서 요청을 거절했습니다. 앱의 승인 기록을 확인하세요.");
-          }).catch(() => {
+            if (v === "deny") this.approvalDenied(p.turnId, "파일 변경", diffs.map(d => d.path).join(", "), reason || "승인 정책에서 요청을 거절했습니다. 앱의 승인 기록을 확인하세요.", cancelled);
+          }).catch(error => {
             this.server.respond(req.id, { decision: "decline" });
-            this.approvalDenied(p.turnId, "승인 요청을 처리하지 못했습니다. 앱의 승인 기록을 확인하세요.");
+            this.approvalDenied(p.turnId, "파일 변경", diffs.map(d => d.path).join(", "), `승인 요청을 처리하지 못했습니다. 승인 처리 오류: ${error instanceof Error ? error.message : String(error)}`);
           });
         return true;
       }
