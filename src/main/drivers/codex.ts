@@ -2,6 +2,7 @@
 // one CodexDriver per thread.
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync } from "node:fs";
+import { innerShellCommand } from "../execution-policy";
 import type { ProjectListResponse } from "../codex-schema/v2/ProjectListResponse";
 import type { ProjectCreateParams } from "../codex-schema/v2/ProjectCreateParams";
 import type { FileDiff, ModelOption, UsageInfo, TokenCounts, AgentMetrics } from "../../shared/types";
@@ -244,8 +245,7 @@ function toUsage(r: RateLimitSnapshot): UsageInfo {
 
 /** Strip Codex's Windows wrapper: "powershell.exe" -Command '…' → … */
 export function innerCommand(cmd: string): string {
-  const m = /-Command\s+'([\s\S]*)'\s*$/.exec(cmd);
-  return m ? m[1].replace(/''/g, "'") : cmd;
+  return innerShellCommand(cmd);
 }
 
 function toDiffs(changes: FileUpdateChange[]): FileDiff[] {
@@ -490,6 +490,13 @@ export class CodexDriver implements AgentDriver {
     }
   }
 
+  private approvalDenied(turnId: string, reason: string) {
+    const text = `[AI ChatterBox 승인 거절 사유] ${reason}`;
+    this.host.emit({ type: "notice", text });
+    // The native decline response has no reason field; steer only the turn that requested approval.
+    if (this.turnId === turnId) void this.steer({ text, attachments: [] }).catch(() => undefined);
+  }
+
   onServerRequest(req: ServerRequest): boolean {
     switch (req.method) {
       case "item/commandExecution/requestApproval": {
@@ -504,10 +511,14 @@ export class CodexDriver implements AgentDriver {
             command: cmd,
             paths: p.cwd ? [p.cwd] : [],
           })
-          .then(({ verdict: v }) => {
+          .then(({ verdict: v, reason }) => {
             const decision: CommandExecutionApprovalDecision = v === "deny" ? "decline" : "accept";
             this.server.respond(req.id, { decision });
-          }).catch(() => this.server.respond(req.id, { decision: "decline" }));
+            if (v === "deny") this.approvalDenied(p.turnId, reason || "승인 정책에서 요청을 거절했습니다. 앱의 승인 기록을 확인하세요.");
+          }).catch(() => {
+            this.server.respond(req.id, { decision: "decline" });
+            this.approvalDenied(p.turnId, "승인 요청을 처리하지 못했습니다. 앱의 승인 기록을 확인하세요.");
+          });
         return true;
       }
       case "item/fileChange/requestApproval": {
@@ -524,10 +535,14 @@ export class CodexDriver implements AgentDriver {
             diffs,
             writes: true,
           })
-          .then(({ verdict: v }) => {
+          .then(({ verdict: v, reason }) => {
             const decision: FileChangeApprovalDecision = v === "deny" ? "decline" : "accept";
             this.server.respond(req.id, { decision });
-          }).catch(() => this.server.respond(req.id, { decision: "decline" }));
+            if (v === "deny") this.approvalDenied(p.turnId, reason || "승인 정책에서 요청을 거절했습니다. 앱의 승인 기록을 확인하세요.");
+          }).catch(() => {
+            this.server.respond(req.id, { decision: "decline" });
+            this.approvalDenied(p.turnId, "승인 요청을 처리하지 못했습니다. 앱의 승인 기록을 확인하세요.");
+          });
         return true;
       }
       case "item/permissions/requestApproval":

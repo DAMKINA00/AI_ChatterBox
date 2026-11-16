@@ -1,11 +1,24 @@
-/** Conservative commands allowed by our gate while planning/reviewing. No shell composition. */
+/** Unwrap only a complete PowerShell invocation, never a trailing -Command in another command. */
+export function innerShellCommand(command: string): string {
+  const match = /^(?:"(?:[^"\r\n]*[\\/])?(?:powershell|pwsh)(?:\.exe)?"|'(?:[^'\r\n]*[\\/])?(?:powershell|pwsh)(?:\.exe)?'|(?:powershell|pwsh)(?:\.exe)?)(?:\s+-(?:NoLogo|NoProfile|NonInteractive))*\s+-(?:Command|c)\s+(['"])([\s\S]*)\1\s*$/i.exec(command.trim());
+  if (!match) return command;
+  return match[1] === "'" ? match[2].replace(/''/g, "'") : match[2].replace(/\\"/g, '"');
+}
+
+/** Conservative reads and simple read-only pipelines; unknown shell syntax still needs a write lock. */
 export function isReadCommand(command: string): boolean {
-  const s = command.trim();
-  if (!s || /[;&|<>`$\r\n(){}]/.test(s)) return false;
-  if (/^git\s+(status|diff|log|show|ls-files|rev-parse)\b/i.test(s))
-    return !/--(output|ext-diff|textconv|exec-path)|\s-c\s/i.test(s);
-  return /^(pwd|ls|cat|head|tail|wc|rg|Get-Content|Get-ChildItem|Get-Item|Test-Path|Select-String|Get-Location)\b/i.test(s)
-    && !/(?:^|\s)(?:-exec|-delete|--pre(?:=|\s)|--pre-glob|-OutVariable|-ov|-PipelineVariable|-pv)\b/i.test(s);
+  const s = innerShellCommand(command).trim();
+  if (!s || /[;&<>`$\r\n(){}]/.test(s)) return false;
+  return s.split("|").every((part, index) => {
+    const segment = part.trim();
+    if (!segment || /['"]/.test(segment.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"/g, ""))) return false;
+    if (/(?:^|\s)(?:-exec|-delete|--pre(?:=|\s)|--pre-glob|-OutVariable|-ov|-PipelineVariable|-pv)\b/i.test(segment)) return false;
+    if (index > 0) return /^Select-Object(?:\s|$)/i.test(segment)
+      || /^Where-Object\s+\w+\s+-(?:eq|ne|gt|ge|lt|le|like|notlike|match|notmatch|contains|notcontains|in|notin)\s+(?:'[^']*'|"[^"]*"|[^\s'"]+)$/i.test(segment);
+    if (/^git\s+(status|diff|log|show|ls-files|rev-parse)\b/i.test(segment))
+      return !/--(output|ext-diff|textconv|exec-path)|\s-c\s/i.test(segment);
+    return /^(pwd|ls|cat|head|tail|wc|rg|Get-Content|Get-ChildItem|Get-Item|Get-FileHash|Test-Path|Select-String|Get-Location)(?:\s|$)/i.test(segment);
+  });
 }
 
 export function isMutatingTool(name: string, input: string, hasDiffs = false): boolean {

@@ -3,6 +3,35 @@ import assert from "node:assert/strict";
 import { isReadCommand, isMutatingTool } from "./execution-policy";
 import { Orchestrator } from "./orchestrator";
 import { ChatManager } from "./chats";
+import { CodexDriver, innerCommand } from "./drivers/codex";
+import { ApprovalService } from "./approvals";
+
+test("project reads with Codex PowerShell wrappers and read-only pipelines are not mutations", () => {
+  for (const command of [
+    '"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -LiteralPath \'D:\\project\\AGENTS.md\' -Encoding UTF8"',
+    "powershell.exe -NoLogo -NoProfile -NonInteractive -Command 'Get-Content README.md'",
+    "pwsh -Command 'Get-Content ''folder with spaces/file.md'''",
+    "Get-Content src/file.ts | Select-Object -Skip 245 -First 55",
+    "Get-ChildItem -Path . -Filter AGENTS.md -Recurse -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName",
+    "Get-ChildItem skills -Directory | Where-Object Name -match ponytail | Select-Object -ExpandProperty FullName",
+    "Get-FileHash build/app.exe",
+  ]) {
+    assert.equal(isReadCommand(command), true, command);
+    assert.equal(isMutatingTool("명령", command), false, command);
+  }
+  assert.equal(innerCommand('"powershell.exe" -Command "Get-Content README.md"'), "Get-Content README.md");
+  for (const command of [
+    '"powershell.exe" -Command "Get-Content a; Set-Content b changed"',
+    '"powershell.exe" -Command "Get-Content a"; Remove-Item b',
+    "Remove-Item b; echo -Command 'Get-Content a'",
+    "Get-Content a | Set-Content b", "Get-Content a || Remove-Item b",
+    "Get-ChildItem | ForEach-Object -MemberName Delete", "Get-ChildItem | Where-Object -FilterScript 'Remove-Item b'",
+    "Get-Content a | Select-Object -Property { Remove-Item b }", "Get-Content a > b",
+    "Get-Content $env:FILE", 'Get-Content "$(Remove-Item b)"', "Get-Content a `\n; Remove-Item b",
+    "powershell.exe -EncodedCommand RwBlAHQALQBDAG8AbgB0AGUAbgB0AA==", "Get-Content 'unterminated",
+    "Get-Content-MutatingCommand a", "Get-Content a | Select-Object-MutatingCommand",
+  ]) assert.equal(isReadCommand(command), false, command);
+});
 
 test("planning command gate rejects composition and executable read options", () => {
   for (const command of ["git status --short", "rg name src", "Get-Content README.md", "pwd"])
@@ -29,6 +58,57 @@ function engine() {
   return { chats, orchestrator };
 }
 const write: any = { role: "orch", node: "orch", title: "Write", detail: "a", key: "Write", writes: true, paths: ["a"] };
+
+test("project file queries do not acquire or collide with another worker's write lock", () => {
+  const { chats, orchestrator: o } = engine();
+  o.running.set(1, new Map([
+    ["w1", { consultId: 10, scope: ["src/**"] }],
+    ["w2", { consultId: 11, scope: [] }],
+  ]));
+  assert.equal(chats.approvalGuard(1, { ...write, role: "w1" }), null);
+  for (const command of [
+    '"powershell.exe" -Command "Get-Content src/file.ts"',
+    "Get-Content src/file.ts | Select-Object -First 20",
+    "Get-ChildItem src -Recurse -File | Select-Object -ExpandProperty FullName",
+  ]) assert.equal(chats.approvalGuard(1, { ...write, role: "w2", writes: false, command }), null, command);
+  assert.deepEqual(o.scopeLocks.get(1), [{ consultId: 10, scope: ["src/**"] }]);
+  assert.match(chats.approvalGuard(1, { ...write, role: "w2", writes: false, command: "Get-Content a | Set-Content src/file.ts" }), /다른 작업이 같은 범위/);
+  assert.match(chats.approvalGuard(1, { ...write, role: "w2" }), /다른 작업이 같은 범위/);
+  o.stopped.add(1);
+  assert.match(chats.approvalGuard(1, { ...write, role: "w2", writes: false, command: "Get-Content a" }), /중지/);
+});
+
+test("Codex project reads pass the real approval service during another worker's write; mixed writes remain denied", async () => {
+  const { chats, orchestrator: o } = engine();
+  o.running.set(1, new Map([["w1", { consultId: 10, scope: ["src/**"] }], ["w2", { consultId: 11, scope: [] }]]));
+  assert.equal(chats.approvalGuard(1, { ...write, role: "w1" }), null);
+  const events: any[] = [], replies: any[] = [], logs: any[] = [], calls: any[] = [];
+  const service = new ApprovalService({
+    emit: (_id, _node, _role, event) => events.push(event), pendingChanged() {},
+    log: (...args) => logs.push(args), guard: chats.approvalGuard,
+    mode: () => ({ mode: "orchestrator-all", delegateHighRisk: true }),
+    judge: async () => ({ decision: "allow", reason: "프로젝트 지침 파일을 읽는 작업입니다." }),
+  });
+  const server: any = { loaded: new Set(), ensure: async () => {}, attach() {},
+    request: async (method: string, params: unknown) => { calls.push({ method, params }); return { thread: { id: "same-worker-thread" }, turn: { id: "turn" } }; },
+    respond: (id: unknown, result: unknown) => replies.push({ id, result }),
+  };
+  const driver = new CodexDriver({ cwd: process.cwd(), nativeId: null, exePath: "unused" }, server, {
+    emit: event => events.push(event), nativeId() {},
+    approve: input => service.request(1, process.cwd(), { ...input, role: "w2", node: "consult:11" }),
+  });
+  await driver.send({ text: "continue the existing worker", attachments: [] });
+  const request = (id: number, command: string) => driver.onServerRequest({ id, method: "item/commandExecution/requestApproval", params: { threadId: "same-worker-thread", turnId: "turn", itemId: `item:${id}`, cwd: process.cwd(), command } } as any);
+  request(1, '"powershell.exe" -Command "Get-Content AGENTS.md | Select-Object -First 20"');
+  await new Promise(r => setImmediate(r));
+  assert.deepEqual(replies[0], { id: 1, result: { decision: "accept" } });
+  request(2, '"powershell.exe" -Command "Get-Content AGENTS.md | Set-Content src/file.ts"');
+  await new Promise(r => setImmediate(r));
+  assert.deepEqual(replies[1], { id: 2, result: { decision: "decline" } });
+  assert.ok(logs.some(log => log.includes("scope") && log.includes("다른 작업이 같은 범위를 변경 중입니다. 해당 작업이 끝난 뒤 다시 요청하세요.")));
+  assert.match(calls.find(c => c.method === "turn/steer").params.input[0].text, /다른 작업이 같은 범위/);
+  assert.deepEqual(o.scopeLocks.get(1), [{ consultId: 10, scope: ["src/**"] }]);
+});
 
 test("native Antigravity model switches retain the CLI conversation; provider switches hand over context", () => {
   const { chats, orchestrator: o } = engine();

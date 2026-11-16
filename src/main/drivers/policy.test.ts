@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CodexDriver } from "./codex";
 import { ClaudeDriver, NATIVE_AGENT_TOOLS } from "./claude";
+import type { VerdictResult } from "../approvals";
 
 const opts = { cwd: process.cwd(), nativeId: null, exePath: "unused" };
 
@@ -39,16 +40,48 @@ test("Codex declines unsupported elicitation and readonly app access, and select
   assert.equal(readonly.approvals, 0);
   assert.equal(readonly.replies[0].value.action, "decline");
 });
-function codex(readOnly = false) {
+function codex(readOnly = false, result: VerdictResult | Error = { verdict: "allow_chat" }) {
   const calls: { method: string; params: any }[] = [], replies: any[] = [], events: any[] = [], inputs: any[] = [];
   let approvals = 0;
   const server: any = { loaded: new Set(), ensure: async () => {}, attach() {}, detach() {},
     request: async (method: string, params: any) => { calls.push({ method, params }); return { thread: { id: "thread" }, turn: { id: "turn" } }; },
     respond: (id: unknown, value: unknown) => replies.push({ id, value }),
   };
-  const driver = new CodexDriver({ ...opts, readOnly }, server, { nativeId() {}, emit: (e) => events.push(e), approve: async (input) => { inputs.push(input); approvals++; return { verdict: "allow_chat" }; } });
+  const driver = new CodexDriver({ ...opts, readOnly }, server, { nativeId() {}, emit: (e) => events.push(e), approve: async (input) => { inputs.push(input); approvals++; if (result instanceof Error) throw result; return result; } });
   return { driver, calls, replies, events, inputs, get approvals() { return approvals; } };
 }
+
+test("Codex command and patch denials retain the app reason and deliver it to the same worker turn", async () => {
+  for (const method of ["item/commandExecution/requestApproval", "item/fileChange/requestApproval"] as const) {
+    const reason = "다른 작업이 같은 범위를 변경 중입니다.";
+    const f = codex(false, { verdict: "deny", reason });
+    await f.driver.send({ text: "continue existing worker", attachments: [] });
+    f.driver.onServerRequest({ id: 7, method, params: { threadId: "thread", turnId: "turn", itemId: "item", command: '"powershell.exe" -Command "Get-Content AGENTS.md"', cwd: opts.cwd } } as any);
+    await new Promise(r => setImmediate(r));
+    assert.deepEqual(f.replies, [{ id: 7, value: { decision: "decline" } }]);
+    assert.ok(f.events.some(e => e.type === "notice" && e.text.includes(reason)));
+    const steer = f.calls.find(c => c.method === "turn/steer")!;
+    assert.equal(steer.params.threadId, "thread");
+    assert.equal(steer.params.expectedTurnId, "turn");
+    assert.match(steer.params.input[0].text, /AI ChatterBox 승인 거절 사유/);
+    assert.ok(steer.params.input[0].text.includes(reason));
+    if (method === "item/commandExecution/requestApproval") assert.equal(f.inputs[0].command, "Get-Content AGENTS.md");
+  }
+});
+
+test("late Codex denials never steer another turn, and approval errors are not reported as user denials", async () => {
+  const f = codex(false, { verdict: "deny", reason: "기존 배정의 범위 밖입니다." });
+  await f.driver.send({ text: "first", attachments: [] });
+  f.driver.onServerRequest({ id: 1, method: "item/commandExecution/requestApproval", params: { threadId: "thread", turnId: "previous-turn", itemId: "item", command: "npm test" } } as any);
+  await new Promise(r => setImmediate(r));
+  assert.equal(f.calls.some(c => c.method === "turn/steer"), false);
+  const broken = codex(false, new Error("approval transport closed"));
+  await broken.driver.send({ text: "task", attachments: [] });
+  broken.driver.onServerRequest({ id: 2, method: "item/fileChange/requestApproval", params: { threadId: "thread", turnId: "turn", itemId: "item" } } as any);
+  await new Promise(r => setImmediate(r));
+  assert.deepEqual(broken.replies, [{ id: 2, value: { decision: "decline" } }]);
+  assert.match(broken.calls.find(c => c.method === "turn/steer")!.params.input[0].text, /승인 요청을 처리하지 못했습니다/);
+});
 
 test("Codex worker recovery waits for its terminal event and leaves the shared server attached", async () => {
   const f = codex();
