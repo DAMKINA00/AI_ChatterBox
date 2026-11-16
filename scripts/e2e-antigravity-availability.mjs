@@ -65,8 +65,8 @@ try {
   check("install and refresh re-enable master effort", await effort.isEnabled());
   check("install and refresh permit the preserved draft", await page.getByTestId("send").isEnabled() && await input.inputValue() === "keep this draft");
   await model.click();
-  await page.getByRole("menuitem", { name: /gemini fixture model/ }).waitFor();
-  check("model list reloads after installation", await page.getByRole("menuitem", { name: /gemini fixture model/ }).count() === 1);
+  await page.getByRole("menuitem", { name: /fixture model.*gemini-4-argon-medium/ }).waitFor();
+  check("model list reloads after installation", await page.getByRole("menuitem", { name: /fixture model.*gemini-4-argon-medium/ }).count() === 1);
   await page.keyboard.press("Escape");
   await cli(app, false);
   await model.click();

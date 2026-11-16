@@ -36,7 +36,10 @@ export function geminiEffortModel(model: ModelOption, effort: string | undefined
 }
 
 const modelLists = new Map<string, { expires: number; promise: Promise<ModelOption[]> }>();
-export function clearGeminiModels() { modelLists.clear(); }
+export function clearGeminiModels(home?: string | null) {
+  if (home === undefined) modelLists.clear();
+  else for (const key of modelLists.keys()) if (key.endsWith(`:${home ?? "default"}`)) modelLists.delete(key);
+}
 export async function listGeminiModels(exe: string, cwd: string, env: Record<string, string> = {}): Promise<ModelOption[]> {
   requireAntigravityLogin(env);
   const settingsFile = join(antigravityProfileDir(env.USERPROFILE ?? homedir()), "settings.json");

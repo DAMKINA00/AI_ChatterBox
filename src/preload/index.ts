@@ -45,7 +45,7 @@ const api: ChatterBoxApi = {
   removeAttachment: (id) => ipcRenderer.invoke("att:remove", id),
   pathForFile: (file) => webUtils.getPathForFile(file),
 
-  cliInfo: (checkAuth) => ipcRenderer.invoke("cli:info", checkAuth),
+  cliInfo: (checkAuth, agent) => ipcRenderer.invoke("cli:info", checkAuth, agent),
   models: (agent) => ipcRenderer.invoke("models:list", agent),
   cliAccounts: {
     list: () => ipcRenderer.invoke("cli-accounts:list"),

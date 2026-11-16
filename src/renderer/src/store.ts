@@ -18,6 +18,7 @@ import type {
 import { historyFromPage, prependPage, replayLive, stateEvents, type StateSnapshot } from "../../shared/event-page";
 import { emptyTeamUpdates, mergeTeamUpdates, type TeamUpdates } from "./lib/history-load";
 import { api, errorMessage } from "./lib/utils";
+import { mergeCliInfo } from "./lib/cli-status";
 import { appendEvent, chatTimelines } from "./timeline";
 
 export interface Selection {
@@ -77,7 +78,7 @@ interface State {
   /** Load older pages until `found` holds for the loaded events (e.g. a consult's start) or the history ends. */
   loadUntil(chatId: number, found: (events: TimelineEvent[]) => boolean): Promise<void>;
   loadModels(agent: AgentKind): Promise<void>;
-  refreshCli(refreshAuth?: boolean): Promise<void>;
+  refreshCli(refreshAuth?: boolean, agent?: AgentKind): Promise<void>;
 
   createProject(input: { name: string; folder: string; settings: ProjectSettings }): Promise<Project | null>;
   updateProject(id: number, patch: Parameters<typeof api.updateProject>[1]): Promise<boolean>;
@@ -329,9 +330,15 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  async refreshCli(refreshAuth = true) {
-    const cli = await api.cliInfo(refreshAuth);
+  async refreshCli(refreshAuth = true, agent) {
+    if (refreshAuth && !agent) {
+      await get().refreshCli(false);
+      await Promise.all(get().cli.filter(info => info.path).map(info => get().refreshCli(true, info.agent)));
+      return;
+    }
+    const updates = await api.cliInfo(refreshAuth, agent);
     set(s => {
+      const cli = mergeCliInfo(s.cli, updates);
       const changed = !!s.cli.find(c => c.agent === "gemini")?.path !== !!cli.find(c => c.agent === "gemini")?.path;
       return { cli, ...(changed ? { models: { ...s.models, gemini: undefined }, modelErrors: { ...s.modelErrors, gemini: undefined } } : {}) };
     });
@@ -341,7 +348,7 @@ export const useStore = create<State>((set, get) => ({
     if (get().models[agent]) return;
     set((s) => ({ modelErrors: { ...s.modelErrors, [agent]: undefined } }));
     try {
-      void get().refreshCli().catch(() => undefined);
+      void get().refreshCli(true, agent).catch(() => undefined);
       const list = await api.models(agent);
       set((s) => ({ models: { ...s.models, [agent]: list }, modelErrors: { ...s.modelErrors, [agent]: undefined } }));
     } catch (e) {

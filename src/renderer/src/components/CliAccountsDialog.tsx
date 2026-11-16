@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CircleAlert, ExternalLink, Loader2, LogOut, Plus, RefreshCw, Trash2 } from "lucide-react";
-import type { CliAccountStatus, CliAccountPolicies } from "../../../shared/types";
+import type { CliAccountId, CliAccountStatus, CliAccountPolicies } from "../../../shared/types";
 import { api, errorMessage } from "../lib/utils";
 import { CLI_KINDS, CLI_KIND_LABEL, cliCheckedText, cliRemaining, type CliKind } from "../lib/cli-accounts-ui";
 import { useStore } from "../store";
@@ -8,9 +8,10 @@ import { Badge, Button, Dialog, DialogContent, DialogFooter, Input } from "./ui"
 import { CliAccountPolicyField } from "./CliAccountPolicyField";
 import { pickUsage } from "../../../shared/usage";
 
-export function CliAccountCard({ account, pending, update, run }: {
+export function CliAccountCard({ account, pending, loggingIn = false, update, run }: {
   account: CliAccountStatus;
   pending: boolean;
+  loggingIn?: boolean;
   update: (patch: { label?: string; enabled?: boolean }) => void;
   run: (action: "login" | "logout" | "refresh" | "remove") => void;
 }) {
@@ -35,10 +36,12 @@ export function CliAccountCard({ account, pending, update, run }: {
         <Button type="button" size="sm" variant="outline" disabled={pending || !label.trim() || label.trim() === account.label} onClick={() => update({ label: label.trim() })}>이름 저장</Button>
       </div>
       <p className="break-all text-[12px]" data-testid="cli-account-auth">
-        {account.authStatus === "authenticated" ? "로그인됨" : account.authStatus === "required" ? "로그인 필요" : "로그인 상태 미확인"}
+        {loggingIn ? "로그인 완료 대기 중…" : account.authStatus === "authenticated" ? "로그인됨" : account.authStatus === "required" ? "로그인 필요" : "로그인 상태 미확인"}
         {account.auth?.email ? ` · ${account.auth?.email}` : ""}
       </p>
-      {account.authStatus === "unknown" && <p className="text-[11.5px] text-muted-foreground">로그인 창에서 로그인을 마친 뒤 상태 새로고침을 눌러주세요.</p>}
+      {loggingIn && <p role="status" className="text-[11.5px] text-muted-foreground">브라우저 인증 후 인증 코드 또는 마지막 페이지 주소를 이 계정의 로그인 콘솔에 붙여넣고 Enter를 누르세요. 완료 여부를 자동으로 확인합니다.</p>}
+      {!loggingIn && account.authStatus === "unknown" && <p className="text-[11.5px] text-muted-foreground">로그인 창에서 로그인을 마친 뒤 상태 새로고침을 눌러주세요.</p>}
+      {account.loginError && <p role="alert" className="text-[12px] text-destructive">{account.loginError}</p>}
       <div className="grid gap-2 text-[12px]" data-testid="cli-account-usage">
         {windows.map(key => {
           const value = account.usage?.[key];
@@ -79,29 +82,59 @@ export function CliAccountCard({ account, pending, update, run }: {
   );
 }
 
-export function CliAccountsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
-  const [kind, setKind] = useState<CliKind>("claude");
+export function CliAccountsDialog({ open, onOpenChange, initialKind = "claude" }: { open: boolean; onOpenChange: (open: boolean) => void; initialKind?: CliKind }) {
+  const [kind, setKind] = useState<CliKind>(initialKind);
   const [accounts, setAccounts] = useState<CliAccountStatus[]>([]);
   const [policy, setPolicy] = useState<CliAccountPolicies>({});
   const [loaded, setLoaded] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
+  const [loginId, setLoginId] = useState<CliAccountId>();
   const inFlight = useRef(false);
   const reload = useCallback(async () => {
     const [nextAccounts, nextPolicy] = await Promise.all([api.cliAccounts.list(), api.cliAccounts.getPolicy()]);
     setAccounts(nextAccounts);
     useStore.setState({ cliAccounts: nextAccounts });
+    setLoginId(id => id && nextAccounts.some(account => account.accountId === id && account.authStatus === "authenticated") ? undefined : id);
     setPolicy(nextPolicy);
     setLoaded(true);
   }, []);
   useEffect(() => {
     if (!open) return;
+    setKind(initialKind);
     setError(undefined);
     setNotice(undefined);
     setLoaded(false);
     void reload().catch(error => setError(errorMessage(error)));
-  }, [open, reload]);
+  }, [open, reload, initialKind]);
+  useEffect(() => {
+    if (!open || !loginId) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        if (!inFlight.current) {
+          const next = await api.cliAccounts.refresh(loginId);
+          if (cancelled) return;
+          setAccounts(next);
+          useStore.setState({ cliAccounts: next });
+          const account = next.find(account => account.accountId === loginId);
+          if (!account || account.authStatus === "authenticated" || account.loginError) {
+            setLoginId(undefined);
+            if (account?.authStatus === "authenticated") {
+              setNotice(`${loginId} 로그인이 확인되었습니다.`);
+              if (account.isDefault) void useStore.getState().refreshCli(true, "gemini").catch(() => undefined);
+            } else setNotice(undefined);
+            return;
+          }
+        }
+      } catch (error) { if (!cancelled) setError(errorMessage(error)); }
+      if (!cancelled) timer = setTimeout(() => void poll(), 3000);
+    };
+    timer = setTimeout(() => void poll(), 1500);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [open, loginId]);
   const manage = async (action: () => Promise<unknown>, success?: string) => {
     if (inFlight.current) return;
     inFlight.current = true;
@@ -130,7 +163,7 @@ export function CliAccountsDialog({ open, onOpenChange }: { open: boolean; onOpe
         {error && <div role="alert" className="flex gap-2 rounded-lg border border-destructive/50 p-3 text-[12px] text-destructive"><CircleAlert className="size-4 shrink-0" />{error}</div>}
         {notice && <p role="status" className="rounded-lg border border-primary/30 bg-primary/5 p-3 text-[12px]">{notice}</p>}
         <section className="grid gap-2 rounded-lg border p-3">
-          {kind === "gemini" && <p className="text-[12px] text-muted-foreground">Antigravity 추가 계정은 CLI별 폴더에 로그인과 대화를 따로 저장합니다. 로그인 콘솔에 표시된 Google 인증 링크를 열고 안내에 따라 인증을 마친 뒤 상태를 새로고침하세요. 기본 계정은 평소 CLI 로그인을 사용합니다.</p>}
+          {kind === "gemini" && <p className="text-[12px] text-muted-foreground">Antigravity 추가 계정은 로그인과 대화를 따로 저장합니다. 콘솔의 Google 인증 링크를 열고, 인증 후 표시되는 코드 또는 마지막 페이지 주소를 같은 콘솔에 붙여넣고 Enter를 누르세요. 기본 계정은 평소 CLI 로그인을 사용합니다.</p>}
           <h3 className="text-[12px] font-medium">앱 전역 계정 선택 · {CLI_KIND_LABEL[kind]}</h3>
           <CliAccountPolicyField kind={kind} accounts={accounts} value={policy[kind]} disabled={pending || !loaded} onChange={value => { if (value) void manage(() => api.cliAccounts.setPolicy({ ...policy, [kind]: value })); }} />
         </section>
@@ -141,10 +174,12 @@ export function CliAccountsDialog({ open, onOpenChange }: { open: boolean; onOpe
         <p className="text-[11.5px] text-muted-foreground" data-testid="cli-new-account-note">새 계정은 빈 설정 폴더로 생성되며, 기존 계정의 설정·플러그인을 가져오지 않습니다.</p>
         {!loaded && <p role="status" className="text-[12px] text-muted-foreground">계정을 불러오는 중입니다.</p>}
         <div className="grid gap-3 sm:grid-cols-2">
-          {list.map(account => <CliAccountCard key={account.accountId} account={account} pending={pending || !loaded}
+          {list.map(account => <CliAccountCard key={account.accountId} account={account} pending={pending || !loaded} loggingIn={loginId === account.accountId}
             update={patch => void manage(() => api.cliAccounts.update(account.accountId, patch))}
             run={action => void manage(async () => {
               await api.cliAccounts[action](account.accountId);
+              if (action === "login" && account.kind === "gemini") setLoginId(account.accountId);
+              else if (action === "logout" || action === "remove") setLoginId(id => id === account.accountId ? undefined : id);
               if (action === "remove") useStore.setState({ projects: await api.listProjects() });
             }, action === "login" ? "로그인 콘솔을 열었습니다. 로그인 창에서 로그인을 마친 뒤 이 계정의 상태 새로고침을 눌러주세요." : undefined)} />)}
         </div>

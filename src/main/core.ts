@@ -177,7 +177,7 @@ function registerHandlers(rpc: CoreRpc) {
   ipcMain.handle("att:remove", (_e, id: number) => store.deleteAttachment(id));
 
   // misc
-  ipcMain.handle("cli:info", (_e, checkAuth?: boolean) => checkAuth ? chats.checkedCliInfo() : chats.cliInfo());
+  ipcMain.handle("cli:info", (_e, checkAuth?: boolean, agent?: AgentKind) => checkAuth ? chats.checkedCliInfo(agent) : chats.cliInfo().filter(info => !agent || info.agent === agent));
   ipcMain.handle("models:list", (_e, agent: AgentKind) => chats.models(agent));
   ipcMain.handle("deepseek", async (_e, action, input = {}) => {
     const service = chats.deepSeek();

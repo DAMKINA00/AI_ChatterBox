@@ -183,7 +183,7 @@ function ProviderControls({ agent, apiProvider = agent === "deepseek", master = 
     <div className={cn("flex min-w-0 items-center gap-1.5", inactive && "opacity-45 grayscale")}>{children}</div>
     {inactive && <button type="button" disabled={checking} className="rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground" aria-label={`${master ? "마스터 " : ""}${AGENT_LABEL[agent]} 로그인 상태 다시 확인`} title={unavailable ? "Antigravity CLI(agy) 미설치로 비활성화되었습니다. 설치 후 눌러서 다시 확인하세요." : "로그인이 확인되지 않았습니다. 로그인 후 눌러서 다시 확인하세요. 모델 설정은 변경할 수 있습니다."} onClick={async () => {
       setChecking(true);
-      try { await refresh(); } catch (error) { useStore.getState().toast(errorMessage(error)); }
+      try { await refresh(true, agent); } catch (error) { useStore.getState().toast(errorMessage(error)); }
       finally { setChecking(false); }
     }}>{checking ? "확인 중…" : status}</button>}
   </div>;

@@ -5,6 +5,7 @@ import { ANTIGRAVITY_MODEL } from "../../../shared/types";
 import { AGENT_LABEL, type AgentKind } from "../../../shared/types";
 import { cn, errorMessage } from "../lib/utils";
 import { latestModels } from "../../../shared/models";
+import { shortModelLabel } from "../lib/model-label";
 import { useStore } from "../store";
 import { CliAccountsDialog } from "./CliAccountsDialog";
 import { DeepSeekDialog } from "./DeepSeekDialog";
@@ -34,8 +35,8 @@ const MODEL_GROUP_LABEL: Record<AgentKind, string> = {
 /** "claude:opus" for the orchestrator (both CLIs), or a plain model id for a worker. */
 export function useModelLabel() {
   const models = useStore((s) => s.models);
-  return (agent: AgentKind, id: string) =>
-    models[agent]?.find((m) => m.id === id)?.label ?? (agent === "gemini" && id === ANTIGRAVITY_MODEL ? "Antigravity · Argon" : id || (agent === "gemini" ? "Antigravity · Argon" : agent === "deepseek" ? DEEPSEEK_MODEL : "기본값"));
+  return (agent: AgentKind, id: string) => shortModelLabel(agent,
+    models[agent]?.find((m) => m.id === id)?.label ?? (agent === "gemini" && id === ANTIGRAVITY_MODEL ? "Antigravity · Argon" : id || (agent === "gemini" ? "Antigravity · Argon" : agent === "deepseek" ? DEEPSEEK_MODEL : "기본값")));
 }
 
 interface Props {
@@ -75,7 +76,7 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
   }, [agents.join(","), loadModels, geminiInstalled]);
 
   const make = (agent: AgentKind, id: string) => (encoded ? `${agent}:${id}` : id);
-  const refreshInstallation = () => void refreshCli().catch(error => useStore.getState().toast(errorMessage(error)));
+  const refreshInstallation = () => void refreshCli(true, "gemini").catch(error => useStore.getState().toast(errorMessage(error)));
 
   return (
     <>
@@ -157,7 +158,7 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
                     checked={current.agent === a && current.id === m.id}
                     onSelect={() => onChange(make(a, m.id))}
                   >
-                    <span className="flex-1 truncate">{m.label}</span>
+                    <span className="flex-1 truncate">{shortModelLabel(a, m.label)}</span>
                     {m.old && <span className="text-[11px] text-warning">이전 버전</span>}
                     <span className="font-mono text-[11px] text-muted-foreground">{m.id}</span>
                   </DropdownMenuCheckItem>
@@ -207,7 +208,7 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
           </form>
         </DialogContent>
       </Dialog>
-      <CliAccountsDialog open={cliOpen} onOpenChange={setCliOpen} />
+      <CliAccountsDialog open={cliOpen} onOpenChange={setCliOpen} initialKind="gemini" />
       <DeepSeekDialog
         open={deepseekOpen}
         onOpenChange={setDeepseekOpen}

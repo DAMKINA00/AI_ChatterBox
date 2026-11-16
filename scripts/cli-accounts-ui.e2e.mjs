@@ -62,11 +62,12 @@ try {
       usage: async wait => { record("usage", wait); if (window.failUsage) throw new Error("사용량 조회 실패"); return window.usageValue ?? { accounts: Object.fromEntries(accounts.map(a => [a.accountId, copy(a.usage ?? {})])) }; },
       listProjects: async () => { record("listProjects"); return copy(projects); },
       models: async agent => agent === "gemini" ? [{ id: "gemini-4-argon-medium", label: "Antigravity · Argon", reasoningEfforts: ["low", "medium", "high"], isDefault: true }] : [],
-      cliInfo: async () => [],
+      cliInfo: async (auth, agent) => ["claude", "codex", "gemini", "grok"].filter(value => !agent || value === agent).map(agent => ({ agent, path: "fixture-cli", ...(auth ? { authStatus: "authenticated" } : {}) })),
       updateProject: async (id, patch) => { record("project", id, patch); return { id, ...patch }; },
     };
   });
   await page.addScriptTag({ content: bundle.outputFiles[0].text });
+  await page.evaluate(() => window.uiStore.getState().refreshCli(false));
   const card = id => page.locator('[data-testid="cli-account"][data-account-id="' + id + '"]');
   await card("claude-1").waitFor();
   check(await card("claude-1").getByRole("button", { name: "삭제", exact: true }).isDisabled(), "default account delete disabled");
@@ -212,9 +213,16 @@ try {
   check(await page.getByTestId("cli-account-create").isEnabled(), "additional Antigravity CLI accounts remain available");
   await card("gemini-2").getByRole("button", { name: "로그인", exact: true }).click();
   check(await page.evaluate(() => window.calls.some(c => c[0] === "login" && c[1] === "gemini-2")), "added Antigravity CLI uses its own login action");
+  await card("gemini-2").getByTestId("cli-account-auth").getByText("로그인 완료 대기 중…", {exact:true}).waitFor();
+  check((await card("gemini-2").textContent()).includes("마지막 페이지 주소"), "added account explains the complete terminal code exchange");
+  await page.evaluate(() => { window.calls = []; });
+  await card("gemini-2").getByTestId("cli-account-auth").getByText("로그인됨", {exact:false}).waitFor();
+  check(await page.evaluate(() => { const checks = window.calls.filter(c => c[0] === "refresh"); return checks.length > 0 && checks.every(c => c[1] === "gemini-2"); }), "login completion automatically refreshes only its own account");
+  check((await card("gemini-1").getByTestId("cli-account-auth").textContent()).includes("로그인 필요"), "added-account login does not authenticate default account");
   await card("gemini-1").getByRole("button", { name: "로그인", exact: true }).click();
   check(await page.evaluate(() => window.calls.some(c => c[0] === "login" && c[1] === "gemini-1")), "Antigravity uses the common CLI login action");
   await card("gemini-1").getByRole("button", { name: "상태 새로고침", exact: true }).click();
+  await card("gemini-1").getByTestId("cli-account-auth").getByText("로그인됨", {exact:false}).waitFor();
   check((await card("gemini-1").textContent()).includes("로그인됨"), "Antigravity uses the common account status and quota display");
   check(await card("gemini-1").getByRole("progressbar").count() === 1 && await card("gemini-1").getByRole("progressbar").getAttribute("aria-valuenow") === "60", "Antigravity shows only the smaller remaining Gemini window");
   check(!(await card("gemini-1").textContent()).includes("Claude and GPT") && !(await card("gemini-1").textContent()).includes("Argon"), "excluded model groups are absent from account usage");
@@ -222,6 +230,44 @@ try {
   await page.getByText("안티그래비티", { exact: true }).waitFor();
   const rows = await page.locator('[data-testid=usage-bar], [aria-label="안티그래비티 계정별 잔여량"]').allTextContents();
   check(rows.findIndex(s => s.includes("지피티")) < rows.findIndex(s => s.includes("안티그래비티")) && rows.findIndex(s => s.includes("안티그래비티")) < rows.findIndex(s => s.includes("그록")), "usage puts Antigravity between Codex and Grok");
+  await page.evaluate(async () => {
+    const ready = ["claude", "codex", "gemini", "grok"].map(agent => ({agent, path:"fixture-cli", authStatus:"authenticated"}));
+    window.uiStore.setState({cli:ready});
+    await window.uiStore.getState().refreshCli(false);
+  });
+  check(await page.evaluate(() => window.uiStore.getState().cli.every(info => info.authStatus === "authenticated")), "installation-only refresh preserves every provider login");
+  await page.evaluate(async () => {
+    window.authChecks = [];
+    window.chatterbox.cliInfo = async (auth, agent) => {
+      if (auth) window.authChecks.push(agent);
+      return ["claude", "codex", "gemini", "grok"].filter(value => !agent || value === agent).map(agent => ({agent,path:"fixture-cli",...(auth ? {authStatus:agent === "gemini" ? "required" : "authenticated"} : {})}));
+    };
+    await window.uiStore.getState().refreshCli(true, "gemini");
+  });
+  check(await page.evaluate(() => window.authChecks.join() === "gemini" && window.uiStore.getState().cli.filter(info => info.agent !== "gemini").every(info => info.authStatus === "authenticated")), "targeted Gemini authentication never resets or checks other providers");
+  await page.evaluate(async () => {
+    const info = {gemini:{id:"gemini-4-argon-medium",label:"Gemini 4 Argon (Medium)"},codex:{id:"gpt-6.1-sol",label:"GPT-6.1-Sol"},deepseek:{id:"DeepSeek-Chat",label:"DeepSeek Chat"},grok:{id:"grok-4.7",label:"Grok 4.7"}};
+    window.uiStore.setState({models:Object.fromEntries(Object.entries(info).map(([agent, model]) => [agent,[model]]))});
+    window.showModel(["codex","gemini","grok","deepseek"], "codex:gpt-6.1-sol");
+  });
+  await geminiModelPicker.click();
+  for (const [id, label] of [["gemini-4-argon-medium","4 Argon (Medium)"],["gpt-6.1-sol","6.1-Sol"],["DeepSeek-Chat","Chat"],["grok-4.7","Grok 4.7"]]) {
+    const item = page.getByRole("menuitem").filter({hasText:id}).first();
+    check((await item.locator("span.flex-1").textContent()) === label, `short display label for ${id}`);
+  }
+  await page.getByRole("menuitem").filter({hasText:"gpt-6.1-sol"}).click();
+  check(await page.evaluate(() => window.getModelValue() === "codex:gpt-6.1-sol"), "short labels preserve the exact model id");
+  await page.evaluate(() => {
+    window.chatterbox.cliInfo = async (auth, agent) => {
+      if (auth && agent === "gemini") return new Promise(resolve => { window.releaseGeminiCheck = () => resolve([{agent:"gemini",path:"fixture-cli",authStatus:"required"}]); });
+      return ["claude","codex","gemini","grok"].filter(value => !agent || value === agent).map(agent => ({agent,path:"fixture-cli",...(auth ? {authStatus:"authenticated"} : {})}));
+    };
+    window.uiStore.setState({cli:["claude","codex","gemini","grok"].map(agent => ({agent,path:"fixture-cli"}))});
+    window.fullAuthCheck = window.uiStore.getState().refreshCli();
+  });
+  await page.waitForFunction(() => !!window.releaseGeminiCheck && window.uiStore.getState().cli.filter(info => info.agent !== "gemini").every(info => info.authStatus === "authenticated"));
+  check(await page.evaluate(() => window.uiStore.getState().cli.find(info => info.agent === "gemini").authStatus === undefined), "slow Gemini authentication never delays other provider results");
+  await page.evaluate(async () => { window.releaseGeminiCheck(); await window.fullAuthCheck; });
   mkdirSync(".scratch/antigravity-ui", { recursive: true });
   await page.screenshot({ path: ".scratch/antigravity-ui/usage.png" });
   check(errors.length === 0, "no browser runtime errors: " + errors.join(", "));

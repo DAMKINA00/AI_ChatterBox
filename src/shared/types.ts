@@ -49,6 +49,7 @@ export interface CliAccount {
 export interface CliAccountStatus extends CliAccount {
   isDefault: boolean;
   authStatus: "authenticated" | "required" | "unknown";
+  loginError?: string;
   /** Lowest remaining percent of the 5-hour and weekly windows; undefined when unknown or stale. */
   remainingPercent?: number;
   /** Live drivers currently running a turn on this account (all chats). */
@@ -617,7 +618,7 @@ export interface ChatterBoxApi {
   removeAttachment(id: number): Promise<void>;
   pathForFile(file: File): string;
   // misc
-  cliInfo(checkAuth?: boolean): Promise<CliInfo[]>;
+  cliInfo(checkAuth?: boolean, agent?: AgentKind): Promise<CliInfo[]>;
   models(agent: AgentKind): Promise<ModelOption[]>;
   remoteWeb(action: RemoteWebAction, input?: RemoteWebInput): Promise<RemoteWebStatus>;
   getTheme(): Promise<Theme>;

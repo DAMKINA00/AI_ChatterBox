@@ -105,11 +105,14 @@ export class ChatManager {
   private cliAccountStore?: CliAccounts;
   /** Bumped by logout/removal; readings started under an older epoch are discarded. */
   private accountEpochs = new Map<CliAccountId, number>();
+  private loginErrors = new Map<CliAccountId, string>();
   /** Opens a visible console running the CLI sign-in (replaceable in tests). */
-  consoleLauncher: (exe: string, args: string[], env: Record<string, string>, cwd: string) => void = (exe, args, env, cwd) => {
+  consoleLauncher: (exe: string, args: string[], env: Record<string, string>, cwd: string, onExit?: (code: number | null) => void) => void = (exe, args, env, cwd, onExit) => {
     const options = { cwd, env: { ...process.env, ...env }, detached: true, stdio: "ignore" as const, windowsHide: false };
-    const child = process.platform === "win32" ? spawn(process.env.ComSpec || "cmd.exe", ["/k", exe, ...args], options) : spawn(exe, args, options);
+    const terminalLogin = args[0] === "acp" && args.includes("--login");
+    const child = process.platform === "win32" ? spawn(process.env.ComSpec || "cmd.exe", [terminalLogin ? "/c" : "/k", exe, ...args], options) : spawn(exe, args, options);
     child.on("error", () => undefined);
+    child.once("close", code => onExit?.(code));
     child.unref();
   };
   /** Keyed by agent and, for CLI agents, the account (`codex:gpt-2`). */
@@ -188,8 +191,8 @@ export class ChatManager {
     ];
   }
 
-  async checkedCliInfo(): Promise<CliInfo[]> {
-    return Promise.all(this.cliInfo().map(async info => {
+  async checkedCliInfo(agent?: AgentKind): Promise<CliInfo[]> {
+    return Promise.all(this.cliInfo().filter(info => !agent || info.agent === agent).map(async info => {
       if (!info.path) return info;
       if (info.agent === "deepseek") {
         const status = await this.deepSeek().check();
@@ -439,6 +442,7 @@ export class ChatManager {
       .then(usage => {
         if (this.disposing || !this.isCurrentAccount(id, token)) return;
         this.cliAccounts().setAuth(id, { loggedIn: true, checkedAt: Date.now() });
+        this.loginErrors.delete(id);
         this.mergeUsage({ gemini: { ...usage, updatedAt: Date.now() } }, id, token, startedAt);
       })
       .catch(error => { if (!this.disposing) this.mergeUsage({ gemini: { error: error instanceof Error ? error.message : "Antigravity 사용량 조회에 실패했습니다." } }, id, token, startedAt); })
@@ -499,12 +503,17 @@ export class ChatManager {
 
   /** Invalidates every reading in flight for the account (login/logout/removal start and end). */
   private bumpAccount(id: CliAccountId) {
-    if (cliAccountKindOf(id) === "gemini") clearGeminiModels();
+    this.loginErrors.delete(id);
+    if (cliAccountKindOf(id) === "gemini") clearGeminiModels(this.cliAccounts().get(id)?.configDir ?? null);
     this.accountEpochs.set(id, (this.accountEpochs.get(id) ?? 0) + 1);
     this.grokUsageRefresh.delete(id);
     this.geminiUsageRefresh.delete(id);
-    this.authChecks.clear();
+    this.clearAccountAuthCheck(id);
     for (const key of [...this.modelLists.keys()]) if (key.endsWith(`:${id}`)) this.modelLists.delete(key);
+  }
+
+  private clearAccountAuthCheck(id: CliAccountId) {
+    for (const key of this.authChecks.keys()) if (key.endsWith(`:${id}`)) this.authChecks.delete(key);
   }
 
   /** Project policies keep only well-formed entries naming registered accounts. */
@@ -583,6 +592,7 @@ export class ChatManager {
       ...account,
       isDefault: account.accountId === defaultCliAccountId(account.kind),
       authStatus: account.auth ? account.auth.loggedIn ? "authenticated" : "required" : "unknown",
+      ...(this.loginErrors.has(account.accountId) ? { loginError: this.loginErrors.get(account.accountId) } : {}),
       ...(remainingPercent === undefined ? {} : { remainingPercent }),
       runningWorkers,
     };
@@ -698,7 +708,7 @@ export class ChatManager {
       const detail = await readClaudeAuthDetail(this.claudeExe(), this.tmpDir, env);
       if (detail.status !== "unknown") auth = { loggedIn: detail.status === "authenticated", ...(detail.email ? { email: detail.email } : {}) };
     } else if (kind === "gemini") {
-      clearGeminiModels();
+      clearGeminiModels(accounts.get(id)?.configDir ?? null);
       try { await readGeminiUsage(this.geminiExe(), this.tmpDir, env); auth = { loggedIn: true }; }
       catch (error) { if (/로그인/.test(String(error))) auth = { loggedIn: false }; }
     } else if (kind === "grok") {
@@ -714,7 +724,10 @@ export class ChatManager {
     // Logged out, removed or re-created meanwhile: the answer belongs to an earlier incarnation.
     if (!this.isCurrentAccount(id, token)) return null;
     if (auth) accounts.setAuth(id, { ...auth, checkedAt: Date.now() });
-    if (auth?.loggedIn) this.priorityEvidence(id, { startedAt, loggedIn: true });
+    if (auth?.loggedIn) {
+      this.loginErrors.delete(id);
+      this.priorityEvidence(id, { startedAt, loggedIn: true });
+    }
     return auth;
   }
 
@@ -723,7 +736,7 @@ export class ChatManager {
     const ids = id ? [this.cliAccountOrThrow(id).accountId] : this.cliAccounts().list().map(a => a.accountId);
     await Promise.allSettled(ids.map(async accountId => {
       if (this.accountChanges.has(accountId)) return;
-      this.authChecks.clear();
+      this.clearAccountAuthCheck(accountId);
       const token = this.accountToken(accountId);
       let auth: { loggedIn: boolean } | null = null;
       try { auth = await this.withTimeout(this.refreshAccountAuth(accountId, token), 20_000, "로그인 상태 확인 시간 초과"); }
@@ -767,12 +780,27 @@ export class ChatManager {
   loginCliAccount(id: CliAccountId) {
     const account = this.cliAccountOrThrow(id);
     this.beginAccountChange(id);
+    let loginToken = "";
     try {
-      this.consoleLauncher(this.cliExe(account.kind), CLI_LOGIN_ARGS[account.kind], accountEnv(account), account.configDir ?? homedir());
+      this.consoleLauncher(this.cliExe(account.kind), CLI_LOGIN_ARGS[account.kind], accountEnv(account), account.configDir ?? homedir(), account.kind !== "gemini" ? undefined : code => {
+        if (this.disposing || !this.isCurrentAccount(id, loginToken)) return;
+        if (code !== 0) {
+          this.loginErrors.set(id, `Antigravity 로그인 콘솔이 종료되었습니다(종료 코드 ${code ?? "미확인"}). 인증을 완료하지 못했습니다. 다시 로그인하세요.`);
+          this.sink.usage(this.usageState);
+          return;
+        }
+        void this.refreshCliAccount(id).then(() => {
+          if (!this.isCurrentAccount(id, loginToken)) return;
+          if (this.getCliAccount(id)?.authStatus !== "authenticated") this.loginErrors.set(id,
+            "로그인 콘솔이 종료됐지만 이 계정의 로그인을 확인하지 못했습니다. 다시 로그인하거나 상태를 새로고침하세요.");
+          this.sink.usage(this.usageState);
+        }).catch(() => undefined);
+      });
       this.cliAccounts().setAuth(id, undefined, account.createdAt);
     } finally {
       this.bumpAccount(id);
       this.accountChanges.delete(id);
+      loginToken = this.accountToken(id);
     }
   }
 

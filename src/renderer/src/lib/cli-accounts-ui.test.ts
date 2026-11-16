@@ -54,6 +54,8 @@ test("account card marks the default and disables its delete action, with unknow
   const errored = renderToStaticMarkup(createElement(CliAccountCard, { account: { ...account("claude-2"), usage: { checkedAt: 0, error: "조회 실패", fiveHour: { usedPercent: 0 } } }, pending: false, update: () => {}, run: () => {} }));
   assert.doesNotMatch(errored, /aria-valuenow=/);
   assert.match(errored, /정보 없음/);
+  const failedLogin = renderToStaticMarkup(createElement(CliAccountCard, { account: { ...account("gemini-2", "gemini"), loginError: "로그인 콘솔 종료 코드 1" }, pending: false, update: () => {}, run: () => {} }));
+  assert.match(failedLogin, /role="alert"[^>]*>로그인 콘솔 종료 코드 1/);
 });
 
 test("Antigravity card shows one Gemini window with the smaller remaining amount", async () => {

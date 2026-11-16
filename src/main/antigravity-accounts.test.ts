@@ -106,3 +106,53 @@ test("an Antigravity login invalidates in-flight usage without blocking a fresh 
     assert.equal(chats.getCliAccount("gemini-2")!.remainingPercent, 25);
   } finally { patch.mock.restore(); await chats.dispose(); store.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+test("Antigravity account changes and scoped checks preserve other provider and account auth caches", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cbx-agy-auth-scope-")); const store = new Store(join(root, "app.db"));
+  const chats = new ChatManager(store, { agents() {}, chat() {}, consult() {}, usage() {}, event() {} }, root, "unused");
+  chats.cliInfo = () => [{ agent: "claude", path: "fixture-claude" }, { agent: "gemini", path: exe }];
+  chats.geminiExe = () => exe; chats.consoleLauncher = () => {};
+  const cache = (chats as any).authChecks as Map<string, { expires: number; promise: Promise<string> }>;
+  const claude = { expires: Date.now() + 60_000, promise: Promise.resolve("authenticated") };
+  const gemini = { expires: Date.now() + 60_000, promise: Promise.resolve("required") };
+  const claudeKey = "claude:fixture-claude:claude-1", geminiKey = `gemini:${exe}:gemini-1`;
+  cache.set(claudeKey, claude); cache.set(geminiKey, gemini);
+  try {
+    chats.createCliAccount("gemini"); chats.loginCliAccount("gemini-2");
+    await chats.refreshCliAccount("gemini-2");
+    assert.equal(cache.get(claudeKey), claude);
+    assert.equal(cache.get(geminiKey), gemini, "added-account login never resets the default account");
+    assert.deepEqual(await chats.checkedCliInfo("claude"), [{ agent: "claude", path: "fixture-claude", authStatus: "authenticated" }]);
+    assert.deepEqual(await chats.checkedCliInfo("gemini"), [{ agent: "gemini", path: exe, authStatus: "required" }]);
+    assert.equal(chats.getCliAccount("gemini-2")!.authStatus, "required");
+  } finally { await chats.dispose(); store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Antigravity console completion confirms its account or records a visible failure", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cbx-agy-login-exit-")); const store = new Store(join(root, "app.db"));
+  const chats = new ChatManager(store, { agents() {}, chat() {}, consult() {}, usage() {}, event() {} }, root, "unused");
+  chats.geminiExe = () => exe;
+  const exits: ((code: number | null) => void)[] = [];
+  chats.consoleLauncher = (_exe, _args, _env, _cwd, onExit) => { if (onExit) exits.push(onExit); };
+  const cli = fakeCli();
+  const until = async (ready: () => boolean) => { for (let i = 0; i < 100 && !ready(); i++) await new Promise<void>(resolve => setImmediate(resolve)); assert.ok(ready()); };
+  try {
+    chats.createCliAccount("gemini"); chats.createCliAccount("gemini");
+    chats.cliAccounts().setAuth("gemini-3", { loggedIn: true, checkedAt: Date.now() });
+    chats.loginCliAccount("gemini-2"); exits[0](1);
+    await until(() => !!chats.getCliAccount("gemini-2")?.loginError);
+    assert.match(chats.getCliAccount("gemini-2")!.loginError!, /종료 코드 1/);
+    assert.equal(chats.getCliAccount("gemini-3")!.authStatus, "authenticated");
+    chats.loginCliAccount("gemini-2");
+    assert.equal(chats.getCliAccount("gemini-2")!.loginError, undefined);
+    exits[0](1);
+    assert.equal(chats.getCliAccount("gemini-2")!.loginError, undefined, "an older console cannot fail a newer login attempt");
+    token(chats.getCliAccount("gemini-2")!.configDir!); exits[1](0);
+    await until(() => chats.getCliAccount("gemini-2")!.authStatus === "authenticated");
+    assert.equal(chats.getCliAccount("gemini-2")!.loginError, undefined);
+    assert.equal(chats.getCliAccount("gemini-3")!.authStatus, "authenticated");
+    chats.loginCliAccount("gemini-2");
+    await chats.removeCliAccount("gemini-2"); chats.createCliAccount("gemini"); exits[2](0);
+    assert.equal(chats.getCliAccount("gemini-2")!.authStatus, "unknown", "old login console cannot authenticate a recreated account");
+  } finally { cli.restore(); await chats.dispose(); store.close(); rmSync(root, { recursive: true, force: true }); }
+});
