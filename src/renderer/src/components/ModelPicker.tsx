@@ -3,7 +3,7 @@ import { ChevronDown, KeyRound, Loader2, PencilLine, RotateCcw, Sparkles } from 
 import { DEEPSEEK_MODEL } from "../../../shared/deepseek";
 import { ANTIGRAVITY_MODEL } from "../../../shared/types";
 import { AGENT_LABEL, type AgentKind } from "../../../shared/types";
-import { cn } from "../lib/utils";
+import { cn, errorMessage } from "../lib/utils";
 import { latestModels } from "../../../shared/models";
 import { useStore } from "../store";
 import { CliAccountsDialog } from "./CliAccountsDialog";
@@ -56,6 +56,8 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
   const models = useStore((s) => s.models);
   const errors = useStore((s) => s.modelErrors);
   const loadModels = useStore((s) => s.loadModels);
+  const refreshCli = useStore((s) => s.refreshCli);
+  const geminiInstalled = useStore(s => !!s.cli.find(c => c.agent === "gemini")?.path);
   const label = useModelLabel();
   const [custom, setCustom] = useState<AgentKind | null>(null);
   const [customText, setCustomText] = useState("");
@@ -69,26 +71,31 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
   const current = rawCurrent.agent === "gemini" && !rawCurrent.id ? { ...rawCurrent, id: ANTIGRAVITY_MODEL } : rawCurrent;
 
   useEffect(() => {
-    for (const a of agents) void loadModels(a);
-  }, [agents.join(","), loadModels]);
+    for (const a of agents) if (a !== "gemini" || geminiInstalled) void loadModels(a);
+  }, [agents.join(","), loadModels, geminiInstalled]);
 
   const make = (agent: AgentKind, id: string) => (encoded ? `${agent}:${id}` : id);
+  const refreshInstallation = () => void refreshCli().catch(error => useStore.getState().toast(errorMessage(error)));
 
   return (
     <>
       <DropdownMenu onOpenChange={(open) => {
-        if (open) for (const a of agents) if (errors[a]) void loadModels(a);
+        if (open) void refreshCli(false).catch(() => undefined);
+        if (open) for (const a of agents) if (errors[a] && (a !== "gemini" || geminiInstalled)) void loadModels(a);
       }}>
         <DropdownMenuTrigger asChild>
           <Button
             variant="outline"
             size={compact ? "xs" : "default"}
             aria-label={ariaLabel}
+            disabled={!encoded && current.agent === "gemini" && !geminiInstalled}
+            title={current.agent === "gemini" && !geminiInstalled ? "Antigravity CLI(agy) 미설치 · 설치 후 다시 확인하세요." : undefined}
             className={cn("min-w-0 justify-between font-normal", compact && "max-w-40", !compact && "w-full", className)}
           >
             <span className="flex min-w-0 items-center gap-1.5 truncate">
               {encoded && <span className="text-muted-foreground">{AGENT_LABEL[current.agent]} ·</span>}
               <span className="truncate">{label(current.agent, current.id)}</span>
+              {current.agent === "gemini" && !geminiInstalled && <span className="text-muted-foreground">· 미설치</span>}
             </span>
             <ChevronDown className="opacity-60" />
           </Button>
@@ -108,6 +115,10 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
             <div key={a}>
               {i > 0 && <DropdownMenuSeparator />}
               <DropdownMenuLabel>{MODEL_GROUP_LABEL[a]}</DropdownMenuLabel>
+              {a === "gemini" && !geminiInstalled ? <>
+                <DropdownMenuItem disabled data-testid="antigravity-unavailable">Antigravity CLI 미설치 · 사용 안 함</DropdownMenuItem>
+                <DropdownMenuItem onSelect={event => { event.preventDefault(); refreshInstallation(); }}><RotateCcw /> 설치 후 다시 확인</DropdownMenuItem>
+              </> : <>
               {a === "gemini" ? (
                 <>
                   <DropdownMenuItem onSelect={() => setCliOpen(true)} data-testid="antigravity-connect">
@@ -160,10 +171,12 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
                 <PencilLine />
                 직접 입력…
               </DropdownMenuItem>}
+              </>}
             </div>
           ))}
         </DropdownMenuContent>
       </DropdownMenu>
+      {!encoded && current.agent === "gemini" && !geminiInstalled && <Button variant="ghost" size="xs" aria-label="Antigravity 설치 다시 확인" onClick={refreshInstallation}><RotateCcw /> 설치 확인</Button>}
       <Dialog open={custom !== null} onOpenChange={(o) => !o && setCustom(null)}>
         <DialogContent
           title={`${custom ? AGENT_LABEL[custom] : ""} 모델 직접 입력`}

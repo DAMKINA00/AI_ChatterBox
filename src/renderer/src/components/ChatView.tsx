@@ -176,11 +176,12 @@ function ProviderControls({ agent, apiProvider = agent === "deepseek", master = 
   const cli = useStore(s => s.cli.find(c => c.agent === agent));
   const refresh = useStore(s => s.refreshCli);
   const [checking, setChecking] = useState(false);
-  const inactive = !apiProvider && cli?.authStatus !== "authenticated";
+  const unavailable = agent === "gemini" && !cli?.path;
+  const inactive = !apiProvider && (unavailable || cli?.authStatus !== "authenticated");
   const status = !cli?.path ? "CLI 미설치" : cli.authStatus === "required" ? "로그인 필요" : "로그인 확인 필요";
-  return <div className="flex shrink-0 flex-nowrap items-center gap-1.5" data-testid={master ? "orch-badge" : "provider-controls"} data-provider={agent} data-state={apiProvider ? "api" : inactive ? "inactive" : "ready"}>
+  return <div className="flex shrink-0 flex-nowrap items-center gap-1.5" data-testid={master ? "orch-badge" : "provider-controls"} data-provider={agent} data-state={apiProvider ? "api" : unavailable ? "disabled" : inactive ? "inactive" : "ready"}>
     <div className={cn("flex min-w-0 items-center gap-1.5", inactive && "opacity-45 grayscale")}>{children}</div>
-    {inactive && <button type="button" disabled={checking} className="rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground" aria-label={`${master ? "마스터 " : ""}${AGENT_LABEL[agent]} 로그인 상태 다시 확인`} title="로그인이 확인되지 않았습니다. 로그인 후 눌러서 다시 확인하세요. 모델 설정은 변경할 수 있습니다." onClick={async () => {
+    {inactive && <button type="button" disabled={checking} className="rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground" aria-label={`${master ? "마스터 " : ""}${AGENT_LABEL[agent]} 로그인 상태 다시 확인`} title={unavailable ? "Antigravity CLI(agy) 미설치로 비활성화되었습니다. 설치 후 눌러서 다시 확인하세요." : "로그인이 확인되지 않았습니다. 로그인 후 눌러서 다시 확인하세요. 모델 설정은 변경할 수 있습니다."} onClick={async () => {
       setChecking(true);
       try { await refresh(); } catch (error) { useStore.getState().toast(errorMessage(error)); }
       finally { setChecking(false); }
@@ -774,6 +775,7 @@ const drafts = new Map<number, { text: string; attachments: AttachmentRef[] }>()
 
 const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy: boolean }>(function Composer({ chat, project, busy }, ref) {
   const toast = useStore((s) => s.toast);
+  const geminiInstalled = useStore(s => !!s.cli.find(c => c.agent === "gemini")?.path);
   const [text, setText] = useState(() => drafts.get(chat.id)?.text ?? "");
   const [attachments, setAttachments] = useState<AttachmentRef[]>(() => drafts.get(chat.id)?.attachments ?? []);
   const [uploading, setUploading] = useState(0);
@@ -783,6 +785,8 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
   const paused = chat.status === "paused";
   const pausing = chat.status === "pausing";
   const pauseInFlight = pausing || !!pausePending;
+  const missingGeminiMaster = !geminiInstalled && parseOrchestrator(chat.orchestratorModelOverride ?? project.settings.orchestratorModel).agent === "gemini";
+  const unavailableMaster = !busy && !paused && missingGeminiMaster;
 
   useEffect(() => {
     setPausePending(null);
@@ -892,6 +896,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
     // "/name arg" → command (attachments are not used by commands).
     const cmd = /^\/([a-z-]+)(?:\s+([\s\S]*))?$/i.exec(t);
     if (cmd) return void runCommand(cmd[1].toLowerCase(), cmd[2] ?? "");
+    if (unavailableMaster) return void toast("Antigravity CLI(agy)가 설치되지 않았습니다. 다른 마스터를 선택하거나 설치 후 다시 확인하세요.");
     if ((!t && !attachments.length) || sending || uploading) return;
     setSending(true);
     try {
@@ -911,7 +916,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
     }
   };
 
-  const canSend = (!!text.trim() || attachments.length > 0) && !sending && !uploading && !pauseInFlight;
+  const canSend = (!!text.trim() || attachments.length > 0) && !sending && !uploading && !pauseInFlight && (!unavailableMaster || text.trim().startsWith("/"));
 
   const requestPause = async () => {
     if (pauseInFlight || !busy) return;
@@ -926,7 +931,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
   };
 
   const requestResume = async () => {
-    if (pauseInFlight || !paused) return;
+    if (pauseInFlight || !paused || missingGeminiMaster) return;
     setPausePending("resume");
     try {
       await api.resume(chat.id);
@@ -940,6 +945,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
   return (
     <div className="px-4 pt-1 pb-4">
       <StatusDialog open={statusOpen} onOpenChange={setStatusOpen} chat={chat} project={project} />
+      {unavailableMaster && <p role="status" data-testid="antigravity-master-unavailable" className="mx-auto mb-2 max-w-[860px] text-[12px] text-muted-foreground">Antigravity CLI(agy) 미설치로 마스터가 비활성화되었습니다. 다른 마스터를 선택하거나 설치 후 다시 확인하세요.</p>}
       <div className="relative mx-auto max-w-[860px] rounded-2xl border bg-card shadow-sm transition-colors focus-within:border-ring/60">
         {menu.length > 0 && (
           <div role="listbox" aria-label="명령" className="absolute bottom-full left-0 z-30 mb-2 w-96 overflow-hidden rounded-xl border bg-card p-1 shadow-xl" data-testid="slash-menu">
@@ -1048,7 +1054,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
             </Button>
           ) : paused ? (
             <Tooltip content="재시작">
-              <Button size="icon-sm" variant="ghost" onClick={() => void requestResume()} aria-label="재시작" data-testid="resume">
+              <Button size="icon-sm" variant="ghost" disabled={missingGeminiMaster} onClick={() => void requestResume()} aria-label="재시작" data-testid="resume">
                 <Play />
               </Button>
             </Tooltip>

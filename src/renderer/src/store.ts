@@ -77,7 +77,7 @@ interface State {
   /** Load older pages until `found` holds for the loaded events (e.g. a consult's start) or the history ends. */
   loadUntil(chatId: number, found: (events: TimelineEvent[]) => boolean): Promise<void>;
   loadModels(agent: AgentKind): Promise<void>;
-  refreshCli(): Promise<void>;
+  refreshCli(refreshAuth?: boolean): Promise<void>;
 
   createProject(input: { name: string; folder: string; settings: ProjectSettings }): Promise<Project | null>;
   updateProject(id: number, patch: Parameters<typeof api.updateProject>[1]): Promise<boolean>;
@@ -329,8 +329,12 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  async refreshCli() {
-    set({ cli: await api.cliInfo(true) });
+  async refreshCli(refreshAuth = true) {
+    const cli = await api.cliInfo(refreshAuth);
+    set(s => {
+      const changed = !!s.cli.find(c => c.agent === "gemini")?.path !== !!cli.find(c => c.agent === "gemini")?.path;
+      return { cli, ...(changed ? { models: { ...s.models, gemini: undefined }, modelErrors: { ...s.modelErrors, gemini: undefined } } : {}) };
+    });
   },
 
   async loadModels(agent) {

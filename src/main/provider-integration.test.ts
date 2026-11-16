@@ -39,6 +39,7 @@ test("three-provider DB upgrade preserves workers, sessions and new Grok setting
     store.updateAgent(grok.id, { sessionId: "grok-worker" });
     store.updateChat(chat.id, { grokModelOverride: "grok-4.6", grokEffortOverride: "high", orchestratorModelOverride: "grok:grok-4.6" });
     const chats = new ChatManager(store, { agents() {}, chat() {}, consult() {}, usage() {}, event() {} }, root, "unused");
+    chats.geminiExe = () => "unused";
     for (const agent of ["claude", "codex", "gemini", "grok"] as const) (chats as any).saveNativeId(chat.id, "orch", agent, `master-${agent}`);
     for (const agent of ["claude", "codex", "gemini", "grok"] as const) assert.equal((chats as any).nativeIdOf(store.chat(chat.id), "orch", agent), `master-${agent}`);
     assert.equal(chats.roleConfig(store.chat(chat.id)!, p, "orch").agent, "grok");
@@ -170,3 +171,36 @@ for (const kind of ["claude", "gpt", "gemini", "grok"] as const) {
     } finally { await engine.judge.dispose(); await chats.dispose(); store.close(); rmSync(root, { recursive: true, force: true }); }
   });
 }
+
+test("Antigravity availability follows CLI installation without rewriting saved preferences", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cbx-agy-availability-"));
+  const store = new Store(join(root, "app.db"));
+  const chats = new ChatManager(store, { agents() {}, chat() {}, consult() {}, usage() {}, event() {} }, root, "unused");
+  const engine = new Orchestrator(chats) as any;
+  let installed = false;
+  chats.cliInfo = () => installed ? [{ agent: "gemini", path: "fake-agy" }] : [];
+  chats.models = async () => [{ id: ANTIGRAVITY_MODEL, label: "fixture", isDefault: true }];
+  try {
+    const project = store.createProject("availability", root, { ...DEFAULT_SETTINGS, maxGeminiWorkers: 2 });
+    const chat = store.createChat(project.id, "availability");
+    let caps = await chats.teamCapabilities(chat);
+    assert.equal(caps.gemini.installed, false);
+    assert.equal(caps.gemini.enabled, false);
+    assert.equal(caps.availableModels.gemini, undefined);
+    const blocked = await engine.call(chat.id, "orch", "spawn", { kind: "gemini", job: "must not start" });
+    assert.equal(blocked.isError, true);
+    assert.equal(store.listAgents(chat.id).length, 0);
+    installed = true;
+    caps = await chats.teamCapabilities(chat);
+    assert.equal(caps.gemini.installed, true);
+    assert.equal(caps.gemini.enabled, true);
+    assert.equal(caps.availableModels.gemini?.[0].id, ANTIGRAVITY_MODEL);
+    assert.equal(store.project(project.id)!.settings.maxGeminiWorkers, 2);
+    assert.equal(store.project(project.id)!.settings.geminiModel, project.settings.geminiModel);
+    installed = false;
+    assert.equal((await chats.teamCapabilities(chat)).gemini.enabled, false);
+    store.updateProject(project.id, { settings: { ...project.settings, maxGeminiWorkers: 0 } });
+    installed = true;
+    assert.equal((await chats.teamCapabilities(chat)).gemini.enabled, false);
+  } finally { await engine.judge.dispose(); await chats.dispose(); store.close(); rmSync(root, { recursive: true, force: true }); }
+});

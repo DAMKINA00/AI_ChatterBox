@@ -80,10 +80,11 @@ export function EffortPicker({
   const models = useStore((s) => s.models);
   const modelErrors = useStore((s) => s.modelErrors);
   const loadModels = useStore((s) => s.loadModels);
+  const unavailable = useStore(s => agent === "gemini" && !s.cli.find(c => c.agent === "gemini")?.path);
 
   useEffect(() => {
-    void loadModels(agent);
-  }, [agent, loadModels]);
+    if (!unavailable) void loadModels(agent);
+  }, [agent, loadModels, unavailable]);
 
   const options = useMemo(() => effortOptions(models, agent, model, worker), [models, agent, model, worker]);
   const metadata = models[agent];
@@ -107,8 +108,9 @@ export function EffortPicker({
           variant="outline"
           size={compact ? "xs" : "default"}
           aria-label={ariaLabel}
+          disabled={unavailable}
           aria-invalid={status ? true : undefined}
-          title={statusTitle}
+          title={unavailable ? "Antigravity CLI(agy) 미설치 · 설치 후 다시 확인하세요." : statusTitle}
           data-testid="effort-picker"
           data-effort={value}
           data-effort-status={status}

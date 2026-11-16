@@ -288,6 +288,7 @@ export class ChatManager {
   async teamCapabilities(chat: Chat) {
     const project = this.store.project(chat.projectId)!;
     const installed = this.cliInfo();
+    const geminiInstalled = !!installed.find(c => c.agent === "gemini")?.path;
     const gptModel = chat.codexModelOverride ?? project.settings.codexModel;
     let imageGeneration: boolean | null = null;
     let codexAuthenticated: boolean | null = null;
@@ -331,7 +332,7 @@ export class ChatManager {
       claude: { installed: !!installed.find((c) => c.agent === "claude")?.path, model: chat.claudeModelOverride ?? project.settings.claudeModel, reasoningEfforts: effortLevels.claude, effortSetting: project.settings.claudeEffort, imageGeneration: false, authentication: "실행 시 확인", usage: this.usageState.claude },
       gpt: { installed: !!installed.find((c) => c.agent === "codex")?.path, model: gptModel, reasoningEfforts: effortLevels.codex, effortSetting: project.settings.codexEffort, imageGeneration, authenticated: codexAuthenticated, usage: this.usageState.codex },
       grok: { installed: !!installed.find(c => c.agent === "grok")?.path, model: chat.grokModelOverride ?? project.settings.grokModel, reasoningEfforts: effortLevels.grok, effortSetting: project.settings.grokEffort, imageGeneration: null, authentication: "Grok 로그인과 도구는 실행 시 확인", usage: this.usageState.grok },
-      gemini: { installed: !!installed.find(c => c.agent === "gemini")?.path, model: chat.geminiModelOverride ?? project.settings.geminiModel, reasoningEfforts: effortLevels.gemini, effortSetting: project.settings.geminiEffort, usage: this.usageState.gemini, authentication: "CLI 계정 관리에서 Antigravity 로그인·상태 확인", enabled: project.settings.maxGeminiWorkers > 0, localTools: true, fileWrites: true, supportedKinds: ["implement", "writing", "opinion", "review"] },
+      gemini: { installed: geminiInstalled, model: chat.geminiModelOverride ?? project.settings.geminiModel, reasoningEfforts: effortLevels.gemini, effortSetting: project.settings.geminiEffort, usage: this.usageState.gemini, authentication: "CLI 계정 관리에서 Antigravity 로그인·상태 확인", enabled: geminiInstalled && project.settings.maxGeminiWorkers > 0, localTools: true, fileWrites: true, supportedKinds: ["implement", "writing", "opinion", "review"] },
     };
   }
 
