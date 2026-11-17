@@ -144,7 +144,7 @@ export function currentPlanView(events: readonly TimelineEvent[]): PlanView | nu
       // An update for another plan id replaces the shown plan instead of merging into it.
       if (ev.planId !== undefined && planId !== undefined && ev.planId !== planId) { state = "live"; reason = undefined; }
       if (ev.planId !== undefined) planId = ev.planId;
-      view = { planId, steps: ev.steps, explanation: ev.explanation, state, reason };
+      view = ev.steps.length ? { planId, steps: ev.steps, explanation: ev.explanation, state, reason } : null;
     } else if (ev.type === "plan_state") {
       if (ev.planId !== undefined && planId !== undefined && ev.planId !== planId && ev.state !== "running") continue;
       state = ev.state;

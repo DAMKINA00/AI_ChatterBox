@@ -70,7 +70,7 @@ export async function listGeminiModels(exe: string, cwd: string, env: Record<str
 
 export const GEMINI_READ_TOOLS = new Set(["view_file", "list_dir", "find_by_name", "grep_search", "view_file_outline", "view_code_item", "search_web", "read_url_content", "view_content_chunk", "list_permissions"]);
 export const GEMINI_WRITE_TOOLS = new Set(["write_to_file", "replace_file_content", "multi_replace_file_content"]);
-export const GEMINI_BRIDGE_TOOLS = new Set(["route_request", "cli_accounts", "spawn", "ask", "ask_parallel", "send_message", "read_messages", "release", "agents", "checklist", "update_goal", "ask_user", "set_expression"]);
+export const GEMINI_BRIDGE_TOOLS = new Set(["route_request", "cli_accounts", "spawn", "ask", "ask_parallel", "send_message", "read_messages", "read_consult", "check_agent", "report_review", "release", "agents", "checklist", "update_goal", "ask_user", "set_expression"]);
 
 /** CLI versions use different names for the same native file/command tools. */
 export function normalizeGeminiTool(name: string, input: Record<string, unknown>) {

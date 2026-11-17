@@ -44,7 +44,7 @@ function fixture() {
 
 const textOf = (result: any): string => result.content.map((part: { text: string }) => part.text).join("\n");
 
-test("a finished consult's group copy is marked result; a real public line has no kind; delivery and the master's ask result are unchanged", async () => {
+test("a finished consult broadcasts a result reference while preserving the report and real public lines", async () => {
   const f = fixture();
   try {
     const a = f.store.createAgent(f.chat.id, "claude", "writer");
@@ -56,17 +56,18 @@ test("a finished consult's group copy is marked result; a real public line has n
     });
     const result = await f.engine.call(f.chat.id, "orch", "ask", { to: a.nickname, kind: "opinion", message: "초안", reason: "test", effort: "high" });
     assert.equal(result.isError, false);
-    assert.match(textOf(result), /긴 최종 보고 본문/, "the master still receives the full report as the ask result");
+    assert.doesNotMatch(textOf(result), /긴 최종 보고 본문/, "ordinary master assignments only return a receipt");
     const [chat, copy] = f.rooms();
     assert.equal(chat.kind, undefined, "a model-written public line stays a plain room message");
     assert.equal(copy.kind, "result");
     assert.equal(copy.status, "done");
     assert.equal(copy.consultId, f.store.listConsults(f.chat.id).at(-1)!.id);
-    assert.match(copy.text, /^\[의견 · done · 협의 \d+/, "stored text is the same wrapper as before");
-    assert.match(copy.text, /긴 최종 보고 본문/);
+    assert.match(copy.text, /협의 id=/);
+    assert.doesNotMatch(copy.text, /긴 최종 보고 본문/);
     const inbox = textOf(await f.engine.call(f.chat.id, b.key, "read_messages", {}));
     assert.match(inbox, /이름 규칙 괜찮을까요/);
-    assert.match(inbox, /긴 최종 보고 본문/, "teammates still receive the result copy");
+    assert.doesNotMatch(inbox, /긴 최종 보고 본문/);
+    assert.match(textOf(await f.engine.call(f.chat.id, b.key, "read_consult", { consultId: copy.consultId })), /긴 최종 보고 본문/);
   } finally { await f.close(); }
 });
 
@@ -85,7 +86,9 @@ test("a worker-to-worker consult result still reaches the master's inbox", async
     const nestedCopy = f.rooms().find((r) => r.from === b.key)!;
     assert.equal(nestedCopy.kind, "result");
     // The master did not assign this consult; the group copy delivered with its next tool result is how it learns.
-    assert.match(outer, /\[동료 메시지[\s\S]*helper 결과 본문/);
+    assert.match(outer, /\[동료 메시지[\s\S]*협의 id=/);
+    assert.doesNotMatch(outer, /helper 결과 본문/);
+    assert.match(textOf(await f.engine.call(f.chat.id, "orch", "read_consult", { consultId: nestedCopy.consultId })), /helper 결과 본문/);
   } finally { await f.close(); }
 });
 

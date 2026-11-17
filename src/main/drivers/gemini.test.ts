@@ -141,6 +141,10 @@ test("Gemini blocks native subagents, arbitrary MCP and tools after stop", async
     assert.equal((await f.call(name)).decision, "deny");
   assert.equal(geminiBridgeTool("mcp__chatterbox_bridge__set_expression"), true);
   assert.equal(geminiBridgeTool("mcp__chatterbox_bridge__spawn"), true);
+  for (const name of ["read_consult", "check_agent", "report_review"]) {
+    assert.equal(geminiBridgeTool(`mcp__chatterbox_bridge__${name}`), true);
+    assert.equal(geminiBridgeTool("call_mcp_tool", { ServerName: "chatterbox_bridge", ToolName: name }), true);
+  }
   assert.equal(geminiBridgeTool("call_mcp_tool", { ServerName: "chatterbox_bridge", ToolName: "set_expression" }), true);
   assert.equal(geminiBridgeTool("call_mcp_tool", { ServerName: "other", ToolName: "set_expression" }), false);
   assert.equal(geminiBridgeTool("call_mcp_tool", { ServerName: "chatterbox_bridge", ToolName: "spawn" }), true);

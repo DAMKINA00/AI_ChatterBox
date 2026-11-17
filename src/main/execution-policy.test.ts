@@ -209,7 +209,7 @@ test("a successful CLI exit without a worker answer or artifact is not a complet
     let finished: any;
     chats.store.project = () => ({ settings: {} });
     chats.store.createConsult = () => ({ id: 1 });
-    chats.store.finishConsult = (_id: number, status: string, summary: string) => (finished = { status, summary });
+    chats.store.finishConsult = (id: number, status: string, summary: string, filesChanged: string[]) => (finished = { id, kind: "opinion", status, summary, responseSummary: summary, filesChanged });
     chats.sink = { consult() {} };
     chats.agentsChanged = () => undefined;
     chats.setRoute = () => undefined;
@@ -252,7 +252,7 @@ test("worker remains reserved until native archive finishes before its next queu
   const firstArchive = new Promise<void>((resolve) => { unblock = resolve; });
   chats.store.project = () => ({ settings: {} });
   chats.store.createConsult = () => ({ id: ++nextId });
-  chats.store.finishConsult = (_id: number, status: string, summary: string) => ({ status, summary });
+  chats.store.finishConsult = (id: number, status: string, summary: string, filesChanged: string[]) => ({ id, kind: "opinion", status, responseSummary: summary, filesChanged });
   chats.sink = { consult() {} };
   chats.agentsChanged = chats.setRoute = () => undefined;
   chats.archiveWorker = async () => { if (++archives === 1) await firstArchive; };
@@ -321,7 +321,7 @@ test("critical routing persists on resume, cannot be downgraded, and gates write
   chats.teamCapabilities = async () => ({});
   const reports: any[] = [];
   chats.store.listConsults = () => reports;
-  o.instructions.set(1, { id: 17 });
+  o.instructions.set(1, { id: 17, queued: [], pinned: [] });
   const route = (args: any) => o.call(1, "orch", "route_request", { mode: "delegated", reason: "safety fault", ...args });
   assert.equal((await route({ dualInvestigation: "true" })).isError, true);
   assert.equal((await route({ dualInvestigation: true, mode: "direct" })).isError, true);

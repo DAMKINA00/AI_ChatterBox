@@ -105,6 +105,16 @@ const user = (text: string) => ev("orch", null, { type: "user", text, attachment
 const update = (s: PlanStep[], planId?: number) => ev("orch", "orch", { type: "plan_update", steps: s, ...(planId !== undefined ? { planId } : {}) });
 const stateEv = (state: PlanState, planId?: number, reason?: string) => ev("orch", "orch", { type: "plan_state", state, ...(planId !== undefined ? { planId } : {}), ...(reason ? { reason } : {}) });
 
+test("a new task boundary clears the pinned plan while its completed predecessor stays in history", () => {
+  const old = [{ title: "previous result", status: "completed" as const }];
+  const events = [update(old, 10), stateEv("done", 10), user("new task"), update([], 20)];
+  assert.equal(planOf(events), null);
+  assert.deepEqual(planHistory(events).map(p => [p.planId, p.steps]), [[10, old]]);
+  events.push(update([{ title: "new work", status: "pending" }], 20));
+  assert.deepEqual(planOf(events)?.steps.map(s => s.title), ["new work"]);
+  assert.deepEqual(planHistory(events).map(p => p.planId), [10]);
+});
+
 test("history: a cancelled proposal stays readable after the next ordinary instruction", () => {
   const events = [user("/plan A"), update(steps, 1), stateEv("proposed", 1), stateEv("cancelled", 1, "사용자가 제안을 취소했습니다."), user("다른 일")];
   assert.equal(planOf(events), null, "the pinned panel moves on");

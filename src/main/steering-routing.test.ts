@@ -7,6 +7,7 @@ import { Store } from "./db";
 import { ChatManager } from "./chats";
 import { Orchestrator } from "./orchestrator";
 import { DEFAULT_SETTINGS } from "../shared/types";
+const textOf = (r: any) => r.content.map((c: any) => c.text).join("\n");
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "cbx-steering-"));
@@ -20,6 +21,26 @@ function fixture() {
   store.updateChat(chat.id, { status: "working" });
   return { store, chat, chats, engine, inst, async close() { await engine.judge.dispose(); await chats.dispose(); store.close(); rmSync(root, { recursive: true, force: true }); } };
 }
+
+test("follow-ups are delivered once per run and replayable after pause without losing the originals", async () => {
+  const f = fixture();
+  try {
+    f.inst.queued.push({ text: "keep this constraint", attachments: [] });
+    const first = await f.engine.call(f.chat.id, "orch", "agents", {});
+    assert.match(textOf(first), /keep this constraint/);
+    const second = await f.engine.call(f.chat.id, "orch", "agents", {});
+    assert.doesNotMatch(textOf(second), /keep this constraint/);
+    assert.deepEqual(f.inst.pinned, ["keep this constraint"]);
+    f.inst.queued.push({ text: "new constraint", attachments: [] });
+    const third = await f.engine.call(f.chat.id, "orch", "agents", {});
+    assert.match(textOf(third), /new constraint/);
+    assert.doesNotMatch(textOf(third), /keep this constraint/);
+    const restored = f.engine.restoreInstruction({ instruction: { ...f.inst, requests: [] } });
+    f.engine.instructions.set(f.chat.id, restored);
+    assert.match(f.engine.takeQueued(f.chat.id), /keep this constraint[\s\S]*new constraint/);
+    assert.equal(f.engine.takeQueued(f.chat.id), "");
+  } finally { await f.close(); }
+});
 
 test("routing and bridge tools work without a project analysis service", async () => {
   const f = fixture();
@@ -125,9 +146,10 @@ test("master awaits existing worker results after detached ask, then synthesizes
     finish();
     await new Promise((r) => setImmediate(r));
     assert.equal(inputs.length, 1);
-    assert.match(inputs[0].text, /sum=42/);
+    assert.match(inputs[0].text, /협의 id=/);
+    assert.doesNotMatch(inputs[0].text, /sum=42/);
     assert.equal(f.store.listConsults(f.chat.id).length, 1);
-    assert.match((await f.engine.call(f.chat.id, "orch", "agents", {})).content[0].text, /sum=42/);
+    assert.match((await f.engine.call(f.chat.id, "orch", "read_consult", { consultId: consult.id })).content[0].text, /sum=42/);
   } finally { await f.close(); }
 });
 
@@ -183,7 +205,7 @@ test("immediate input releases parallel master waits without completing or cance
     await f.chats.send(f.chat.id, "기존 작업을 유지하고 이 질문에 답해줘", [], "now");
     const reply = await result;
     assert.match(reply.content[0].text, /대기만 해제/);
-    assert.match(reply.content[0].text, /이 질문에 답해줘/);
+    assert.match(textOf(reply), /이 질문에 답해줘/);
     assert.equal(finished, 0);
     assert.equal(f.engine.masterConsultWaiters.size, 0);
     completions.forEach((complete) => complete());
@@ -200,7 +222,7 @@ test("older CLI can receive immediate input through its pending app consult resu
     f.chats.liveDriver = () => ({ running: true, steer: async () => false } as any);
     const result = f.engine.call(f.chat.id, "orch", "ask", {});
     await f.chats.send(f.chat.id, "제목을 바꿔줘", [], "now");
-    assert.match((await result).content[0].text, /제목을 바꿔줘/);
+    assert.match(textOf(await result), /제목을 바꿔줘/);
     assert.equal(f.inst.queued.length, 0);
     assert.equal((f.inst as any).pendingImmediate, true);
   } finally { complete(); await f.close(); }

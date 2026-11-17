@@ -49,6 +49,7 @@ function fixture() {
   };
 }
 const body = (r: any) => r.content.map((c: any) => c.text).join("\n");
+const reportOf = (f: ReturnType<typeof fixture>, r: any) => f.store.consult(r.structuredContent?.consultId ?? -1)?.responseSummary ?? body(r);
 
 test("all CLI account schemas reach spawn, ask and parallel tasks without retired web accounts", async () => {
   const f = fixture();
@@ -98,8 +99,9 @@ test("CLI quota failure stays failed, retains a streamed draft and never dispatc
     const result = await f.call("ask", { to: worker.nickname, kind: "opinion", message: "read", reason: "bounded review", effort: "medium" });
     assert.equal(result.isError, true);
     assert.match(body(result), /CLI 한도 소진/);
-    assert.match(body(result), /preserved draft/);
-    assert.match(body(result), /supersedes/);
+    assert.doesNotMatch(body(result), /preserved draft/);
+    assert.match(reportOf(f, result), /preserved draft/);
+    assert.match(reportOf(f, result), /supersedes/);
     assert.equal(sends, 1);
     assert.equal(f.store.listConsults(f.chat.id)[0].status, "error");
   } finally { await f.close(); }
@@ -176,11 +178,11 @@ test("project and global fixed policies reject other explicit IDs and override s
       assert.equal(f.store.agent(worker.id)!.cliAccountId, "gpt-2", "refusal never mutates an older binding");
       const reply = await f.ask(worker.nickname, { message: source });
       assert.equal(reply.isError, false);
-      assert.match(body(reply), /지정 계정=gpt-1 · 실제 실행 계정=gpt-1/);
-      assert.ok(body(reply).includes(`모드=fixed · 출처=${source} · 정책 출처=${source}`));
+      assert.match(reportOf(f, reply), /지정 계정=gpt-1 · 실제 실행 계정=gpt-1/);
+      assert.ok(reportOf(f, reply).includes(`모드=fixed · 출처=${source} · 정책 출처=${source}`));
     }
     const same = await f.ask(worker.nickname, { accountId: "gpt-1", message: "same-policy-account" });
-    assert.equal(same.isError, false); assert.match(body(same), /출처=global/);
+    assert.equal(same.isError, false); assert.match(reportOf(f, same), /출처=global/);
     const route = JSON.parse(body(await f.call("route_request", { mode: "delegated", reason: "accounts" })));
     assert.equal(route.capabilities.gpt.cliAccounts.length, 2);
     assert.equal(route.capabilities.gpt.accountPolicy.source, "global");
@@ -203,6 +205,7 @@ test("parallel tasks carry distinct CLI IDs and a running worker cannot be rebou
     const team = body(await f.call("agents")); assert.match(team, /현재 실행 계정=gpt-1/); assert.match(team, /현재 실행 계정=gpt-2/);
     assert.equal((await f.ask(b.nickname, { accountId: "gpt-1" })).isError, true);
     assert.equal(f.store.agent(b.id)!.cliAccountId, "gpt-2");
+    f.complete(); // Let the subsequent worker consolidation finish as well.
     f.finish(a.key); f.finish(b.key); assert.equal((await pending).isError, false);
   } finally { await f.close(); }
 });
@@ -252,7 +255,7 @@ test("pre-start failure never reports a previous session as the actual execution
     f.store.updateAgent(worker.id, { sessionAccountId: "gpt-1" });
     f.chats.driver = async () => { throw new Error("missing CLI"); };
     const reply = await f.ask(worker.nickname);
-    assert.equal(reply.isError, true); assert.match(body(reply), /지정 계정=gpt-2 · 실제 실행 계정=연결 전 실패\/중지/);
+    assert.equal(reply.isError, true); assert.match(reportOf(f, reply), /지정 계정=gpt-2 · 실제 실행 계정=연결 전 실패\/중지/);
     assert.doesNotMatch(body(reply), /실제 실행 계정=gpt-1/);
   } finally { await f.close(); }
 });
@@ -304,8 +307,8 @@ test("result reports the policy applied at execution even if settings change mid
     f.finish(worker.key);
     const reply = await pending;
     assert.equal(reply.isError, false);
-    assert.match(body(reply), /모드=fixed · 출처=project · 정책 출처=project/);
-    assert.match(body(reply), /실제 실행 계정=gpt-2/);
+    assert.match(reportOf(f, reply), /모드=fixed · 출처=project · 정책 출처=project/);
+    assert.match(reportOf(f, reply), /실제 실행 계정=gpt-2/);
     assert.match(body(await f.call("agents")), /모드=auto · 출처=explicit · 정책 출처=global/);
   } finally { await f.close(); }
 });
@@ -390,6 +393,7 @@ test("auto permits several workers to share an eligible account and rules prefer
     assert.equal(status.runningWorkers, 2); assert.equal(status.remainingPercent, 70);
     const rules = f.chats.instructionsFor!(f.chat, f.project, "orch", "codex")!;
     assert.match(rules, /대기 계정이 없으면 잔여량 10% 초과 계정을 여러 작업자가 공유/);
+    f.complete(); // Let the subsequent worker consolidation finish as well.
     f.finish(a.key); f.finish(b.key); assert.equal((await pending).isError, false);
   } finally { await f.close(); }
 });

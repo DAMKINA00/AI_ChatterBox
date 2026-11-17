@@ -8,6 +8,7 @@ import type { AgentDriver, AgentInput } from "./drivers/types";
 import { Store } from "./db";
 import { ChatManager } from "./chats";
 import { Orchestrator } from "./orchestrator";
+import { currentPlanView, planStepsFor } from "../shared/plan-lifecycle";
 
 class FakeDriver implements AgentDriver {
   running = false;
@@ -22,6 +23,29 @@ class FakeDriver implements AgentDriver {
     this.emitEvent({ type: "turn_end", ok, interrupted, ...(ok || interrupted ? {} : { error: "드라이버 오류" }) });
   }
 }
+
+test("a new task in the same chat starts a clean plan and keeps the previous record", async () => {
+  const f = fixture();
+  try {
+    await f.chats.send(f.chat.id, "first task", []);
+    const firstId = f.engine.instructions.get(f.chat.id).id;
+    await f.engine.call(f.chat.id, "orch", "route_request", { mode: "direct", reason: "fixture" });
+    await f.engine.call(f.chat.id, "orch", "checklist", { steps: [{ id: "old", title: "old completed task", status: "completed" }, { id: "cancelled", title: "old cancellation", status: "cancelled", cancelReason: "not required" }] });
+    f.master().finish();
+    await f.chats.send(f.chat.id, "new unrelated task", []);
+    const secondId = f.engine.instructions.get(f.chat.id).id;
+    assert.notEqual(secondId, firstId);
+    assert.equal(currentPlanView(f.store.events(f.chat.id)), null);
+    assert.match(f.master().sendCalls.at(-1)!.text, /새 작업 계획/);
+    assert.deepEqual(planStepsFor(f.store.events(f.chat.id), firstId)?.map(s => s.id), ["old", "cancelled"]);
+    await f.engine.call(f.chat.id, "orch", "checklist", { steps: [{ id: "new", title: "new work only", status: "inProgress" }] });
+    assert.deepEqual(currentPlanView(f.store.events(f.chat.id))?.steps.map(s => s.id), ["new"]);
+    assert.equal(currentPlanView(f.store.events(f.chat.id))?.planId, secondId);
+    await f.chats.send(f.chat.id, "additional constraint", [], "now");
+    assert.equal(f.engine.instructions.get(f.chat.id).id, secondId);
+    assert.deepEqual(currentPlanView(f.store.events(f.chat.id))?.steps.map(s => s.id), ["new"]);
+  } finally { f.close(); }
+});
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 async function waitFor(check: () => boolean) {
@@ -180,7 +204,7 @@ test("open steps cannot silently disappear from the same plan", async () => {
     const dropped = await checklist(f, [step("a", "pending")]);
     assert.equal(dropped.isError, true);
     assert.match(dropped.content[0].text, /뺄 수 없습니다: b/);
-    assert.equal(f.store.events(f.chat.id).filter((e) => e.event.type === "plan_update").length, 1, "the rejected update is not stored");
+    assert.equal(f.store.events(f.chat.id).filter((e) => e.event.type === "plan_update" && e.event.steps.length).length, 1, "the rejected update is not stored");
     const ok = await checklist(f, [step("a", "pending"), step("b", "cancelled", { cancelReason: "중복" })]);
     assert.notEqual(ok.isError, true, "a completed step may be left out; an open one must be completed or cancelled");
   } finally { f.close(); }

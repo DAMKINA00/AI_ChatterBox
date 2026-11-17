@@ -4,7 +4,7 @@
 //   master:  spawn · ask · release · agents · checklist · update_goal · ask_user
 //   workers: ask · agents          (call each other by nickname)
 // An "ask" runs one turn on the target worker's own Claude session / Codex thread, streams it into the
-// chat under a consult node, and returns the answer + changed files as the tool result.
+// chat under a consult node. Workers can read reports; the master gets receipts and a final brief.
 // Parallelism: a worker runs one turn at a time; review/opinion asks run concurrently; implement asks
 // carry a scope (path globs) — non-overlapping scopes run concurrently, overlapping ones queue, and
 // writes outside the scope are denied. A call that would wait in a cycle, or nest deeper than 3, is refused.
@@ -56,10 +56,11 @@ import { completionIssue, dualInvestigationIssue } from "./dispatch";
 import { isAIStudioModel } from "../shared/aistudio";
 import { cliRemaining, CLI_LOW_REMAINING, isAuthError, isQuotaError, PRIORITY_FAILURE_LABEL, type PriorityFailureReason } from "./cli-accounts";
 import { planStepBlockers, validatePlanSteps } from "../shared/plan-steps";
-import { alignNativeSteps, droppedSteps, isOpenStep, keepDroppedSteps, openStepsText, pendingProposal, planStepsFor, stepKey } from "../shared/plan-lifecycle";
+import { alignNativeSteps, currentPlanView, droppedSteps, isOpenStep, keepDroppedSteps, openStepsText, pendingProposal, planStepsFor, stepKey } from "../shared/plan-lifecycle";
 import { validateReviewResult } from "../shared/review-result";
 import { forkContextPrompt } from "./chat-fork";
 import { buildResumeContext, instructionToResume, parseInstructionSnapshot, type InstructionSnapshot } from "./resume-context";
+import { consultResultText, consultStatusText, masterResultText } from "./consult-context";
 
 const KINDS: ConsultKind[] = ["implement", "review", "opinion", "writing"];
 const MAX_DEPTH = 3;
@@ -108,6 +109,7 @@ const ASK_TOOL = (forMaster: boolean): ToolDef => ({
       model: { type: "string", description: "선택 사항. route_request의 availableModels에서 담당 계열의 모델 ID를 선택합니다. 생략하면 프로젝트/채팅 모델을 유지합니다." },
       discussion: DISCUSSION_INPUT,
       ...(forMaster ? { accountId: CLI_ACCOUNT_INPUT, clearAccountId: CLEAR_CLI_ACCOUNT_INPUT } : {}),
+      ...(forMaster ? { summary: { type: "boolean", description: "최종 취합 담당에게만 true. 기본은 협의 ID·상태만 반환하며 true는 400자 이내 결론과 주요 산출물을 반환합니다. 상세 자료 취합은 작업자가 수행합니다." } } : {}),
       requiresImage: { type: "boolean", description: "실제 이미지 생성·편집 도구가 필요한 작업이면 true" },
       supersedes: { type: "integer", description: "이 배정으로 보완할 실패한 협의 id" },
       scope: { type: "array", items: { type: "string" } },
@@ -119,11 +121,12 @@ const ASK_TOOL = (forMaster: boolean): ToolDef => ({
 const ASK_PARALLEL_TOOL: ToolDef = {
   name: "ask_parallel",
   description:
-    "서로 독립적인 일을 여러 작업자에게 동시에 맡기고, 모두 끝나면 결과를 한꺼번에 돌려받습니다. tasks 항목은 ask와 같습니다(to, message, kind, scope). " +
+    "서로 독립적인 일을 여러 작업자에게 동시에 맡깁니다. 마스터의 복수 배정은 작업자들이 끝난 뒤 coordinator가 결과를 취합해 마스터에게 통합 결론만 반환합니다. 생략하면 성공한 첫 담당자가 취합합니다. tasks 항목은 ask와 같습니다(to, message, kind, scope). " +
     "구현을 나눠 맡길 때는 scope를 서로 겹치지 않게 주세요. 순서가 있는 일은 ask를 차례로 쓰세요.",
   inputSchema: {
     type: "object",
     properties: {
+      coordinator: { type: "string", description: "결과 취합을 맡을 tasks 안의 작업자 닉네임. 마스터의 복수 배정에서 사용합니다." },
       tasks: {
         type: "array",
         items: {
@@ -168,7 +171,7 @@ const RELEASE_TOOL: ToolDef = {
 };
 const MESSAGE_TOOL: ToolDef = {
   name: "send_message",
-  description: "동료·마스터에게 보내거나 to=all로 그룹 채팅(사용자가 읽는 메인 대화)에 발언합니다. to=all은 실제 진행·질문·답변·막힘을 쉬운 한국어 1~3문장으로 쓰고, 상세 근거·로그는 1:1 메시지나 최종 응답에 담습니다. 보낸 뒤 본 작업을 계속합니다. 작업 중인 상대에게 즉시 전달을 시도하며 다음 도구 호출에도 확인합니다. 답변이 필요하면 ask를 사용하세요.",
+  description: "동료·마스터에게 보내거나 to=all로 그룹 채팅(사용자가 읽는 메인 대화)에 발언합니다. to=all은 실제 진행·질문·답변·막힘을 쉬운 한국어 1~3문장으로 씁니다. 상세 자료는 협의 ID나 산출물 경로로 공유하고 담당 동료가 직접 조회합니다. 마스터에게는 결정이 필요한 쟁점만 보냅니다. 보낸 뒤 본 작업을 계속합니다. 작업 중인 상대에게 즉시 전달을 시도하며 다음 도구 호출에도 확인합니다. 답변이 필요하면 ask를 사용하세요.",
   inputSchema: { type: "object", properties: { to: { type: "string" }, message: { type: "string" } }, required: ["to", "message"], additionalProperties: false },
 };
 const MESSAGES_TOOL: ToolDef = {
@@ -177,8 +180,17 @@ const MESSAGES_TOOL: ToolDef = {
 };
 const AGENTS_TOOL: ToolDef = {
   name: "agents",
-  description: "이 채팅의 팀 목록: 닉네임, 종류, 맡은 역할, 상태(대기/작업 중/해제). 마스터에게는 현재 지시의 최근 협의 결과도 반환합니다. 즉시 추가 지시로 ask 응답을 놓쳤으면 재배정하기 전에 여기서 확인하세요.",
+  description: "이 채팅의 팀 목록과 현재 지시의 최근 협의 ID·상태를 조회합니다. 결과 본문은 read_consult로 필요한 협의만 확인하세요. ask 응답을 놓쳤어도 결과를 다시 받기 위해 재배정하지 마세요.",
   inputSchema: { type: "object", properties: {} },
+};
+const READ_CONSULT_TOOL: ToolDef = {
+  name: "read_consult",
+  description: "이 채팅에 저장된 협의 결과 원문·전체 파일 목록·구조화 리뷰를 조회합니다. 기본은 짧은 결과 요약이며 detail=true일 때만 원문을 페이지 단위로 반환합니다. 반환된 nextOffset으로 이어 읽으세요. 작업을 재실행하지 않습니다.",
+  inputSchema: { type: "object", properties: {
+    consultId: { type: "integer" }, detail: { type: "boolean" },
+    offset: { type: "integer", minimum: 0 },
+    limit: { type: "integer", minimum: 1, maximum: 8000, description: "원문 페이지의 최대 문자 수. 기본 4000." },
+  }, required: ["consultId"], additionalProperties: false },
 };
 const CHECK_AGENT_TOOL: ToolDef = {
   name: "check_agent",
@@ -254,7 +266,8 @@ function masterInstructions(project: Project, agent: AgentKind): string {
   return [
     "# 역할: AI_ChatterBox 마스터",
     `너는 사용자의 지시를 받아 팀을 꾸리고 일을 나눠 맡기는 마스터다. 작업 폴더: ${project.folder}`,
-    "- 너는 배정·검토·취합 담당이다. 간단한 질문·짧은 설명·이미 주어진 정보만으로 답할 수 있는 확인은 direct로 기록한 뒤 작업자를 생성하거나 호출하지 않고 직접 답한다. 상세 원인 조사·구현·이미지·문서 제작 등 본 작업은 앱 작업자에게 맡긴다. 결과에 누락·모순이 있으면 보완 요청하고 최종 답변을 취합한다. 사용자가 명시적으로 직접 수행을 요구한 예외에도 기존 승인·작업 범위 규칙을 지킨다.",
+    "- 너는 배정·방침 결정·최종 보고 담당이다. 간단한 질문·짧은 설명·이미 주어진 정보만으로 답할 수 있는 확인은 direct로 기록한 뒤 작업자를 생성하거나 호출하지 않고 직접 답한다. 상세 원인 조사·구현·이미지·문서 제작 등 본 작업은 앱 작업자에게 맡긴다. 결과에 누락·모순이 있으면 담당자에게 보완을 요청하고 통합 결론을 받아 최종 답변한다. 사용자가 명시적으로 직접 수행을 요구한 예외에도 기존 승인·작업 범위 규칙을 지킨다.",
+    "- 마스터는 목표·범위·완료 기준을 전달하고 결론을 정리한다. 개별 배정에서는 협의 ID·상태만 받는다. 작업자 보고서들을 읽어 다시 취합하지 말고 최종 취합 담당에게 협의 ID들을 주고 ask(summary=true)로 400자 이내 결론·검증 여부·미해결 사항·산출물 링크를 받는다. ask_parallel은 이 취합을 자동 수행한다. 상세 검증은 담당자와 비작성자 리뷰어가 직접 수행한다. 새 방침이나 사용자 결정이 필요한 쟁점만 판단한다. 근거가 부족하면 담당자에게 좁게 확인하고 생략된 내용을 확인한 것처럼 말하지 않는다. 사용자가 전문을 요청하거나 중대한 오류의 근거가 꼭 필요한 예외에만 read_consult(detail=true)로 필요한 원문 페이지를 조회한다.",
     `- 지시마다 먼저 ${t("route_request")}(mode=direct|delegated, reason=이유)를 호출한다. 반환되는 실제 사용 가능 도구·모델·사용량으로 후보를 확인한다. 도구 사용 불가/미확인은 가능하다고 가정하지 않는다.`,
     "- 모든 위임은 이 앱의 chatterbox_bridge spawn/ask/ask_parallel만 사용한다. CLI 내부 spawn_agent/Agent/Task/팀 도구나 별도 CLI 프로세스로 작업자를 만들지 않는다. 앱 상단 모델을 기본으로 사용하며 배정마다 availableModels에 있는 담당 계열 모델을 model로 선택할 수 있다. 사용자가 담당 모델을 명시한 요청은 우선한다.",
     "- 작업자·역할·순서·병렬 수·추론 수준은 매 배정의 난도, 실제 도구, 비용, 속도, 사용량에 맞게 선정한다. 선호 역할은 참고이며 특정 업무를 특정 계열에 강제하지 않는다. effort는 route_request의 실제 지원 범위 전체에서 고르고 생략하면 기존 배정/모델 기본값을 쓴다. 동료도 질문마다 별도 effort를 선택할 수 있다. 사용자가 명시한 담당·수동 설정은 우선한다.",
@@ -269,15 +282,15 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     "- auto에서는 마스터가 cli_accounts로 로그인·enabled·실행 중 작업자·remainingPercent·checkedAt를 직접 확인한다. 잔여량이 10%를 초과하는 계정 중 실행 중 작업자가 없는 계정을 우선하고 잔여량이 가장 많은 계정을 accountId로 지정한다. 대기 계정이 없으면 잔여량 10% 초과 계정을 여러 작업자가 공유할 수 있다. 미조회·10분 초과·미확인 잔여량은 사용 가능으로 추정하지 않는다. 적합한 계정이 없으면 갱신하거나 사용자에게 알린다.",
     "- fixed·auto에서 앱은 CLI 한도 소진 시 자동 계정 전환이나 작업 재시도를 하지 않는다. fixed는 실패를 보고한다. auto는 마스터가 cli_accounts로 다시 확인하고 실패 협의 id를 supersedes에 넣어 다른 계정으로 재배정한다. 계정 변경은 새 세션과 요약 인계로 처리한다. auto에서 accountId를 생략하면 기존 지정 계정을 유지하고, 지정이 없으면 정책 계정(없으면 *-1)을 사용한다. 앱이 잔여량으로 대신 선택하지 않는다.",
     "- priority(계정 우선 할당)에서는 앱이 사용자가 정한 우선 순서의 첫 사용 가능 계정으로 배정한다(배정 제외·로그아웃 확인·잔여 0% 확인·최근 실패 계정은 건너뛰고 미확인 잔여량은 시도). 한도 소진·인증 실패·무응답으로 실패하면 앱이 같은 협의를 다음 계정의 새 세션과 요약 인계로 자동 이어서 실행하고, 모두 실패하면 실패를 보고한다. 이 경우 마스터는 같은 작업을 재배정하지 않는다. 첫 계정이 회복되면 다음 새 배정부터 다시 첫 계정을 쓰며 진행 중 작업은 바꾸지 않는다. 명시·저장된 accountId는 먼저 사용하고 실패하면 우선 순서로 넘어간다. 협의 결과의 '우선 할당' 줄과 실제 실행 계정을 확인해 보고한다.",
-    "- 작업자 번호를 CLI 계정 번호로 추정하지 않는다. spawn/ask/ask_parallel의 accountId로 계정을 명시하고 agents와 협의 결과의 실제 실행 계정을 확인하여 최종 결과에도 실행 계정을 보고한다.",
+    "- 작업자 번호를 CLI 계정 번호로 추정하지 않는다. spawn/ask/ask_parallel의 accountId로 계정을 명시한다. 실행 계정은 앱 기록에 남으며, 계정 문제가 있거나 사용자가 물었을 때만 확인해 보고한다.",
     "- 기술 업무도 모델별 고정 역할 없이 필요한 구현·분석·검증 능력과 실제 가용성을 비교해 맡긴다. 중요한 오류의 독립 검증이 필요하면 dualInvestigation을 선택한다.",
     "- 위 기준은 기본 선호이며 절대적인 우열이 아니다. 필요한 도구 사용 가능 여부를 먼저 확인하고, 사용자가 지정한 담당·선호 기준·관련 맥락·작업량·사용 한도를 고려한다. 두 계열을 매번 모두 부르지 않는다. 실패하면 원인을 반영해 재배정하고 가능한 담당자가 없으면 미완료 사유를 알린다.",
     "- 시각 작업도 구분한다. 이미지 생성·편집은 지정이 없을 때 이미지 도구가 있는 Codex에게, 명시적으로 Gemini/Grok 등 다른 작업자를 지정하면 그 작업자에게 requiresImage=true로 배정한다. 제공된 이미지 도구의 실제 결과만 완료로 인정한다. 그 밖의 모션그래픽·애니메이션은 실제 도구와 맥락에 맞는 동료가 제작하고 필요한 이미지 소재도 도구 가용성에 따라 협의한다.",
     `- 중요한 버그 수정·오류 분석이라고 판단하면 ${t("route_request")}(mode=delegated, dualInvestigation=true, reason=중요도 판단 근거)를 기록한다. 예: 데이터 손실·보안·설비 안전·서비스 중단에 영향이 크거나, 반복 장애의 원인이 불확실하고 잘못 고쳤을 때 피해가 큰 경우. 사용자에게 양쪽 조사를 명시적으로 요청받은 경우도 적용한다. 단순 문구·서식 수정이나 일반 질문에 모두 호출하지 않는다.`,
-    `- 양쪽 조사: 클로드와 지피티에게 동일한 문제·증상·소스·로그·완료 기준을 주고 ${t("ask_parallel")}(각 kind=opinion)로 독립 조사시킨다. 다른 쪽 결론을 먼저 전달하거나 파일 수정을 맡기지 않는다. 각각 원인 후보·근거(파일/로그)·재현 방법·수정안·불확실성을 보고하게 한다. 두 결과가 오면 공통점과 차이를 대조하고, 충돌은 추가 증거로 확인해 마스터가 최종 원인·수정 방향을 취합한다. 이후 구현은 정한 담당자에게 맡기고 교차 리뷰 규칙을 유지한다. 한쪽을 실행할 수 없으면 양쪽 조사를 완료했다고 하지 말고 제한과 확인된 결과를 보고한다.`,
+    `- 양쪽 조사: 클로드와 지피티에게 동일한 문제·증상·소스·로그·완료 기준을 주고 ${t("ask_parallel")}(각 kind=opinion)로 독립 조사시킨다. 다른 쪽 결론을 먼저 전달하거나 파일 수정을 맡기지 않는다. 각각 원인 후보·근거(파일/로그)·재현 방법·수정안·불확실성을 기록하게 한다. 두 조사가 끝난 뒤 취합 담당 작업자가 공통점·차이와 충돌하는 근거를 동료와 확인하고 통합 결론을 낸다. 마스터는 그 결론으로 수정 방침을 정해 구현을 배정하며 교차 리뷰 규칙을 유지한다. 한쪽을 실행할 수 없으면 양쪽 조사를 완료했다고 하지 말고 제한과 확인된 결과를 보고한다.`,
     `- 팀: ${t("spawn")}(kind=claude|gpt|gemini|grok|deepseek)로 작업자를 만든다. 기존 동료를 우선 재사용하고 필요한 인원과 병렬 수를 상황에 맞게 선택한다. 설정 인원은 권장 규모이며 초과해도 차단되지 않는다. 0으로 비활성화한 계열은 사용하지 않는다. 다 쓴 동료는 ${t("release")}로 해제한다.`,
-    "- 한 요청 안에서도 UI·로직·테스트·자료 조사처럼 독립 가능한 파트를 나누고 담당·파일 범위·입출력 계약·의존성을 체크리스트에 기록한다. 파트는 ask_parallel로 동시에 맡긴다. 각 파트 담당에게 동료 닉네임과 연결되는 부분을 명시하고 직접 협의하게 한다. 마스터가 모든 대화를 중계하지 않는다. 작업 중인 동료와는 send_message로 계약·진행·질문을 주고받고, 대기 동료의 결과가 필요하면 ask/ask_parallel을 사용한다. 결과는 read_messages와 agents로 확인한 뒤 통합·검증한다.",
-    "- send_message(to=all)는 사용자가 읽는 메인 대화다. 결정·질문·답변·막힘처럼 실제로 할 말이 있을 때만 쉬운 한국어 1~3문장으로 말한다. 상세 근거·로그·계정 정보는 마스터 대화와 협의 결과에 남긴다. 상태 확인용 반복 발언이나 형식적인 대사는 만들지 않는다.",
+    "- 너는 각 작업의 목표·담당·파일 범위·입출력 계약·완료 기준을 정해 배정한다. 독립 파트는 ask_parallel(tasks, coordinator=취합 담당 닉네임)로 맡긴다. 작업자들은 서로 직접 협의하고 취합 담당이 결과·검증·이견을 모은다. 순차 배정도 마지막에 한 작업자에게 협의 ID들을 주고 취합을 맡긴다. 마스터는 통합 보고를 받아 새로운 방침을 정하거나 최종 완료 결과를 보고한다. 개별 보고를 다시 모두 취합하거나 동료 간 질문을 중계하지 않는다.",
+    "- send_message(to=all)는 사용자가 읽는 메인 대화다. 결정·질문·답변·막힘처럼 실제로 할 말이 있을 때만 쉬운 한국어 1~3문장으로 말한다. 상세 근거·로그는 해당 협의 기록이나 산출물에 남긴다. 마스터 대화에는 결과·남은 문제·링크만 짧게 정리하고 작업자 보고서나 계정 진단을 반복 출력하지 않는다. 상태 확인용 반복 발언이나 형식적인 대사는 만들지 않는다.",
     `- 일 맡기기: ${t("ask")}(to=닉네임, kind, message, scope). 서로 독립적인 일은 반드시 ${t("ask_parallel")}(tasks=[…])로 한 번에 맡겨 동시에 진행한다(하나씩 기다리지 말 것). 파일을 변경할 작업은 종류와 관계없이 scope를 겹치지 않게 나눈다. 읽기·토의는 동시에 가능하며, 리뷰·의견에서 수정할 때도 범위와 승인을 따른다.`,
     `- 관련 쟁점·서로 맞물린 설계·문장과 연출 등 직접 논의가 필요한 항목은 주제별 토의 그룹으로 묶는다. ${t("ask")}(to=클로드/지피티 진행자, kind=opinion|writing, discussion={topic:주제, peers:[참여 닉네임]}, message=목표·공통 자료·쟁점·완료 기준, reason, effort)로 맡긴다. 진행자가 참여자에게 직접 ask로 초안과 근거를 주고받아 합의·이견·남은 확인을 정리하고, 너는 그룹별 결과와 필요한 최종 결정만 취합한다. 사소한 확인까지 매번 중계하지 않는다.`,
     "- 토의 중 필요한 파일 수정·명령 실행도 지정 범위와 승인을 따른다. 주제와 사용자의 지정을 따라 Claude·Codex·Gemini·Grok에서 진행자와 참여자를 정한다. 참여자는 토의 시점에 대기 상태로 두고 다른 병렬 작업·토의 그룹에 중복 배정하지 않는다. 중요한 오류는 먼저 양쪽 독립 조사 결과를 확보한 뒤 토의 그룹에서 대조한다. 토의 결과를 교차 리뷰로 대신하지 않는다. 실제 참여 응답이 없으면 토의 완료로 보고하지 말고 보완하거나 미완료 사유를 알린다.",
@@ -288,12 +301,12 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     "- 작업자는 이 대화를 보지 못한다. message에 목표, 관련 파일 경로, 제약, 완료 기준을 빠짐없이 적는다. 사용자가 첨부한 파일이 필요하면 attach로 경로를 넘긴다.",
     `- 작업 중 사용자의 즉시 추가 지시를 받으면 기존 작업자를 유지한다. CLI가 ask 응답 수신을 중단해도 작업자는 계속 실행될 수 있다. ${t("agents")}로 상태와 저장된 최근 결과를 확인하고, 이미 완료한 작업을 응답 재수신만을 위해 다시 배정하지 않는다.`,
     "- 즉시 추가 질문·수정 요청에는 작업자의 완료를 기다리지 말고 먼저 사용자에게 한국어로 직접 답한다. 이미 아는 내용은 바로 설명하고 수정 요청은 이해한 내용과 반영 방법을 먼저 말한다. 기존 지시의 위임·교차 검증 요건은 그대로 유지하며, 추가 질문에 답하려고 기존 지시를 direct로 변경하지 않는다. 답변하기 전에 작업 배정이나 체크리스트 갱신으로 넘어가지 않는다.",
-    `- 여러 단계 작업은 ${t("checklist")}로 단계와 담당(owner에 닉네임)을 등록하고, 선행 관계는 id·dependsOn으로, 배정한 협의는 consultIds로 연결한다. 단계를 시작·완료할 때마다 갱신한다.`,
+    `- 여러 단계 작업은 ${t("checklist")}로 현재 작업만의 짧은 계획과 담당(owner에 닉네임)을 등록한다. 새 지시로 새 작업을 시작할 때 이전 작업의 완료·취소 단계들을 이어 붙이지 말고 새로 정리한다. 선행 관계는 id·dependsOn으로, 배정한 협의는 consultIds로 연결하고 작업자 간 취합·검증 단계를 포함한다. 같은 작업의 추가 지시에는 현재 계획을 갱신한다.`,
     `- 채팅에 목표(/goal)가 있으면 그 목표를 향해 일하고, 한 단계를 마칠 때마다 ${t("update_goal")}로 진행을 보고한다. 다 이루면 status=complete.`,
     `- 꼭 필요한 결정만 ${t("ask_user")}로 묻는다.`,
     `- 사용자에게 대사를 쓰기 전에 ${t("set_expression")}(expression=감정)으로 표정을 지정한다. 감정: ${AGENT_EXPRESSIONS.join(", ")}. 기술적 내용과 말투를 억지로 바꾸지 않는다.`,
     "- 지시·협의의 시간·배정·리뷰 횟수에는 강제 한도를 두지 않는다. 설정 숫자는 계획 참고값이다. 같은 요청 반복, 순환 대기, 충돌을 피하고 새로운 근거가 없으면 질문을 바꾸거나 사용자에게 필요한 결정을 알린다. 사용자가 중지를 요청하면 즉시 멈춘다.",
-    "- 마지막에는 항상 한국어로 취합한다: 담당별 결과, 산출물 링크, 검증·리뷰 결과, 남은 문제. 돌아오지 않았거나 실패한 결과를 완료했다고 말하지 않는다. 생성 이미지 파일 경로도 최종 답변에 포함한다.",
+    "- 마지막에는 항상 한국어로 전체 결론, 산출물 링크, 검증 요약, 남은 문제를 짧게 보고한다. 담당별 보고서를 반복하지 않는다. 돌아오지 않았거나 실패한 결과를 완료했다고 말하지 않는다. 생성 이미지 파일 경로도 최종 답변에 포함한다.",
     "- 사용자에게 결과물을 제공할 때마다 반드시 해당 파일별로 클릭할 수 있는 Markdown 링크 [파일명](<절대경로>)를 함께 쓴다. 이미지도 같은 링크와 미리보기를 함께 제공한다. :codex-file-citation 같은 내부 앱 전용 표기나 링크 없는 완료 문장으로 대체하지 않는다. 수정한 기존 PDF·문서·ZIP도 빠뜨리지 않고 각각 연결한다.",
   ].join("\n");
 }
@@ -305,11 +318,11 @@ function workerInstructions(a: ChatAgent): string {
     "- 너의 모델은 앱이 지정한다. 네이티브 spawn_agent/Agent/Task 또는 별도 CLI로 하위 작업자를 생성하지 않는다. 추가 인력이 필요하면 마스터에게 send_message로 요청한다. 기존 팀과는 앱 ask/ask_parallel/send_message/read_messages로 협업한다.",
     "- 구현 지시(implement): 지정된 범위(scope) 안의 파일만 고친다. 사용자에게 지정받은 종류의 작업을 수행한다. 승인·범위·도구 한계는 지킨다.",
     "- 계획·리뷰(review)·의견(opinion)·글쓰기(writing)에서도 사용자 지시에 필요한 수정·명령 실행이 가능하다. 지정된 파일 범위와 승인 절차, 사용자가 명시한 수정 금지를 지킨다.",
-    "- 팀은 그룹 채팅으로 협의한다. send_message(to=all)는 사용자가 읽는 메인 대화다. 실제로 바뀐 진행, 동료에게 할 질문·답변·반론, 막힌 점이 생겼을 때만 쉬운 한국어 1~3문장으로 말한다. 근거·로그·명령·계정·검증표 같은 상세는 공개하지 말고 최종 응답(마스터가 받는 결과 보고)에 담는다. 협의 결과는 앱이 마스터에게 그대로 전달하므로 같은 보고를 그룹에 다시 올리지 않는다. 할 말이 없으면 주기적인 상태 발언을 하지 않는다. 직접 질문은 동료에게 ask한다. 메시지를 read_messages로 확인한다. 질문마다 난도에 맞는 effort를 선택할 수 있다. 작업 중인 동료에게는 send_message, 상태 확인은 check_agent를 사용한다. 이미 배정했다는 이유로 점검을 생략하지 않는다. 자신의 잠근 파일 범위는 다시 위임하지 않는다.",
+    "- 팀은 그룹 채팅으로 협의한다. send_message(to=all)는 사용자가 읽는 메인 대화다. 실제로 바뀐 진행, 동료에게 할 질문·답변·반론, 막힌 점이 생겼을 때만 쉬운 한국어 1~3문장으로 말한다. 원본 로그·코드·긴 검증표는 도구 기록이나 허용된 산출물 파일에 남기고 최종 보고에 복사하지 않는다. 결과는 앱이 전달하므로 같은 보고를 그룹에 다시 올리지 않는다. 할 말이 없으면 주기적인 상태 발언을 하지 않는다. 직접 질문은 동료에게 ask한다. 메시지를 read_messages로 확인한다. 질문마다 난도에 맞는 effort를 선택할 수 있다. 작업 중인 동료에게는 send_message, 상태 확인은 check_agent를 사용한다. 자신의 잠근 파일 범위는 다시 위임하지 않는다.",
     "- writing은 글쓰기 목적의 배정이다. 필요한 사실 확인과 파일 반영은 지정 범위와 사용자 승인을 따르며 요청한 독자·말투·길이를 지킨다.",
     "- 다른 작업자에게 확인할 것이 있으면 ask(to=닉네임)로 직접 묻는다. 팀 목록은 agents. 마스터에게는 ask를 쓰지 말고 결과 보고에 질문을 적는다.",
     "- 토의 그룹의 진행자로 지정되면 공통 주제와 너의 초안·근거·질문을 각 참여자에게 앱 ask로 직접 보내고, 실제 의견을 받아 대조·보완한 뒤 합의, 이견, 근거, 남은 결정을 한 번에 보고한다. 참여자로 질문을 받으면 쟁점에 답하고 반론·확인 질문을 이번 응답에 담는다. 너의 답을 기다리는 진행자에게 다시 ask하여 순환 대기를 만들지 않는다. 그룹 밖 쟁점이나 사용자 결정만 마스터에게 최종 보고한다.",
-    "- 끝나면 한국어로 짧게 보고한다: 한 일, 바뀐 파일, 확인 방법과 결과, 남은 문제.",
+    "- 최종 보고는 핵심 6개 항목 이내, 가급적 1000자 이내로 쓴다: 결론, 바뀐 파일·산출물 경로, 검증 결과, 미실행 검사·남은 문제, 마스터 결정이 필요한 사항. 실패·불확실성·중요한 위험은 먼저 쓴다. 원문이 필요한 동료는 read_consult로 확인할 수 있다. 글쓰기 전문이 산출물이거나 사용자가 상세 보고를 명시한 경우에는 요청한 내용을 보존하되 결론을 앞에 둔다.",
     `- 대사 전에 set_expression 도구로 감정을 지정한다 (${AGENT_EXPRESSIONS.join(", ")}). Claude에서는 mcp__chatterbox_bridge__set_expression. 기술적 내용과 말투는 그대로 유지한다.`,
   ].join("\n");
 }
@@ -331,8 +344,9 @@ interface Instruction {
   requests: Map<string, number>;
   /** Extra instructions the user sent while the team was working. */
   queued: { text: string; attachments: AttachmentRef[] }[];
-  /** Extra instructions already handed over (repeated in later tool results). */
+  /** Extra instructions retained for pause/resume; sent only once per active run. */
   pinned: string[];
+  pinnedSent?: number;
   /** A user follow-up needs a visible master reply before further team management. */
   pendingImmediate?: boolean;
 }
@@ -413,6 +427,7 @@ export class Orchestrator {
   private masterActions = new Map<number, Set<string>>();
   /** chatId -> id of the approved plan being carried out (the /plan instruction's id). */
   private planRunning = new Map<number, number>();
+  private parallelBatches = new Map<number, Set<Promise<ToolResult>>>();
   /** Chats whose current turn already recorded its plan as incomplete (the completion guard). */
   private planIncomplete = new Set<number>();
   readonly judge: ApprovalJudge;
@@ -653,8 +668,8 @@ export class Orchestrator {
       reg = this.chats.bridge.register(
         {
           tools: master
-            ? [ROUTE_TOOL, CLI_ACCOUNTS_TOOL, SPAWN_TOOL, ASK_TOOL(true), ASK_PARALLEL_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, RELEASE_TOOL, AGENTS_TOOL, CHECK_AGENT_TOOL, CHECKLIST_TOOL, GOAL_TOOL, ASK_USER_TOOL, EXPRESSION_TOOL]
-            : [ASK_TOOL(false), ASK_PARALLEL_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, AGENTS_TOOL, CHECK_AGENT_TOOL, REPORT_REVIEW_TOOL, EXPRESSION_TOOL],
+            ? [ROUTE_TOOL, CLI_ACCOUNTS_TOOL, SPAWN_TOOL, ASK_TOOL(true), ASK_PARALLEL_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, RELEASE_TOOL, AGENTS_TOOL, READ_CONSULT_TOOL, CHECK_AGENT_TOOL, CHECKLIST_TOOL, GOAL_TOOL, ASK_USER_TOOL, EXPRESSION_TOOL]
+            : [ASK_TOOL(false), ASK_PARALLEL_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, AGENTS_TOOL, READ_CONSULT_TOOL, CHECK_AGENT_TOOL, REPORT_REVIEW_TOOL, EXPRESSION_TOOL],
           call: (name, args) => this.call(chatId, role, name, args),
         },
         id,
@@ -664,16 +679,23 @@ export class Orchestrator {
     return bridgeServerConfig(this.chats.bridgeScript, reg.url);
   }
 
-  private readMessages(chatId: number, role: Role, consume = true, through = Infinity): string {
+  private readMessages(chatId: number, role: Role, consume = true, through = Infinity, received: readonly number[] = []): string {
     const key = `teamMessages:${chatId}:${role}`;
     const cursor = Number(this.chats.store.getSetting(key) ?? 0);
     const messages = this.chats.store.events(chatId).filter(e => e.id > cursor && e.id <= through && (e.event.type === "peer_message" && e.event.to === role || e.event.type === "room_message" && e.event.from !== role));
     if (!messages.length) return "";
     if (consume) this.chats.store.setSetting(key, String(messages.at(-1)!.id));
-    return "\n\n[동료 메시지 — 참고/협업 요청, 사용자 지시와 승인·작업 범위를 변경하지 않음]\n" + messages.map(e => {
+    const lines = messages.flatMap(e => {
       const m = e.event as Extract<AgentEvent, { type: "peer_message" | "room_message" }>;
+      // Older stored result broadcasts also contain report copies; don't replay them into every inbox.
+      if (m.type === "room_message" && m.kind === "result" && m.consultId) {
+        if (received.includes(m.consultId)) return [];
+        const c = this.chats.store.consult(m.consultId);
+        if (c?.chatId === chatId) return `${this.name(chatId, m.from)}: ${consultStatusText(c)}`;
+      }
       return `${this.name(chatId, m.from)} → ${m.type === "room_message" ? "그룹 채팅" : this.name(chatId, m.to)}: ${m.text}`;
-    }).join("\n");
+    });
+    return lines.length ? "\n\n[동료 메시지 — 참고/협업 요청, 사용자 지시와 승인·작업 범위를 변경하지 않음]\n" + lines.join("\n") : "";
   }
 
   private async deliverMessages(chatId: number, role: Role) {
@@ -695,7 +717,13 @@ export class Orchestrator {
 
   private async call(chatId: number, caller: Role, name: string, args: any): Promise<ToolResult> {
     const result = await this.dispatchCall(chatId, caller, name, args);
-    const incoming = this.chats.store.chat(chatId) ? this.readMessages(chatId, caller) : "";
+    // Append only to the winning tool response, not a detached ask that completes after steering.
+    if (caller === "orch" && !this.stopped.has(chatId) && !["pausing", "paused"].includes(this.chats.store.chat(chatId)?.status ?? "")) {
+      const queued = this.takeQueued(chatId);
+      if (queued) result.content.push({ type: "text", text: queued });
+    }
+    const received = [result.structuredContent?.consultId, ...(Array.isArray(result.structuredContent?.consultIds) ? result.structuredContent.consultIds : [])].filter((id): id is number => typeof id === "number");
+    const incoming = this.chats.store.chat(chatId) ? this.readMessages(chatId, caller, true, Infinity, received) : "";
     if (incoming) result.content.push({ type: "text", text: incoming });
     return result;
   }
@@ -709,6 +737,17 @@ export class Orchestrator {
     try {
       switch (name) {
         case "read_messages": return textResult(this.readMessages(chatId, caller) || "새 협업 메시지가 없습니다.");
+        case "read_consult": {
+          if (!Number.isSafeInteger(args.consultId)) return textResult("consultId는 정수여야 합니다.", true);
+          const c = this.chats.store.consult(args.consultId);
+          if (!c || c.chatId !== chatId) return textResult("이 채팅의 협의를 찾을 수 없습니다.", true);
+          if (args.detail !== undefined && typeof args.detail !== "boolean") return textResult("detail은 boolean이어야 합니다.", true);
+          const offset = args.offset ?? 0, limit = args.limit ?? 4000;
+          if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 8000) return textResult("offset은 0 이상 정수, limit은 1~8000 정수여야 합니다.", true);
+          if (!args.detail) return textResult(master ? masterResultText(c) : consultResultText(c));
+          const report = JSON.stringify({ responseSummary: c.responseSummary, filesChanged: c.filesChanged, review: c.review ?? null }, null, 2);
+          return textResult(JSON.stringify({ consultId: c.id, status: c.status, offset, totalChars: report.length, nextOffset: offset + limit < report.length ? offset + limit : null, text: report.slice(offset, offset + limit) }));
+        }
         case "check_agent": {
           if (args.recover !== undefined && typeof args.recover !== "boolean") return textResult("recover는 boolean이어야 합니다.", true);
           const to = String(args.to ?? "").trim();
@@ -739,7 +778,7 @@ export class Orchestrator {
             this.chats.emit(chatId, this.chats.route(chatId, target.key), caller, { type: "peer_message", from: caller, to: target.key, text: "현재 진행 상황·남은 작업·막힌 이유를 알려주세요. 기존 작업을 중복 시작하지 마세요." });
             void this.deliverMessages(chatId, target.key);
           }
-          return textResult(JSON.stringify({ nickname: target.nickname, state: running ? driver?.running ? "running" : "missing_terminal_result" : "idle", quietSeconds: running ? Math.floor((Date.now() - running.lastEventAt) / 1000) : null, pendingTools: running?.tools?.size ?? 0, error: running?.lastError ?? null, latest }, null, 2));
+          return textResult(JSON.stringify({ nickname: target.nickname, state: running ? driver?.running ? "running" : "missing_terminal_result" : "idle", quietSeconds: running ? Math.floor((Date.now() - running.lastEventAt) / 1000) : null, pendingTools: running?.tools?.size ?? 0, error: running?.lastError ?? null, latest: latest ? { id: latest.id, status: latest.status } : null }));
         }
         case "send_message": {
           const to = String(args.to ?? "").trim();
@@ -795,10 +834,14 @@ export class Orchestrator {
         case "ask_parallel": {
           const tasks: any[] = Array.isArray(args.tasks) ? args.tasks : [];
           if (!tasks.length) return textResult("tasks가 비었습니다.", true);
-          const result = Promise.all(tasks.map((t) => this.askTool(chatId, caller, t).catch((error) => textResult(error instanceof Error ? error.message : String(error), true)))).then((results) => textResult(
-            results.map((r, i) => `## ${i + 1}. ${String(tasks[i]?.to ?? "")}\n${r.content.map((c) => c.text).join("\n")}`).join("\n\n"),
-            results.every((r) => r.isError),
-          ));
+          if (args.coordinator !== undefined && (typeof args.coordinator !== "string" || !tasks.some(t => t.to === args.coordinator))) return textResult("coordinator는 이번 tasks에 배정한 작업자 닉네임이어야 합니다.", true);
+          const batches = this.parallelBatches.get(chatId) ?? new Set<Promise<ToolResult>>();
+          this.parallelBatches.set(chatId, batches);
+          const result = this.parallelAsks(chatId, caller, tasks, args.coordinator).finally(() => {
+            batches.delete(result);
+            if (!batches.size && this.parallelBatches.get(chatId) === batches) this.parallelBatches.delete(chatId);
+          });
+          batches.add(result);
           return await (master ? this.waitForMasterConsult(chatId, result) : result);
         }
         case "cli_accounts": {
@@ -850,6 +893,28 @@ export class Orchestrator {
     }
   }
 
+  private async parallelAsks(chatId: number, caller: Role, tasks: any[], coordinator?: string): Promise<ToolResult> {
+    const inst = this.instructions.get(chatId), epoch = this.epochs.get(chatId);
+    const results = await Promise.all(tasks.map(t => this.askTool(chatId, caller, t).catch(error => textResult(error instanceof Error ? error.message : String(error), true))));
+    if (caller !== "orch" || tasks.length === 1) return textResult(results.map((r, i) => `## ${i + 1}. ${String(tasks[i]?.to ?? "")}\n${r.content.map(c => c.text).join("\n")}`).join("\n\n"), results.every(r => r.isError));
+    const records = results.map(r => {
+      const id = r.structuredContent?.consultId;
+      return typeof id === "number" ? this.chats.store.consult(id) : undefined;
+    });
+    const receipts = records.map((c, i) => c ? `${tasks[i].to}: ${consultStatusText(c)}` : `${tasks[i].to}: 배정 실패 · ${clipText(results[i].content.map(x => x.text).join("\n"), 500)}`).join("\n");
+    if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch || this.instructions.get(chatId) !== inst || !this.chats.store.chat(chatId)) return textResult(`작업이 중지·변경되어 결과 취합을 시작하지 않았습니다.\n${receipts}`, true);
+    const selected = coordinator ? tasks.findIndex(t => t.to === coordinator) : results.findIndex((r, i) => !r.isError && records[i]);
+    if (selected < 0 || !records.some(Boolean)) return textResult(`결과 취합 미완료: 성공한 담당자가 없습니다.\n${receipts}`, true);
+    const task = tasks[selected];
+    const combined = await this.askTool(chatId, caller, {
+      to: task.to, kind: "opinion", summary: true, reason: "작업자들이 수행한 결과의 상호 확인·취합", effort: task.effort, model: task.model,
+      message: `[작업자 결과 취합]\n${receipts}\n\n각 협의를 read_consult로 확인하고 필요한 상세만 detail=true로 읽으세요. 누락·충돌은 해당 동료에게 직접 ask/send_message로 확인하세요. 기존 작업을 반복하지 말고, 완료·미완료, 실제 검증과 미실행 검사, 산출물 경로, 합의·이견, 마스터가 바꿔야 할 방침만 통합 보고하세요. 실패한 배정과 미제출 리뷰를 숨기거나 통과로 바꾸지 마세요. 자기 구현에 대한 취합은 독립 리뷰가 아닙니다. 소스·로그·개별 보고를 복사하지 말고 최종 보고는 400자 이내로 마무리하세요. 파일 변경은 맡기지 않았습니다.`,
+      scope: [],
+    });
+    const failed = records.flatMap((c, i) => results[i].isError ? [c ? `협의 ${c.id}: ${c.status}` : `${tasks[i].to}: 배정 실패`] : []);
+    return { ...textResult(`[작업자 통합 보고 · 취합 ${task.to}]\n${combined.content.map(c => c.text).join("\n")}\n배정 ${tasks.length}건 · 실패 ${failed.length}건${failed.length ? ` (${failed.join(", ")})` : ""}`, !!combined.isError || failed.length > 0), structuredContent: { consultIds: [...records.flatMap(c => c ? [c.id] : []), combined.structuredContent?.consultId].filter(id => typeof id === "number") } };
+  }
+
   private async waitForMasterConsult(chatId: number, result: Promise<ToolResult>): Promise<ToolResult> {
     const waiters = this.masterConsultWaiters.get(chatId) ?? new Set<(note?: string) => void>();
     this.masterConsultWaiters.set(chatId, waiters);
@@ -857,7 +922,7 @@ export class Orchestrator {
     const followup = new Promise<ToolResult>((resolve) => {
       wake = (note) => resolve(textResult(this.stopped.has(chatId)
         ? "사용자가 작업을 중지했습니다. 멈추세요."
-        : (note ? `[그룹 채팅·상태 점검으로 대기 해제]\n${note}\n기존 작업자는 계속 실행 중입니다. check_agent와 read_messages로 확인하고 기존 작업을 중복 배정하지 마세요.` : "사용자의 즉시 추가 요청을 처리하도록 협의 결과 대기만 해제했습니다. 기존 작업자는 중지하지 않았으며 결과는 저장됩니다. 먼저 사용자 질문에 직접 답하고, 수정 요청에는 반영 방법을 먼저 말하세요. 완료한 작업을 중복 배정하지 말고 이후 agents로 결과를 확인하세요.") + this.takeQueued(chatId)));
+        : (note ? `[그룹 채팅·상태 점검으로 대기 해제]\n${note}\n기존 작업자는 계속 실행 중입니다. check_agent와 read_messages로 확인하고 기존 작업을 중복 배정하지 마세요.` : "사용자의 즉시 추가 요청을 처리하도록 협의 결과 대기만 해제했습니다. 기존 작업자는 중지하지 않았으며 결과는 저장됩니다. 먼저 사용자 질문에 직접 답하고, 수정 요청에는 반영 방법을 먼저 말하세요. 완료한 작업을 중복 배정하지 말고 이후 agents로 결과를 확인하세요.")));
       waiters.add(wake);
     });
     try { return await Promise.race([result, followup]); }
@@ -883,7 +948,7 @@ export class Orchestrator {
         const r = busy?.get(a.key);
         const state = a.status === "released" ? "해제됨" : r ? `작업 중 (${CONSULT_KIND_LABEL[r.kind]}${r.scope.length ? ` · ${r.scope.join(", ")}` : ""}) · 마지막 활동 ${Math.floor((Date.now() - r.lastEventAt) / 1000)}초 전 · 도구 ${r.tools?.size ?? 0}개${r.lastError ? ` · 오류=${r.lastError}` : ""} · check_agent로 언제든 재점검 가능` : "대기";
         const latest = consults.findLast((c) => c.toRole === a.key);
-        const result = latest ? `\n  최근 협의 id=${latest.id} · ${latest.status}${latest.responseSummary ? `\n${latest.responseSummary}` : ""}${latest.filesChanged.length ? `\n산출물:\n${latest.filesChanged.join("\n")}` : ""}` : "";
+        const result = latest ? `\n  최근 ${consultStatusText(latest)}` : "";
         const cli = this.chats.roleAccount(chatId, a.key);
         const cliInfo = this.cliAccountText(chatId, cli, r?.cliAccountId, true);
         const failover = r?.attempts?.length ? ` · 우선 할당: ${r.attempts.map(x => `${x.accountId} 실패(${PRIORITY_FAILURE_LABEL[x.reason]})`).join(" → ")}${r.failover ? ` → ${r.failover}` : ""}` : "";
@@ -1012,6 +1077,7 @@ export class Orchestrator {
   }
 
   private async askTool(chatId: number, caller: Role, args: any): Promise<ToolResult> {
+    if (args.summary !== undefined && (caller !== "orch" || typeof args.summary !== "boolean")) return textResult("summary는 마스터가 지정하는 boolean 옵션입니다.", true);
     const to = String(args.to ?? "").trim();
     const kind: ConsultKind = KINDS.includes(args.kind) ? args.kind : "implement";
     let message = String(args.message ?? "");
@@ -1101,6 +1167,9 @@ export class Orchestrator {
     if (args.model !== undefined && (typeof args.model !== "string" || !args.model.trim())) return textResult("model은 실제 모델 ID를 지정하세요.", true);
     const response = await this.consult(chatId, caller, target, kind, message, scope, attach, reason || (parent?.discussion ? `토의 ${parent.discussion.topic} · ${callerName} → ${target.nickname}` : ""), supersedes, inherited, discussion, false, cliAccount, args.model);
     if (parent?.discussion && !response.isError) parent.discussionReplies!.add(target.key);
+    const id = response.structuredContent?.consultId;
+    const record = caller === "orch" && typeof id === "number" ? this.chats.store.consult(id) : undefined;
+    if (record) return { ...response, content: [{ type: "text", text: (args.summary ? masterResultText(record) : consultStatusText(record)) + (response.isError ? `\n원인: ${response.structuredContent?.error ?? "결과를 확인하지 못했습니다."}` : "") }] };
     return response;
   }
 
@@ -1152,7 +1221,7 @@ export class Orchestrator {
     const limited = resuming ? (this.stopped.has(chatId) || this.planning.has(chatId) ? "작업이 중지되었거나 계획 모드입니다." : null) : this.limitCheck(chatId, project, target.key, kind, message, cliSelection?.accountId);
     if (limited) {
       this.chats.emit(chatId, this.chats.route(chatId, caller), caller, { type: "notice", text: `${target.nickname}에게 맡기기 거절 · ${limited.split(".")[0]}` });
-      return textResult(limited + this.takeQueued(chatId), true);
+      return textResult(limited, true);
     }
     if (accountChange !== undefined) {
       this.chats.setWorkerAccount(chatId, target.key, accountChange);
@@ -1354,7 +1423,7 @@ export class Orchestrator {
       this.chats.sink.consult(finished);
       this.chats.emit(chatId, this.chats.route(chatId, caller), caller, { type: "consult_end", consultId: consult.id, status, summary, files: result.files });
       // The team (including a master who did not assign this) still receives the result; kind keeps it out of the main chat view.
-      this.chats.emit(chatId, "orch", target.key, { type: "room_message", from: target.key, text: `[${CONSULT_KIND_LABEL[kind]} · ${status} · 협의 ${consult.id}${assignmentModel ? ` · ${assignmentModel}` : ""}]\n${clipText(summary, 4000)}`, kind: "result", consultId: consult.id, status });
+      this.chats.emit(chatId, "orch", target.key, { type: "room_message", from: target.key, text: consultStatusText(finished), kind: "result", consultId: consult.id, status });
       // The worker queue remains held until its native log is safely archived.
       await this.chats.archiveWorker(chatId, target.key);
       this.running.get(chatId)?.delete(target.key);
@@ -1366,12 +1435,8 @@ export class Orchestrator {
           : status === "stopped"
             ? `[${target.nickname}: 사용자가 중지했습니다. 더 맡기지 말고 멈추세요.]`
             : `[${target.nickname}: 오류 — ${result.error ?? "실패"}]`;
-      const files = result.files.length ? `\n\n변경된 파일:\n${result.files.map((f) => `- ${f}`).join("\n")}` : "\n\n변경된 파일: 없음";
       const effortLabel = reasoning.effort || "CLI 기본";
-      const reviewNote = kind !== "review" ? "" : finished.review
-        ? `\n\n구조화 리뷰: ${finished.review.verdict} · 기준 ${finished.review.revision} · 지적 ${finished.review.findings.length}건`
-        : "\n\n구조화 리뷰 결과가 제출되지 않았습니다. 통과로 간주하지 마세요.";
-      return textResult(`${head} 협의 id=${consult.id} · 추론 ${effortLabel}\n${summary}${reviewNote}${files}${caller === "orch" ? this.takeQueued(chatId) : ""}`, status !== "done");
+      return { ...textResult(`${head} · 추론 ${effortLabel}\n${consultResultText(finished)}`, status !== "done"), structuredContent: { consultId: consult.id, ...(status !== "done" ? { error: (quotaFailure ? "CLI 한도 소진 · " : "") + clipText(result.error ?? (status === "stopped" ? "사용자가 중지했습니다." : "작업자의 응답과 산출물이 없습니다."), 160) } : {}) } };
     } finally {
       if (cliKind) this.chats.pinRoleAccount(chatId, target.key, undefined);
       assignments.delete(assignmentKey);
@@ -1549,10 +1614,11 @@ export class Orchestrator {
     if (!chat) return end;
     // Immediate input may detach the master's native ask call while app workers continue.
     // Wait for those existing jobs and resume synthesis without spending the repair attempt.
-    if (this.assignments.get(chatId)?.size || this.chats.store.listConsults(chatId).some((c) => c.instructionId === inst.id && c.status === "running")) {
+    if (this.parallelBatches.get(chatId)?.size || this.assignments.get(chatId)?.size || this.chats.store.listConsults(chatId).some((c) => c.instructionId === inst.id && c.status === "running")) {
       if (!inst.waitingForResults) {
         inst.waitingForResults = true;
-        const pending = [...this.workerQueue].filter(([key]) => key.startsWith(`${chatId}:`)).map(([, promise]) => promise);
+        const pending: Promise<unknown>[] = [...this.workerQueue].filter(([key]) => key.startsWith(`${chatId}:`)).map(([, promise]) => promise);
+        pending.push(...(this.parallelBatches.get(chatId) ?? []));
         void Promise.allSettled(pending).then(async () => {
           inst.waitingForResults = false;
           if (this.stopped.has(chatId) || this.instructions.get(chatId) !== inst || !this.chats.store.chat(chatId)) return;
@@ -1560,7 +1626,7 @@ export class Orchestrator {
             const driver = await this.chats.driver(chatId, "orch");
             if (driver.running || this.stopped.has(chatId) || this.instructions.get(chatId) !== inst) return;
             this.chats.updateChat(chatId, { status: "working" });
-            await driver.send({ text: `[앱 작업자 결과 도착 — 기존 지시 계속]\n${this.agentsText(chatId, true)}\n기존 결과를 검토하고 사용자 추가 지시를 반영해 취합하세요. 응답 재수신만을 위한 재배정은 필요 없습니다.${this.takeQueued(chatId)}`, attachments: [], noWrites: false });
+            await driver.send({ text: `[앱 작업자 결과 도착 — 기존 지시 계속]\n${this.agentsText(chatId, true)}\n취합 협의가 있으면 read_consult로 짧은 통합 결론만 확인하세요. 아직 취합하지 않았으면 작업자 한 명에게 협의 ID들을 주고 summary=true로 취합을 맡기세요. 개별 보고를 다시 모두 읽거나 완료 작업을 재배정하지 말고, 사용자 추가 지시에 따른 방침 결정 또는 완료 결과를 보고하세요.${this.takeQueued(chatId)}`, attachments: [], noWrites: false });
           } catch (e) {
             const error = String(e);
             this.chats.emit(chatId, "orch", "orch", { type: "error", message: error });
@@ -1630,12 +1696,23 @@ export class Orchestrator {
     return `[AI_ChatterBox] 이 채팅의 마스터가 ${name(prev)}에서 ${name(session)}로 바뀌었습니다.${team ? ` 지금 팀: ${team}.` : ""} 지금까지의 대화 요약:\n${recent}\n\n---\n`;
   }
 
-  private async instruct(chat: Chat, input: AgentInput) {
+  private async instruct(chat: Chat, input: AgentInput, continuePlan = false) {
     const epoch = this.nextEpoch(chat.id);
     this.stopped.delete(chat.id);
     const prefix = this.handover(chat);
     if (prefix) input = { ...input, text: prefix + input.text };
     this.instructions.set(chat.id, this.newInstruction(chat.id, input.text));
+    if (!continuePlan) {
+      this.planRunning.delete(chat.id);
+      const id = this.instructions.get(chat.id)!.id;
+      const previous = currentPlanView(this.chats.store.events(chat.id).filter(e => e.id < id));
+      if (previous && ["live", "running", "proposed"].includes(previous.state)) {
+        const incomplete = previous.steps.some(isOpenStep);
+        this.chats.emit(chat.id, "orch", null, { type: "plan_state", planId: previous.planId, state: incomplete ? "incomplete" : "done", reason: incomplete ? "새 작업이 시작되어 이전 계획의 미완료 항목을 기록으로 남겼습니다." : undefined });
+      }
+      this.chats.emit(chat.id, "orch", "orch", { type: "plan_update", planId: id, instructionId: id, steps: [] });
+      input = { ...input, text: input.text + "\n\n[새 작업 계획]\n이 지시의 작업 계획을 새로 정리하세요. 이전 작업의 완료·취소 목록을 이어 붙이지 마세요. 여러 단계 작업은 현재 목표·담당·작업자 간 취합·검증을 checklist로 등록하고, 간단한 질문은 계획 없이 답하세요. 진행 중 추가 지시에는 같은 계획을 갱신합니다." };
+    }
     this.saveInstruction(chat.id);
     // Added only to what the model reads: the approval judge's instruction text must not include old transcript.
     const forkContext = this.forkContext(chat);
@@ -1656,8 +1733,8 @@ export class Orchestrator {
   }
 
   /** Start a master turn with prepared text (same bookkeeping as a normal instruction). */
-  private async instructWith(chat: Chat, text: string, contextText: string) {
-    await this.instruct(chat, { text, attachments: [] });
+  private async instructWith(chat: Chat, text: string, contextText: string, continuePlan = false) {
+    await this.instruct(chat, { text, attachments: [] }, continuePlan);
     const inst = this.instructions.get(chat.id);
     if (inst) inst.text = contextText;
     this.saveInstruction(chat.id);
@@ -1771,7 +1848,7 @@ export class Orchestrator {
     }
   }
 
-  /** Extra instructions ride along with the master's next tool result, and stay pinned to later ones. */
+  /** Deliver new notes once; keep the originals for recovery instead of replaying them on every call. */
   private takeQueued(chatId: number): string {
     const inst = this.instructions.get(chatId);
     if (!inst) return "";
@@ -1779,8 +1856,10 @@ export class Orchestrator {
     inst.recoveryNote = undefined;
     const fresh = inst.queued.splice(0);
     inst.pinned.push(...fresh.map((x) => x.text + attachmentNote(x.attachments)));
-    if (!inst.pinned.length) return recovery ? `\n\n${recovery}` : "";
-    return "\n\n[사용자 추가 지시 — 작업 중에 도착함, 최종 보고까지 반드시 반영]\n" + inst.pinned.map((t) => `- ${t}`).join("\n") + (recovery ? `\n\n${recovery}` : "");
+    const unsent = inst.pinned.slice(inst.pinnedSent ?? 0);
+    inst.pinnedSent = inst.pinned.length;
+    if (!unsent.length) return recovery ? `\n\n${recovery}` : "";
+    return "\n\n[사용자 추가 지시 — 작업 중에 도착함, 최종 보고까지 반드시 반영]\n" + unsent.map((t) => `- ${t}`).join("\n") + (recovery ? `\n\n${recovery}` : "");
   }
 
   // ---------- slash commands
@@ -1819,7 +1898,7 @@ export class Orchestrator {
           "사용자가 계획을 승인했다. 계획대로 실행하라: 필요한 작업자를 spawn 하고, 단계마다 담당 작업자에게 ask로 맡기고(implement는 scope 지정), 단계를 시작·완료할 때마다 checklist를 갱신하고, " +
           "모든 단계를 완료하거나, 진행하지 않을 단계는 cancelled와 cancelReason으로 표시한 뒤 결과를 보고하라. 끝나지 않은 단계가 남으면 앱은 완료로 처리하지 않는다." +
           (steps?.length ? `\n\n승인된 계획 단계:\n${steps.map((s) => `- ${s.id ? `${s.id} ` : ""}${s.title} (${s.status})`).join("\n")}` : "");
-        await this.chats.startTurn(chatId, "계획 실행", [], () => this.instructWith(chat, text, "계획 실행"));
+        await this.chats.startTurn(chatId, "계획 실행", [], () => this.instructWith(chat, text, "계획 실행", true));
         return;
       }
       case "plan-cancel": {
@@ -2011,7 +2090,7 @@ export class Orchestrator {
   }
 
   private restoreInstruction(state: PauseState): Instruction {
-    return { ...state.instruction, requests: new Map(state.instruction.requests), waitingForResults: false, pendingImmediate: false };
+    return { ...state.instruction, requests: new Map(state.instruction.requests), waitingForResults: false, pendingImmediate: false, pinnedSent: 0 };
   }
 
   pause(chatId: number): Promise<void> {

@@ -63,6 +63,7 @@ function fixture() {
   };
 }
 const body = (r: any) => r.content.map((c: any) => c.text).join("\n");
+const reportOf = (f: ReturnType<typeof fixture>, r: any) => f.store.consult(r.structuredContent?.consultId ?? -1)?.responseSummary ?? body(r);
 const flush = () => new Promise<void>(resolve => setImmediate(resolve));
 
 test("priority schema keeps a same-family order, rejects malformed lists and leaves fixed/auto files untouched", () => {
@@ -155,8 +156,8 @@ test("priority assigns the first usable account, skipping disabled, signed-out a
     const reply = await f.ask(worker.nickname);
     assert.equal(reply.isError, false);
     assert.equal(f.sent[1].accountId, "gpt-1");
-    assert.match(body(reply), /gpt-3 건너뜀\(배정 제외\), gpt-4 건너뜀\(로그인 필요\), gpt-2 건너뜀\(잔여 0%\)/);
-    assert.match(body(reply), /모드=priority/);
+    assert.match(reportOf(f, reply), /gpt-3 건너뜀\(배정 제외\), gpt-4 건너뜀\(로그인 필요\), gpt-2 건너뜀\(잔여 0%\)/);
+    assert.match(reportOf(f, reply), /모드=priority/);
     const info = JSON.parse(body(await f.call("cli_accounts", { kind: "gpt" })));
     assert.deepEqual(info.policies.gpt.order, ["gpt-3", "gpt-4", "gpt-2", "gpt-1"]);
     assert.deepEqual(info.policies.gpt.priorityState.map((s: any) => s.skip), ["배정 제외", "로그인 필요", "잔여 0%", null]);
@@ -176,13 +177,13 @@ test("priority continues a quota-failed consult on the next account with a hando
     f.plan.set("gpt-1", "usage_limit_reached");
     const worker = f.store.createAgent(f.chat.id, "gpt", "failover");
     const reply = await f.ask(worker.nickname, { message: "finish the report" });
-    assert.equal(reply.isError, false, body(reply));
+    assert.equal(reply.isError, false, reportOf(f, reply));
     assert.deepEqual(f.sent.map(s => s.accountId), ["gpt-1", "gpt-2"]);
     assert.match(f.sent[1].text, /^[\s\S]*finish the report[\s\S]*\[앱 우선 할당 전환\] 이전 계정 gpt-1에서 한도 소진/);
     assert.match(f.sent[1].text, /draft from gpt-1/);
-    assert.match(body(reply), /우선 할당: gpt-1 실패\(한도 소진\) → gpt-2로 전환 · 실제 실행 계정=gpt-2/);
-    assert.match(body(reply), /지정 계정=gpt-1 · 실제 실행 계정=gpt-2/);
-    assert.doesNotMatch(body(reply), /자동 계정 전환·재시도 없음/);
+    assert.match(reportOf(f, reply), /우선 할당: gpt-1 실패\(한도 소진\) → gpt-2로 전환 · 실제 실행 계정=gpt-2/);
+    assert.match(reportOf(f, reply), /지정 계정=gpt-1 · 실제 실행 계정=gpt-2/);
+    assert.doesNotMatch(reportOf(f, reply), /자동 계정 전환·재시도 없음/);
     const consults = f.store.listConsults(f.chat.id);
     assert.equal(consults.length, 1); assert.equal(consults[0].status, "done");
     assert.match(consults[0].responseSummary!, /draft from gpt-2/);
@@ -200,8 +201,8 @@ test("priority switches on sign-in failures and reports every attempt when all a
     const reply = await f.ask(worker.nickname);
     assert.equal(reply.isError, true);
     assert.deepEqual(f.sent.map(s => s.accountId), ["gpt-1", "gpt-2"]);
-    assert.match(body(reply), /우선 할당: 시도한 계정 모두 실패 — gpt-1\(인증 실패: unexpected status 401 Unauthorized, url: https:\/\/chatgpt\.com\/backend-api\/codex\/responses\), gpt-2\(한도 소진: rate_limit_exceeded\) · 남은 계정: gpt-3\(배정 제외\)/);
-    assert.match(body(reply), /우선 할당 목록에 이어서 실행할 계정이 남지 않아/);
+    assert.match(reportOf(f, reply), /우선 할당: 시도한 계정 모두 실패 — gpt-1\(인증 실패: unexpected status 401 Unauthorized, url: https:\/\/chatgpt\.com\/backend-api\/codex\/responses\), gpt-2\(한도 소진: rate_limit_exceeded\) · 남은 계정: gpt-3\(배정 제외\)/);
+    assert.match(reportOf(f, reply), /우선 할당 목록에 이어서 실행할 계정이 남지 않아/);
     assert.equal(f.store.listConsults(f.chat.id).length, 1);
   } finally { await f.close(); }
 });
@@ -215,7 +216,7 @@ test("priority never switches for ordinary failures or stops, and fixed/auto quo
     const worker = f.store.createAgent(f.chat.id, "gpt", "plain failure");
     const failed = await f.ask(worker.nickname);
     assert.equal(failed.isError, true); assert.equal(f.sent.length, 1);
-    assert.doesNotMatch(body(failed), /우선 할당:/);
+    assert.doesNotMatch(reportOf(f, failed), /우선 할당:/);
     f.plan.set("gpt-1", "hold");
     const pending = f.ask(worker.nickname); await flush();
     f.engine.stopped.add(f.chat.id);
@@ -230,7 +231,7 @@ test("priority never switches for ordinary failures or stops, and fixed/auto quo
       const before = f.sent.length;
       const reply = await f.ask(worker.nickname);
       assert.equal(reply.isError, true); assert.equal(f.sent.length, before + 1, mode);
-      assert.match(body(reply), /자동 계정 전환·재시도 없음/);
+      assert.match(reportOf(f, reply), /자동 계정 전환·재시도 없음/);
     }
   } finally { await f.close(); }
 });
@@ -247,7 +248,7 @@ test("priority returns to the first account once it recovers; a running assignme
     // Cooling down: the next assignment starts on gpt-2 without retrying gpt-1.
     f.plan.set("gpt-1", "ok");
     const second = await f.ask(worker.nickname);
-    assert.equal(f.sent.at(-1)!.accountId, "gpt-2"); assert.match(body(second), /gpt-1 건너뜀\(최근 한도 소진\)/);
+    assert.equal(f.sent.at(-1)!.accountId, "gpt-2"); assert.match(reportOf(f, second), /gpt-1 건너뜀\(최근 한도 소진\)/);
     // Hold an assignment on gpt-2, then gpt-1 recovers: the running one stays on gpt-2.
     f.plan.set("gpt-2", "hold");
     const pending = f.ask(worker.nickname); await flush();
@@ -275,14 +276,14 @@ test("priority uses an explicit account first and falls back to the order when i
     const reply = await f.ask(worker.nickname);
     assert.equal(reply.isError, false);
     assert.deepEqual(f.sent.map(s => s.accountId), ["gpt-3", "gpt-1"]);
-    assert.match(body(reply), /우선 할당: gpt-3 실패\(한도 소진\) → gpt-1로 전환/);
-    assert.match(body(reply), /출처=explicit/);
+    assert.match(reportOf(f, reply), /우선 할당: gpt-3 실패\(한도 소진\) → gpt-1로 전환/);
+    assert.match(reportOf(f, reply), /출처=explicit/);
     // A saved binding that becomes unusable falls back to the order before dispatch.
     f.chats.updateCliAccount("gpt-3", { enabled: false });
     f.plan.set("gpt-3", "ok");
     const next = await f.ask(worker.nickname);
     assert.equal(next.isError, false); assert.equal(f.sent.at(-1)!.accountId, "gpt-1");
-    assert.match(body(next), /지정 계정 gpt-3 사용 불가\(배정 제외\)/);
+    assert.match(reportOf(f, next), /지정 계정 gpt-3 사용 불가\(배정 제외\)/);
   } finally { await f.close(); }
 });
 
@@ -298,9 +299,9 @@ test("priority treats a master recover of a silent worker as no response and con
     assert.equal(recovered.isError, false);
     assert.match(body(recovered), /다음 계정으로 이어서 실행.*재배정하지 말고/);
     const reply = await pending;
-    assert.equal(reply.isError, false, body(reply));
+    assert.equal(reply.isError, false, reportOf(f, reply));
     assert.deepEqual(f.sent.map(s => s.accountId), ["gpt-1", "gpt-2"]);
-    assert.match(body(reply), /gpt-1 실패\(무응답\) → gpt-2로 전환/);
+    assert.match(reportOf(f, reply), /gpt-1 실패\(무응답\) → gpt-2로 전환/);
   } finally { await f.close(); }
 });
 
@@ -550,7 +551,7 @@ test("[review2 4] sign-in detection needs the CLI's own wording; line numbers an
     const worker = f.store.createAgent(f.chat.id, "gpt", "user 401");
     const reply = await f.ask(worker.nickname);
     assert.equal(reply.isError, true); assert.deepEqual(f.sent.map(s => s.accountId), ["gpt-1"]);
-    assert.doesNotMatch(body(reply), /우선 할당:/);
+    assert.doesNotMatch(reportOf(f, reply), /우선 할당:/);
   } finally { await f.close(); }
 });
 
@@ -574,7 +575,7 @@ test("[review3 2] a silent archive after a confirmed close only warns: the switc
     f.engine.switchCleanupMs = 40;
     const { pending, consult } = await failingPriorityRun(f, live => { live.archive = () => new Promise(() => {}); });
     const reply = await pending;
-    assert.equal(reply.isError, false, body(reply));
+    assert.equal(reply.isError, false, reportOf(f, reply));
     assert.deepEqual(f.sent.map(s => s.accountId), ["gpt-1", "gpt-2"]);
     assert.equal(consult().status, "done");
     const warning = f.store.events(f.chat.id).find(e => e.event.type === "notice" && e.event.text.includes("세션 보관을 완료하지 못했습니다"));

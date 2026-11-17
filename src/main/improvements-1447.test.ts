@@ -408,7 +408,7 @@ test("report_review stores on the caller's running review, updates the record an
 
     driver.finish(true, false, "자유문장 리뷰");
     const result = await ask;
-    assert.match(result.content[0].text, /구조화 리뷰: pass/);
+    assert.match(result.content[0].text, /리뷰=pass/);
     assert.match(f.store.consult(consult.id)!.responseSummary!, /자유문장 리뷰/);
 
     const late = await f.engine.call(f.chat.id, worker.key, "report_review", REPORT);
@@ -461,7 +461,7 @@ test("a valid report with no prose or files completes the review and carries its
     driver.finish(true, false, "");
     const result = await ask;
     assert.equal(result.isError, false);
-    assert.match(result.content[0].text, /구조화 리뷰: changes_requested/);
+    assert.match(result.content[0].text, /리뷰=changes_requested/);
     const stored = f.store.consult(consult.id)!;
     assert.equal(stored.status, "done");
     assert.equal(stored.review?.verdict, "changes_requested");
@@ -502,7 +502,7 @@ test("an empty review stays an error whether no report or only a rejected report
       driver.finish(true, false, "");
       const result = await ask;
       assert.equal(result.isError, true);
-      assert.match(result.content[0].text, /구조화 리뷰 결과가 제출되지 않았습니다/);
+      assert.match(result.content[0].text, /리뷰=미제출/);
       const stored = f.store.consult(consult.id)!;
       assert.equal(stored.status, "error");
       assert.equal(stored.review, undefined);
@@ -518,7 +518,7 @@ test("a review without a report is not presented as a pass and is not blocked", 
     driver.finish(true, false, "문장 리뷰만");
     const result = await ask;
     assert.equal(result.isError, false);
-    assert.match(result.content[0].text, /구조화 리뷰 결과가 제출되지 않았습니다/);
+    assert.match(result.content[0].text, /리뷰=미제출/);
     assert.equal(f.store.consult(consult.id)!.review, undefined);
     assert.equal(f.store.consult(consult.id)!.status, "done");
   } finally { f.close(); }

@@ -39,9 +39,9 @@ test("master defaults to auto; parallel assignments keep separate effort and res
       { to: gemini.nickname, kind: "writing", message: "write dialogue", reason: "complex character voice: xhigh", effort: "xhigh" },
     ] });
     assert.ok(!response.isError);
-    assert.deepEqual(f.sent.sort((a, b) => a.role.localeCompare(b.role)), [{ role: claude.key, effort: "medium" }, { role: gemini.key, effort: "xhigh" }]);
+    assert.deepEqual(f.sent.sort((a, b) => a.role.localeCompare(b.role)), [{ role: claude.key, effort: "medium" }, { role: claude.key, effort: "medium" }, { role: gemini.key, effort: "xhigh" }]);
     const records = f.store.listConsults(f.chat.id).sort((a, b) => a.toRole.localeCompare(b.toRole));
-    assert.deepEqual(records.map((c) => [c.requestedEffort, c.effort, c.status]), [["medium", "medium", "done"], ["xhigh", "xhigh", "done"]]);
+    assert.deepEqual(records.map((c) => [c.requestedEffort, c.effort, c.status]), [["medium", "medium", "done"], ["medium", "medium", "done"], ["xhigh", "xhigh", "done"]]);
   } finally { await f.close(); }
 });
 

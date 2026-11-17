@@ -14,6 +14,7 @@ export interface ToolDef {
 export interface ToolResult {
   content: { type: "text"; text: string }[];
   isError?: boolean;
+  structuredContent?: Record<string, unknown>;
 }
 
 export interface Registration {

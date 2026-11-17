@@ -109,7 +109,7 @@ function ask(
     args.reason = "discussion routing regression";
     args.effort = options.effort ?? "high";
   }
-  if (options.discussion !== undefined) args.discussion = options.discussion;
+  if (options.discussion !== undefined) { args.discussion = options.discussion; if (caller === "orch") args.summary = true; }
   return f.engine.call(f.chat.id, caller, "ask", args);
 }
 
@@ -134,9 +134,181 @@ test("group messages and peer results reach every inbox and remain visible witho
     await ask(f, "orch", a, "opinion");
     const inbox = textOf(await f.engine.call(f.chat.id, b.key, "read_messages", {}));
     assert.match(inbox, /반론:/);
-    assert.match(inbox, /근거를 반영한 제안/);
+    assert.doesNotMatch(inbox, /근거를 반영한 제안/);
+    const id = f.store.listConsults(f.chat.id)[0].id;
+    assert.match(inbox, new RegExp(`협의 id=${id}`));
+    assert.match(textOf(await f.engine.call(f.chat.id, b.key, "read_consult", { consultId: id })), /근거를 반영한 제안/);
     assert.equal(f.store.events(f.chat.id).filter(e => e.event.type === "room_message").length, 3);
   } finally { await f.close(); }
+});
+
+test("master receives only a receipt; workers can retrieve excerpts and full reports without data loss", async () => {
+  const f = fixture();
+  try {
+    const worker = f.store.createAgent(f.chat.id, "claude", "report");
+    const report = "RESULT_START\n" + "private detailed evidence\n".repeat(600) + "\nRESULT_END: remaining risk";
+    const paths = Array.from({ length: 30 }, (_, i) => `output/result-${i}.md`);
+    f.behavior.set(worker.key, (_input, role) => {
+      f.chats.onDriverEvent!(f.chat.id, role, { type: "file_change", id: "write", ok: true, files: paths.map(path => ({ path, kind: "add" as const })) });
+      f.finish(role, report);
+    });
+    const result = await ask(f, "orch", worker, "opinion");
+    assert.equal(result.isError, false);
+    const body = textOf(result);
+    assert.doesNotMatch(body, /RESULT_START|RESULT_END|private detailed evidence/);
+    assert.ok(body.length < 150, "ordinary master results contain only a small receipt");
+    const saved = f.store.listConsults(f.chat.id)[0];
+    assert.ok(saved.responseSummary!.endsWith(report), "stored report remains intact");
+    assert.deepEqual(saved.filesChanged, paths);
+    const excerpt = textOf(await f.engine.call(f.chat.id, worker.key, "read_consult", { consultId: saved.id }));
+    assert.match(excerpt, /RESULT_START/);
+    assert.match(excerpt, /RESULT_END: remaining risk/);
+    assert.match(excerpt, /중간 내용 생략/);
+    assert.ok(excerpt.length < 3000);
+    const status = textOf(await f.engine.call(f.chat.id, "orch", "agents", {}));
+    assert.doesNotMatch(status, /RESULT_START|private detailed evidence/);
+    assert.match(status, /파일 30개/);
+    const check = textOf(await f.engine.call(f.chat.id, "orch", "check_agent", { to: worker.nickname }));
+    assert.ok(check.length < 3000);
+    let full = "", offset: number | null = 0;
+    f.engine.instructions.get(f.chat.id).queued.push({ text: "new user constraint", attachments: [] });
+    while (offset !== null) {
+      const response = await f.engine.call(f.chat.id, "orch", "read_consult", { consultId: saved.id, detail: true, offset, limit: 701 });
+      const page = JSON.parse(response.content[0].text);
+      if (!offset) assert.match(response.content[1].text, /new user constraint/);
+      assert.ok(page.text.length <= 701);
+      full += page.text;
+      offset = page.nextOffset;
+    }
+    const decoded = JSON.parse(full);
+    assert.equal(decoded.responseSummary, saved.responseSummary);
+    assert.deepEqual(decoded.filesChanged, paths);
+    assert.equal(f.sent.length, 1, "retrieval must never rerun a worker");
+    assert.deepEqual(f.store.consult(saved.id), saved);
+  } finally { await f.close(); }
+});
+
+test("saved result broadcasts are compacted while direct peer messages keep their full content", async () => {
+  const f = fixture();
+  try {
+    const worker = f.store.createAgent(f.chat.id, "claude", "peer");
+    await ask(f, "orch", worker, "opinion");
+    const c = f.store.listConsults(f.chat.id)[0];
+    f.store.addEvent(f.chat.id, "orch", worker.key, { type: "room_message", from: worker.key, kind: "result", consultId: c.id, status: "done", text: "OLD_REPORT_COPY".repeat(300) });
+    f.store.addEvent(f.chat.id, "orch", worker.key, { type: "peer_message", from: worker.key, to: "orch", text: "Important direct question" });
+    const inbox = textOf(await f.engine.call(f.chat.id, "orch", "read_messages", {}));
+    assert.doesNotMatch(inbox, /OLD_REPORT_COPY/);
+    assert.match(inbox, /협의 id=/);
+    assert.match(inbox, /Important direct question/);
+    assert.equal(textOf(await f.engine.call(f.chat.id, "orch", "read_messages", {})), "새 협업 메시지가 없습니다.");
+    assert.ok(f.store.events(f.chat.id).some(e => e.event.type === "room_message" && e.event.text.includes("OLD_REPORT_COPY")), "legacy timeline remains intact");
+  } finally { await f.close(); }
+});
+
+test("consult retrieval rejects foreign chats and invalid page parameters", async () => {
+  const f = fixture();
+  try {
+    const worker = f.store.createAgent(f.chat.id, "claude", "peer");
+    await ask(f, "orch", worker, "opinion");
+    const c = f.store.listConsults(f.chat.id)[0];
+    const other = f.store.createChat(f.project.id, "other");
+    assert.equal((await f.engine.call(other.id, "orch", "read_consult", { consultId: c.id, detail: true })).isError, true);
+    for (const invalid of [{ consultId: "1" }, { consultId: 99999 }, { detail: "true" }, { offset: -1 }, { offset: 0.5 }, { limit: 0 }, { limit: 8001 }]) {
+      assert.equal((await f.engine.call(f.chat.id, "orch", "read_consult", { consultId: c.id, ...invalid })).isError, true);
+    }
+  } finally { await f.close(); }
+});
+
+test("parallel assignments are consolidated by a worker who can verify directly with peers", async () => {
+  const f = fixture();
+  try {
+    const a = f.store.createAgent(f.chat.id, "claude", "collector");
+    const b = f.store.createAgent(f.chat.id, "gpt", "peer");
+    let collected = false;
+    f.behavior.set(a.key, async (input, role) => {
+      if (!input.text.includes("[작업자 결과 취합]")) return f.finish(role, "RAW_A_REPORT");
+      collected = true;
+      const originals = f.store.listConsults(f.chat.id).filter(c => c.status === "done");
+      assert.equal(originals.length, 2);
+      for (const c of originals) assert.match(textOf(await f.engine.call(f.chat.id, role, "read_consult", { consultId: c.id })), /RAW_[AB]_REPORT/);
+      const clarification = await f.engine.call(f.chat.id, role, "ask", { to: b.nickname, kind: "opinion", message: "confirm test evidence" });
+      assert.match(textOf(clarification), /peer confirmed/);
+      f.finish(role, "CONSOLIDATED: verification complete, output/result.md");
+    });
+    f.behavior.set(b.key, (input, role) => f.finish(role, input.text.includes("confirm test evidence") ? "peer confirmed" : "RAW_B_REPORT"));
+    const result = await f.engine.call(f.chat.id, "orch", "ask_parallel", { coordinator: a.nickname, tasks: [a, b].map(w => ({ to: w.nickname, kind: "opinion", message: "bounded task", reason: "independent work" })) });
+    assert.equal(result.isError, false);
+    assert.ok(collected);
+    assert.match(textOf(result), /CONSOLIDATED/);
+    assert.doesNotMatch(textOf(result), /RAW_A_REPORT|RAW_B_REPORT|peer confirmed/);
+    assert.equal(f.store.listConsults(f.chat.id).length, 4);
+    assert.equal(f.engine.parallelBatches.size, 0);
+  } finally { await f.close(); }
+});
+
+test("failed work cannot be hidden by a successful consolidated report", async () => {
+  const f = fixture();
+  try {
+    const a = f.store.createAgent(f.chat.id, "claude", "collector");
+    const b = f.store.createAgent(f.chat.id, "gpt", "failed peer");
+    f.behavior.set(a.key, (input, role) => f.finish(role, input.text.includes("[작업자 결과 취합]") ? "everything looks done" : "part A done"));
+    f.behavior.set(b.key, (_input, role) => f.chats.onDriverEvent!(f.chat.id, role, { type: "turn_end", ok: false, error: "provider unavailable" }));
+    const result = await f.engine.call(f.chat.id, "orch", "ask_parallel", { tasks: [a, b].map(w => ({ to: w.nickname, kind: "opinion", message: "task", reason: "test" })) });
+    assert.equal(result.isError, true);
+    assert.match(textOf(result), /error/);
+    assert.equal(f.store.listConsults(f.chat.id).filter(c => c.status === "error").length, 1);
+  } finally { await f.close(); }
+});
+
+test("stop after parallel work never launches an automatic collector", async () => {
+  const f = fixture();
+  try {
+    const a = f.store.createAgent(f.chat.id, "claude", "a");
+    const b = f.store.createAgent(f.chat.id, "gpt", "b");
+    f.behavior.set(b.key, (_input, role) => { f.finish(role); f.engine.stopped.add(f.chat.id); });
+    const result = await f.engine.call(f.chat.id, "orch", "ask_parallel", { tasks: [a, b].map(w => ({ to: w.nickname, kind: "opinion", message: "task", reason: "test" })) });
+    assert.equal(result.isError, true);
+    assert.equal(f.sent.length, 2);
+    assert.equal(f.engine.parallelBatches.size, 0);
+  } finally { await f.close(); }
+});
+
+test("an interrupted master waits through worker consolidation before its continuation", async () => {
+  const f = fixture();
+  let releaseWork!: () => void, releaseCollector!: () => void, startedCollector!: () => void;
+  const work = new Promise<void>(r => { releaseWork = r; });
+  const collecting = new Promise<void>(r => { releaseCollector = r; });
+  const started = new Promise<void>(r => { startedCollector = r; });
+  try {
+    const a = f.store.createAgent(f.chat.id, "claude", "collector");
+    const b = f.store.createAgent(f.chat.id, "gpt", "peer");
+    const continuations: AgentInput[] = [];
+    const master = { agent: "claude" as const, running: true, steer: async () => false, send: async (input: AgentInput) => { continuations.push(input); master.running = true; }, stop: async () => {}, dispose: async () => {} };
+    const workerDriver = f.chats.driver;
+    f.chats.driver = async (id, role, effort, model) => role === "orch" ? master : workerDriver(id, role, effort, model);
+    f.chats.liveDriver = (_id, role) => role === "orch" ? master : undefined;
+    for (const worker of [a, b]) f.behavior.set(worker.key, async (input, role) => {
+      if (input.text.includes("[작업자 결과 취합]")) { startedCollector(); await collecting; f.finish(role, "final consolidated report"); }
+      else { await work; f.finish(role, "part done"); }
+    });
+    f.store.updateChat(f.chat.id, { status: "working" });
+    const pending = f.engine.call(f.chat.id, "orch", "ask_parallel", { tasks: [a, b].map(w => ({ to: w.nickname, kind: "opinion", message: "task", reason: "test" })) });
+    await f.chats.send(f.chat.id, "quick question", [], "now");
+    assert.match(textOf(await pending), /quick question/);
+    master.running = false;
+    assert.equal(f.engine.checkCompletion(f.chat.id, { type: "turn_end", ok: true }), null);
+    releaseWork();
+    await started;
+    await new Promise(r => setImmediate(r));
+    assert.equal(continuations.length, 0, "part completion must not wake the master ahead of the collector");
+    const batch = [...f.engine.parallelBatches.get(f.chat.id)] as Promise<unknown>[];
+    releaseCollector();
+    await Promise.all(batch);
+    await new Promise(r => setImmediate(r));
+    assert.equal(continuations.length, 1);
+    assert.match(continuations[0].text, /협의 id=/);
+    assert.equal(f.store.listConsults(f.chat.id).length, 3);
+  } finally { releaseWork(); releaseCollector(); await f.close(); }
 });
 
 test("busy peer receives a live message; a failed steer leaves its inbox unread", async () => {
@@ -450,6 +622,7 @@ test("parallel parts exchange direct messages while both workers remain active",
     let ready = 0, release!: () => void;
     const barrier = new Promise<void>(r => { release = r; });
     for (const [self, peer] of [[a, b], [b, a]]) f.behavior.set(self.key, async (_input, role) => {
+      if (_input.text.includes("[작업자 결과 취합]")) return f.finish(role, "resultId contract confirmed by both workers");
       const sent = await f.engine.call(f.chat.id, role, "send_message", { to: peer.nickname, message: `${self.key}: use field resultId` });
       assert.equal(sent.isError, false);
       if (++ready === 2) release();
