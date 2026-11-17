@@ -7,6 +7,7 @@
 //     the judge may still deny them.
 //  4. delegated high-risk mode allows an uncertain/failed judgment within runtime restrictions;
 //     explicit denials stand. Otherwise show the inline approval card for the user.
+//  5. the judge's own tools follow full-risk delegation without recursively calling the judge.
 import { randomUUID } from "node:crypto";
 import { isAbsolute, relative, resolve } from "node:path";
 import { inScope as matchesScope } from "./scope";
@@ -189,8 +190,10 @@ export class ApprovalService {
       riskReason: c.reason,
       diffs: input.diffs,
     };
-    if (input.userOnly && fullApproval && !judgeSignal) {
-      const reason = "전체 승인 설정에 따라 앱 접근을 허용했습니다.";
+    if (fullApproval && (input.userOnly || judgeSignal)) {
+      const reason = judgeSignal
+        ? "전체 위험 승인 설정에 따라 승인 판정기의 확인 작업을 허용했습니다."
+        : "전체 승인 설정에 따라 앱 접근을 허용했습니다.";
       log("allow", "once", "orchestrator-delegated", reason);
       this.host.emit(chatId, input.node, input.role, { type: "approval_auto", request: { ...base, id: `ap:${randomUUID()}` }, decision: "allow", reason });
       return { verdict: "allow" };

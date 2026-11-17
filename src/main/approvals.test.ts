@@ -18,6 +18,43 @@ function fixture() {
 }
 const tick = () => new Promise<void>((r) => setImmediate(r));
 
+test("judge tool requests honor full-risk presets without recursive judging", async () => {
+  const command = "$r='D:\\Game\\Maked\\Fantasymasters\\output\\r106_deploy'; Get-ChildItem $r -Recurse -Depth 2 -Force | Where-Object { $_.Attributes -match 'ReparsePoint' } | Select-Object FullName,LinkType | Measure-Object";
+  for (const [mode, high, auto] of [["orchestrator-all", false, true], ["orchestrator", true, true], ["orchestrator", false, false], ["user", true, false]] as const) {
+    const f = fixture();
+    f.setMode(mode); f.setHigh(high);
+    const controller = new AbortController();
+    const pending = f.service.request(1, folder, { ...write, role: "w1", node: "consult:1", title: "승인 판정기 · PowerShell", key: "judge:PowerShell", command, detail: command, writes: false, paths: [] }, controller.signal);
+    await tick();
+    const count = f.service.pendingCount(1);
+    const event = f.events.find(e => e.type === "approval_request");
+    // Settle the request even on a regression so this test cannot leave a pending promise behind.
+    if (event?.type === "approval_request") f.service.answer(1, event.request.id, "once");
+    assert.equal((await pending).verdict, "allow");
+    assert.equal(count, auto ? 0 : 1, `${mode}, high=${high}`);
+    assert.equal(f.calls, 0, "the judge must not recursively judge its own tools");
+    assert.equal(f.events.some(e => e.type === "approval_auto" && e.decision === "allow"), auto);
+  }
+});
+
+test("full-risk judge tools still obey abort, runtime restrictions and write scopes", async () => {
+  const f = fixture();
+  f.setMode("orchestrator-all");
+  const controller = new AbortController();
+  f.setGuard("user stopped");
+  assert.equal((await f.service.request(1, folder, write, controller.signal)).verdict, "deny");
+  f.setGuard(null);
+  f.setScope(["other/**"]);
+  assert.equal((await f.service.request(1, folder, write, controller.signal)).verdict, "deny");
+  f.setScope(["a.txt"]);
+  assert.equal((await f.service.request(1, folder, { ...write, paths: [] }, controller.signal)).verdict, "deny");
+  controller.abort();
+  assert.equal((await f.service.request(1, folder, write, controller.signal)).verdict, "deny");
+  assert.equal(f.calls, 0);
+  assert.equal(f.service.pendingCount(1), 0);
+  assert.equal(f.events.some(e => e.type === "approval_request"), false);
+});
+
 test("native app access follows full approval, otherwise always asks a person without memo reuse", async () => {
   for (const mode of ["user", "orchestrator", "orchestrator-all"] as const) {
     const f = fixture();

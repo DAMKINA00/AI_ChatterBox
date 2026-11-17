@@ -5,19 +5,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApprovalJudge } from "./judge";
 import { ApprovalService, type ApprovalInput } from "./approvals";
-import { DEFAULT_SETTINGS, type AgentEvent } from "../shared/types";
+import { DEFAULT_SETTINGS, type AgentEvent, type ApprovalMode } from "../shared/types";
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 const action: ApprovalInput = { role: "w1", node: "consult:1", title: "Write", detail: "result.txt", key: "Write", writes: true, paths: ["result.txt"] };
 
-async function fixture(provider = "codex") {
+async function fixture(provider = "codex", approvalMode: ApprovalMode = "orchestrator") {
   const folder = mkdtempSync(join(tmpdir(), "chatterbox-judge-"));
   const events: AgentEvent[] = [], observed: AgentEvent[] = [];
   let calls = 0, scope = ["result.txt", "probe.txt"], blocked: string | null = null;
   const chats: any = {
     store: {
       chat: () => ({ projectId: 1 }),
-      project: () => ({ folder, settings: { ...DEFAULT_SETTINGS, orchestratorModel: `${provider}:test`, approvalMode: "orchestrator-all" } }),
+      project: () => ({ folder, settings: { ...DEFAULT_SETTINGS, orchestratorModel: `${provider}:test`, approvalMode } }),
       listAgents: () => [],
     },
     runningAccount: () => undefined, roleAccount: () => null,
@@ -29,7 +29,7 @@ async function fixture(provider = "codex") {
   };
   const judge = new ApprovalJudge(chats, () => ({ instruction: "프로젝트 수정과 검증", consult: { who: "reviewer", kind: "review", message: "검토 후 수정", scope } }));
   chats.approvals = new ApprovalService({
-    emit: chats.emit, log() {}, pendingChanged() {}, mode: () => ({ mode: "orchestrator-all", delegateHighRisk: true }),
+    emit: chats.emit, log() {}, pendingChanged() {}, mode: () => ({ mode: approvalMode, delegateHighRisk: approvalMode === "orchestrator-all" }),
     writeScope: () => ({ folder, globs: scope, why: "assigned scope" }), guard: () => blocked,
     judge: (...args) => { calls++; return judge.decide(...args); },
   });
@@ -52,6 +52,31 @@ test("every supported judge permits tools instead of imposing a read-only sessio
       assert.equal(f.driver.opts.ephemeral, true);
       assert.equal(f.driver.env?.tools, undefined);
       assert.doesNotMatch(f.driver.opts.instructions, /도구는 쓰지 않는다|리뷰·의견 요청인데 파일을 고치려는/);
+    } finally { await f.close(); }
+  }
+});
+
+test("full-risk judge inspection finishes without a user card and preserves the original verdict", async () => {
+  for (const decision of ["allow", "deny"] as const) {
+    const f = await fixture("codex", "orchestrator-all");
+    try {
+      f.driver.send = async () => {
+        const probe = await f.driver.host.approve({ title: "PowerShell", detail: "Check junctions in test folders", key: "PowerShell", command: "$r='output'; Get-ChildItem $r -Recurse -Depth 2 | Measure-Object", writes: false });
+        assert.equal(probe.verdict, "allow");
+        assert.equal((await f.driver.host.approve({ ...action, paths: ["probe.txt"] })).verdict, "allow");
+        assert.equal((await f.driver.host.approve({ ...action, paths: ["outside.txt"] })).verdict, "deny");
+        f.driver.host.emit({ type: "text", text: JSON.stringify({ decision, reason: "확인 결과" }) });
+        f.driver.host.emit({ type: "turn_end", ok: true });
+      };
+      const pending = f.chats.approvals.request(1, f.folder, action);
+      await tick();
+      const count = f.chats.approvals.pendingCount(1);
+      if (count) await f.judge.interrupt(1);
+      assert.equal(count, 0, "full approval must not fall back to a human for the judge's own inspection");
+      assert.equal((await pending).verdict, decision);
+      assert.equal(f.calls, 1);
+      assert.equal(f.events.some(e => e.type === "approval_request"), false);
+      assert.ok(f.events.some(e => e.type === "approval_auto" && e.request.title === "승인 판정기 · PowerShell" && e.request.role === "w1" && e.decision === "allow"));
     } finally { await f.close(); }
   }
 });
