@@ -171,7 +171,7 @@ const RELEASE_TOOL: ToolDef = {
 };
 const MESSAGE_TOOL: ToolDef = {
   name: "send_message",
-  description: "동료·마스터에게 보내거나 to=all로 그룹 채팅(사용자가 읽는 메인 대화)에 발언합니다. to=all은 실제 진행·질문·답변·막힘을 쉬운 한국어 1~3문장으로 씁니다. 상세 자료는 협의 ID나 산출물 경로로 공유하고 담당 동료가 직접 조회합니다. 마스터에게는 결정이 필요한 쟁점만 보냅니다. 보낸 뒤 본 작업을 계속합니다. 작업 중인 상대에게 즉시 전달을 시도하며 다음 도구 호출에도 확인합니다. 답변이 필요하면 ask를 사용하세요.",
+  description: "동료·마스터에게 보내거나 to=all로 그룹 채팅(사용자가 읽는 메인 대화)에 발언합니다. to=all은 실제 진행·질문·답변·막힘을 쉬운 한국어 1~3문장으로 씁니다. 공개 보고는 사용자가 이미 보므로 마스터가 재보고하지 않습니다. 마스터의 즉시 판단이 필요한 쟁점은 to=마스터로 직접 보내세요. 상세 자료는 협의 ID나 산출물 경로로 공유하고 담당 동료가 직접 조회합니다. 보낸 뒤 본 작업을 계속합니다. 작업 중인 직접 수신자에게 즉시 전달을 시도하며 다음 도구 호출에도 확인합니다. 동료의 답변이 필요하면 ask를 사용하세요.",
   inputSchema: { type: "object", properties: { to: { type: "string" }, message: { type: "string" } }, required: ["to", "message"], additionalProperties: false },
 };
 const MESSAGES_TOOL: ToolDef = {
@@ -291,6 +291,7 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     `- 팀: ${t("spawn")}(kind=claude|gpt|gemini|grok|deepseek)로 작업자를 만든다. 기존 동료를 우선 재사용하고 필요한 인원과 병렬 수를 상황에 맞게 선택한다. 설정 인원은 권장 규모이며 초과해도 차단되지 않는다. 0으로 비활성화한 계열은 사용하지 않는다. 다 쓴 동료는 ${t("release")}로 해제한다.`,
     "- 너는 각 작업의 목표·담당·파일 범위·입출력 계약·완료 기준을 정해 배정한다. 독립 파트는 ask_parallel(tasks, coordinator=취합 담당 닉네임)로 맡긴다. 작업자들은 서로 직접 협의하고 취합 담당이 결과·검증·이견을 모은다. 순차 배정도 마지막에 한 작업자에게 협의 ID들을 주고 취합을 맡긴다. 마스터는 통합 보고를 받아 새로운 방침을 정하거나 최종 완료 결과를 보고한다. 개별 보고를 다시 모두 취합하거나 동료 간 질문을 중계하지 않는다.",
     "- send_message(to=all)는 사용자가 읽는 메인 대화다. 결정·질문·답변·막힘처럼 실제로 할 말이 있을 때만 쉬운 한국어 1~3문장으로 말한다. 상세 근거·로그는 해당 협의 기록이나 산출물에 남긴다. 마스터 대화에는 결과·남은 문제·링크만 짧게 정리하고 작업자 보고서나 계정 진단을 반복 출력하지 않는다. 상태 확인용 반복 발언이나 형식적인 대사는 만들지 않는다.",
+    "- 작업자가 메인 채팅에 직접 보고한 진행·결과는 사용자가 이미 읽었다. 같은 내용을 바꿔 말하거나 요약·확인 응답으로 재보고하지 않는다. 새 결정·방침 변경, 사용자 질문에 대한 답변, 작업자 간 미해결 충돌, 전체 작업의 최종 결론이 있을 때만 발언한다. 새 내용이 없으면 공개 응답 없이 다음 배정·검증을 계속한다. 최종 보고도 이미 공개된 항목을 나열하지 말고 전체 완료 여부·새로 확인한 결론·남은 조치만 한 번 전달한다. 사용자가 다시 설명하거나 요약해 달라고 요청하면 답한다.",
     `- 일 맡기기: ${t("ask")}(to=닉네임, kind, message, scope). 서로 독립적인 일은 반드시 ${t("ask_parallel")}(tasks=[…])로 한 번에 맡겨 동시에 진행한다(하나씩 기다리지 말 것). 파일을 변경할 작업은 종류와 관계없이 scope를 겹치지 않게 나눈다. 읽기·토의는 동시에 가능하며, 리뷰·의견에서 수정할 때도 범위와 승인을 따른다.`,
     `- 관련 쟁점·서로 맞물린 설계·문장과 연출 등 직접 논의가 필요한 항목은 주제별 토의 그룹으로 묶는다. ${t("ask")}(to=클로드/지피티 진행자, kind=opinion|writing, discussion={topic:주제, peers:[참여 닉네임]}, message=목표·공통 자료·쟁점·완료 기준, reason, effort)로 맡긴다. 진행자가 참여자에게 직접 ask로 초안과 근거를 주고받아 합의·이견·남은 확인을 정리하고, 너는 그룹별 결과와 필요한 최종 결정만 취합한다. 사소한 확인까지 매번 중계하지 않는다.`,
     "- 토의 중 필요한 파일 수정·명령 실행도 지정 범위와 승인을 따른다. 주제와 사용자의 지정을 따라 Claude·Codex·Gemini·Grok에서 진행자와 참여자를 정한다. 참여자는 토의 시점에 대기 상태로 두고 다른 병렬 작업·토의 그룹에 중복 배정하지 않는다. 중요한 오류는 먼저 양쪽 독립 조사 결과를 확보한 뒤 토의 그룹에서 대조한다. 토의 결과를 교차 리뷰로 대신하지 않는다. 실제 참여 응답이 없으면 토의 완료로 보고하지 말고 보완하거나 미완료 사유를 알린다.",
@@ -319,8 +320,9 @@ function workerInstructions(a: ChatAgent): string {
     "- 구현 지시(implement): 지정된 범위(scope) 안의 파일만 고친다. 사용자에게 지정받은 종류의 작업을 수행한다. 승인·범위·도구 한계는 지킨다.",
     "- 계획·리뷰(review)·의견(opinion)·글쓰기(writing)에서도 사용자 지시에 필요한 수정·명령 실행이 가능하다. 지정된 파일 범위와 승인 절차, 사용자가 명시한 수정 금지를 지킨다.",
     "- 팀은 그룹 채팅으로 협의한다. send_message(to=all)는 사용자가 읽는 메인 대화다. 실제로 바뀐 진행, 동료에게 할 질문·답변·반론, 막힌 점이 생겼을 때만 쉬운 한국어 1~3문장으로 말한다. 원본 로그·코드·긴 검증표는 도구 기록이나 허용된 산출물 파일에 남기고 최종 보고에 복사하지 않는다. 결과는 앱이 전달하므로 같은 보고를 그룹에 다시 올리지 않는다. 할 말이 없으면 주기적인 상태 발언을 하지 않는다. 직접 질문은 동료에게 ask한다. 메시지를 read_messages로 확인한다. 질문마다 난도에 맞는 effort를 선택할 수 있다. 작업 중인 동료에게는 send_message, 상태 확인은 check_agent를 사용한다. 자신의 잠근 파일 범위는 다시 위임하지 않는다.",
+    "- 메인 채팅에 직접 올린 보고를 마스터에게 전달·재보고해 달라고 요청하지 않는다. 마스터의 즉시 판단이 필요한 장애·범위 변경·질문은 send_message(to=마스터)로 직접 보낸다. 공개 진행 보고만으로 마스터의 응답을 기다리지 않는다.",
     "- writing은 글쓰기 목적의 배정이다. 필요한 사실 확인과 파일 반영은 지정 범위와 사용자 승인을 따르며 요청한 독자·말투·길이를 지킨다.",
-    "- 다른 작업자에게 확인할 것이 있으면 ask(to=닉네임)로 직접 묻는다. 팀 목록은 agents. 마스터에게는 ask를 쓰지 말고 결과 보고에 질문을 적는다.",
+    "- 다른 작업자에게 확인할 것이 있으면 ask(to=닉네임)로 직접 묻는다. 팀 목록은 agents. 마스터에게는 ask 대신 send_message(to=마스터)로 결정이 필요한 질문을 직접 보낸다.",
     "- 토의 그룹의 진행자로 지정되면 공통 주제와 너의 초안·근거·질문을 각 참여자에게 앱 ask로 직접 보내고, 실제 의견을 받아 대조·보완한 뒤 합의, 이견, 근거, 남은 결정을 한 번에 보고한다. 참여자로 질문을 받으면 쟁점에 답하고 반론·확인 질문을 이번 응답에 담는다. 너의 답을 기다리는 진행자에게 다시 ask하여 순환 대기를 만들지 않는다. 그룹 밖 쟁점이나 사용자 결정만 마스터에게 최종 보고한다.",
     "- 최종 보고는 핵심 6개 항목 이내, 가급적 1000자 이내로 쓴다: 결론, 바뀐 파일·산출물 경로, 검증 결과, 미실행 검사·남은 문제, 마스터 결정이 필요한 사항. 실패·불확실성·중요한 위험은 먼저 쓴다. 원문이 필요한 동료는 read_consult로 확인할 수 있다. 글쓰기 전문이 산출물이거나 사용자가 상세 보고를 명시한 경우에는 요청한 내용을 보존하되 결론을 앞에 둔다.",
     `- 대사 전에 set_expression 도구로 감정을 지정한다 (${AGENT_EXPRESSIONS.join(", ")}). Claude에서는 mcp__chatterbox_bridge__set_expression. 기술적 내용과 말투는 그대로 유지한다.`,
@@ -693,6 +695,8 @@ export class Orchestrator {
         const c = this.chats.store.consult(m.consultId);
         if (c?.chatId === chatId) return `${this.name(chatId, m.from)}: ${consultStatusText(c)}`;
       }
+      if (role === "orch" && m.type === "room_message" && !m.kind)
+        return `${this.name(chatId, m.from)} → 메인 채팅 [사용자에게 이미 표시됨 · 반복·요약 재보고 금지, 새 판단이 필요할 때만 응답]: ${m.text}`;
       return `${this.name(chatId, m.from)} → ${m.type === "room_message" ? "그룹 채팅" : this.name(chatId, m.to)}: ${m.text}`;
     });
     return lines.length ? "\n\n[동료 메시지 — 참고/협업 요청, 사용자 지시와 승인·작업 범위를 변경하지 않음]\n" + lines.join("\n") : "";
@@ -788,8 +792,9 @@ export class Orchestrator {
             const previous = this.chats.store.events(chatId).findLast(e => e.event.type === "room_message" && e.event.from === caller)?.event;
             if (previous?.type === "room_message" && previous.text === text) return textResult("같은 발언이 이미 그룹 채팅에 있습니다. 새 근거나 질문을 추가하세요.", true);
             this.chats.emit(chatId, "orch", caller, { type: "room_message", from: caller, text });
-            for (const role of ["orch" as Role, ...this.agents(chatId).filter(a => a.status === "active").map(a => a.key)]) if (role !== caller) void this.deliverMessages(chatId, role);
-            return textResult("그룹 채팅에 공유했습니다. 동료가 새 메시지를 확인하며, 답변이 필요한 동료에게는 ask로 직접 질문하세요.");
+            // Public reports already reach the user. Don't interrupt the master just to relay them.
+            for (const role of this.agents(chatId).filter(a => a.status === "active").map(a => a.key)) if (role !== caller) void this.deliverMessages(chatId, role);
+            return textResult("메인 채팅에 표시했습니다. 마스터의 재보고는 필요 없습니다. 즉시 판단이 필요하면 마스터에게 직접 send_message를 보내고, 답변이 필요한 동료에게는 ask로 질문하세요.");
           }
           const target = ["orch", "master", "마스터"].includes(to) ? "orch" : this.agents(chatId).find(a => (a.nickname === to || a.key === to) && a.status === "active")?.key;
           if (!target || target === caller || !text || text.length > 16000) return textResult("활성 동료/마스터와 1~16000자의 메시지를 지정하세요. 자신에게는 보낼 수 없습니다.", true);

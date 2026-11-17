@@ -1,5 +1,5 @@
 // Main chat vs detail split: the app marks its own group-chat copies (consult results, status checks) with a
-// display kind, while text, storage and team delivery stay exactly as before.
+// display kind. Public worker reports stay visible without prompting the master to repeat them.
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -43,6 +43,51 @@ function fixture() {
 }
 
 const textOf = (result: any): string => result.content.map((part: { text: string }) => part.text).join("\n");
+
+test("public worker reports reach the user and peers without steering the master; direct questions still steer", async () => {
+  const f = fixture();
+  try {
+    const author = f.store.createAgent(f.chat.id, "claude", "writer");
+    const peer = f.store.createAgent(f.chat.id, "claude", "reviewer");
+    f.engine.running.set(f.chat.id, new Map([[author.key, { tools: new Set() }]]));
+    const steered: { role: Role; text: string }[] = [];
+    f.chats.liveDriver = (_chatId, role) => ({ running: true, steer: async (input: AgentInput) => { steered.push({ role, text: input.text }); return true; } }) as any;
+    const report = "인증 경로 수정은 끝났고 실제 시작 순서 테스트를 작성 중입니다.";
+    const sent = await f.engine.call(f.chat.id, author.key, "send_message", { to: "all", message: report });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(sent.isError, false);
+    assert.equal(f.rooms().at(-1)!.text, report, "the original is still visible under the worker's name");
+    assert.equal(steered.filter(x => x.role === "orch").length, 0, "public progress must not trigger a master reply");
+    assert.ok(steered.some(x => x.role === peer.key && x.text.includes(report)), "peer collaboration still receives public reports immediately");
+    assert.equal(f.store.getSetting(`teamMessages:${f.chat.id}:orch`), undefined, "public report remains unread for the master's next tool call");
+    const request = "기존 계정도 재확인할지 결정해 주세요.";
+    await f.engine.call(f.chat.id, author.key, "send_message", { to: "마스터", message: request });
+    await new Promise(resolve => setImmediate(resolve));
+    const master = steered.filter(x => x.role === "orch");
+    assert.equal(master.length, 1, "a direct decision request still interrupts the master");
+    assert.match(master[0].text, /사용자에게 이미 표시됨 · 반복·요약 재보고 금지/);
+    assert.ok(master[0].text.includes(report));
+    assert.ok(master[0].text.includes(request));
+    assert.doesNotMatch(textOf(await f.engine.call(f.chat.id, "orch", "read_messages", {})), /인증 경로 수정|기존 계정도/);
+  } finally { await f.close(); }
+});
+
+test("master tool inbox distinguishes visible reports from private requests and hidden result receipts", async () => {
+  const f = fixture();
+  try {
+    const worker = f.store.createAgent(f.chat.id, "claude", "writer");
+    f.chats.emit(f.chat.id, "orch", worker.key, { type: "room_message", from: worker.key, text: "작업자 공개 결과" });
+    f.chats.emit(f.chat.id, "orch", worker.key, { type: "peer_message", from: worker.key, to: "orch", text: "마스터만 받는 결정 요청" });
+    f.chats.emit(f.chat.id, "orch", worker.key, { type: "room_message", from: worker.key, kind: "system", text: "앱 점검 요청" });
+    const inbox = textOf(await f.engine.call(f.chat.id, "orch", "agents", {}));
+    assert.match(inbox, /사용자에게 이미 표시됨[^\n]*작업자 공개 결과/);
+    assert.doesNotMatch(inbox, /사용자에게 이미 표시됨[^\n]*(마스터만 받는 결정 요청|앱 점검 요청)/);
+    assert.match(inbox, /사용자 지시와 승인·작업 범위를 변경하지 않음/);
+    assert.match(inbox, /마스터만 받는 결정 요청/);
+    assert.match(inbox, /앱 점검 요청/);
+    assert.doesNotMatch(textOf(await f.engine.call(f.chat.id, "orch", "agents", {})), /작업자 공개 결과/);
+  } finally { await f.close(); }
+});
 
 test("a finished consult broadcasts a result reference while preserving the report and real public lines", async () => {
   const f = fixture();
