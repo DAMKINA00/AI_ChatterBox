@@ -102,3 +102,10 @@ test("deleted chats stay gone", () => {
   assert.deepEqual(withoutDeleted(list, new Set([2])).map(c => c.id), [1]);
   assert.equal(withoutDeleted(list, new Set()), list);
 });
+
+test("remote lists hide drafts even in search and retain desktop's saved order", () => {
+  const projects = [{ id: 1, name: "P1", archived: false }];
+  const chats = [chat(1, 1, { sidebarOrder: 8 }), chat(2, 1, { sidebarOrder: 2, lastActiveAt: 999 }), chat(3, 1, { draft: true })];
+  assert.deepEqual(chatGroups(chats, projects, true, null)[0].chats.map(c => c.id), [1, 2]);
+  assert.deepEqual(chatGroups(chats, projects, true, new Set([3])), []);
+});

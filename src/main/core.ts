@@ -77,7 +77,8 @@ function registerHandlers(rpc: CoreRpc) {
 
   // chats
   ipcMain.handle("chats:list", () => store.listChats());
-  ipcMain.handle("chats:create", (_e, projectId: number) => store.createChat(projectId, "새 채팅"));
+  ipcMain.handle("chats:create", (_e, projectId: number) => store.createDraftChat(projectId));
+  ipcMain.handle("chats:reorder", (_e, id: number, targetId: number, placement: "before" | "after") => chats.reorderChat(id, targetId, placement));
   ipcMain.handle("chats:update", (_e, id: number, patch) => chats.updateChat(id, patch));
   ipcMain.handle("chats:delete", async (_e, id: number) => {
     await orchestrator.stop(id);
@@ -254,6 +255,7 @@ export async function runCore(dataDir: string, pipe: string, token: string, test
     stopping = true;
     orchestrator?.stopRecovery();
     await boot.catch(() => undefined);
+    await orchestrator?.council.dispose().catch(() => undefined);
     await orchestrator?.judge.dispose().catch(() => undefined);
     await chats?.dispose().catch(() => undefined);
     try { store?.close(); } catch { /* already closed */ }

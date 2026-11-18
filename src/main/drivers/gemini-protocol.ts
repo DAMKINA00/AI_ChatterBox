@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ModelOption, TokenCounts } from "../../shared/types";
-import { requireAntigravityLogin, antigravityProfileDir } from "../antigravity-profile";
+import { AGY_BACKGROUND_ENV, requireAntigravityLogin, antigravityProfileDir } from "../antigravity-profile";
 import { claudeToolDiffs } from "../diffs";
 
 /** Use the native CLI account model list, including Argon when the account provides it. */
@@ -53,7 +53,7 @@ export async function listGeminiModels(exe: string, cwd: string, env: Record<str
   const cached = modelLists.get(key);
   if (cached && cached.expires > Date.now()) return cached.promise;
   const promise = new Promise<ModelOption[]>((resolve, reject) => {
-    execFile(exe, ["models"], { cwd, windowsHide: true, timeout: 45000, maxBuffer: 1024 * 1024, env: { ...process.env, ...env } }, (error, stdout, stderr) => {
+    execFile(exe, ["models"], { cwd, windowsHide: true, timeout: 45000, maxBuffer: 1024 * 1024, env: { ...process.env, ...env, ...AGY_BACKGROUND_ENV } }, (error, stdout, stderr) => {
       if (error) {
         const login = /sign in|not logged|authenticate/i.test(stdout + stderr);
         return reject(new Error(login ? "Antigravity에 로그인해 주세요. 터미널에서 agy를 실행하면 Google 계정 로그인을 진행할 수 있습니다." : "Antigravity 모델 목록 조회가 지연되거나 실패했습니다. 네트워크 상태를 확인하고 다시 시도하세요."));
@@ -70,7 +70,7 @@ export async function listGeminiModels(exe: string, cwd: string, env: Record<str
 
 export const GEMINI_READ_TOOLS = new Set(["view_file", "list_dir", "find_by_name", "grep_search", "view_file_outline", "view_code_item", "search_web", "read_url_content", "view_content_chunk", "list_permissions"]);
 export const GEMINI_WRITE_TOOLS = new Set(["write_to_file", "replace_file_content", "multi_replace_file_content"]);
-export const GEMINI_BRIDGE_TOOLS = new Set(["route_request", "cli_accounts", "spawn", "ask", "ask_parallel", "send_message", "read_messages", "read_consult", "check_agent", "report_review", "release", "agents", "checklist", "update_goal", "ask_user", "set_expression"]);
+export const GEMINI_BRIDGE_TOOLS = new Set(["route_request", "council_consult", "council_explore", "cli_accounts", "spawn", "ask", "ask_parallel", "send_message", "read_messages", "read_consult", "check_agent", "report_review", "release", "agents", "checklist", "update_goal", "ask_user", "set_expression"]);
 
 /** CLI versions use different names for the same native file/command tools. */
 export function normalizeGeminiTool(name: string, input: Record<string, unknown>) {

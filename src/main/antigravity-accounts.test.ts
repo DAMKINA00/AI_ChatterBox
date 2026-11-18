@@ -45,6 +45,7 @@ test("Antigravity models and usage run in their own profile; model caches never 
     const [ua, ub] = await Promise.all([readGeminiUsage(exe, root, accounts.env(a.accountId)), readGeminiUsage(exe, root, accounts.env(b.accountId))]);
     assert.equal(Math.round(ua.weekly!.usedPercent), 20); assert.equal(ub.weekly!.usedPercent, 75);
     assert.ok(cli.calls.every(c => c.env.HOME === c.env.USERPROFILE && !!c.env.SSH_CONNECTION));
+    assert.ok(cli.calls.every(c => c.env.AGY_CLI_DISABLE_AUTO_UPDATE === "true"), "model lists and usage reads never start agy's own updater");
     assert.equal(process.env.USERPROFILE, originalHome); assert.deepEqual(accounts.env("gemini-1"), {});
   } finally { cli.restore(); clearGeminiModels(); rmSync(root, { recursive: true, force: true }); }
 });

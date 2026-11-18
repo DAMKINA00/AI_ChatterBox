@@ -258,6 +258,8 @@ const toChat = (r: Row): Chat => ({
   archived: !!r.archived,
   createdAt: r.created_at,
   lastActiveAt: r.last_active_at,
+  draft: !!r.draft,
+  sidebarOrder: r.sidebar_order,
   ...(r.fork_json ? { fork: JSON.parse(r.fork_json) } : {}),
 });
 const toConsult = (r: Row): Consult => ({
@@ -320,6 +322,17 @@ export class Store {
       rename.run(WORKER_KIND_LABEL[kind], kind, old);
     }
     this.migrateAllocationLimits();
+    if (!this.getSetting("migratedSidebarOrder")) {
+      this.db.exec("SAVEPOINT sidebar_order");
+      try {
+        this.db.exec("UPDATE chats SET sidebar_order = last_active_at");
+        this.setSetting("migratedSidebarOrder", "1");
+        this.db.exec("RELEASE sidebar_order");
+      } catch (error) {
+        this.db.exec("ROLLBACK TO sidebar_order; RELEASE sidebar_order");
+        throw error;
+      }
+    }
   }
 
   private migrateAllocationLimits() {
@@ -470,6 +483,8 @@ export class Store {
     add("consults", "assignment_json", "assignment_json TEXT");
     add("consults", "interrupted_by", "interrupted_by TEXT");
     add("chats", "fork_json", "fork_json TEXT");
+    add("chats", "draft", "draft INTEGER NOT NULL DEFAULT 0");
+    add("chats", "sidebar_order", "sidebar_order INTEGER NOT NULL DEFAULT 0");
     add("approvals", "decided_by", "decided_by TEXT NOT NULL DEFAULT 'user'");
     add("approvals", "reason", "reason TEXT");
     add("attachments", "uuid", "uuid TEXT"); // remote uploads only; NULL for desktop attachments
@@ -573,18 +588,47 @@ export class Store {
 
   // ---- chats
   listChats(): Chat[] {
-    return this.db.prepare("SELECT * FROM chats ORDER BY last_active_at DESC").all().map(toChat);
+    return this.db.prepare("SELECT * FROM chats ORDER BY sidebar_order DESC, id DESC").all().map(toChat);
   }
   chat(id: number): Chat | undefined {
     const r = this.db.prepare("SELECT * FROM chats WHERE id = ?").get(id);
     return r ? toChat(r) : undefined;
   }
-  createChat(projectId: number, title: string): Chat {
+  createChat(projectId: number, title: string, draft = false): Chat {
     const now = Date.now();
     const r = this.db
-      .prepare("INSERT INTO chats (project_id, title, created_at, last_active_at) VALUES (?, ?, ?, ?)")
-      .run(projectId, title, now, now);
+      .prepare("INSERT INTO chats (project_id, title, created_at, last_active_at, draft, sidebar_order) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(projectId, title, now, now, draft ? 1 : 0, draft ? 0 : this.nextSidebarOrder(projectId));
     return this.chat(Number(r.lastInsertRowid))!;
+  }
+  /** Reopen the project's unpublished composer instead of accumulating empty chats. */
+  createDraftChat(projectId: number): Chat {
+    const existing = this.db.prepare("SELECT * FROM chats WHERE project_id = ? AND draft = 1 ORDER BY id DESC LIMIT 1").get(projectId);
+    return existing ? toChat(existing) : this.createChat(projectId, "새 채팅", true);
+  }
+  private nextSidebarOrder(projectId: number): number {
+    return Number(this.db.prepare("SELECT COALESCE(MAX(sidebar_order), 0) + 1 AS next FROM chats WHERE project_id = ? AND draft = 0").get(projectId)!.next);
+  }
+  reorderChat(id: number, targetId: number, placement: "before" | "after"): Chat[] {
+    if (!Number.isSafeInteger(id) || !Number.isSafeInteger(targetId) || id <= 0 || targetId <= 0) throw new Error("올바른 채팅 ID를 지정하세요.");
+    if (!["before", "after"].includes(placement)) throw new Error("올바른 채팅 위치를 지정하세요.");
+    const chat = this.chat(id), target = this.chat(targetId);
+    if (!chat || !target || chat.draft || target.draft) throw new Error("목록에 등록된 채팅만 이동할 수 있습니다.");
+    if (chat.projectId !== target.projectId) throw new Error("같은 프로젝트 안에서만 채팅 순서를 바꿀 수 있습니다.");
+    const ordered = this.listChats().filter(c => c.projectId === chat.projectId && !c.draft);
+    if (id === targetId) return ordered;
+    const rest = ordered.filter(c => c.id !== id);
+    rest.splice(rest.findIndex(c => c.id === targetId) + (placement === "after" ? 1 : 0), 0, chat);
+    this.db.exec("SAVEPOINT reorder_chats");
+    try {
+      const update = this.db.prepare("UPDATE chats SET sidebar_order = ? WHERE id = ?");
+      rest.forEach((c, i) => update.run(rest.length - i, c.id));
+      this.db.exec("RELEASE reorder_chats");
+    } catch (error) {
+      this.db.exec("ROLLBACK TO reorder_chats; RELEASE reorder_chats");
+      throw error;
+    }
+    return this.listChats().filter(c => c.projectId === chat.projectId && !c.draft);
   }
   updateChat(id: number, patch: ChatPatch): Chat {
     const c = this.chat(id)!;
@@ -647,6 +691,7 @@ export class Store {
           source.approvalModeOverride, source.orchestratorModelOverride, JSON.stringify(fork), now, now,
         );
       const chatId = Number(r.lastInsertRowid);
+      this.db.prepare("UPDATE chats SET sidebar_order = ? WHERE id = ?").run(this.nextSidebarOrder(source.projectId), chatId);
       const event = context(chatId);
       const stored = this.addEvent(chatId, "orch", null, event);
       this.linkAttachments(event.attachments.map(a => a.id), stored.id);
@@ -945,6 +990,10 @@ export class Store {
     try {
       const ev = this.addEvent(chatId, "orch", null, event);
       this.linkAttachments(attachmentIds, ev.id);
+      const chat = this.chat(chatId)!;
+      if (event.type === "user" && chat.draft) {
+        this.db.prepare("UPDATE chats SET draft = 0, sidebar_order = ? WHERE id = ?").run(this.nextSidebarOrder(chat.projectId), chatId);
+      }
       this.db.exec("RELEASE user_event");
       return ev;
     } catch (error) {

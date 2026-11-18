@@ -162,6 +162,8 @@ test("two-kind agent migration preserves identities, sessions, statuses, events,
         archived: false,
         createdAt: 20,
         lastActiveAt: 30,
+        draft: false,
+        sidebarOrder: 30,
       },
     );
     assert.deepEqual(

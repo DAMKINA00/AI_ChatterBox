@@ -61,6 +61,7 @@ import { validateReviewResult } from "../shared/review-result";
 import { forkContextPrompt } from "./chat-fork";
 import { buildResumeContext, instructionToResume, parseInstructionSnapshot, type InstructionSnapshot } from "./resume-context";
 import { consultResultText, consultStatusText, masterResultText } from "./consult-context";
+import { Council, COUNCIL_TOOLS } from "./council";
 
 const KINDS: ConsultKind[] = ["implement", "review", "opinion", "writing"];
 const MAX_DEPTH = 3;
@@ -266,6 +267,7 @@ function masterInstructions(project: Project, agent: AgentKind): string {
   return [
     "# 역할: AI_ChatterBox 마스터",
     `너는 사용자의 지시를 받아 팀을 꾸리고 일을 나눠 맡기는 마스터다. 작업 폴더: ${project.folder}`,
+    `- 좁은 판단에 별도 시각이 꼭 필요하면 ${t("council_consult")}에 질문과 필요한 문맥만 준다. 파일 위치·짧은 근거 탐색은 ${t("council_explore")}의 search/grep/docs를 사용한다. 단순 답변에는 호출하지 않는다. 두 도구는 파일 수정·명령 실행·하위 위임 없이 제한된 결과만 반환한다. 구현, 독립 조사, 코드 리뷰나 완료 검증을 대신하지 않으며 기존 spawn/ask·교차 리뷰 요건을 그대로 지킨다. Gemini 자문은 purpose=writing인 글쓰기만 지정한다.`,
     "- 너는 배정·방침 결정·최종 보고 담당이다. 간단한 질문·짧은 설명·이미 주어진 정보만으로 답할 수 있는 확인은 direct로 기록한 뒤 작업자를 생성하거나 호출하지 않고 직접 답한다. 상세 원인 조사·구현·이미지·문서 제작 등 본 작업은 앱 작업자에게 맡긴다. 결과에 누락·모순이 있으면 담당자에게 보완을 요청하고 통합 결론을 받아 최종 답변한다. 사용자가 명시적으로 직접 수행을 요구한 예외에도 기존 승인·작업 범위 규칙을 지킨다.",
     "- 마스터는 목표·범위·완료 기준을 전달하고 결론을 정리한다. 개별 배정에서는 협의 ID·상태만 받는다. 작업자 보고서들을 읽어 다시 취합하지 말고 최종 취합 담당에게 협의 ID들을 주고 ask(summary=true)로 400자 이내 결론·검증 여부·미해결 사항·산출물 링크를 받는다. ask_parallel은 이 취합을 자동 수행한다. 상세 검증은 담당자와 비작성자 리뷰어가 직접 수행한다. 새 방침이나 사용자 결정이 필요한 쟁점만 판단한다. 근거가 부족하면 담당자에게 좁게 확인하고 생략된 내용을 확인한 것처럼 말하지 않는다. 사용자가 전문을 요청하거나 중대한 오류의 근거가 꼭 필요한 예외에만 read_consult(detail=true)로 필요한 원문 페이지를 조회한다.",
     `- 지시마다 먼저 ${t("route_request")}(mode=direct|delegated, reason=이유)를 호출한다. 반환되는 실제 사용 가능 도구·모델·사용량으로 후보를 확인한다. 도구 사용 불가/미확인은 가능하다고 가정하지 않는다.`,
@@ -324,6 +326,7 @@ function workerInstructions(a: ChatAgent): string {
     "- writing은 글쓰기 목적의 배정이다. 필요한 사실 확인과 파일 반영은 지정 범위와 사용자 승인을 따르며 요청한 독자·말투·길이를 지킨다.",
     "- 다른 작업자에게 확인할 것이 있으면 ask(to=닉네임)로 직접 묻는다. 팀 목록은 agents. 마스터에게는 ask 대신 send_message(to=마스터)로 결정이 필요한 질문을 직접 보낸다.",
     "- 토의 그룹의 진행자로 지정되면 공통 주제와 너의 초안·근거·질문을 각 참여자에게 앱 ask로 직접 보내고, 실제 의견을 받아 대조·보완한 뒤 합의, 이견, 근거, 남은 결정을 한 번에 보고한다. 참여자로 질문을 받으면 쟁점에 답하고 반론·확인 질문을 이번 응답에 담는다. 너의 답을 기다리는 진행자에게 다시 ask하여 순환 대기를 만들지 않는다. 그룹 밖 쟁점이나 사용자 결정만 마스터에게 최종 보고한다.",
+    "- 좁은 파일·근거 탐색에는 council_explore(search/grep/docs), 제공된 문맥만의 단발성 의견에는 council_consult를 사용할 수 있다. 마스터를 중계하지 않아도 된다. 검색은 제한된 읽기 전용 결과이며 전체 검증·독립 리뷰로 보고하지 않는다. Gemini 자문은 purpose=writing인 문장·대사·문서 작성에만 사용한다.",
     "- 최종 보고는 핵심 6개 항목 이내, 가급적 1000자 이내로 쓴다: 결론, 바뀐 파일·산출물 경로, 검증 결과, 미실행 검사·남은 문제, 마스터 결정이 필요한 사항. 실패·불확실성·중요한 위험은 먼저 쓴다. 원문이 필요한 동료는 read_consult로 확인할 수 있다. 글쓰기 전문이 산출물이거나 사용자가 상세 보고를 명시한 경우에는 요청한 내용을 보존하되 결론을 앞에 둔다.",
     `- 대사 전에 set_expression 도구로 감정을 지정한다 (${AGENT_EXPRESSIONS.join(", ")}). Claude에서는 mcp__chatterbox_bridge__set_expression. 기술적 내용과 말투는 그대로 유지한다.`,
   ].join("\n");
@@ -433,6 +436,7 @@ export class Orchestrator {
   /** Chats whose current turn already recorded its plan as incomplete (the completion guard). */
   private planIncomplete = new Set<number>();
   readonly judge: ApprovalJudge;
+  readonly council: Council;
 
   constructor(private chats: ChatManager) {
     chats.beforeMasterEnd = (chatId, event) => this.checkCompletion(chatId, event);
@@ -464,6 +468,7 @@ export class Orchestrator {
       };
     });
     chats.judge = (chatId, request, input) => this.judge.decide(chatId, request, input);
+    this.council = new Council(chats);
     chats.writeScope = (chatId, role) => this.writeScope(chatId, role);
     chats.approvalGuard = (chatId, input) => this.guardApproval(chatId, input);
     chats.instructionsFor = (chat, project, role, agent) => {
@@ -670,8 +675,8 @@ export class Orchestrator {
       reg = this.chats.bridge.register(
         {
           tools: master
-            ? [ROUTE_TOOL, CLI_ACCOUNTS_TOOL, SPAWN_TOOL, ASK_TOOL(true), ASK_PARALLEL_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, RELEASE_TOOL, AGENTS_TOOL, READ_CONSULT_TOOL, CHECK_AGENT_TOOL, CHECKLIST_TOOL, GOAL_TOOL, ASK_USER_TOOL, EXPRESSION_TOOL]
-            : [ASK_TOOL(false), ASK_PARALLEL_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, AGENTS_TOOL, READ_CONSULT_TOOL, CHECK_AGENT_TOOL, REPORT_REVIEW_TOOL, EXPRESSION_TOOL],
+            ? [ROUTE_TOOL, ...COUNCIL_TOOLS, CLI_ACCOUNTS_TOOL, SPAWN_TOOL, ASK_TOOL(true), ASK_PARALLEL_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, RELEASE_TOOL, AGENTS_TOOL, READ_CONSULT_TOOL, CHECK_AGENT_TOOL, CHECKLIST_TOOL, GOAL_TOOL, ASK_USER_TOOL, EXPRESSION_TOOL]
+            : [...COUNCIL_TOOLS, ASK_TOOL(false), ASK_PARALLEL_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, AGENTS_TOOL, READ_CONSULT_TOOL, CHECK_AGENT_TOOL, REPORT_REVIEW_TOOL, EXPRESSION_TOOL],
           call: (name, args) => this.call(chatId, role, name, args),
         },
         id,
@@ -736,10 +741,19 @@ export class Orchestrator {
     if (!this.chats.store.chat(chatId)) return textResult("채팅이 삭제되었습니다.", true);
     if ((this.stopped.has(chatId) || ["pausing", "paused"].includes(this.chats.store.chat(chatId)!.status)) && name !== "agents") return textResult("사용자가 작업을 중지했습니다. 재시작 전까지 기다리세요.", true);
     const master = caller === "orch";
-    if (master && this.instructions.get(chatId)?.pendingImmediate && ["spawn", "ask", "ask_parallel", "release", "checklist", "update_goal", "ask_user"].includes(name))
+    if (master && this.instructions.get(chatId)?.pendingImmediate && ["council_consult", "council_explore", "spawn", "ask", "ask_parallel", "release", "checklist", "update_goal", "ask_user"].includes(name))
       return textResult("사용자의 즉시 추가 질문·수정 요청에 먼저 직접 답변하세요. 이미 아는 내용은 바로 설명하고, 수정 요청은 이해한 내용과 반영 방법을 사용자에게 먼저 말한 뒤 기존 작업을 계속하세요. 기존 작업자는 그대로 실행 중입니다.", true);
     try {
       switch (name) {
+        case "council_consult":
+        case "council_explore": {
+          if (master && !this.instructions.has(chatId)) return textResult("진행 중인 사용자 지시가 없습니다.", true);
+          if (!master && !this.running.get(chatId)?.has(caller)) return textResult("현재 배정받은 작업이 없습니다.", true);
+          const epoch = this.epochs.get(chatId);
+          const result = await this.council.run(chatId, name, args);
+          if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch) return textResult("자문·탐색이 중지되었습니다. 이전 답변은 반영하지 않습니다.", true);
+          return textResult(JSON.stringify(result));
+        }
         case "read_messages": return textResult(this.readMessages(chatId, caller) || "새 협업 메시지가 없습니다.");
         case "read_consult": {
           if (!Number.isSafeInteger(args.consultId)) return textResult("consultId는 정수여야 합니다.", true);
@@ -2085,7 +2099,7 @@ export class Orchestrator {
     const w = this.scopeWaiters.get(chatId) ?? [];
     this.scopeWaiters.set(chatId, []);
     for (const f of w) f();
-    await this.chats.stop(chatId);
+    await Promise.all([this.chats.stop(chatId), this.council.cancel(chatId)]);
     if (!preserve && ["pausing", "paused"].includes(this.chats.store.chat(chatId)?.status ?? "")) this.chats.updateChat(chatId, { status: "idle" });
   }
 

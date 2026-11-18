@@ -5,6 +5,7 @@ import {
   REMOTE_FOLDER_NAME_PATTERN, REMOTE_LIMITS, type RemoteCommandName, type RemoteProjectSettings,
 } from "../../../shared/remote-web";
 import type { AgentKind, ApprovalMode, Chat, ModelOption } from "../../../shared/types";
+import { listedChats } from "../../../shared/chat-list";
 
 // lib/utils.formatBytes reads window.chatterbox at import time, so the page keeps its own copy.
 export function formatBytes(n: number): string {
@@ -142,13 +143,12 @@ export interface ProjectRef { id: number; name: string; archived: boolean }
  * keeps only those chats; null = no search.
  */
 export function chatGroups(chats: Chat[], projects: ProjectRef[], showArchived: boolean, matches: Set<number> | null) {
+  const ordered = listedChats(chats);
   return projects
     .filter(p => showArchived || !p.archived)
     .map(project => ({
       project,
-      chats: chats
-        .filter(c => c.projectId === project.id && (showArchived || !c.archived) && (!matches || matches.has(c.id)))
-        .sort((a, b) => b.lastActiveAt - a.lastActiveAt),
+      chats: ordered.filter(c => c.projectId === project.id && (showArchived || !c.archived) && (!matches || matches.has(c.id))),
     }))
     .filter(g => g.chats.length || (!matches && !g.project.archived));
 }

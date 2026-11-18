@@ -1,9 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type DragEvent } from "react";
+import { listedChats } from "../../../shared/chat-list";
 import { version } from "../../../../package.json";
 import { WorkingIndicator } from "./WorkingIndicator";
 import {
   Archive,
   ArchiveRestore,
+  ArrowUp,
+  ArrowDown,
   Bot,
   Check,
   ChevronRight,
@@ -126,6 +129,7 @@ function MoreMenu({ actions, label }: { actions: MenuAction[]; label: string }) 
 export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
   const projects = useStore((s) => s.projects);
   const chats = useStore((s) => s.chats);
+  const orderedChats = useMemo(() => listedChats(chats), [chats]);
   const selection = useStore((s) => s.selection);
   const select = useStore((s) => s.select);
   const search = useStore((s) => s.search);
@@ -208,7 +212,7 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
           <ProjectNode
             key={p.id}
             project={p}
-            chats={chats.filter((c) => c.projectId === p.id && (showArchived || !c.archived))}
+            chats={orderedChats.filter((c) => c.projectId === p.id && (showArchived || !c.archived))}
             query={q}
             hits={contentHits}
             now={now}
@@ -300,11 +304,17 @@ function ProjectNode({
   const createChat = useStore((s) => s.createChat);
   const updateProject = useStore((s) => s.updateProject);
   const deleteProject = useStore((s) => s.deleteProject);
+  const reorderChat = useStore(s => s.reorderChat);
+  const [dragged, setDragged] = useState<number | null>(null);
+  const [drop, setDrop] = useState<{ id: number; placement: "before" | "after" } | null>(null);
   const shown = query
     ? chats.filter((c) => c.title.toLowerCase().includes(query) || hits.has(c.id) || project.name.toLowerCase().includes(query))
     : chats;
   if (query && shown.length === 0) return null;
   const open = expanded || !!query;
+  const finishDrag = () => { setDragged(null); setDrop(null); };
+  const dropPosition = (e: DragEvent<HTMLDivElement>) =>
+    e.clientY < e.currentTarget.getBoundingClientRect().top + e.currentTarget.offsetHeight / 2 ? "before" as const : "after" as const;
 
   const actions: MenuAction[] = [
     { label: "새 채팅", icon: Plus, onSelect: () => void createChat(project.id) },
@@ -361,8 +371,34 @@ function ProjectNode({
       </ItemMenus>
       {open && (
         <div className="ml-3 border-l pl-1.5">
-          {shown.map((c) => (
-            <ChatNode key={c.id} chat={c} now={now} onRename={onRename} onConfirm={onConfirm} />
+          {shown.map((c, index) => (
+            <ChatNode key={c.id} chat={c} now={now} onRename={onRename} onConfirm={onConfirm}
+              dragging={dragged === c.id} drop={drop?.id === c.id ? drop.placement : undefined}
+              onDragStart={e => {
+                if ((e.target as HTMLElement).closest("button")) { e.preventDefault(); return; }
+                e.dataTransfer.effectAllowed = "move";
+                e.dataTransfer.setData("application/x-chatterbox-chat", String(c.id));
+                setDragged(c.id);
+              }}
+              onDragEnd={finishDrag}
+              onDragOver={e => {
+                // Drag state belongs to this project: another project's drag is never accepted.
+                if (dragged === null || dragged === c.id) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+                const placement = dropPosition(e);
+                setDrop(previous => previous?.id === c.id && previous.placement === placement ? previous : { id: c.id, placement });
+              }}
+              onDragLeave={() => setDrop(previous => previous?.id === c.id ? null : previous)}
+              onDrop={e => {
+                e.preventDefault();
+                if (dragged !== null && dragged !== c.id && e.dataTransfer.getData("application/x-chatterbox-chat") === String(dragged))
+                  void reorderChat(dragged, c.id, dropPosition(e));
+                finishDrag();
+              }}
+              moveUp={index > 0 ? () => void reorderChat(c.id, shown[index - 1].id, "before") : undefined}
+              moveDown={index < shown.length - 1 ? () => void reorderChat(c.id, shown[index + 1].id, "after") : undefined}
+            />
           ))}
           {!query && (
             <button
@@ -383,11 +419,21 @@ function ChatNode({
   now,
   onRename,
   onConfirm,
+  dragging, drop, onDragStart, onDragEnd, onDragOver, onDragLeave, onDrop, moveUp, moveDown,
 }: {
   chat: Chat;
   now: number;
   onRename: (kind: "chat" | "project", id: number, title: string) => void;
   onConfirm: (c: { title: string; body: string; run: () => Promise<void> }) => void;
+  dragging: boolean;
+  drop?: "before" | "after";
+  onDragStart: (e: DragEvent<HTMLDivElement>) => void;
+  onDragEnd: () => void;
+  onDragOver: (e: DragEvent<HTMLDivElement>) => void;
+  onDragLeave: () => void;
+  onDrop: (e: DragEvent<HTMLDivElement>) => void;
+  moveUp?: () => void;
+  moveDown?: () => void;
 }) {
   const selection = useStore((s) => s.selection);
   const select = useStore((s) => s.select);
@@ -414,6 +460,8 @@ function ChatNode({
 
   const actions: MenuAction[] = [
     { label: "이름 변경", icon: Pencil, onSelect: () => onRename("chat", chat.id, chat.title) },
+    ...(moveUp ? [{ label: "위로 이동", icon: ArrowUp, onSelect: moveUp }] : []),
+    ...(moveDown ? [{ label: "아래로 이동", icon: ArrowDown, onSelect: moveDown }] : []),
     {
       label: chat.archived ? "보관 해제" : "보관",
       icon: chat.archived ? ArchiveRestore : Archive,
@@ -439,10 +487,16 @@ function ChatNode({
         <div
           role="treeitem"
           aria-selected={active}
+          draggable
+          onDragStart={onDragStart} onDragEnd={onDragEnd} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}
+          data-drop-position={drop}
           className={cn(
             "group flex h-8 cursor-default items-center gap-1.5 rounded-md pr-1 pl-1 text-[13px]",
             active ? "bg-accent text-foreground" : "text-foreground/90 hover:bg-accent/60",
             chat.archived && "opacity-60",
+            dragging && "opacity-40",
+            drop === "before" && "shadow-[inset_0_2px_0_var(--color-primary)]",
+            drop === "after" && "shadow-[inset_0_-2px_0_var(--color-primary)]",
           )}
           onClick={() => void select({ chatId: chat.id })}
         >

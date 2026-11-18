@@ -40,6 +40,8 @@ export interface ClaudeEnv {
   tools?: string[];
   /** Load only our MCP servers, not the user's. */
   strictMcp?: boolean;
+  /** Suppress user hooks for tool-free, one-shot helpers. Managed policy still applies. */
+  disableHooks?: boolean;
   extraArgs?: string[];
 }
 
@@ -109,7 +111,7 @@ export class ClaudeDriver implements AgentDriver {
       "--permission-prompt-tool", "mcp__chatterbox_approver__approve",
       "--permission-mode", this.noWrites || this.opts.readOnly ? "plan" : "default",
       // Ask rules precede user allow rules. Keep every mutation behind the app's current policy.
-      "--settings", JSON.stringify({ permissions: { ask: [...WRITE_TOOLS, ...SHELL_TOOLS] } }),
+      "--settings", JSON.stringify({ permissions: { ask: [...WRITE_TOOLS, ...SHELL_TOOLS] }, ...(this.env.disableHooks ? { disableAllHooks: true } : {}) }),
     ];
     if (this.opts.model) args.push("--model", this.opts.model);
     if (this.opts.effort) args.push("--effort", this.opts.effort);

@@ -46,6 +46,7 @@ import { CLI_LOGIN_ARGS, CLI_LOGOUT_ARGS, CliAccounts, accountEnv, cliRemaining,
 import { GeminiDriver } from "./drivers/gemini";
 import { listGeminiModels, clearGeminiModels } from "./drivers/gemini-protocol";
 import { readGeminiUsage } from "./drivers/gemini-usage";
+import { AGY_BACKGROUND_ENV } from "./antigravity-profile";
 import { ClaudeDriver, claudeUsageText, listClaudeModels } from "./drivers/claude";
 import { resolveEffort, workerEffort } from "./effort";
 import { parseClaudeUsageText } from "../shared/usage";
@@ -832,7 +833,7 @@ export class ChatManager {
       if (account.kind === "gemini" && account.configDir) this.cliAccounts().clearAntigravityCredentials(id);
       else {
         const exe = this.cliExe(account.kind);
-        await new Promise<void>((resolve, reject) => execFile(exe, CLI_LOGOUT_ARGS[account.kind], { cwd: account.configDir ?? this.tmpDir, windowsHide: true, timeout: 30_000, env: { ...process.env, ...accountEnv(account) } },
+        await new Promise<void>((resolve, reject) => execFile(exe, CLI_LOGOUT_ARGS[account.kind], { cwd: account.configDir ?? this.tmpDir, windowsHide: true, timeout: 30_000, env: { ...process.env, ...accountEnv(account), ...(account.kind === "gemini" ? AGY_BACKGROUND_ENV : {}) } },
         (error, _stdout, stderr) => error ? reject(new Error(`로그아웃에 실패했습니다: ${String(stderr || error.message).trim().slice(0, 300)}`)) : resolve()));
       }
       this.cliAccounts().setAuth(id, { loggedIn: false, checkedAt: Date.now() }, account.createdAt);
@@ -985,6 +986,12 @@ export class ChatManager {
       this.approvals.invalidate(chatId);
     this.sink.chat(chat);
     return chat;
+  }
+
+  reorderChat(id: number, targetId: number, placement: "before" | "after"): Chat[] {
+    const ordered = this.store.reorderChat(id, targetId, placement);
+    for (const chat of ordered) this.sink.chat(chat);
+    return ordered;
   }
 
   private refreshStatus(chatId: number, pending = this.approvals.pendingCount(chatId)) {
@@ -1292,6 +1299,7 @@ export class ChatManager {
     const chat = this.store.chat(chatId);
     if (!chat) throw new Error("채팅이 없습니다.");
     const attachments = this.store.attachmentsFor(attachmentIds);
+    if (!text.trim() && !attachments.length) throw new Error("메시지나 첨부 파일을 입력하세요.");
     if (chat.status === "pausing") throw new Error("마스터와 작업자의 중지 확인을 기다리고 있습니다.");
     if (chat.status === "working" || chat.status === "approval" || chat.status === "paused" || this.isBusy(chatId)) {
       if (!this.busySend) throw new Error("작업이 진행 중입니다. 끝나거나 중지한 뒤 보내 주세요.");

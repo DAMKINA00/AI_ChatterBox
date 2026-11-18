@@ -84,6 +84,7 @@ interface State {
   updateProject(id: number, patch: Parameters<typeof api.updateProject>[1]): Promise<boolean>;
   deleteProject(id: number): Promise<void>;
   createChat(projectId: number): Promise<Chat | null>;
+  reorderChat(id: number, targetId: number, placement: "before" | "after"): Promise<void>;
   updateChat(id: number, patch: Parameters<typeof api.updateChat>[1]): Promise<void>;
   deleteChat(id: number): Promise<void>;
   /** New idle chat holding a read-only transcript of the source; opens it. null on failure (toast shown). */
@@ -392,7 +393,7 @@ export const useStore = create<State>((set, get) => ({
   async createChat(projectId) {
     try {
       const c = await api.createChat(projectId);
-      set((s) => ({ chats: [c, ...s.chats], events: { ...s.events, [c.id]: [] }, history: { ...s.history, [c.id]: { context: [], start: 0, hasMore: false } }, consults: { ...s.consults, [c.id]: [] }, agents: { ...s.agents, [c.id]: [] } }));
+      set((s) => ({ chats: [c, ...s.chats.filter(x => x.id !== c.id)] }));
       await get().select({ chatId: c.id });
       return c;
     } catch (e) {
@@ -404,6 +405,17 @@ export const useStore = create<State>((set, get) => ({
     try {
       const c = await api.updateChat(id, patch);
       set((s) => ({ chats: s.chats.map((x) => (x.id === id ? c : x)) }));
+    } catch (e) {
+      get().toast(errorMessage(e));
+    }
+  },
+  async reorderChat(id, targetId, placement) {
+    try {
+      // The core validates the project and applies the move to its current order.
+      // Do not replace newer chat status/text with the mutation's response snapshot.
+      const ordered = await api.reorderChat(id, targetId, placement);
+      const positions = new Map(ordered.map(c => [c.id, c.sidebarOrder]));
+      set(s => ({ chats: s.chats.map(c => positions.has(c.id) ? { ...c, sidebarOrder: positions.get(c.id) } : c) }));
     } catch (e) {
       get().toast(errorMessage(e));
     }

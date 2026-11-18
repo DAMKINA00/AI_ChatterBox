@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { textResult, type LocalBridge } from "../local-bridge";
 import { readLines, shutdown, closeConfirmed } from "../proc";
+import { AGY_BACKGROUND_ENV } from "../antigravity-profile";
 import { isReadCommand } from "../execution-policy";
 import { fileNote, type AgentDriver, type AgentInput, type DriverHost, type DriverOptions } from "./types";
 import { imageFileSnapshot, publishGeneratedImages } from "./generated-images";
@@ -139,7 +140,7 @@ export class GeminiDriver implements AgentDriver {
     if (this.nativeId) args.push("--conversation", this.nativeId);
     // Plan adds a native second layer to the app's own per-tool write restriction.
     args.push("--mode", this.noWrites ? "plan" : "accept-edits");
-    const child = spawn(this.opts.exePath, args, { cwd: this.sessionDir, windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...this.opts.accountEnv, ELECTRON_RUN_AS_NODE: "1", CHATTERBOX_GEMINI_HOOK_URL: reg.url } });
+    const child = spawn(this.opts.exePath, args, { cwd: this.sessionDir, windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...this.opts.accountEnv, ...AGY_BACKGROUND_ENV, ELECTRON_RUN_AS_NODE: "1", CHATTERBOX_GEMINI_HOOK_URL: reg.url } });
     this.child = child;
     this.children.add(child);
     this.hooksReady = false;

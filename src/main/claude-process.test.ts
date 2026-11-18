@@ -62,6 +62,30 @@ class FakeChild extends EventEmitter {
   }
 }
 
+test("one-shot helpers disable user hooks without changing normal sessions", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cbx-claude-helper-"));
+  const env = bridge();
+  const child = new FakeChild(null);
+  const calls: string[][] = [];
+  const spawnMock = mock.method(childProcess, "spawn", (_exe: any, args: any) => { calls.push(args); return child as any; });
+  try {
+    for (const helper of [true, false]) {
+      child.exitCode = null;
+      const instance = new ClaudeDriver({ cwd: root, nativeId: null, exePath: "fixture.exe", readOnly: helper }, {
+        bridge: env.bridge, bridgeScript: "fixture.js", tmpDir: root,
+        ...(helper ? { tools: [], strictMcp: true, disableHooks: true, extraArgs: ["--no-session-persistence"] } : {}),
+      }, { emit() {}, nativeId() {}, approve: async () => ({ verdict: "deny" }) });
+      await instance.send({ text: "question", attachments: [] });
+      const args = calls.at(-1)!;
+      assert.equal(JSON.parse(args[args.indexOf("--settings") + 1]).disableAllHooks, helper ? true : undefined);
+      assert.equal(args.includes("--strict-mcp-config"), helper);
+      if (helper) assert.equal(args[args.indexOf("--tools") + 1], "");
+      child.exitCode = 0;
+      await instance.dispose();
+    }
+  } finally { spawnMock.mock.restore(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("an old child exit cannot end a newer child turn", async () => {
   const root = mkdtempSync(join(tmpdir(), "cbx-claude-process-stale-"));
   const env = bridge();

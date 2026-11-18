@@ -77,11 +77,15 @@ function harness(t: { mock: typeof mock }) {
     approve: async () => ({ verdict: "allow" }),
   };
 
-  t.mock.method(childProcess, "execFile", ((exe: string, _args: string[], _options: unknown, callback: ModelCallback) => {
+  t.mock.method(childProcess, "execFile", ((exe: string, _args: string[], options: any, callback: ModelCallback) => {
+    assert.equal(options.windowsHide, true);
+    assert.equal(options.env.AGY_CLI_DISABLE_AUTO_UPDATE, "true", "background model queries must not launch agy's updater");
     callbacks.set(exe, callback);
     return undefined;
   }) as any);
-  t.mock.method(childProcess, "spawn", (() => {
+  t.mock.method(childProcess, "spawn", ((_exe: string, _args: string[], options: any) => {
+    assert.equal(options.windowsHide, true);
+    assert.equal(options.env.AGY_CLI_DISABLE_AUTO_UPDATE, "true", "background workers must not launch agy's updater");
     const child = new FakeChild();
     children.push(child);
     return child;

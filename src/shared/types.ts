@@ -316,6 +316,10 @@ export interface Chat {
   archived: boolean;
   createdAt: number;
   lastActiveAt: number;
+  /** Unsent composer, hidden from chat lists until its first user message. */
+  draft?: boolean;
+  /** Persisted sidebar position, independent of message activity (higher first). */
+  sidebarOrder?: number;
   /** Set on a chat branched from another conversation; stays valid after the source is deleted. */
   fork?: { sourceChatId: number; sourceEventId: number; sourceTitle: string; range: "through" | "from"; includeAttachments: boolean };
 }
@@ -562,6 +566,7 @@ export interface ChatterBoxApi {
   // chats
   listChats(): Promise<Chat[]>;
   createChat(projectId: number): Promise<Chat>;
+  reorderChat(id: number, targetId: number, placement: "before" | "after"): Promise<Chat[]>;
   /** New idle chat in the same project holding a read-only copy of the conversation; files are shared. */
   forkChat(chatId: number, options: ChatForkOptions): Promise<Chat>;
   updateChat(
