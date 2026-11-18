@@ -309,7 +309,7 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     `- 꼭 필요한 결정만 ${t("ask_user")}로 묻는다.`,
     `- 사용자에게 대사를 쓰기 전에 ${t("set_expression")}(expression=감정)으로 표정을 지정한다. 감정: ${AGENT_EXPRESSIONS.join(", ")}. 기술적 내용과 말투를 억지로 바꾸지 않는다.`,
     "- 지시·협의의 시간·배정·리뷰 횟수에는 강제 한도를 두지 않는다. 설정 숫자는 계획 참고값이다. 같은 요청 반복, 순환 대기, 충돌을 피하고 새로운 근거가 없으면 질문을 바꾸거나 사용자에게 필요한 결정을 알린다. 사용자가 중지를 요청하면 즉시 멈춘다.",
-    "- 마지막에는 항상 한국어로 전체 결론, 산출물 링크, 검증 요약, 남은 문제를 짧게 보고한다. 담당별 보고서를 반복하지 않는다. 돌아오지 않았거나 실패한 결과를 완료했다고 말하지 않는다. 생성 이미지 파일 경로도 최종 답변에 포함한다.",
+    "- 마지막에는 항상 한국어로 전체 결론, 산출물 링크, 검증 요약, 남은 문제를 짧게 보고한다. 담당별 보고서를 반복하지 않는다. 돌아오지 않았거나 실패한 결과를 완료했다고 말하지 않는다. 배정·분석만 끝났고 구현·시험·리뷰가 남았다면 지금 이어서 수행하고 checklist를 갱신한다. '결과가 오면 리뷰하겠다' 같은 다음 행동의 예고로 턴을 끝내지 않는다. 생성 이미지 파일 경로도 최종 답변에 포함한다.",
     "- 사용자에게 결과물을 제공할 때마다 반드시 해당 파일별로 클릭할 수 있는 Markdown 링크 [파일명](<절대경로>)를 함께 쓴다. 이미지도 같은 링크와 미리보기를 함께 제공한다. :codex-file-citation 같은 내부 앱 전용 표기나 링크 없는 완료 문장으로 대체하지 않는다. 수정한 기존 PDF·문서·ZIP도 빠뜨리지 않고 각각 연결한다.",
   ].join("\n");
 }
@@ -338,6 +338,7 @@ interface Instruction {
   mode?: "direct" | "delegated";
   dualInvestigation?: boolean;
   repaired?: boolean;
+  repairProgress?: string[];
   waitingForResults?: boolean;
   recoveryAttempts?: number;
   recoveryAfter?: number;
@@ -1631,9 +1632,11 @@ export class Orchestrator {
     if (!inst || !end.ok || end.interrupted || this.stopped.has(chatId) || this.planning.has(chatId)) return end;
     const chat = this.chats.store.chat(chatId);
     if (!chat) return end;
+    const consults = this.chats.store.listConsults(chatId);
+    const work = consults.filter(c => c.instructionId === inst.id);
     // Immediate input may detach the master's native ask call while app workers continue.
     // Wait for those existing jobs and resume synthesis without spending the repair attempt.
-    if (this.parallelBatches.get(chatId)?.size || this.assignments.get(chatId)?.size || this.chats.store.listConsults(chatId).some((c) => c.instructionId === inst.id && c.status === "running")) {
+    if (this.parallelBatches.get(chatId)?.size || this.assignments.get(chatId)?.size || work.some(c => c.status === "running")) {
       if (!inst.waitingForResults) {
         inst.waitingForResults = true;
         const pending: Promise<unknown>[] = [...this.workerQueue].filter(([key]) => key.startsWith(`${chatId}:`)).map(([, promise]) => promise);
@@ -1659,12 +1662,21 @@ export class Orchestrator {
     const planId = this.planRunning.get(chatId) ?? inst.id;
     const steps = planStepsFor(this.chats.store.events(chatId), planId);
     const open = steps?.filter(isOpenStep) ?? [];
-    const planIssue = open.length ? `체크리스트에 끝나지 않은 단계 ${open.length}개: ${openStepsText(steps!)}. 실제로 끝냈으면 completed로, 진행하지 않을 단계는 cancelled와 cancelReason으로 갱신하세요.` : undefined;
-    const issue = this.investigationIssue(chatId) ?? completionIssue(inst.id, inst.mode, this.chats.store.listConsults(chatId), !!this.chats.store.project(chat.projectId)?.settings.reviewGate) ?? planIssue;
+    const planIssue = open.length ? `체크리스트에 끝나지 않은 단계 ${open.length}개: ${openStepsText(steps!)}. 실제로 끝냈으면 completed로, 진행하지 않을 단계는 cancelled와 cancelReason으로 갱신하세요.`
+      : work.some(c => c.kind === "implement") && !steps?.length ? "구현 작업의 완료 기준과 검증·리뷰 등 남은 단계를 checklist에 기록하세요. 작업자가 변경 파일 없이 끝났어도 남은 작업을 생략하지 마세요." : undefined;
+    const issue = this.investigationIssue(chatId) ?? completionIssue(inst.id, inst.mode, consults, !!this.chats.store.project(chat.projectId)?.settings.reviewGate) ?? planIssue;
     if (!issue) return end;
+    // New results renew continuation; repeated prose or checklist status toggles do not.
+    const progress = new Set(inst.repairProgress ?? []);
+    const current = [
+      ...work.filter(c => c.status === "done" && c.responseSummary?.trim()).map(c => `consult:${c.id}`),
+      ...(steps ?? []).filter(s => !isOpenStep(s)).map(s => `plan:${planId}:${stepKey(s)}`),
+    ];
+    if (inst.repairProgress && current.some(key => !progress.has(key))) inst.repaired = false;
+    inst.repairProgress = [...new Set([...progress, ...current])];
     this.chats.emit(chatId, "orch", "orch", { type: "notice", text: `완료 확인: ${issue}` });
     if (inst.repaired) {
-      // After the one repair: say so plainly and end without another automatic turn.
+      // No new result after the repair: report the blocker instead of looping.
       if (open.length) {
         this.planIncomplete.add(chatId);
         this.chats.emit(chatId, "orch", null, { type: "plan_state", state: "incomplete", planId, reason: `끝나지 않은 단계 ${open.length}개: ${openStepsText(steps!)}` });
@@ -1672,14 +1684,14 @@ export class Orchestrator {
       return { ...end, ok: false, error: `미완료: ${issue}` };
     }
     inst.repaired = true;
-    // Resume the same instruction once. Do not reset its limits or lose its queued user input.
+    // Continue the same instruction; another repair needs new results or completed steps.
     setTimeout(() => {
       if (this.stopped.has(chatId) || this.instructions.get(chatId) !== inst || !this.chats.store.chat(chatId)) return;
       void (async () => {
         try {
           const driver = await this.chats.driver(chatId, "orch");
           if (this.stopped.has(chatId) || this.instructions.get(chatId) !== inst) return;
-          await driver.send({ text: `[앱 완료 검사 — 보완 1회] ${issue}\n본 작업은 앱 작업자에게 배정해야 합니다. 실제 결과를 검토하고 취합하세요. 더 진행할 수 없으면 미완료 사유를 분명히 보고하세요.${this.takeQueued(chatId)}`, attachments: [], noWrites: false });
+          await driver.send({ text: `[앱 완료 검사 — 미진행 시 보완 1회] ${issue}\n본 작업은 앱 작업자에게 배정해야 합니다. 기존 결과를 확인하고 남은 구현·검증·리뷰를 지금 이어서 수행하세요. 새 결과나 완료 단계가 있으면 계속 진행할 수 있습니다. 앞으로 하겠다는 예고만 남기고 종료하지 마세요. 더 진행할 수 없으면 미완료 사유를 분명히 보고하세요.${this.takeQueued(chatId)}`, attachments: [], noWrites: false });
         } catch (e) {
           const message = String(e);
           this.chats.emit(chatId, "orch", "orch", { type: "error", message });
@@ -1725,6 +1737,9 @@ export class Orchestrator {
       this.planRunning.delete(chat.id);
       const id = this.instructions.get(chat.id)!.id;
       const previous = currentPlanView(this.chats.store.events(chat.id).filter(e => e.id < id));
+      if (previous?.steps.some(isOpenStep) && ["live", "running", "incomplete", "failed"].includes(previous.state)) {
+        input = { ...input, text: input.text + `\n\n[이전 작업 미완료]\n${openStepsText(previous.steps)}\n이번 지시가 같은 작업의 상태 확인·재개·보완이라면 이 남은 단계들을 현재 checklist에 등록하고 기존 결과를 확인해 이어서 수행하세요. 완료된 작업을 다시 배정하지 마세요. 별개 새 작업이면 이전 단계를 가져오지 마세요.` };
+      }
       if (previous && ["live", "running", "proposed"].includes(previous.state)) {
         const incomplete = previous.steps.some(isOpenStep);
         this.chats.emit(chat.id, "orch", null, { type: "plan_state", planId: previous.planId, state: incomplete ? "incomplete" : "done", reason: incomplete ? "새 작업이 시작되어 이전 계획의 미완료 항목을 기록으로 남겼습니다." : undefined });

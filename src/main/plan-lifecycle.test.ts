@@ -196,6 +196,89 @@ test("an ordinary instruction's checklist is guarded the same way", async () => 
   } finally { f.close(); }
 });
 
+test("real progress allows the master to continue from implementation to review; unchanged work still stops", async () => {
+  const f = fixture();
+  try {
+    await f.chats.send(f.chat.id, "implement and review", []);
+    await route(f);
+    await checklist(f, [step("analysis", "inProgress"), step("implementation", "pending"), step("review", "pending")]);
+    const master = f.master();
+    master.finish();
+    await waitFor(() => master.sendCalls.length === 2);
+    await checklist(f, [step("analysis", "completed"), step("implementation", "inProgress"), step("review", "pending")]);
+    master.finish();
+    await waitFor(() => master.sendCalls.length === 3);
+    await checklist(f, [step("analysis", "completed"), step("implementation", "completed"), step("review", "inProgress")]);
+    master.finish();
+    await waitFor(() => master.sendCalls.length === 4);
+    await checklist(f, [step("analysis", "completed"), step("implementation", "inProgress"), step("review", "inProgress")]);
+    await checklist(f, [step("analysis", "completed"), step("implementation", "completed"), step("review", "inProgress")]);
+    master.finish();
+    assert.equal(f.store.chat(f.chat.id)!.status, "error");
+    await delay(30);
+    assert.equal(master.sendCalls.length, 4, "no loop without further progress");
+  } finally { f.close(); }
+});
+
+test("a new successful worker result permits continuation even before the checklist is updated", async () => {
+  const f = fixture();
+  try {
+    await f.chats.send(f.chat.id, "implementation then review", []);
+    await route(f);
+    await checklist(f, [step("work", "inProgress")]);
+    const master = f.master();
+    master.finish();
+    await waitFor(() => master.sendCalls.length === 2);
+    const worker = f.store.createAgent(f.chat.id, "claude", "implement");
+    const c = f.store.createConsult(f.chat.id, "orch", worker.key, "implement", "fix", [], f.engine.instructions.get(f.chat.id).id);
+    f.store.finishConsult(c.id, "done", "implementation tested", ["src/test.ts"]);
+    master.finish();
+    await waitFor(() => master.sendCalls.length === 3);
+    const failed = f.store.createConsult(f.chat.id, "orch", worker.key, "review", "review", [], c.instructionId);
+    f.store.finishConsult(failed.id, "error", "provider failed", []);
+    master.finish();
+    assert.equal(f.store.chat(f.chat.id)!.status, "error", "a failed consult does not renew the repair");
+    await delay(30);
+    assert.equal(master.sendCalls.length, 3);
+  } finally { f.close(); }
+});
+
+test("implementation cannot end successfully without a task checklist, even when it changed no files", async () => {
+  const f = fixture();
+  try {
+    await f.chats.send(f.chat.id, "finish implementation and validation", []);
+    await f.engine.call(f.chat.id, "orch", "route_request", { mode: "delegated", reason: "implementation" });
+    const worker = f.store.createAgent(f.chat.id, "claude", "finish implementation");
+    const c = f.store.createConsult(f.chat.id, "orch", worker.key, "implement", "finish", [], f.engine.instructions.get(f.chat.id).id);
+    f.store.finishConsult(c.id, "done", "existing implementation verified; review next", []);
+    const master = f.master();
+    master.finish();
+    await waitFor(() => master.sendCalls.length === 2);
+    assert.match(master.sendCalls.at(-1)!.text, /checklist/);
+    assert.notEqual(f.store.chat(f.chat.id)!.status, "done");
+    await checklist(f, [step("validation", "completed")]);
+    master.finish();
+    assert.equal(f.store.chat(f.chat.id)!.status, "done");
+  } finally { f.close(); }
+});
+
+test("a follow-up receives the unfinished prior work as context without importing an unrelated plan", async () => {
+  const f = fixture();
+  try {
+    await f.chats.send(f.chat.id, "first task", []);
+    await route(f);
+    await checklist(f, [step("finished", "completed"), step("review", "pending")]);
+    const master = f.master();
+    master.finish();
+    await waitFor(() => master.sendCalls.length === 2);
+    master.finish();
+    await f.chats.send(f.chat.id, "why did you stop?", []);
+    assert.match(master.sendCalls.at(-1)!.text, /이전 작업 미완료[^]*단계 review/);
+    assert.doesNotMatch(master.sendCalls.at(-1)!.text, /단계 finished/);
+    assert.equal(currentPlanView(f.store.events(f.chat.id)), null, "the model must distinguish continuation from unrelated new work");
+  } finally { f.close(); }
+});
+
 test("open steps cannot silently disappear from the same plan", async () => {
   const f = fixture();
   try {
