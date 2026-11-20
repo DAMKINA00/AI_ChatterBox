@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { DEFAULT_SETTINGS } from "../shared/types";
 import { Store } from "./db";
 import { ChatManager } from "./chats";
+import { findCodex } from "./locate";
 
 const END = "2026-10-26T00:00:00Z";
 
@@ -60,6 +61,26 @@ function fakeGrok(replies: Array<{ result?: unknown; error?: { code?: number; me
 }
 
 const grokUsage = { config: { currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", end: END }, creditUsagePercent: 20 } };
+
+test("Windows discovers the standalone Codex CLI before the desktop copy", { skip: process.platform !== "win32" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "cbx-codex-path-"));
+  const previous = process.env.LOCALAPPDATA;
+  try {
+    const standalone = join(root, "Programs", "OpenAI", "Codex", "bin");
+    const desktop = join(root, "OpenAI", "Codex", "bin", "older");
+    for (const directory of [standalone, desktop]) {
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, "codex.exe"), "fixture");
+    }
+    process.env.LOCALAPPDATA = root;
+    assert.equal(findCodex(), join(standalone, "codex.exe"));
+    assert.equal(findCodex(join(desktop, "codex.exe")), join(desktop, "codex.exe"));
+  } finally {
+    if (previous === undefined) delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("a stale Antigravity path falls back to the current installation for usage refresh", async (t) => {
   const f = fixture();

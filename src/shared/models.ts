@@ -1,12 +1,20 @@
 // Model pickers show only the newest model of each family. Families and "newest" come from the ids the
 // CLIs report (no hardcoded model names): Claude aliases (opus / sonnet / haiku / fable…) already point
 // at the newest version, so pinned "claude-<family>-<version>" ids are older; Codex ids look like
-// "gpt-<version>-<family>". Whatever the project/chat has selected stays visible (marked old).
+// "gpt-<version>-<family>". The current selection stays visible even if omitted from the menu.
 import type { AgentKind, ModelOption } from "./types";
 
 export interface PickerModel extends ModelOption {
   /** Shown only because it is selected; a newer model of its family exists. */
   old?: boolean;
+  /** The current model was not offered by the CLI. Its release status is unknown. */
+  unlisted?: boolean;
+}
+
+function retainedModel(list: ModelOption[], id: string): PickerModel {
+  const model = list.find(item => item.id === id);
+  if (!model) return { id, label: id, unlisted: true };
+  return model.hidden && !model.deprecated ? { ...model, unlisted: true } : { ...model, old: true };
 }
 
 function claudeFamily(id: string): { family: string; version: number[] } | null {
@@ -43,7 +51,7 @@ export function latestModels(agent: AgentKind, list: ModelOption[], selected: st
     }
     const out: PickerModel[] = [...families.values()];
     for (const id of selected) if (id && !usable.some(model => model.id === id))
-      out.push({ ...(list.find(model => model.id === id) ?? { id, label: id }), old: true });
+      out.push(retainedModel(list, id));
     return out;
   }
   const familyOf = agent === "claude" ? claudeFamily : codexFamily;
@@ -66,8 +74,7 @@ export function latestModels(agent: AgentKind, list: ModelOption[], selected: st
   const out: PickerModel[] = list.filter((m) => keep.has(m.id));
   for (const id of selected) {
     if (!id || keep.has(id)) continue;
-    const known = list.find((m) => m.id === id);
-    out.push({ ...(known ?? { id, label: id }), old: true });
+    out.push(retainedModel(list, id));
   }
   return out;
 }

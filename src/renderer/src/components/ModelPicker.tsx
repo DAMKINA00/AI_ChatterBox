@@ -162,6 +162,7 @@ export function ModelPicker({ agents, value, onChange, inherited, onReset, reset
                   >
                     <span className="flex-1 truncate">{shortModelLabel(a, m.label)}</span>
                     {m.old && <span className="text-[11px] text-warning">이전 버전</span>}
+                    {m.unlisted && <span className="shrink-0 text-[11px] text-muted-foreground">목록에 없음</span>}
                     {a !== "gemini" && <span className="font-mono text-[11px] text-muted-foreground">{m.id}</span>}
                   </DropdownMenuCheckItem>
                 ))}

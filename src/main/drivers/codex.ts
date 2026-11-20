@@ -8,6 +8,7 @@ import type { ProjectCreateParams } from "../codex-schema/v2/ProjectCreateParams
 import type { FileDiff, ModelOption, UsageInfo, TokenCounts, AgentMetrics } from "../../shared/types";
 import { readLines } from "../proc";
 import { classifyWindow, type UsageWindow } from "../../shared/usage";
+import { rebindCodexRollout } from "./codex-rollout";
 import { fileNote, IMAGE_MIMES, type AgentDriver, type AgentInput, type DriverHost, type DriverOptions } from "./types";
 import type { RequestId, ServerNotification, ServerRequest, InitializeResponse, ClientRequest } from "../codex-schema";
 import type {
@@ -335,18 +336,32 @@ export class CodexDriver implements AgentDriver {
         config: config as ThreadResumeParams["config"],
       };
       this.server.attach(this.threadId, this);
-      try {
+      const threadId = this.threadId;
+      const resume = async () => {
         // Unarchive before resume, including after a restart. Writer conflicts use the same fork recovery.
-        if (this.opts.workerSession) await this.server.request("thread/unarchive", { threadId: this.threadId });
-        if (projectId) await this.server.request("thread/metadata/update", { threadId: this.threadId, projectId });
-        if (this.opts.workerSession) await this.server.request("thread/name/set", { threadId: this.threadId, name: this.opts.workerSession.name });
+        if (this.opts.workerSession) await this.server.request("thread/unarchive", { threadId });
+        if (projectId) await this.server.request("thread/metadata/update", { threadId, projectId });
+        if (this.opts.workerSession) await this.server.request("thread/name/set", { threadId, name: this.opts.workerSession.name });
         await this.server.request("thread/resume", params);
-        this.server.loaded.add(this.threadId);
+        this.server.loaded.add(threadId);
+      };
+      try {
+        await resume();
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+        let error = e;
+        const home = this.opts.accountEnv?.CODEX_HOME;
+        if (home && /no rollout found for thread id/i.test(String(error)) && rebindCodexRollout(home, threadId)) {
+          try {
+            await resume();
+            this.host.emit({ type: "notice", text: "Codex 세션 경로를 복구해 기존 대화에서 이어갑니다." });
+            return threadId;
+          } catch (retryError) {
+            error = retryError;
+          }
+        }
         // Another program (usually the Codex desktop app, which lists our threads) holds the writer
         // lock. Continue on a fork: same history, new thread id.
-        if (!/active writer|thread-store conflict/i.test(msg)) throw e;
+        if (!/active writer|thread-store conflict/i.test(String(error))) throw error;
         const old = this.threadId;
         const fork: ThreadForkParams = {
           threadId: old,

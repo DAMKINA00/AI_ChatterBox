@@ -51,10 +51,11 @@ test("Codex: hidden / upgradable models dropped, selected one kept", () => {
   assert.equal(l.find((m) => m.id === "gpt-5.6-sol")?.old, true);
 });
 
-test("Free-text id not in the list stays visible", () => {
+test("Free-text id not in the list stays visible without implying it is outdated", () => {
   const l = latestModels("codex", CODEX, ["my-custom-model"]);
   assert.equal(l.at(-1)!.id, "my-custom-model");
-  assert.equal(l.at(-1)!.old, true);
+  assert.equal(l.at(-1)!.unlisted, true);
+  assert.equal(l.at(-1)!.old, undefined);
 });
 
 test("Gemini offers one entry per model family; effort variants remain separate metadata", () => {
@@ -71,5 +72,6 @@ test("Gemini retains an unavailable saved selection without duplicating availabl
   const list = ["gemini-4-argon-medium", "gemini-4-argon-high"].map(id => ({id,label:id}));
   const result = latestModels("gemini", list, ["gemini-old-medium"]);
   assert.deepEqual(ids(result), ["gemini-4-argon-medium", "gemini-old-medium"]);
-  assert.equal(result[1].old, true);
+  assert.equal(result[1].unlisted, true);
+  assert.equal(result[1].old, undefined);
 });

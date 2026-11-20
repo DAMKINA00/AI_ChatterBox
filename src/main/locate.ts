@@ -50,10 +50,12 @@ export function findClaude(override?: string): string | null {
   return existsSync(local) ? local : null;
 }
 
-/** Same order as AIUsageMonitor Core/CodexAppServer.cs FindExecutable. */
+/** Prefer the installed standalone CLI over the copy bundled with Codex Desktop. */
 export function findCodex(override?: string): string | null {
   if (override && existsSync(override)) return override;
   const localAppData = process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
+  const standalone = join(localAppData, "Programs", "OpenAI", "Codex", "bin", exe("codex"));
+  if (process.platform === "win32" && existsSync(standalone)) return standalone;
   const store = newest(subdirs(join(localAppData, "OpenAI", "Codex", "bin")).map((d) => join(d, exe("codex"))));
   if (store) return store;
   const p = onPath("codex");

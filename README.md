@@ -1,5 +1,10 @@
 # AI_ChatterBox
 
+### Codex 대화 재개와 모델 목록 (0.4.63)
+
+- 추가 Codex 계정의 세션 인덱스가 이전 설치 위치를 가리키면, 현재 계정 폴더에서 동일한 세션 파일을 확인하고 해당 대화를 이어갑니다.
+- Windows에 공식 독립 Codex CLI가 설치돼 있으면 이를 먼저 사용합니다. 현재 모델 목록에 없는 선택값에는 **목록에 없음**을 표시합니다.
+
 ### 작업자 취합과 작업별 계획 (0.4.58)
 
 마스터는 작업 배정과 방침 결정·최종 보고를 맡습니다. 개별 배정 결과는 협의 ID와 상태만 반환하고, 병렬 작업은 담당 작업자가 결과를 직접 조회·협의해 취합한 뒤 마스터에게 짧은 결론을 전달합니다. 원문 보고서와 산출물은 대화 기록에 보존됩니다. 같은 채팅에서 새 작업을 시작하면 이전 계획을 기록에 남기고 현재 작업의 계획을 새로 작성합니다. [변경·검증 기록](docs/validation-0.4.58.md)
@@ -193,9 +198,10 @@ CLI 계정 관리에서 Antigravity도 계정을 최대 10개까지 추가하고
   - 로그인: `& "$env:USERPROFILE\.local\bin\claude.exe"` 실행 후 `/login`
   - Claude 데스크톱 앱 안에 있는 사본은 쓰지 않습니다. 업데이트 때마다 경로가 바뀌고 앱 밖에서는 로그인이 안 돼 있습니다.
 - **Codex** (Codex 앱 또는 Codex CLI, 로그인된 상태). 앱은 다음 순서로 찾습니다.
-  1. `%LOCALAPPDATA%\OpenAI\Codex\bin\<ver>\codex.exe`
-  2. PATH
-  3. `~\.codex\packages\standalone\releases`
+  1. 지정된 CLI 경로 또는 `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`
+  2. `%LOCALAPPDATA%\OpenAI\Codex\bin\<ver>\codex.exe`
+  3. PATH
+  4. `~\.codex\packages\standalone\releases`
 - **제미나이 작업자를 쓸 경우(선택):** Antigravity CLI를 설치하고 CLI 계정 관리에서 로그인합니다. [Gemini 설치 안내](docs/gemini-pro.md)
 
 - **Grok 작업자 또는 마스터(선택):** `npm install -g @xai-official/grok` 후 `grok login`. Windows 공식 네이티브 실행 파일 `%USERPROFILE%\.grok\bin\grok.exe`를 자동 탐색합니다. ACP 세션과 승인 hook을 지원하는 CLI가 필요합니다. [공식 CLI 안내](https://docs.x.ai/build/cli/reference).
