@@ -1,5 +1,5 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ArrowDown, BarChart3, Check, ChevronDown, CircleAlert, History, ImagePlus, Loader2, Paperclip, Pause, Play, RotateCcw, Search, SendHorizontal, ShieldCheck, Workflow, X } from "lucide-react";
+import { ArrowDown, BarChart3, Check, ChevronDown, CircleAlert, History, ImagePlus, ListChecks, Loader2, Paperclip, Pause, Play, RotateCcw, Search, SendHorizontal, ShieldCheck, Workflow, X } from "lucide-react";
 import {
   APPROVAL_MODE_LABEL,
   AGENT_LABEL,
@@ -757,7 +757,7 @@ function EmptyChat() {
       </div>
       <div className="text-[15px] font-semibold">무엇을 할까요?</div>
       <div className="max-w-md text-[13px] leading-relaxed text-muted-foreground">
-        지시를 보내면 마스터가 계획을 세우고, 일의 양에 맞춰 클로드·지피티·제미나이·그록·딥시크 작업자를 꾸려 구현과 리뷰를 나눠 맡깁니다. 파일은 끌어다 놓기로, 이미지는 붙여넣기(Ctrl+V)로 첨부할 수 있어요.
+        원하는 결과를 적어 주세요. 마스터가 필요에 따라 작업자를 배정하고 결과를 정리합니다. 실행 전에 단계를 확인하려면 아래의 <strong className="font-medium text-foreground">계획 먼저</strong>를 선택하세요.
       </div>
     </div>
   );
@@ -917,6 +917,21 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
   };
 
   const canSend = (!!text.trim() || attachments.length > 0) && !sending && !uploading && !pauseInFlight && (!unavailableMaster || text.trim().startsWith("/"));
+  const canPlan = canSend && !!text.trim() && !text.trim().startsWith("/") && !attachments.length;
+
+  const requestPlan = async () => {
+    if (!canPlan || busy || paused) return;
+    const instruction = text;
+    setSending(true);
+    try {
+      await api.command(chat.id, "plan", instruction.trim());
+      setText(current => current === instruction ? "" : current);
+    } catch (error) {
+      toast(errorMessage(error));
+    } finally {
+      setSending(false);
+    }
+  };
 
   const requestPause = async () => {
     if (pauseInFlight || !busy) return;
@@ -991,7 +1006,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
           ref={area}
           value={text}
           aria-label="메시지 입력"
-          placeholder={paused ? "추가 지시는 재시작할 때 전달" : busy ? "추가 지시를 입력하세요. Enter 즉시 전달 · Alt+Enter 다음 단계 전달" : "지시를 입력하세요. Enter 즉시 전달 (/ 로 명령)"}
+          placeholder={paused ? "추가 지시는 재시작할 때 전달" : busy ? "추가 지시를 입력하세요. Enter 즉시 전달 · Alt+Enter 다음 단계 전달" : "원하는 결과를 입력하세요"}
           className="block max-h-60 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[14px] leading-relaxed outline-none select-text placeholder:text-muted-foreground"
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => {
@@ -1043,9 +1058,12 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
               <Paperclip />
             </Button>
           </Tooltip>
+          {!busy && !paused && <Button size="sm" variant="ghost" onClick={() => void requestPlan()} disabled={!canPlan} title={attachments.length ? "계획은 텍스트 지시로 시작할 수 있습니다." : "계획을 확인한 뒤 실행합니다."}>
+            <ListChecks /> 계획 먼저
+          </Button>}
           <span className="ml-1 hidden text-[11.5px] text-muted-foreground xl:inline">
-            <Kbd>Enter</Kbd> {paused ? "지시 보관" : "즉시 전달"} · {busy && <><Kbd>Alt+Enter</Kbd> 다음 단계 · </>}
-            <Kbd>Shift+Enter</Kbd> 줄바꿈 · <Kbd>Ctrl+V</Kbd> 이미지 붙여넣기
+            {busy && <><Kbd>Alt+Enter</Kbd> 다음 단계 · </>}
+            <Kbd>Shift+Enter</Kbd> 줄바꿈
           </span>
           <div className="flex-1" />
           {pauseInFlight ? (

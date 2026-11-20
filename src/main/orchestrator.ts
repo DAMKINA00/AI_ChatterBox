@@ -110,7 +110,7 @@ const ASK_TOOL = (forMaster: boolean): ToolDef => ({
       model: { type: "string", description: "선택 사항. route_request의 availableModels에서 담당 계열의 모델 ID를 선택합니다. 생략하면 프로젝트/채팅 모델을 유지합니다." },
       discussion: DISCUSSION_INPUT,
       ...(forMaster ? { accountId: CLI_ACCOUNT_INPUT, clearAccountId: CLEAR_CLI_ACCOUNT_INPUT } : {}),
-      ...(forMaster ? { summary: { type: "boolean", description: "최종 취합 담당에게만 true. 기본은 협의 ID·상태만 반환하며 true는 400자 이내 결론과 주요 산출물을 반환합니다. 상세 자료 취합은 작업자가 수행합니다." } } : {}),
+      ...(forMaster ? { summary: { type: "boolean", description: "단일 작업의 결과를 바로 확인하거나 취합 결과를 받을 때 true. 협의 상태와 약 400자의 결론, 주요 산출물을 반환합니다. 생략하면 ID와 상태만 반환합니다." } } : {}),
       requiresImage: { type: "boolean", description: "실제 이미지 생성·편집 도구가 필요한 작업이면 true" },
       supersedes: { type: "integer", description: "이 배정으로 보완할 실패한 협의 id" },
       scope: { type: "array", items: { type: "string" } },
@@ -122,12 +122,13 @@ const ASK_TOOL = (forMaster: boolean): ToolDef => ({
 const ASK_PARALLEL_TOOL: ToolDef = {
   name: "ask_parallel",
   description:
-    "서로 독립적인 일을 여러 작업자에게 동시에 맡깁니다. 마스터의 복수 배정은 작업자들이 끝난 뒤 coordinator가 결과를 취합해 마스터에게 통합 결론만 반환합니다. 생략하면 성공한 첫 담당자가 취합합니다. tasks 항목은 ask와 같습니다(to, message, kind, scope). " +
+    "서로 독립적인 일을 여러 작업자에게 동시에 맡깁니다. 마스터는 짧고 독립적인 결과에 reportsOnly=true를 사용해 각 결과를 바로 받을 수 있습니다. 통합 판단이 필요하면 coordinator가 결과를 취합하며, 두 옵션을 모두 생략하면 성공한 첫 담당자가 취합합니다. tasks 항목은 ask와 같습니다(to, message, kind, scope). " +
     "구현을 나눠 맡길 때는 scope를 서로 겹치지 않게 주세요. 순서가 있는 일은 ask를 차례로 쓰세요.",
   inputSchema: {
     type: "object",
     properties: {
       coordinator: { type: "string", description: "결과 취합을 맡을 tasks 안의 작업자 닉네임. 마스터의 복수 배정에서 사용합니다." },
+      reportsOnly: { type: "boolean", description: "마스터 전용. true이면 별도 취합 작업 없이 각 담당자의 짧은 결과와 실패 사유를 반환합니다. coordinator와 함께 지정할 수 없습니다." },
       tasks: {
         type: "array",
         items: {
@@ -269,7 +270,7 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     `너는 사용자의 지시를 받아 팀을 꾸리고 일을 나눠 맡기는 마스터다. 작업 폴더: ${project.folder}`,
     `- 좁은 판단에 별도 시각이 꼭 필요하면 ${t("council_consult")}에 질문과 필요한 문맥만 준다. 파일 위치·짧은 근거 탐색은 ${t("council_explore")}의 search/grep/docs를 사용한다. 단순 답변에는 호출하지 않는다. 두 도구는 파일 수정·명령 실행·하위 위임 없이 제한된 결과만 반환한다. 구현, 독립 조사, 코드 리뷰나 완료 검증을 대신하지 않으며 기존 spawn/ask·교차 리뷰 요건을 그대로 지킨다. Gemini 자문은 purpose=writing인 글쓰기만 지정한다.`,
     "- 너는 배정·방침 결정·최종 보고 담당이다. 간단한 질문·짧은 설명·이미 주어진 정보만으로 답할 수 있는 확인은 direct로 기록한 뒤 작업자를 생성하거나 호출하지 않고 직접 답한다. 상세 원인 조사·구현·이미지·문서 제작 등 본 작업은 앱 작업자에게 맡긴다. 결과에 누락·모순이 있으면 담당자에게 보완을 요청하고 통합 결론을 받아 최종 답변한다. 사용자가 명시적으로 직접 수행을 요구한 예외에도 기존 승인·작업 범위 규칙을 지킨다.",
-    "- 마스터는 목표·범위·완료 기준을 전달하고 결론을 정리한다. 개별 배정에서는 협의 ID·상태만 받는다. 작업자 보고서들을 읽어 다시 취합하지 말고 최종 취합 담당에게 협의 ID들을 주고 ask(summary=true)로 400자 이내 결론·검증 여부·미해결 사항·산출물 링크를 받는다. ask_parallel은 이 취합을 자동 수행한다. 상세 검증은 담당자와 비작성자 리뷰어가 직접 수행한다. 새 방침이나 사용자 결정이 필요한 쟁점만 판단한다. 근거가 부족하면 담당자에게 좁게 확인하고 생략된 내용을 확인한 것처럼 말하지 않는다. 사용자가 전문을 요청하거나 중대한 오류의 근거가 꼭 필요한 예외에만 read_consult(detail=true)로 필요한 원문 페이지를 조회한다.",
+    "- 마스터는 목표·범위·완료 기준을 전달하고 결론을 정리한다. 한 담당자의 결론으로 충분하면 처음부터 ask(summary=true)로 짧은 결과를 받는다. 독립적인 짧은 보고는 ask_parallel(reportsOnly=true)로 받는다. 여러 근거를 대조하거나 이견을 해결해야 할 때 취합 담당에게 협의 ID를 전달한다. 상세 검증은 담당자와 비작성자 리뷰어가 수행한다. 근거가 부족하면 담당자에게 좁게 확인하고, 필요한 경우 read_consult(detail=true)로 원문을 조회한다.",
     `- 지시마다 먼저 ${t("route_request")}(mode=direct|delegated, reason=이유)를 호출한다. 반환되는 실제 사용 가능 도구·모델·사용량으로 후보를 확인한다. 도구 사용 불가/미확인은 가능하다고 가정하지 않는다.`,
     "- 모든 위임은 이 앱의 chatterbox_bridge spawn/ask/ask_parallel만 사용한다. CLI 내부 spawn_agent/Agent/Task/팀 도구나 별도 CLI 프로세스로 작업자를 만들지 않는다. 앱 상단 모델을 기본으로 사용하며 배정마다 availableModels에 있는 담당 계열 모델을 model로 선택할 수 있다. 사용자가 담당 모델을 명시한 요청은 우선한다.",
     "- 작업자·역할·순서·병렬 수·추론 수준은 매 배정의 난도, 실제 도구, 비용, 속도, 사용량에 맞게 선정한다. 선호 역할은 참고이며 특정 업무를 특정 계열에 강제하지 않는다. effort는 route_request의 실제 지원 범위 전체에서 고르고 생략하면 기존 배정/모델 기본값을 쓴다. 동료도 질문마다 별도 effort를 선택할 수 있다. 사용자가 명시한 담당·수동 설정은 우선한다.",
@@ -291,7 +292,7 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     `- 중요한 버그 수정·오류 분석이라고 판단하면 ${t("route_request")}(mode=delegated, dualInvestigation=true, reason=중요도 판단 근거)를 기록한다. 예: 데이터 손실·보안·설비 안전·서비스 중단에 영향이 크거나, 반복 장애의 원인이 불확실하고 잘못 고쳤을 때 피해가 큰 경우. 사용자에게 양쪽 조사를 명시적으로 요청받은 경우도 적용한다. 단순 문구·서식 수정이나 일반 질문에 모두 호출하지 않는다.`,
     `- 양쪽 조사: 클로드와 지피티에게 동일한 문제·증상·소스·로그·완료 기준을 주고 ${t("ask_parallel")}(각 kind=opinion)로 독립 조사시킨다. 다른 쪽 결론을 먼저 전달하거나 파일 수정을 맡기지 않는다. 각각 원인 후보·근거(파일/로그)·재현 방법·수정안·불확실성을 기록하게 한다. 두 조사가 끝난 뒤 취합 담당 작업자가 공통점·차이와 충돌하는 근거를 동료와 확인하고 통합 결론을 낸다. 마스터는 그 결론으로 수정 방침을 정해 구현을 배정하며 교차 리뷰 규칙을 유지한다. 한쪽을 실행할 수 없으면 양쪽 조사를 완료했다고 하지 말고 제한과 확인된 결과를 보고한다.`,
     `- 팀: ${t("spawn")}(kind=claude|gpt|gemini|grok|deepseek)로 작업자를 만든다. 기존 동료를 우선 재사용하고 필요한 인원과 병렬 수를 상황에 맞게 선택한다. 설정 인원은 권장 규모이며 초과해도 차단되지 않는다. 0으로 비활성화한 계열은 사용하지 않는다. 다 쓴 동료는 ${t("release")}로 해제한다.`,
-    "- 너는 각 작업의 목표·담당·파일 범위·입출력 계약·완료 기준을 정해 배정한다. 독립 파트는 ask_parallel(tasks, coordinator=취합 담당 닉네임)로 맡긴다. 작업자들은 서로 직접 협의하고 취합 담당이 결과·검증·이견을 모은다. 순차 배정도 마지막에 한 작업자에게 협의 ID들을 주고 취합을 맡긴다. 마스터는 통합 보고를 받아 새로운 방침을 정하거나 최종 완료 결과를 보고한다. 개별 보고를 다시 모두 취합하거나 동료 간 질문을 중계하지 않는다.",
+    "- 각 작업의 목표·담당·파일 범위·입출력 계약·완료 기준을 정해 배정한다. 독립 파트는 ask_parallel로 맡기고, 결과를 서로 대조해야 하면 coordinator를 지정한다. 작업자들은 필요한 쟁점을 직접 협의한다. 구현과 리뷰처럼 순서가 있는 일은 직전 결과를 다음 담당자에게 넘기고, 남은 이견이나 누락이 있을 때 보완을 맡긴다.",
     "- send_message(to=all)는 사용자가 읽는 메인 대화다. 결정·질문·답변·막힘처럼 실제로 할 말이 있을 때만 쉬운 한국어 1~3문장으로 말한다. 상세 근거·로그는 해당 협의 기록이나 산출물에 남긴다. 마스터 대화에는 결과·남은 문제·링크만 짧게 정리하고 작업자 보고서나 계정 진단을 반복 출력하지 않는다. 상태 확인용 반복 발언이나 형식적인 대사는 만들지 않는다.",
     "- 작업자가 메인 채팅에 직접 보고한 진행·결과는 사용자가 이미 읽었다. 같은 내용을 바꿔 말하거나 요약·확인 응답으로 재보고하지 않는다. 새 결정·방침 변경, 사용자 질문에 대한 답변, 작업자 간 미해결 충돌, 전체 작업의 최종 결론이 있을 때만 발언한다. 새 내용이 없으면 공개 응답 없이 다음 배정·검증을 계속한다. 최종 보고도 이미 공개된 항목을 나열하지 말고 전체 완료 여부·새로 확인한 결론·남은 조치만 한 번 전달한다. 사용자가 다시 설명하거나 요약해 달라고 요청하면 답한다.",
     `- 일 맡기기: ${t("ask")}(to=닉네임, kind, message, scope). 서로 독립적인 일은 반드시 ${t("ask_parallel")}(tasks=[…])로 한 번에 맡겨 동시에 진행한다(하나씩 기다리지 말 것). 파일을 변경할 작업은 종류와 관계없이 scope를 겹치지 않게 나눈다. 읽기·토의는 동시에 가능하며, 리뷰·의견에서 수정할 때도 범위와 승인을 따른다.`,
@@ -855,9 +856,11 @@ export class Orchestrator {
           const tasks: any[] = Array.isArray(args.tasks) ? args.tasks : [];
           if (!tasks.length) return textResult("tasks가 비었습니다.", true);
           if (args.coordinator !== undefined && (typeof args.coordinator !== "string" || !tasks.some(t => t.to === args.coordinator))) return textResult("coordinator는 이번 tasks에 배정한 작업자 닉네임이어야 합니다.", true);
+          if (args.reportsOnly !== undefined && (!master || typeof args.reportsOnly !== "boolean")) return textResult("reportsOnly는 마스터가 지정하는 boolean 옵션입니다.", true);
+          if (args.reportsOnly && args.coordinator !== undefined) return textResult("reportsOnly=true와 coordinator는 함께 지정할 수 없습니다.", true);
           const batches = this.parallelBatches.get(chatId) ?? new Set<Promise<ToolResult>>();
           this.parallelBatches.set(chatId, batches);
-          const result = this.parallelAsks(chatId, caller, tasks, args.coordinator).finally(() => {
+          const result = this.parallelAsks(chatId, caller, tasks, args.coordinator, args.reportsOnly === true).finally(() => {
             batches.delete(result);
             if (!batches.size && this.parallelBatches.get(chatId) === batches) this.parallelBatches.delete(chatId);
           });
@@ -913,16 +916,20 @@ export class Orchestrator {
     }
   }
 
-  private async parallelAsks(chatId: number, caller: Role, tasks: any[], coordinator?: string): Promise<ToolResult> {
+  private async parallelAsks(chatId: number, caller: Role, tasks: any[], coordinator?: string, reportsOnly = false): Promise<ToolResult> {
     const inst = this.instructions.get(chatId), epoch = this.epochs.get(chatId);
-    const results = await Promise.all(tasks.map(t => this.askTool(chatId, caller, t).catch(error => textResult(error instanceof Error ? error.message : String(error), true))));
-    if (caller !== "orch" || tasks.length === 1) return textResult(results.map((r, i) => `## ${i + 1}. ${String(tasks[i]?.to ?? "")}\n${r.content.map(c => c.text).join("\n")}`).join("\n\n"), results.every(r => r.isError));
+    const results = await Promise.all(tasks.map(t => this.askTool(chatId, caller, reportsOnly ? { ...t, summary: true } : t)
+      .catch(error => textResult(error instanceof Error ? error.message : String(error), true))));
+    const reports = results.map((r, i) => `## ${i + 1}. ${String(tasks[i]?.to ?? "")}\n${r.content.map(c => c.text).join("\n")}`).join("\n\n");
+    if (caller !== "orch" || (tasks.length === 1 && !reportsOnly)) return textResult(reports, results.every(r => r.isError));
     const records = results.map(r => {
       const id = r.structuredContent?.consultId;
       return typeof id === "number" ? this.chats.store.consult(id) : undefined;
     });
     const receipts = records.map((c, i) => c ? `${tasks[i].to}: ${consultStatusText(c)}` : `${tasks[i].to}: 배정 실패 · ${clipText(results[i].content.map(x => x.text).join("\n"), 500)}`).join("\n");
     if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch || this.instructions.get(chatId) !== inst || !this.chats.store.chat(chatId)) return textResult(`작업이 중지·변경되어 결과 취합을 시작하지 않았습니다.\n${receipts}`, true);
+    const consultIds = records.flatMap(c => c ? [c.id] : []);
+    if (reportsOnly) return { ...textResult(reports, results.some(r => r.isError)), structuredContent: { consultIds } };
     const selected = coordinator ? tasks.findIndex(t => t.to === coordinator) : results.findIndex((r, i) => !r.isError && records[i]);
     if (selected < 0 || !records.some(Boolean)) return textResult(`결과 취합 미완료: 성공한 담당자가 없습니다.\n${receipts}`, true);
     const task = tasks[selected];
@@ -932,7 +939,7 @@ export class Orchestrator {
       scope: [],
     });
     const failed = records.flatMap((c, i) => results[i].isError ? [c ? `협의 ${c.id}: ${c.status}` : `${tasks[i].to}: 배정 실패`] : []);
-    return { ...textResult(`[작업자 통합 보고 · 취합 ${task.to}]\n${combined.content.map(c => c.text).join("\n")}\n배정 ${tasks.length}건 · 실패 ${failed.length}건${failed.length ? ` (${failed.join(", ")})` : ""}`, !!combined.isError || failed.length > 0), structuredContent: { consultIds: [...records.flatMap(c => c ? [c.id] : []), combined.structuredContent?.consultId].filter(id => typeof id === "number") } };
+    return { ...textResult(`[작업자 통합 보고 · 취합 ${task.to}]\n${combined.content.map(c => c.text).join("\n")}\n배정 ${tasks.length}건 · 실패 ${failed.length}건${failed.length ? ` (${failed.join(", ")})` : ""}`, !!combined.isError || failed.length > 0), structuredContent: { consultIds: [...consultIds, combined.structuredContent?.consultId].filter(id => typeof id === "number") } };
   }
 
   private async waitForMasterConsult(chatId: number, result: Promise<ToolResult>): Promise<ToolResult> {
@@ -1648,7 +1655,7 @@ export class Orchestrator {
             const driver = await this.chats.driver(chatId, "orch");
             if (driver.running || this.stopped.has(chatId) || this.instructions.get(chatId) !== inst) return;
             this.chats.updateChat(chatId, { status: "working" });
-            await driver.send({ text: `[앱 작업자 결과 도착 — 기존 지시 계속]\n${this.agentsText(chatId, true)}\n취합 협의가 있으면 read_consult로 짧은 통합 결론만 확인하세요. 아직 취합하지 않았으면 작업자 한 명에게 협의 ID들을 주고 summary=true로 취합을 맡기세요. 개별 보고를 다시 모두 읽거나 완료 작업을 재배정하지 말고, 사용자 추가 지시에 따른 방침 결정 또는 완료 결과를 보고하세요.${this.takeQueued(chatId)}`, attachments: [], noWrites: false });
+            await driver.send({ text: `[앱 작업자 결과 도착 — 기존 지시 계속]\n${this.agentsText(chatId, true)}\nread_consult로 취합 결과나 필요한 개별 협의의 짧은 결론을 확인하세요. 이견을 대조해야 할 때 취합을 맡기세요. 완료 작업을 재배정하지 말고, 추가 지시에 따른 방침 결정 또는 완료 결과를 보고하세요.${this.takeQueued(chatId)}`, attachments: [], noWrites: false });
           } catch (e) {
             const error = String(e);
             this.chats.emit(chatId, "orch", "orch", { type: "error", message: error });

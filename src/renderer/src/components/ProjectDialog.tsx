@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { FolderOpen } from "lucide-react";
+import { ChevronDown, FolderOpen } from "lucide-react";
 import { APPROVAL_MODE_LABEL, DEFAULT_SETTINGS, MAX_CONSULTS, MAX_REVIEWS, parseOrchestrator, type AgentKind, type CliAccountStatus, type Project, type ProjectSettings } from "../../../shared/types";
 import { CLI_KINDS, CLI_KIND_LABEL, existingCliAccountPolicies } from "../lib/cli-accounts-ui";
 import { CliAccountPolicyField } from "./CliAccountPolicyField";
@@ -24,29 +24,34 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
   const updateProject = useStore((s) => s.updateProject);
   const createChat = useStore((s) => s.createChat);
   const models = useStore((s) => s.models);
-  const [name, setName] = useState("");
+  const toast = useStore((s) => s.toast);
+  const [name, setName] = useState<string>();
   const [folder, setFolder] = useState("");
   const [settings, setSettings] = useState<ProjectSettings>(DEFAULT_SETTINGS);
   const [cliAccounts, setCliAccounts] = useState<CliAccountStatus[]>();
   const [cliAccountsError, setCliAccountsError] = useState<string>();
   const [busy, setBusy] = useState(false);
+  const [advanced, setAdvanced] = useState(false);
+  const showAdvanced = !!project || advanced;
+  const folderName = folder.trim().split(/[\\/]/).filter(Boolean).at(-1);
 
   useEffect(() => {
     if (!open) return;
-    setName(project?.name ?? "");
+    setName(project?.name);
     setFolder(project?.folder ?? "");
     setSettings(project ? { ...DEFAULT_SETTINGS, ...project.settings } : DEFAULT_SETTINGS);
+    setAdvanced(false);
   }, [open]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || !showAdvanced) return;
     let active = true;
     setCliAccountsError(undefined);
     setCliAccounts(undefined);
     void api.cliAccounts.list().then(accounts => { if (active) setCliAccounts(accounts); })
       .catch(error => { if (active) setCliAccountsError(errorMessage(error)); });
     return () => { active = false; };
-  }, [open]);
+  }, [open, showAdvanced]);
 
   const accountPolicy = cliAccounts ? existingCliAccountPolicies(settings.accountPolicy, cliAccounts) : undefined;
 
@@ -64,50 +69,54 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
   };
 
   const browse = async () => {
-    const f = await api.pickFolder();
-    if (!f) return;
-    setFolder(f);
-    if (!name.trim()) setName(f.split(/[\\/]/).filter(Boolean).pop() ?? "");
+    try {
+      const selected = await api.pickFolder();
+      if (selected) setFolder(selected);
+    } catch (error) {
+      toast(errorMessage(error));
+    }
   };
 
   const submit = async () => {
-    if (busy) return;
+    const path = folder.trim();
+    if (busy || !path) return;
     setBusy(true);
     try {
-      // The server validates policies even when the account list is unavailable.
-      const accounts = await api.cliAccounts.list().catch(() => cliAccounts);
-      if (accounts) setCliAccounts(accounts);
-      setCliAccountsError(undefined);
-      const nextSettings = { ...settings, accountPolicy: existingCliAccountPolicies(settings.accountPolicy, accounts) };
       if (project) {
-        const saved = await updateProject(project.id, { name: name.trim() || project.name, folder, settings: nextSettings });
+        const initial = { ...DEFAULT_SETTINGS, ...project.settings };
+        const settingsChanged = (Object.keys(settings) as (keyof ProjectSettings)[]).some(key => settings[key] !== initial[key]);
+        const saved = await updateProject(project.id, {
+          name: name?.trim() || project.name,
+          ...(path !== project.folder ? { folder: path } : {}),
+          ...(settingsChanged ? { settings } : {}),
+        });
         if (saved) onOpenChange(false);
       } else {
-        const p = await createProject({ name: name.trim(), folder, settings: nextSettings });
+        const p = await createProject({ name: name?.trim() ?? "", folder: path, settings });
         if (p) {
           onOpenChange(false);
           await createChat(p.id);
         }
       }
     } catch (error) {
-      setCliAccountsError(errorMessage(error));
+      toast(errorMessage(error));
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={next => { if (!busy) onOpenChange(next); }}>
       <DialogContent
         title={project ? "프로젝트 설정" : "새 프로젝트"}
-        description={project ? "모델 변경은 다음 지시부터 적용됩니다." : "작업할 폴더와 네 역할의 모델을 고르세요."}
-        className="w-[min(1000px,calc(100vw-40px))]"
+        description={project ? "모델 변경은 다음 지시부터 적용됩니다." : "작업할 폴더를 선택하면 첫 채팅이 열립니다."}
+        className={showAdvanced ? "w-[min(1000px,calc(100vw-40px))]" : "w-[min(600px,calc(100vw-40px))]"}
       >
         <form
           className="grid gap-5"
           onSubmit={(e) => {
             e.preventDefault();
-            if (folder) void submit();
+            void submit();
           }}
         >
           <div className="grid gap-1.5">
@@ -120,13 +129,12 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
             </div>
           </div>
           <div className="grid gap-1.5">
-            <Label htmlFor="proj-name">이름</Label>
-            <Input id="proj-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="폴더 이름을 그대로 씁니다" />
+            <Label htmlFor="proj-name">{project ? "이름" : "이름 (선택)"}</Label>
+            <Input id="proj-name" value={name ?? folderName ?? ""} onChange={(e) => setName(e.target.value)} placeholder="폴더 이름을 그대로 씁니다" />
           </div>
 
-          <div className="grid gap-3 rounded-lg border p-3.5">
-            <div className="text-[12px] font-medium text-muted-foreground">모델</div>
-            <ModelRow label="마스터" hint="지시를 받아 팀을 꾸리고 일을 나눕니다 (승인 설정에 따라 파일 수정·명령 실행)">
+          <div className="rounded-lg border p-3.5">
+            <ModelRow label="마스터" hint="필요한 작업자를 배정합니다.">
               <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
                 <ModelPicker
                   agents={["claude", "codex", "gemini", "grok", "deepseek"]}
@@ -149,6 +157,20 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
                 })()}
               </div>
             </ModelRow>
+          </div>
+
+          {!project && (
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-[12px] text-muted-foreground">{APPROVAL_MODE_LABEL[selectedApprovalMode]} · {settings.reviewGate ? "교차 리뷰 사용" : "교차 리뷰 끔"}</span>
+              <Button type="button" variant="ghost" size="sm" aria-expanded={advanced} aria-controls="project-advanced" onClick={() => setAdvanced(value => !value)}>
+                고급 설정 <ChevronDown className={cn(advanced && "rotate-180")} />
+              </Button>
+            </div>
+          )}
+
+          <div id="project-advanced" className={showAdvanced ? "grid gap-4" : "hidden"}>
+          <div className="grid gap-3 rounded-lg border p-3.5">
+            <div className="text-[12px] font-medium text-muted-foreground">작업자 모델</div>
             <ModelRow label="클로드 작업자" hint="클로드 N호 (Claude Code)">
               <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
                 <ModelPicker
@@ -388,12 +410,13 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
             </div>
             <div className="text-[12px] text-muted-foreground">인원·배정·리뷰 숫자는 계획 참고값입니다. 진행 중인 작업을 횟수로 차단하지 않으며 중지 버튼으로 멈출 수 있습니다.</div>
           </div>
+          </div>
 
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            <Button type="button" variant="outline" disabled={busy} onClick={() => onOpenChange(false)}>
               취소
             </Button>
-            <Button type="submit" disabled={!folder || busy}>
+            <Button type="submit" disabled={!folder.trim() || busy}>
               {project ? "저장" : "만들기"}
             </Button>
           </DialogFooter>
@@ -440,7 +463,7 @@ export function Segmented<T extends string>({
 
 function ModelRow({ label, hint, children }: { label: string; hint: string; children: React.ReactNode }) {
   return (
-    <div className="grid grid-cols-[150px_1fr] items-center gap-3">
+    <div className="grid items-center gap-3 sm:grid-cols-[minmax(108px,150px)_minmax(0,1fr)]">
       <div>
         <div className="text-[13px] font-medium">{label}</div>
         <div className="text-[11.5px] leading-snug text-muted-foreground">{hint}</div>

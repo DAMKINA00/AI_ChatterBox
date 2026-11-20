@@ -330,6 +330,43 @@ try {
   await page.locator('[data-testid="chat-node"][data-chat-id="1"] [role="treeitem"]').click();
   await page.waitForSelector('[data-testid="team-chips"]');
   check("worker team history is available after restart", (await page.locator('[data-testid="team-chip"]').count()) === 12);
+
+  await page.getByLabel("새 프로젝트").first().click();
+  const create = page.getByRole("dialog", { name: "새 프로젝트" });
+  const advanced = create.getByRole("button", { name: "고급 설정" });
+  await create.getByLabel("작업 폴더").fill(workspace);
+  check("quick project setup suggests a name and hides worker settings",
+    await create.locator("#proj-name").inputValue() === "workspace"
+      && await advanced.getAttribute("aria-expanded") === "false"
+      && !await create.getByLabel("클로드 모델", { exact: true }).isVisible());
+  await page.screenshot({ path: join(screenshots, "quick-project.png") });
+  await create.getByRole("button", { name: "만들기" }).click();
+  await create.waitFor({ state: "hidden" });
+  await page.locator('[data-testid="chat-title"]').filter({ hasText: "새 채팅" }).waitFor();
+  const newProject = await page.evaluate(() => window.chatterbox.listProjects().then(projects => projects.find(p => p.name === "workspace")));
+  check("creating from a folder opens a first chat with the default review gate", newProject?.folder === workspace && newProject?.settings.reviewGate === true);
+
+  await app.evaluate(({ ipcMain }) => {
+    globalThis.quickPlanRequests = [];
+    ipcMain.removeHandler("chats:command");
+    ipcMain.handle("chats:command", (_event, chatId, name, arg) => {
+      globalThis.quickPlanRequests.push({ chatId, name, arg });
+      if (globalThis.quickPlanRequests.length === 1) throw new Error("계획 요청 테스트 실패");
+    });
+  });
+  const plan = page.getByRole("button", { name: "계획 먼저" });
+  const composer = page.getByLabel("메시지 입력");
+  check("plan shortcut waits for an instruction", await plan.isDisabled());
+  const instruction = "검증 순서를 먼저 정리해 주세요.\n작업 범위도 제안해 주세요.";
+  await composer.fill(instruction);
+  await plan.click();
+  await page.getByRole("alert").filter({ hasText: "계획 요청 테스트 실패" }).waitFor();
+  check("a failed plan request preserves the typed instruction", await composer.inputValue() === instruction);
+  await plan.click();
+  await page.waitForFunction(() => document.querySelector('textarea[aria-label="메시지 입력"]')?.value === "");
+  const requests = await app.evaluate(() => globalThis.quickPlanRequests);
+  check("plan shortcut uses the existing plan command with unmodified task text",
+    requests.length === 2 && requests.every(r => r.name === "plan" && r.arg === instruction && r.chatId === requests[0].chatId));
 } catch (error) {
   console.error(error);
   check("GUI test run completed", false, error instanceof Error ? error.message : String(error));

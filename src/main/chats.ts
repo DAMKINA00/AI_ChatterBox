@@ -178,6 +178,7 @@ export class ChatManager {
   cliInfo(): CliInfo[] {
     const claude = findClaude(this.store.getSetting("claudePath"));
     const codex = findCodex(this.store.getSetting("codexPath"));
+    const gemini = findGemini(this.store.getSetting("geminiPath"));
     const grok = findGrok(this.store.getSetting("grokPath"));
     return [
       {
@@ -186,7 +187,7 @@ export class ChatManager {
         error: claude ? undefined : "claude.exe를 찾지 못했습니다. PowerShell에서 irm https://claude.ai/install.ps1 | iex 로 설치하고 로그인하세요.",
       },
       { agent: "codex", path: codex, error: codex ? undefined : "codex.exe를 찾지 못했습니다. Codex 앱 또는 Codex CLI를 설치하세요." },
-      { agent: "gemini", path: findGemini(this.store.getSetting("geminiPath")), error: findGemini(this.store.getSetting("geminiPath")) ? undefined : "Antigravity CLI(agy)를 설치하고 로그인하세요." },
+      { agent: "gemini", path: gemini, error: gemini ? undefined : "Antigravity CLI(agy)를 설치하고 로그인하세요." },
       { agent: "grok", path: grok, error: grok ? undefined : "Grok CLI를 찾지 못했습니다. npm install -g @xai-official/grok 설치 후 grok login을 실행하세요." },
       { agent: "deepseek", path: this.deepSeek().status().apiKeySet ? "DeepSeek API" : null, error: this.deepSeek().status().apiKeySet ? undefined : "DeepSeek API 설정에서 API 키를 저장하세요." },
     ];

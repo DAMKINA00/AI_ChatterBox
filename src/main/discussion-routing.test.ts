@@ -260,6 +260,27 @@ test("failed work cannot be hidden by a successful consolidated report", async (
   } finally { await f.close(); }
 });
 
+test("independent reports return the completed result and the failure without a collector turn", async () => {
+  const f = fixture();
+  try {
+    const a = f.store.createAgent(f.chat.id, "claude", "reporter");
+    const b = f.store.createAgent(f.chat.id, "gpt", "failed peer");
+    f.behavior.set(a.key, (_input, role) => f.finish(role, "verified: part A"));
+    f.behavior.set(b.key, (_input, role) => f.chats.onDriverEvent!(f.chat.id, role, { type: "turn_end", ok: false, error: "provider unavailable" }));
+    const tasks = [a, b].map(w => ({ to: w.nickname, kind: "opinion", message: "independent check", reason: "test" }));
+    assert.equal((await f.engine.call(f.chat.id, "orch", "ask_parallel", { coordinator: a.nickname, reportsOnly: true, tasks })).isError, true);
+    assert.equal(f.sent.length, 0);
+
+    const result = await f.engine.call(f.chat.id, "orch", "ask_parallel", { reportsOnly: true, tasks });
+    assert.equal(result.isError, true);
+    assert.match(textOf(result), /verified: part A/);
+    assert.match(textOf(result), /provider unavailable/);
+    assert.deepEqual(new Set(result.structuredContent.consultIds), new Set(f.store.listConsults(f.chat.id).map(c => c.id)));
+    assert.equal(f.sent.length, 2);
+    assert.equal(f.engine.parallelBatches.size, 0);
+  } finally { await f.close(); }
+});
+
 test("stop after parallel work never launches an automatic collector", async () => {
   const f = fixture();
   try {

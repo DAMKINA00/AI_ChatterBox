@@ -146,6 +146,9 @@ try {
   await page.getByLabel("새 프로젝트").first().click();
   const newProjectDialog = page.getByRole("dialog").filter({ hasText: "새 프로젝트" });
   await newProjectDialog.waitFor({ state: "visible" });
+  const advanced = newProjectDialog.getByRole("button", { name: "고급 설정" });
+  check("new project starts with advanced controls collapsed", await advanced.getAttribute("aria-expanded") === "false" && !await newProjectDialog.locator("#project-advanced").isVisible());
+  await advanced.click();
   const defaultClaudeWorkers = newProjectDialog.locator("label").filter({ hasText: "권장 클로드 작업자" }).locator("input");
   const defaultGptWorkers = newProjectDialog.locator("label").filter({ hasText: "권장 지피티 작업자" }).locator("input");
   const defaultGeminiWorkers = newProjectDialog.locator("label").filter({ hasText: "권장 제미나이 작업자" }).locator("input");

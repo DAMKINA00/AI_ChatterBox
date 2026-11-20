@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mock, test } from "node:test";
 import { PassThrough } from "node:stream";
 import { tmpdir } from "node:os";
@@ -60,6 +60,41 @@ function fakeGrok(replies: Array<{ result?: unknown; error?: { code?: number; me
 }
 
 const grokUsage = { config: { currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", end: END }, creditUsagePercent: 20 } };
+
+test("a stale Antigravity path falls back to the current installation for usage refresh", async (t) => {
+  const f = fixture();
+  const originalLocalAppData = process.env.LOCALAPPDATA;
+  const originalPath = process.env.PATH;
+  const directory = join(f.root, "agy", "bin");
+  const exe = join(directory, process.platform === "win32" ? "agy.exe" : "agy");
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(exe, "current installation");
+  f.store.setSetting("geminiPath", join(f.root, "old", "agy.exe"));
+  process.env.LOCALAPPDATA = f.root;
+  process.env.PATH = "";
+  const response = JSON.stringify({
+    status: "SUCCESS", command: { name: "usage", data: { groups: [{ name: "Gemini Models", buckets: [{ window: "weekly", remaining_fraction: 0.75 }] }] } },
+  });
+  const exec = t.mock.method(childProcess, "execFile", (_file: string, _args: string[], _options: unknown, done: (error: null, stdout: string, stderr: string) => void) => {
+    queueMicrotask(() => done(null, response, ""));
+    return { stdin: new PassThrough() };
+  });
+
+  try {
+    await f.chats.refreshGeminiUsage();
+    assert.equal(exec.mock.calls[0]?.arguments[0], exe);
+    assert.equal(f.chats.usage().gemini?.weekly?.usedPercent, 25);
+    assert.equal(f.chats.usage().gemini?.error, undefined);
+    assert.equal(f.chats.cliInfo().find(info => info.agent === "gemini")?.path, exe);
+  } finally {
+    if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA = originalLocalAppData;
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    t.mock.restoreAll();
+    await f.chats.dispose(); f.store.close(); rmSync(f.root, { recursive: true, force: true });
+  }
+});
 
 test("refreshUsage settles a synchronous Codex failure records Gemini failure and still refreshes Grok", async () => {
   const f = fixture({ gemini: { weekly: { usedPercent: 42 } } });

@@ -378,9 +378,13 @@ export class CliAccounts {
       throw new Error("앱이 만든 Antigravity 계정 폴더에서만 로그아웃할 수 있습니다.");
     const dir = antigravityProfileDir(account.configDir);
     if (!existsSync(dir)) return;
-    if (!samePath(realpathSync.native(dir), dir)) throw new Error("로그인 저장소가 다른 위치로 연결되어 있어 정리하지 않았습니다.");
-    for (const name of readdirSync(dir).filter(name => ANTIGRAVITY_TOKEN_FILES.some(base => name === base || name.startsWith(base + ".")))) {
-      const file = join(dir, name), stat = lstatSync(file);
+    // A Windows short path can name the same account folder. Anchor the comparison at the real account root.
+    const root = this.realRoot(false);
+    const expected = root && antigravityProfileDir(join(root, id));
+    if (!expected || this.isLink(dirname(dir)) || this.isLink(dir) || !samePath(realpathSync.native(dir), expected))
+      throw new Error("로그인 저장소가 다른 위치로 연결되어 있어 정리하지 않았습니다.");
+    for (const name of readdirSync(expected).filter(name => ANTIGRAVITY_TOKEN_FILES.some(base => name === base || name.startsWith(base + ".")))) {
+      const file = join(expected, name), stat = lstatSync(file);
       if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("로그인 파일이 일반 파일이 아니어서 정리하지 않았습니다.");
       rmSync(file);
     }

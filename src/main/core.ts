@@ -1,6 +1,6 @@
 import { app } from "electron";
 import { existsSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { BUSY_STATUSES, chatApprovalChange, checkRemoteSend, listRemoteUploads, mergeProjectSettings, remoteError, removeRemoteUpload, saveRemoteUpload } from "./remote-core";
 import { REMOTE_UPLOAD_BUDGET, REMOTE_UPLOAD_STORAGE, type RemoteUploadKey } from "../shared/remote-web";
 import { ForkError } from "./chat-fork";
@@ -46,8 +46,8 @@ function registerHandlers(rpc: CoreRpc) {
   // projects
   ipcMain.handle("projects:list", () => store.listProjects());
   ipcMain.handle("projects:create", (_e, input: { name: string; folder: string; settings: ProjectSettings }) => {
-    if (!input.folder || !existsSync(input.folder)) throw new Error("작업 폴더가 없습니다.");
-    return store.createProject(input.name.trim() || "새 프로젝트", input.folder, withAccountPolicy(input.settings));
+    if (!input.folder || !existsSync(input.folder) || !statSync(input.folder).isDirectory()) throw new Error("작업 폴더가 없습니다.");
+    return store.createProject(input.name.trim() || basename(input.folder) || "새 프로젝트", input.folder, withAccountPolicy(input.settings));
   });
   ipcMain.handle("projects:update", async (_e, id: number, patch) => {
     if (patch.folder !== undefined && (!patch.folder || !existsSync(patch.folder) || !statSync(patch.folder).isDirectory()))
