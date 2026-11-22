@@ -62,9 +62,10 @@ function fakeGrok(replies: Array<{ result?: unknown; error?: { code?: number; me
 
 const grokUsage = { config: { currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", end: END }, creditUsagePercent: 20 } };
 
-test("Windows discovers the standalone Codex CLI before the desktop copy", { skip: process.platform !== "win32" }, () => {
+test("Windows keeps a discoverable Codex fallback when no installed version can be read", { skip: process.platform !== "win32" }, (t) => {
   const root = mkdtempSync(join(tmpdir(), "cbx-codex-path-"));
-  const previous = process.env.LOCALAPPDATA;
+  const previous = { LOCALAPPDATA: process.env.LOCALAPPDATA, PATH: process.env.PATH, CODEX_HOME: process.env.CODEX_HOME };
+  t.mock.method(childProcess, "execFileSync", () => { throw new Error("version unavailable"); });
   try {
     const standalone = join(root, "Programs", "OpenAI", "Codex", "bin");
     const desktop = join(root, "OpenAI", "Codex", "bin", "older");
@@ -73,11 +74,15 @@ test("Windows discovers the standalone Codex CLI before the desktop copy", { ski
       writeFileSync(join(directory, "codex.exe"), "fixture");
     }
     process.env.LOCALAPPDATA = root;
+    process.env.PATH = "";
+    process.env.CODEX_HOME = root;
     assert.equal(findCodex(), join(standalone, "codex.exe"));
     assert.equal(findCodex(join(desktop, "codex.exe")), join(desktop, "codex.exe"));
   } finally {
-    if (previous === undefined) delete process.env.LOCALAPPDATA;
-    else process.env.LOCALAPPDATA = previous;
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     rmSync(root, { recursive: true, force: true });
   }
 });
