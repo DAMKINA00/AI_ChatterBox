@@ -31,7 +31,7 @@ export function ForkMessageButton({ chatId, eventId, preview, className }: { cha
   );
 }
 
-function ForkDialog({ chatId, eventId, preview, onClose }: { chatId: number; eventId: number; preview: string; onClose: () => void }) {
+export function ForkDialog({ chatId, eventId, preview, onClose }: { chatId: number; eventId: number; preview: string; onClose: () => void }) {
   const forkChat = useStore((s) => s.forkChat);
   const [range, setRange] = useState<ChatForkOptions["range"]>("through");
   const [includeAttachments, setIncludeAttachments] = useState(false);

@@ -37,6 +37,7 @@ export function CliAccountCard({ account, pending, loggingIn = false, update, ru
       </div>
       <p className="break-all text-[12px]" data-testid="cli-account-auth">
         {loggingIn ? "로그인 완료 대기 중…" : account.authStatus === "authenticated" ? "로그인됨" : account.authStatus === "required" ? "로그인 필요" : "로그인 상태 미확인"}
+        {!loggingIn && account.authStale && account.authStatus !== "unknown" ? " (이전 실행 기준, 다시 확인 전)" : ""}
         {account.auth?.email ? ` · ${account.auth?.email}` : ""}
       </p>
       {loggingIn && <p role="status" className="text-[11.5px] text-muted-foreground">브라우저 인증 후 인증 코드 또는 마지막 페이지 주소를 이 계정의 로그인 콘솔에 붙여넣고 Enter를 누르세요. 완료 여부를 자동으로 확인합니다.</p>}

@@ -128,6 +128,16 @@
   }
 }
 
+/*
+ * Dialog scroll lock (Radix → react-remove-scroll-bar) as a static rule: the library sets
+ * body[data-scroll-locked] and injects the matching rule in a <style> tag, which the remote page's CSP
+ * (style-src 'self', no inline styles) refuses. This keeps the lock working there without loosening the CSP.
+ */
+body[data-scroll-locked] {
+  overflow: hidden !important;
+  overscroll-behavior: contain;
+}
+
 /* Markdown in agent messages */
 .prose-chat {
   @apply select-text leading-relaxed break-words;

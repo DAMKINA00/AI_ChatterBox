@@ -163,11 +163,14 @@ function createWindow() {
 }
 
 function registerUi(channels: string[], rpc: CoreRpc) {
-  const internal = new Set(["attachment:info", "window:save", "files:resolve-link", "remote:chat-patch", "remote:project-patch", "remote:chat-delete", "remote:chat-fork", "remote:attachment-remove", "remote:att-bytes", "remote:uploads", "remote:send"]);
+  const internal = new Set(["attachment:info", "window:save", "files:resolve-link", "remote:chat-patch", "remote:project-patch", "remote:chat-delete", "remote:chat-fork", "remote:fork-anchor", "remote:attachment-remove", "remote:att-bytes", "remote:uploads", "remote:send"]);
   const local = new Set(["theme:set"]);
   for (const channel of channels.filter(channel => !internal.has(channel) && !local.has(channel))) {
     ipcMain.handle(channel, async (_event, ...args) => {
+      const deletedIds = channel === "chats:delete" ? [args[0]]
+        : channel === "projects:delete" ? chatCache.filter(chat => chat.projectId === args[0]).map(chat => chat.id) : [];
       const result = await rpc.call(channel, args);
+      for (const id of deletedIds) remote?.publish("chat:deleted", [id]);
       if (["chats:create", "chats:fork", "chats:delete", "projects:delete"].includes(channel)) chatCache = await rpc.call("chats:list");
       // Account added, renamed, enabled/disabled, logged in/out or removed: the monitor follows at once.
       if (channel.startsWith("cli-accounts:") && channel !== "cli-accounts:list" && channel !== "cli-accounts:get-policy") monitorFeed?.changed();

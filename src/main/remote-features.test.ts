@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { EVENT_PAGE_LIMITS } from "../shared/event-page";
 import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { request as httpRequest, type ClientRequest } from "node:http";
@@ -52,13 +53,17 @@ async function setup(t: { after(fn: () => unknown): void }) {
   files.diskFree = () => free;
   const calls: [string, unknown[]][] = [];
   const hooks: Record<string, () => void> = {};
+  const pending = { eventId: 5, id: "approval-5", at: 1, role: "orch", title: "C:/private/name", risk: "low", detail: "local detail" };
   const call = async (channel: string, args: any[]): Promise<any> => {
     calls.push([channel, args]);
     hooks[channel]?.();
     switch (channel) {
       case "chats:list": return state.chats;
+      case "chats:reorder": return store.reorderChat(args[0], args[1], args[2]).map(chat => ({ ...chat, orchClaudeSessionId: "private-native-thread" }));
+      case "chats:pendingApprovals": return { items: [pending], total: 1 };
+      case "remote:fork-anchor": return store.latestForkAnchor(args[0]);
       case "projects:list": return state.projects;
-      case "chats:create": { const c = { id: state.nextId++, projectId: args[0], title: "새 채팅", status: "idle", approvalModeOverride: null }; state.chats.push(c); return c; }
+      case "chats:create": { const c = { id: state.nextId++, projectId: args[0], title: "새 채팅", status: "idle", approvalModeOverride: null, claudeSessionId: "native-session", internalPath: "C:/secret" }; state.chats.push(c); return c; }
       case "chats:update": { const c = state.chats.find(x => x.id === args[0]); Object.assign(c, args[1]); return c; }
       case "remote:chat-patch": {
         const c = state.chats.find(x => x.id === args[0]);
@@ -79,6 +84,7 @@ async function setup(t: { after(fn: () => unknown): void }) {
         const c = state.chats.find(x => x.id === args[0]);
         if (!c) throw remoteError(404, "채팅이 없습니다.");
         if (c.title !== args[1]) throw remoteError(400, "제목 불일치");
+        if (args[2] && (c.createdAt !== args[2].createdAt || c.projectId !== args[2].projectId)) throw remoteError(412, "채팅 변경");
         if (BUSY_STATUSES.includes(c.status)) throw remoteError(409, "작업 중");
         state.chats = state.chats.filter(x => x.id !== args[0]);
         return;
@@ -101,7 +107,8 @@ async function setup(t: { after(fn: () => unknown): void }) {
       }
       case "chats:events": case "chats:eventsPage": {
         const events = [...(args[0] === 1 ? [{ id: 7, chatId: 1, node: "orch", role: null, at: 1, event: { type: "user", text: "x", attachments: [state.attachments.get(50)] } }] : []), ...store.events(args[0])];
-        return channel === "chats:events" ? events : { events, start: events[0]?.id ?? 0, hasMore: false, ...(args[1] === undefined ? { context: [] } : {}) };
+        return channel === "chats:events" ? events : { events, start: events[0]?.id ?? 0, hasMore: false, ...(args[1] === undefined ? { context: [] } : {}),
+          ...(args[0] === 1 ? { snapshot: { approvals: { pending: [pending], total: 1 } } } : {}) };
       }
       case "chats:hasAttachment": return (args[0] === 1 && args[1] === 50) || store.chatHasAttachment(args[0], args[1]);
       case "chats:agents": case "chats:consults": return [];
@@ -417,6 +424,7 @@ test("attachment downloads need the owning chat; images inline, others as downlo
 test("#7 usage carries no emails or folders; refresh is rate limited; snapshots strip paths", async (t) => {
   const s = await setup(t);
   const usage = await (await s.get("/api/usage")).json() as any;
+  assert.ok(usage.groups.every((g: any) => g.accounts.every((row: any) => !("accountId" in row))));
   assert.ok(!JSON.stringify(usage).includes("@example.com") && !JSON.stringify(usage).includes(".claude") && !/AppData|Users/.test(JSON.stringify(usage)), JSON.stringify(usage));
   // The same view as the desktop panel: ChatterBox's accounts and labels only (no stale gpt-9, no retired Gemini CLI value).
   assert.deepEqual(Object.keys(usage).sort(), ["deepseek", "groups"]);
@@ -433,6 +441,76 @@ test("#7 usage carries no emails or folders; refresh is rate limited; snapshots 
   const snap = await (await s.get("/api/chats/1")).json() as any;
   assert.deepEqual(Object.keys(snap.events[0].event.attachments[0]).sort(), ["id", "mime", "name", "size"]);
   assert.deepEqual(stripLocalPaths({ a: [{ id: 1, name: "n", mime: "m", size: 1, path: "C:\\x" }], path: "kept-not-attachment" }), { a: [{ id: 1, name: "n", mime: "m", size: 1 }], path: "kept-not-attachment" });
+});
+
+test("remote ordering checks session and CSRF, validates input and returns order without native thread IDs", async (t) => {
+  const s = await setup(t);
+  const path = "/api/chats/1/reorder";
+  const order = { targetId: 2, placement: "after" };
+  assert.equal(await s.status(s.post(path, order, { auth: false })), 401);
+  assert.equal(await s.status(s.post(path, order, { csrf: false })), 403);
+  assert.equal(await s.status(s.post(path, { ...order, projectId: 9 })), 400);
+  assert.equal(await s.status(s.post(path, { ...order, targetId: 0 })), 400);
+  const res = await s.post(path, order);
+  assert.equal(res.status, 200);
+  const data = await res.json() as { chats: { id: number }[] };
+  assert.deepEqual(data.chats.map(c => c.id), [2, 1]);
+  assert.ok(!JSON.stringify(data).includes("private-native-thread"));
+});
+
+test("older approval pagination requires a session and returns only sanitized summaries", async (t) => {
+  const s = await setup(t);
+  const path = "/api/chats/1/pending-approvals";
+  assert.equal(await s.status(s.get(path + "?before=9", false)), 401);
+  assert.equal(await s.status(s.post(path + "?before=9")), 405);
+  assert.equal(await s.status(s.get(path)), 400);
+  assert.equal(await s.status(s.get(path + "?before=9&offset=-1")), 400);
+  const res = await s.get(path + "?before=9&offset=2");
+  assert.equal(res.status, 200);
+  const safe = [{ eventId: 5, id: "approval-5", at: 1, role: "orch", title: "승인 요청", risk: "low" }];
+  assert.deepEqual(await res.json(), { items: safe, total: 1 });
+  assert.deepEqual(s.calls.find(([channel]) => channel === "chats:pendingApprovals")?.[1], [1, 9, 2]);
+  for (const detailPath of ["/api/chats/1", "/api/chats/1?before=9"]) {
+    const detail = await (await s.get(detailPath)).json() as { snapshot: { approvals: unknown } };
+    assert.deepEqual(detail.snapshot.approvals, { pending: safe, total: 1 });
+  }
+});
+
+test("remote deletion carries the dialog identity through the core check", async (t) => {
+  const s = await setup(t);
+  const chat = s.state.chats[0];
+  chat.createdAt = 10;
+  const path = "/api/chats/1/delete";
+  const body = { confirm: chat.title, createdAt: 10, projectId: chat.projectId };
+  assert.equal(await s.status(s.post(path, { confirm: chat.title, createdAt: 10 })), 400);
+  s.hooks["remote:chat-delete"] = () => { chat.createdAt = 11; };
+  assert.equal(await s.status(s.post(path, body)), 412);
+  assert.equal(s.state.chats[0], chat);
+  assert.deepEqual(s.calls.at(-1)?.[1], [1, body.confirm, { createdAt: 10, projectId: chat.projectId }]);
+});
+
+test("remote fork anchor finds the latest eligible message beyond the first page", async (t) => {
+  const s = await setup(t);
+  s.store.addEvent(1, "orch", null, { type: "user", text: "이전 메시지", attachments: [] });
+  const latest = s.store.addEvent(1, "orch", "orch", { type: "text", text: "x".repeat(260) });
+  for (let i = 0; i < EVENT_PAGE_LIMITS.visible; i++) s.store.addEvent(1, "orch", "orch", { type: "notice", text: "상태 안내" });
+  assert.ok(s.store.eventsPage(1).events.every(event => event.id !== latest.id));
+  const path = "/api/chats/1/fork-anchor";
+  assert.equal(await s.status(s.get(path, false)), 401);
+  assert.deepEqual(await (await s.get(path)).json(), { anchor: { id: latest.id, preview: "x".repeat(240) } });
+  assert.deepEqual(await (await s.get("/api/chats/2/fork-anchor")).json(), { anchor: null });
+});
+
+test("remote token metrics keep display counters and correlate turns without exposing native identifiers", () => {
+  const input = { type: "agent_usage", metrics: { turnId: "native-turn", nativeId: "native-session", elapsedMs: 100, inputTokens: 1, outputTokens: 2,
+    cachedInputTokens: 3, cacheWriteInputTokens: 4, total: { inputTokens: 50 } } };
+  const first = stripLocalPaths(input);
+  const next = stripLocalPaths({ ...input, metrics: { ...input.metrics, elapsedMs: 200 } });
+  assert.equal(first.metrics.turnId, next.metrics.turnId);
+  assert.equal(next.metrics.outputTokens, 2);
+  assert.equal(next.metrics.elapsedMs, 200);
+  assert.ok(!JSON.stringify(first).includes("native-"));
+  assert.ok(!("total" in first.metrics));
 });
 
 test("D1: projects only as one new folder under an allowed root; no paths in answers", async (t) => {
@@ -486,4 +564,18 @@ test("content sniffing rejects executables, SVG/other images and mismatched type
   assert.equal(contentMatches("text/plain", Buffer.from([0x61, 0, 0x62])), false);
   for (const ip of ["127.0.0.1", "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.0.144", "::1", "::ffff:192.168.1.2", "fd00::1", "fe80::1"]) assert.equal(isPrivateIp(ip), true, ip);
   for (const ip of ["8.8.8.8", "172.32.0.1", "220.94.146.33", "100.64.0.1", "2001:db8::1", "::ffff:8.8.8.8"]) assert.equal(isPrivateIp(ip), false, ip);
+});
+
+test("chat answers of the extended API carry only allow-listed fields", async (t) => {
+  const s = await setup(t);
+  const created = await (await s.post("/api/chats", { projectId: 9 })).json() as { chat: Record<string, unknown> };
+  // The fake core gives the new chat a native session id and an unlisted field; neither may leave the PC.
+  const id = created.chat.id as number;
+  const r = await s.post(`/api/chats/${id}/update`, { title: "이름" });
+  const body = await r.json() as { chat: Record<string, unknown> };
+  assert.equal(body.chat.title, "이름");
+  for (const chat of [created.chat, body.chat]) {
+    assert.equal("claudeSessionId" in chat, false);
+    assert.equal("internalPath" in chat, false);
+  }
 });

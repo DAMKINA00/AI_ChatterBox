@@ -153,5 +153,6 @@ export function chatGroups(chats: Chat[], projects: ProjectRef[], showArchived: 
     .filter(g => g.chats.length || (!matches && !g.project.archived));
 }
 
-/** Drops chats the server deleted (chat:deleted), even if an older snapshot still lists them. */
-export const withoutDeleted = (chats: Chat[], deleted: Set<number>) => (deleted.size ? chats.filter(c => !deleted.has(c.id)) : chats);
+/** A deletion supersedes older snapshots, while a later version may legitimately reuse its id. */
+export const withoutDeleted = (chats: Chat[], deleted: ReadonlyMap<number, number>, versions: ReadonlyMap<number, number>) =>
+  deleted.size ? chats.filter(c => !deleted.has(c.id) || (versions.get(c.id) ?? -1) > deleted.get(c.id)!) : chats;

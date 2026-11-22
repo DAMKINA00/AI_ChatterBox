@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { isAgentExpression, type AgentExpression } from "../../../shared/types";
 import { cn } from "../lib/utils";
+import { isRemote } from "../lib/remote-mode";
 
 export type AvatarKind = "orch" | "claude" | "gpt" | "gemini" | "grok" | "deepseek" | "admin";
 export type AvatarSize = 24 | 32 | 36;
@@ -10,7 +11,8 @@ const SIZE_CLASS: Record<AvatarSize, string> = { 24: "size-6", 32: "size-8", 36:
 function source(kind: AvatarKind, expression: AgentExpression): string {
   // Optional chaining keeps server-side unit renders (no Vite env) working; Vite still substitutes it.
   const base = import.meta.env?.BASE_URL || "./";
-  return `${base.endsWith("/") ? base : `${base}/`}characters/${kind}/${expression}.png`;
+  // Remote web: the build's small copies (scripts/make-remote-avatars.cjs); the desktop keeps the originals.
+  return `${base.endsWith("/") ? base : `${base}/`}${isRemote() ? "avatars" : "characters"}/${kind}/${expression}.png`;
 }
 
 /** Character art with a neutral fallback for stale or missing expression assets. */

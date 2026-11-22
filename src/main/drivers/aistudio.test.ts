@@ -3,7 +3,6 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { AIStudioService } from "../aistudio";
 import { AIStudioDriver, studioCompletion, type StudioMessage } from "./aistudio";
 
 function sseResponse(frames: readonly (unknown | string)[], oneBytePackets = false, omitDone = false): Response {
@@ -287,30 +286,19 @@ test("abort during approval prevents the approved write from taking effect", asy
   }
 });
 
-function serviceStore() {
-  const values = new Map<string, string>();
-  return { getSetting: (key: string) => values.get(key), setSetting: (key: string, value: string) => values.set(key, value) };
-}
-
-function serviceSecrets() {
-  return { encrypt: (value: string) => value, decrypt: (value: string) => value };
-}
-
 test("429 and other HTTP failures emit one error and perform no duplicate actions", async () => {
   for (const status of [429, 500]) {
     let chatRequests = 0;
-    const service = new AIStudioService(serviceStore(), serviceSecrets(), async input => {
-      const path = new URL(String(input)).pathname;
-      if (path === "/api/status") return Response.json({ state: "RUNNING" });
-      if (path === "/api/accounts") return Response.json({ accounts: [{ enabled: true }] });
-      if (path === "/api/cooldowns" || path === "/api/models") return Response.json({});
-      if (path === "/v1/models") return new Response(JSON.stringify({ data: [{ id: "gemini-4-argon" }] }), { headers: { "content-type": "application/json" } });
-      if (path === "/v1/chat/completions") {
+    // The endpoint service turns a failed HTTP answer into one error (as DeepSeekService does).
+    const service = {
+      settings: () => ({ model: "gemini-4-argon", videoEnabled: false }),
+      json: async (path: string) => { if (path === "/v1/models") return { data: [{ id: "gemini-4-argon" }] }; throw new Error(`unexpected ${path}`); },
+      response: async (path: string): Promise<Response> => {
+        if (path !== "/v1/chat/completions") throw new Error(`unexpected ${path}`);
         chatRequests++;
-        return new Response(JSON.stringify({ error: { message: "quota failure" } }), { status, statusText: status === 429 ? "Too Many Requests" : "Internal Server Error", headers: { "content-type": "application/json" } });
-      }
-      throw new Error(`unexpected ${path}`);
-    });
+        throw new Error(`AIStudio2API ${status}: quota failure`);
+      },
+    };
     const events: any[] = [];
     const driver = new AIStudioDriver(
       { cwd: process.cwd(), nativeId: null, exePath: "unused", model: "aistudio:gemini-4-argon" },

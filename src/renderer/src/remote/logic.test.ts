@@ -99,8 +99,10 @@ test("chat groups: archived filtering, search matches, newest first", () => {
 
 test("deleted chats stay gone", () => {
   const list = [chat(1, 1), chat(2, 1)];
-  assert.deepEqual(withoutDeleted(list, new Set([2])).map(c => c.id), [1]);
-  assert.equal(withoutDeleted(list, new Set()), list);
+  const deleted = new Map([[2, 10]]);
+  assert.deepEqual(withoutDeleted(list, deleted, new Map([[2, 10]])).map(c => c.id), [1]);
+  assert.deepEqual(withoutDeleted(list, deleted, new Map([[2, 11]])), list);
+  assert.equal(withoutDeleted(list, new Map(), new Map()), list);
 });
 
 test("remote lists hide drafts even in search and retain desktop's saved order", () => {

@@ -799,6 +799,15 @@ export class Store {
       .all(chatId)
       .map((r: Row) => ({ id: r.id, chatId: r.chat_id, node: r.node, role: r.role, at: r.ts, event: JSON.parse(r.payload_json) }));
   }
+  latestForkAnchor(chatId: number): { id: number; preview: string } | null {
+    const row = this.db.prepare(`
+      SELECT id, substr(json_extract(payload_json, '$.text'), 1, 240) AS preview
+      FROM chat_events
+      WHERE chat_id = ? AND node = 'orch' AND (type = 'user' OR (type = 'text' AND role = 'orch'))
+      ORDER BY id DESC LIMIT 1
+    `).get(chatId) as { id: number; preview: string | null } | undefined;
+    return row ? { id: row.id, preview: row.preview ?? "" } : null;
+  }
   /**
    * One page of history, newest first in selection and id order in the result (see shared/event-page.ts).
    * `before` = load events older than this id; omitted = the newest page, which also carries the context.

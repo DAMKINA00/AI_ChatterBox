@@ -2,8 +2,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import type { DeepSeekBalance } from "../../../shared/deepseek";
-import { REMOTE_LIMITS, type RemoteUsageResponse } from "../../../shared/remote-web";
-import { deepSeekBalanceText, type UsageAccountRow } from "../../../shared/usage-view";
+import { REMOTE_LIMITS, type RemoteUsageAccount, type RemoteUsageResponse } from "../../../shared/remote-web";
+import { deepSeekBalanceText } from "../../../shared/usage-view";
 import { cn } from "../lib/utils";
 import { AuthError, request, url } from "./api";
 import { Btn, ErrorLine, errorText, Modal } from "./ui";
@@ -12,7 +12,7 @@ const AUTH_LABEL = { authenticated: "로그인됨", required: "로그인 필요"
 const time = (at: number) => new Date(at < 1e12 ? at * 1000 : at).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
 
 /** One account row, the same values as the desktop usage panel (shared/usage-view.ts). */
-function Row({ name, row }: { name: string; row: UsageAccountRow }) {
+function Row({ name, row }: { name: string; row: RemoteUsageAccount }) {
   const d = row.display;
   const extra = [row.authStatus === "required" ? AUTH_LABEL.required : "", row.runningWorkers ? `작업자 ${row.runningWorkers}명` : "", !row.enabled ? "배정 제외(조회 안 함)" : "", row.checkedAt ? `${time(row.checkedAt)} 조회` : ""].filter(Boolean).join(" · ");
   return (
@@ -56,7 +56,7 @@ export function UsageSheet({ onClose, onAuthError }: { onClose: () => void; onAu
             ? <Row key={g.kind} name={g.name} row={g.accounts[0]} />
             : <div key={g.kind} className="grid gap-2" aria-label={`${g.name} 계정별 잔여량`}>
               <h3 className="text-[12.5px] font-medium">{g.name}</h3>
-              <div className="grid gap-2 pl-3">{g.accounts.map(r => <Row key={r.accountId} name={r.label} row={r} />)}</div>
+              <div className="grid gap-2 pl-3">{g.accounts.map((r, i) => <Row key={i} name={r.label} row={r} />)}</div>
             </div>)}
           {data.deepseek && (
             <div className="flex justify-between gap-2 text-[12.5px]">

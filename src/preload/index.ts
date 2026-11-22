@@ -54,6 +54,7 @@ const api: ChatterBoxApi = {
     login: (id) => ipcRenderer.invoke("cli-accounts:login", id),
     logout: (id) => ipcRenderer.invoke("cli-accounts:logout", id),
     refresh: (id) => ipcRenderer.invoke("cli-accounts:refresh", id),
+    startupCheck: () => ipcRenderer.invoke("cli-accounts:startup-check"),
     update: (id, patch) => ipcRenderer.invoke("cli-accounts:update", id, patch),
     remove: (id) => ipcRenderer.invoke("cli-accounts:remove", id),
     getPolicy: () => ipcRenderer.invoke("cli-accounts:get-policy"),

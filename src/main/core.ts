@@ -37,7 +37,7 @@ function registerHandlers(rpc: CoreRpc) {
     channels.push(channel);
     rpc.handle(channel, async (...args) => {
       if (preparingUpdate && channel !== "window:save") throw new Error("업데이트 적용을 준비하고 있습니다. 새 작업은 재시작 후 보내 주세요.");
-      const backgroundRead = ["usage:get", "cli:info", "models:list"].includes(channel);
+      const backgroundRead = ["usage:get", "cli:info", "models:list", "cli-accounts:startup-check"].includes(channel);
       if (!backgroundRead) pendingCalls++;
       try { return await handler(undefined, ...args); }
       finally { if (!backgroundRead) pendingCalls--; }
@@ -133,21 +133,29 @@ function registerHandlers(rpc: CoreRpc) {
     if (settings) for (const c of store.listChats().filter((c) => c.projectId === id)) chats.approvals.invalidate(c.id);
     return { project: updated, approvalChange };
   });
-  ipcMain.handle("remote:chat-delete", async (_e, id: number, title: string) => {
-    const chat = store.chat(id);
-    if (!chat) throw remoteError(404, "채팅이 없습니다.");
-    if (chat.title !== title) throw remoteError(400, "삭제하려면 채팅 제목을 정확히 입력하세요.");
-    // Never stops work: a busy chat is refused, and no new work may start while the delete runs.
-    if (BUSY_STATUSES.includes(chat.status) || chats.isBusy(id)) throw remoteError(409, "작업 중인 채팅은 삭제할 수 없습니다. 먼저 중지하세요.");
+  ipcMain.handle("remote:chat-delete", async (_e, id: number, title: string, expected?: { createdAt: number; projectId: number }) => {
+    const validateTarget = () => {
+      const chat = store.chat(id);
+      if (!chat) throw remoteError(404, "채팅이 없습니다.");
+      if (expected && (chat.title !== title || chat.createdAt !== expected.createdAt || chat.projectId !== expected.projectId))
+        throw remoteError(412, "삭제할 채팅이 바뀌었습니다. 다시 확인하세요.");
+      if (chat.title !== title) throw remoteError(400, "삭제하려면 채팅 제목을 정확히 입력하세요.");
+      if (BUSY_STATUSES.includes(chat.status) || chats.isBusy(id)) throw remoteError(409, "작업 중인 채팅은 삭제할 수 없습니다. 먼저 중지하세요.");
+    };
+    if (remoteDeleting.has(id)) throw remoteError(409, "채팅을 삭제하는 중입니다.");
+    validateTarget();
     remoteDeleting.add(id);
-    const released = remoteUploadsOf([id]); // no remote upload can be added while it is marked deleting
     try {
-      orchestrator.forget(id);
-      await chats.deleteChat(id);
+      const released = remoteUploadsOf([id]);
+      await chats.deleteChat(id, () => {
+        validateTarget(); // A desktop rename or deletion can arrive while drivers are closing.
+        orchestrator.forget(id);
+      });
+      // The chat folder is kept; only the chat's remote-upload files (sent or not) go.
+      attachments.gcRemoteUploads({ released });
     } finally { remoteDeleting.delete(id); }
-    // As on the desktop, the chat folder is kept; the chat's remote-upload files (sent or not) go.
-    attachments.gcRemoteUploads({ released });
   });
+  ipcMain.handle("remote:fork-anchor", (_e, id: number) => store.latestForkAnchor(id));
   ipcMain.handle("remote:chat-fork", (_e, id: number, options: ChatForkOptions) => {
     if (remoteDeleting.has(id)) throw remoteError(409, "채팅을 삭제하는 중입니다.");
     try { return chats.forkChat(id, options, { maxBytes: REMOTE_UPLOAD_BUDGET.totalBytes, minFreeBytes: REMOTE_UPLOAD_STORAGE.minFreeBytes }); }
@@ -197,6 +205,7 @@ function registerHandlers(rpc: CoreRpc) {
   ipcMain.handle("cli-accounts:login", (_e, id: CliAccountId) => { chats.loginCliAccount(id); });
   ipcMain.handle("cli-accounts:logout", (_e, id: CliAccountId) => chats.logoutCliAccount(id));
   ipcMain.handle("cli-accounts:refresh", (_e, id?: CliAccountId) => chats.refreshCliAccount(id ?? undefined));
+  ipcMain.handle("cli-accounts:startup-check", () => chats.checkCliAccountsOnStartup());
   ipcMain.handle("cli-accounts:update", (_e, id: CliAccountId, patch: { label?: string; enabled?: boolean }) => chats.updateCliAccount(id, patch ?? {}));
   ipcMain.handle("cli-accounts:remove", (_e, id: CliAccountId) => chats.removeCliAccount(id));
   ipcMain.handle("cli-accounts:get-policy", () => chats.getCliAccountPolicy());

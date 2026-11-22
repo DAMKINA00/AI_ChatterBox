@@ -41,7 +41,7 @@ import { LocalBridge } from "./local-bridge";
 import { ApprovalService, type ApprovalInput, type JudgeAnswer } from "./approvals";
 import { findClaude, findCodex, findGrok, findGemini } from "./locate";
 import { GrokDriver, listGrokModels, readGrokAuth, readGrokUsage } from "./drivers/grok";
-import { readClaudeAuth, readClaudeAuthDetail } from "./cli-auth";
+import { readClaudeAuthDetail } from "./cli-auth";
 import { CLI_LOGIN_ARGS, CLI_LOGOUT_ARGS, CliAccounts, accountEnv, cliRemaining, priorityFailure, priorityFailureActive, priorityRecovered, prioritySkipReason, resolveAccountPolicy, sanitizePolicies, type PriorityEvidence, type PriorityFailure, type PriorityFailureReason } from "./cli-accounts";
 import { GeminiDriver } from "./drivers/gemini";
 import { listGeminiModels, clearGeminiModels } from "./drivers/gemini-protocol";
@@ -204,14 +204,14 @@ export class ChatManager {
       const key = `${info.agent}:${info.path}:${account ? defaultCliAccountId(account) : "-"}`;
       let cached = this.authChecks.get(key);
       if (!cached || cached.expires <= Date.now()) {
+        // The CLI's default account answers through the same shared check as the startup login check,
+        // so the two never run the CLI twice for one account. Only an answer from this run counts.
         const check = async (): Promise<CliInfo["authStatus"]> => {
-          if (info.agent === "claude") return readClaudeAuth(info.path!, this.tmpDir);
-          if (info.agent === "gemini") return readGeminiUsage(info.path!, this.tmpDir).then(() => "authenticated" as const).catch(e => /로그인/.test(String(e)) ? "required" as const : "unknown" as const);
-          if (info.agent === "grok") return readGrokAuth(info.path!, this.tmpDir);
-          const server = this.codex();
-          await server.ensure();
-          const account = await server.request<any>("account/read", { refreshToken: false });
-          return account.account || account.requiresOpenaiAuth === false ? "authenticated" : "required";
+          if (!account) return "unknown";
+          const id = defaultCliAccountId(account);
+          await this.checkAccountAuth(id);
+          const status = this.getCliAccount(id);
+          return status && !status.authStale ? status.authStatus : "unknown";
         };
         const promise = (async () => {
           let timer: ReturnType<typeof setTimeout> | undefined;
@@ -447,7 +447,12 @@ export class ChatManager {
         this.loginErrors.delete(id);
         this.mergeUsage({ gemini: { ...usage, updatedAt: Date.now() } }, id, token, startedAt);
       })
-      .catch(error => { if (!this.disposing) this.mergeUsage({ gemini: { error: error instanceof Error ? error.message : "Antigravity 사용량 조회에 실패했습니다." } }, id, token, startedAt); })
+      .catch(error => {
+        if (this.disposing) return;
+        // Same rule as the explicit status check: only a login error proves the account is signed out.
+        if (/로그인/.test(String(error)) && this.isCurrentAccount(id, token)) this.cliAccounts().setAuth(id, { loggedIn: false, checkedAt: Date.now() });
+        this.mergeUsage({ gemini: { error: error instanceof Error ? error.message : "Antigravity 사용량 조회에 실패했습니다." } }, id, token, startedAt);
+      })
       .finally(() => { if (this.geminiUsageRefresh.get(id) === promise) this.geminiUsageRefresh.delete(id); });
     this.geminiUsageRefresh.set(id, promise);
     return promise;
@@ -468,7 +473,15 @@ export class ChatManager {
   }
 
   /** Providers refresh independently, even when another CLI is missing. */
-  async refreshUsage(): Promise<void> {
+  refreshUsage(): Promise<void> {
+    const run = this.refreshUsageOnce();
+    this.usageRun = run;
+    void run.finally(() => { if (this.usageRun === run) this.usageRun = undefined; });
+    return run;
+  }
+  /** The usage read in flight; the startup login check waits for it instead of overlapping it. */
+  private usageRun?: Promise<void>;
+  private async refreshUsageOnce(): Promise<void> {
     await Promise.allSettled([
       Promise.resolve().then(() => this.codex().readUsage()),
       Promise.resolve().then(() => this.refreshClaudeUsage()),
@@ -594,6 +607,7 @@ export class ChatManager {
       ...account,
       isDefault: account.accountId === defaultCliAccountId(account.kind),
       authStatus: account.auth ? account.auth.loggedIn ? "authenticated" : "required" : "unknown",
+      ...(account.auth && account.auth.checkedAt < this.startedAt ? { authStale: true } : {}),
       ...(this.loginErrors.has(account.accountId) ? { loginError: this.loginErrors.get(account.accountId) } : {}),
       ...(remainingPercent === undefined ? {} : { remainingPercent }),
       runningWorkers,
@@ -754,6 +768,86 @@ export class ChatManager {
     if (!this.disposing) this.sink.usage(this.usageState);
     return this.listCliAccounts();
   }
+
+  /**
+   * One read-only login check of an account, shared by every caller while it runs (startup check, the
+   * CLI status check). The answer is stored on the account with its time; a late answer after the
+   * timeout is still stored and announced. Never opens a login console.
+   */
+  private checkAccountAuth(id: CliAccountId): Promise<void> {
+    let work = this.authInFlight.get(id);
+    if (!work) {
+      // Antigravity confirms login with its usage read; share an in-flight periodic read.
+      const started = Promise.resolve().then(() => cliAccountKindOf(id) === "gemini" ? this.refreshGeminiUsage(id) : this.refreshAccountAuth(id, this.accountToken(id)).then(() => undefined));
+      // The CLI stays registered until it really ends, so a caller that gave up waiting never
+      // starts a second one for the same account, and answers cannot arrive out of order.
+      work = started.catch(() => undefined).finally(() => {
+        if (this.authInFlight.get(id) === work) this.authInFlight.delete(id);
+        if (!this.disposing) this.sink.usage(this.usageState);
+      });
+      this.authInFlight.set(id, work);
+    }
+    // Each caller waits at most the timeout; the shared run continues and still records its answer.
+    return this.withTimeout(work, cliAccountKindOf(id) === "gemini" ? this.geminiAuthTimeoutMs : this.authTimeoutMs, "로그인 상태 확인 시간 초과").catch(() => undefined);
+  }
+  private authInFlight = new Map<CliAccountId, Promise<void>>();
+  authTimeoutMs = 20_000;
+  geminiAuthTimeoutMs = 45_000;
+
+  /** Checks the given accounts, at most `concurrency` at a time; returns those left for later (busy or being changed). */
+  private async checkAccountsLimited(ids: CliAccountId[], concurrency: number): Promise<CliAccountId[]> {
+    const later: CliAccountId[] = [];
+    let next = 0;
+    const worker = async () => {
+      while (next < ids.length && !this.disposing) {
+        const id = ids[next++];
+        const account = this.getCliAccount(id);
+        if (!account || !account.enabled) continue;
+        if (this.accountChanges.has(id) || account.runningWorkers > 0) { later.push(id); continue; }
+        if (!account.authStale && account.auth) continue; // already confirmed during this run
+        await this.checkAccountAuth(id);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, ids.length)) }, worker));
+    return later;
+  }
+
+  /**
+   * Read-only login check of every enabled CLI account, once per app run (later calls share the first
+   * run). Starts after the usage read in flight, so the two never overlap; at most `concurrency` CLIs at
+   * a time. Accounts busy with workers or being changed are checked once they are free (retried every
+   * `startupRetryMs`, up to `startupRetryLimit` times). Never opens a login console.
+   */
+  checkCliAccountsOnStartup(concurrency = 2): Promise<CliAccountStatus[]> {
+    this.startupAuthCheck ??= (async () => {
+      // Wait for the usage read in flight, but not forever: a hung read must not hold back the others.
+      if (this.usageRun) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([this.usageRun.catch(() => undefined), new Promise<void>(resolve => { timer = setTimeout(resolve, this.usageWaitMs); })]);
+        clearTimeout(timer);
+      }
+      const ids = this.cliAccounts().list().filter(a => a.enabled).map(a => a.accountId);
+      const later = await this.checkAccountsLimited(ids, concurrency);
+      if (!this.disposing) this.sink.usage(this.usageState);
+      this.retryStartupCheck(later, concurrency, this.startupRetryLimit);
+    })();
+    return this.startupAuthCheck.then(() => this.listCliAccounts());
+  }
+  private retryStartupCheck(ids: CliAccountId[], concurrency: number, attempts: number) {
+    if (!ids.length || attempts <= 0 || this.disposing) return;
+    this.startupRetryTimer = setTimeout(() => {
+      this.startupRetryTimer = undefined;
+      void this.checkAccountsLimited(ids, concurrency).then(left => this.retryStartupCheck(left, concurrency, attempts - 1));
+    }, this.startupRetryMs);
+    this.startupRetryTimer.unref?.();
+  }
+  startupRetryMs = 30_000;
+  usageWaitMs = 60_000;
+  startupRetryLimit = 60;
+  private startupRetryTimer?: ReturnType<typeof setTimeout>;
+  private startupAuthCheck?: Promise<void>;
+  /** Login states recorded before this time came from an earlier run and are shown as such. */
+  private readonly startedAt = Date.now();
 
   private cliAccountOrThrow(id: unknown) {
     const account = isCliAccountId(id) ? this.cliAccounts().get(id) : undefined;
@@ -1370,13 +1464,15 @@ export class ChatManager {
     return this.approvals.answer(chatId, id, decision);
   }
 
-  async deleteChat(chatId: number) {
+  async deleteChat(chatId: number, beforeDelete?: () => void) {
     await this.resetDrivers(chatId);
+    beforeDelete?.();
     this.store.deleteChat(chatId);
   }
 
   async dispose() {
     this.disposing = true;
+    clearTimeout(this.startupRetryTimer);
     const all = [...this.live.values()].flatMap((s) => Object.values(s));
     this.live.clear();
     await Promise.all(all.map((l) => l?.driver.dispose().catch(() => undefined)));

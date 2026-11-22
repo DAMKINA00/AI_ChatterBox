@@ -1,7 +1,7 @@
 // Remote web UI served by src/main/remote-web.ts: chats (create, rename, archive, delete, search), live
 // timeline, instructions and commands, approvals, uploads, projects, usage and the page theme.
 // Reuses the desktop timeline fold (buildItems/planOf/appendEvent); Markdown is rendered without raw HTML.
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft, BarChart3, Flag, FolderKanban, LoaderCircle, LogOut, Monitor, Moon, Pause, Play,
   Plus, Search, Settings2, Square, Sun, Users, X,
@@ -14,7 +14,8 @@ import { consultCardReview, consultCardStatus } from "../lib/review-summary";
 import { needsAttention } from "../timeline-window";
 import { consultReason } from "../../../shared/room-message";
 import { cn } from "../lib/utils";
-import { ApiError, AuthError, request, setCsrf, url } from "./api";
+import { ApiError, AuthError, logout as logoutRequest, request, setCsrf, url } from "./api";
+import { Login } from "./Login";
 import { ChatSettings } from "./ChatSettings";
 import { Composer } from "./Composer";
 import { chatGroups, formatBytes, INLINE_IMAGE, nextTheme, THEME_LABEL, withoutDeleted, type ProjectRef } from "./logic";
@@ -47,57 +48,6 @@ export function RemoteApp() {
   return <Workspace onLoggedOut={() => { setCsrf(""); setAuth("login"); }} />;
 }
 
-function Login({ onDone }: { onDone: () => void }) {
-  const [configured, setConfigured] = useState<"local" | "synology-dsm">();
-  const [emergency, setEmergency] = useState(false);
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [otp, setOtp] = useState("");
-  const [error, setError] = useState<string>();
-  const [pending, setPending] = useState(false);
-  useEffect(() => { request<{ provider: "local" | "synology-dsm" }>("/api/auth-info").then(r => setConfigured(r.provider)).catch(() => setConfigured("local")); }, []);
-  const nas = configured === "synology-dsm" && !emergency;
-  const submit = async (e: FormEvent) => {
-    e.preventDefault();
-    setPending(true);
-    setError(undefined);
-    try {
-      const { csrf } = await request<{ csrf: string }>("/api/login", nas ? { provider: "synology-dsm", username, password, otp } : { provider: "local", password });
-      setCsrf(csrf);
-      setPassword("");
-      setOtp("");
-      onDone();
-    } catch (err) { setError(errorText(err)); }
-    finally { setPending(false); }
-  };
-  if (!configured) return <div className="flex h-dvh items-center justify-center text-muted-foreground"><LoaderCircle className="size-5 animate-spin" /></div>;
-  return (
-    <main className="flex min-h-dvh items-center justify-center bg-background p-4">
-      <form onSubmit={submit} className="grid w-full max-w-sm gap-3 rounded-xl border bg-card p-6 shadow-lg">
-        <h1 className="text-lg font-semibold">AI ChatterBox 원격 접속</h1>
-        <p className="text-[12.5px] text-muted-foreground">{nas ? "NAS(Synology DSM) 계정으로 로그인합니다." : configured === "synology-dsm" ? "비상용 로컬 비밀번호로 로그인합니다." : "원격 접속 비밀번호를 입력하세요."}</p>
-        {nas && <>
-          <label htmlFor="remote-username" className="text-[13px] font-medium">NAS 아이디</label>
-          <input id="remote-username" autoComplete="username" autoCapitalize="none" spellCheck={false} autoFocus value={username} onChange={e => setUsername(e.target.value)} className={FIELD} />
-        </>}
-        <label htmlFor="remote-password" className="text-[13px] font-medium">{nas ? "NAS 비밀번호" : "비밀번호"}</label>
-        <input id="remote-password" type="password" autoComplete="current-password" autoFocus={!nas} value={password} onChange={e => setPassword(e.target.value)} className={FIELD} />
-        {nas && <>
-          <label htmlFor="remote-otp" className="text-[13px] font-medium">2단계 인증 코드 <span className="font-normal text-muted-foreground">(사용 중이면)</span></label>
-          <input id="remote-otp" inputMode="numeric" autoComplete="one-time-code" pattern="\d{6,8}" maxLength={8} value={otp} onChange={e => setOtp(e.target.value.replace(/\D/g, ""))} className={FIELD} />
-        </>}
-        {error && <div role="alert" className="text-[13px] text-destructive">{error}</div>}
-        <Btn type="submit" disabled={pending || !password || (nas && !username)}>{pending ? <LoaderCircle className="animate-spin" /> : null} 로그인</Btn>
-        {configured === "synology-dsm" && (
-          <button type="button" className="text-[12px] text-muted-foreground underline underline-offset-2" onClick={() => { setEmergency(v => !v); setError(undefined); }}>
-            {emergency ? "NAS 계정으로 로그인" : "NAS에 연결할 수 없을 때: 비상용 로컬 비밀번호로 로그인"}
-          </button>
-        )}
-      </form>
-    </main>
-  );
-}
-
 function Workspace({ onLoggedOut }: { onLoggedOut: () => void }) {
   const [chats, setChats] = useState<Chat[]>([]);
   const [projects, setProjects] = useState<ProjectRef[]>([]);
@@ -108,19 +58,25 @@ function Workspace({ onLoggedOut }: { onLoggedOut: () => void }) {
   const [theme, setTheme] = useTheme();
   // seq each held chat object came from; older snapshots never undo newer chat:updated messages.
   const versions = useRef(new Map<number, number>()).current;
-  // Chats the server deleted; ids are never reused, so older snapshots cannot bring them back.
-  const deleted = useRef(new Set<number>()).current;
+  const deleted = useRef(new Map<number, number>()).current;
+  const forgetChat = useCallback((id: number, seq: number) => {
+    if ((versions.get(id) ?? -1) > seq) return false;
+    versions.set(id, seq);
+    deleted.set(id, seq);
+    setChats(list => withoutDeleted(list, deleted, versions));
+    return true;
+  }, [deleted, versions]);
   const fail = useCallback((e: unknown) => { if (e instanceof AuthError) onLoggedOut(); else setError(errorText(e)); }, [onLoggedOut]);
   const projectData = useProjects(fail);
   const reloadProjects = projectData.reload;
   const loadChats = useCallback(() => request<{ seq: number; chats: Chat[]; projects: ProjectRef[] }>(url("/api/chats")).then(r => {
-    setChats(list => withoutDeleted(mergeChats(list, versions, r.chats, r.seq), deleted));
+    setChats(list => withoutDeleted(mergeChats(list, versions, r.chats, r.seq), deleted, versions));
     setProjects(r.projects);
   }).catch(fail), [fail, versions, deleted]);
 
   useEffect(() => { void loadChats(); }, [loadChats]);
   useEffect(() => {
-    history.replaceState(null, "", selected ? `#chat=${selected}` : location.pathname);
+    history.replaceState(null, "", `${location.pathname}${location.search}${selected ? `#chat=${selected}` : ""}`);
     setDetail(undefined);
     let closed = false;
     // Messages that arrive while a snapshot loads wait here and are replayed on top of it (see stream.ts).
@@ -134,7 +90,7 @@ function Workspace({ onLoggedOut }: { onLoggedOut: () => void }) {
         if (closed || attempt !== latest) return;
         setDetail(mergeSnapshot(r, buffer ?? [], id));
         buffer = null;
-        setChats(list => withoutDeleted(mergeChats(list, versions, [r.chat], r.seq, true), deleted));
+        setChats(list => withoutDeleted(mergeChats(list, versions, [r.chat], r.seq, true), deleted, versions));
       }).catch(e => { if (attempt === latest) buffer = null; fail(e); });
     };
     const source = new EventSource(selected ? `${url("/api/stream")}?chat=${selected}` : url("/api/stream"));
@@ -143,14 +99,16 @@ function Workspace({ onLoggedOut }: { onLoggedOut: () => void }) {
     source.onerror = () => { void request(url("/api/session")).catch(fail); };
     source.addEventListener(REMOTE_EVENTS.chatUpdated, e => {
       const [chat] = JSON.parse((e as MessageEvent).data) as [Chat];
-      if (deleted.has(chat.id)) return;
-      setChats(list => applyChatUpdate(list, versions, chat, Number((e as MessageEvent).lastEventId)));
+      const seq = Number((e as MessageEvent).lastEventId);
+      if ((deleted.get(chat.id) ?? -1) >= seq) return;
+      setChats(list => applyChatUpdate(list, versions, chat, seq));
     });
     source.addEventListener(REMOTE_EVENTS.chatDeleted, e => {
       const [id] = JSON.parse((e as MessageEvent).data) as [number];
-      deleted.add(id);
-      setChats(list => withoutDeleted(list, deleted));
-      if (id === selected) { setSelected(null); setSheet(s => (s === "chat" ? null : s)); }
+      if (forgetChat(id, Number((e as MessageEvent).lastEventId)) && id === selected) {
+        setSelected(null);
+        setSheet(s => (s === "chat" ? null : s));
+      }
     });
     source.addEventListener(REMOTE_EVENTS.projectsUpdated, () => { void reloadProjects(); void loadChats(); });
     for (const channel of [REMOTE_EVENTS.chatEvent, REMOTE_EVENTS.agentsUpdated, REMOTE_EVENTS.consultUpdated]) source.addEventListener(channel, e => {
@@ -159,16 +117,20 @@ function Workspace({ onLoggedOut }: { onLoggedOut: () => void }) {
       else if (selected) setDetail(d => (d ? applyMessage(d, selected, message) : d));
     });
     return () => { closed = true; source.close(); };
-  }, [selected, loadChats, reloadProjects, fail, versions, deleted]);
+  }, [selected, loadChats, reloadProjects, fail, versions, deleted, forgetChat]);
 
   const chat = chats.find(c => c.id === selected);
+  const chatVersion = chat ? versions.get(chat.id) ?? 0 : 0;
   // Opening a chat marks it read (the desktop does the same on select); replies that arrive while it is open too.
   useEffect(() => {
     if (chat?.unread) void request(url("/api/chats/:id/viewed", chat.id), {}).catch(fail);
   }, [chat?.id, chat?.unread, fail]);
 
+  // Back to the login page only when the session really ended (or had already ended, 401); otherwise
+  // the session may still be alive: show the failure and keep the button for another try.
   const logout = async () => {
-    await request(url("/api/logout"), {}).catch(() => undefined);
+    try { await logoutRequest(); }
+    catch (e) { setError(`로그아웃하지 못했습니다: ${errorText(e)} 다시 시도하세요.`); return; }
     onLoggedOut();
   };
   const newChat = async (projectId: number) => {
@@ -195,7 +157,7 @@ function Workspace({ onLoggedOut }: { onLoggedOut: () => void }) {
           : <div className="flex h-full items-center justify-center text-muted-foreground">채팅을 선택하세요.</div>}
       </main>
       {sheet === "chat" && chat && <ChatSettings chat={chat} project={projectData.projects.find(p => p.id === chat.projectId)} onClose={() => setSheet(null)}
-        onDeleted={() => { deleted.add(chat.id); setChats(list => withoutDeleted(list, deleted)); setSheet(null); setSelected(null); }} onAuthError={fail} />}
+        onDeleted={() => { if (!forgetChat(chat.id, chatVersion)) void loadChats(); setSheet(null); setSelected(null); }} onAuthError={fail} />}
       {sheet === "projects" && <ProjectsSheet data={projectData} onClose={() => setSheet(null)} onChanged={() => { void reloadProjects(); void loadChats(); }}
         onOpenChat={id => { setSheet(null); setSelected(id); void loadChats(); }} onAuthError={fail} />}
       {sheet === "usage" && <UsageSheet onClose={() => setSheet(null)} onAuthError={fail} />}

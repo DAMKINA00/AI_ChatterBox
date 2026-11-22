@@ -3,6 +3,7 @@ import { api, errorMessage } from "../lib/utils";
 import { useStore } from "../store";
 import { safeLinkHref } from "../../../shared/links";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui";
+import { isRemote } from "../lib/remote-mode";
 
 export function FileLink({ href, children }: { href: string; children: ReactNode }) {
   const chatId = useStore((s) => s.selection?.chatId);
@@ -16,6 +17,8 @@ export function FileLink({ href, children }: { href: string; children: ReactNode
   if (!safe) return <span>{children}</span>;
   if (safe.startsWith("#")) return <a href={safe}>{children}</a>;
   if (/^https?:\/\//i.test(safe)) return <a href={safe} title={safe} rel="noreferrer" onClick={(e) => { e.preventDefault(); void act("open"); }}>{children}</a>;
+  // Remote web: files on the PC cannot be opened from the browser; show the name only.
+  if (isRemote()) return <span title={`${safe} (PC의 파일)`} data-testid="remote-file-name">{children}</span>;
   return <DropdownMenu>
     <DropdownMenuTrigger asChild><button type="button" className="cursor-pointer text-primary underline underline-offset-2" title={safe}>{children}</button></DropdownMenuTrigger>
     <DropdownMenuContent>

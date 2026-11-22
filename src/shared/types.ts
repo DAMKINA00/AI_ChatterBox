@@ -49,6 +49,8 @@ export interface CliAccount {
 export interface CliAccountStatus extends CliAccount {
   isDefault: boolean;
   authStatus: "authenticated" | "required" | "unknown";
+  /** authStatus comes from a check made before this app run (not yet confirmed again). */
+  authStale?: boolean;
   loginError?: string;
   /** Lowest remaining percent of the 5-hour and weekly windows; undefined when unknown or stale. */
   remainingPercent?: number;
@@ -325,6 +327,8 @@ export interface Chat {
 }
 
 /** through = the conversation up to and including the message; from = that message onward. */
+export type ChatDeleteTarget = Pick<Chat, "id" | "title" | "createdAt" | "projectId">;
+
 export interface ChatForkOptions {
   eventId: number;
   range: "through" | "from";
@@ -547,6 +551,8 @@ export interface CliAccountsApi {
   login(id: CliAccountId): Promise<void>;
   logout(id: CliAccountId): Promise<CliAccountStatus[]>;
   refresh(id?: CliAccountId): Promise<CliAccountStatus[]>;
+  /** Read-only login check of enabled accounts, run once per app start; never opens a login console. */
+  startupCheck(): Promise<CliAccountStatus[]>;
   update(id: CliAccountId, patch: { label?: string; enabled?: boolean }): Promise<CliAccountStatus[]>;
   remove(id: CliAccountId): Promise<CliAccountStatus[]>;
   getPolicy(): Promise<CliAccountPolicies>;
@@ -589,7 +595,7 @@ export interface ChatterBoxApi {
       approvalModeOverride?: ApprovalMode | null;
     },
   ): Promise<Chat>;
-  deleteChat(id: number): Promise<void>;
+  deleteChat(id: number, target?: ChatDeleteTarget): Promise<void>;
   markViewed(id: number): Promise<void>;
   listConsults(chatId: number): Promise<Consult[]>;
   listAgents(chatId: number): Promise<ChatAgent[]>;

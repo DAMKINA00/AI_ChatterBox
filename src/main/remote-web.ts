@@ -11,7 +11,8 @@ import {
   REMOTE_UPLOAD_STORAGE, REMOTE_WEB_DEFAULT_ORIGIN, REMOTE_WEB_DEFAULT_PORT, REMOTE_WEB_MIN_PASSWORD, clampUploadStorageGb,
   type RemoteAuditEntry, type RemoteAuthProvider, type RemoteProjectRoot, type RemoteWebAction, type RemoteWebInput, type RemoteWebLoginFailure, type RemoteWebSession, type RemoteWebStatus,
 } from "../shared/remote-web";
-import { HttpError, RemoteFeatures, folderId, stripLocalPaths } from "./remote-features";
+import { HttpError, RemoteFeatures, folderId, stripLocalPaths, toRemoteAgents, toRemoteChat, toRemotePendingApprovals } from "./remote-features";
+import type { Chat, ChatAgent } from "../shared/types";
 import type { EventPage, RemoteEventText } from "../shared/event-page";
 import { DSM_DEFAULT_URL, DsmProvider, normalizeDsmUrl, normalizeFingerprint, probeDsm, type AuthProvider, type DsmSettings, type LoginResult } from "./remote-auth";
 
@@ -73,6 +74,26 @@ export const CLIENT_IP_HEADER = "x-chatterbox-client-ip";
 const MAX_BODY = 256 * 1024;
 const MAX_TEXT = 50_000;
 const SCRYPT = { N: 2 ** 15, r: 8, p: 1 };
+/**
+ * What a stream message may carry: events without local attachment paths, chats and workers reduced to
+ * the allow-listed fields (remote-features.ts).
+ */
+export function remoteStreamArgs(channel: string, args: unknown[]): unknown[] {
+  if (channel === "chat:event") return stripLocalPaths(args);
+  if (channel === "chat:updated") return [toRemoteChat(args[0] as Chat), ...args.slice(1)];
+  if (channel === "agents:updated") return [args[0], toRemoteAgents((args[1] ?? []) as ChatAgent[])];
+  return args;
+}
+
+function remoteEventPage(page: EventPage): EventPage {
+  const data = stripLocalPaths(page);
+  if (!data.snapshot) return data;
+  const { snapshot } = data;
+  return { ...data, snapshot: { ...snapshot, approvals: { total: snapshot.approvals.total, pending: toRemotePendingApprovals(snapshot.approvals.pending) } } };
+}
+
+/** Desktop character art served to the remote page (AgentAvatar): fixed lowercase segments only. */
+const CHARACTER_PATH = /^\/(characters|avatars)\/([a-z]{2,16})\/([a-z]{2,16})\.png$/;
 const MIME: Record<string, string> = {
   ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".html": "text/html; charset=utf-8",
   ".woff2": "font/woff2", ".woff": "font/woff", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon",
@@ -458,7 +479,7 @@ export class RemoteWeb {
     // chat:updated, chat:deleted and projects:updated go to every stream; other events only to their chat.
     const broadcast = channel === "chat:updated" || channel === "chat:deleted" || channel === "projects:updated";
     if (!broadcast && chatId === undefined) return;
-    const data = `id: ${seq}\nevent: ${channel}\ndata: ${JSON.stringify(channel === "chat:event" ? stripLocalPaths(args) : args)}\n\n`;
+    const data = `id: ${seq}\nevent: ${channel}\ndata: ${JSON.stringify(remoteStreamArgs(channel, args))}\n\n`;
     for (const stream of this.streams) if (broadcast || stream.chatId === chatId) stream.res.write(data);
   }
 
@@ -688,7 +709,7 @@ export class RemoteWeb {
     if (method === "GET" && path === "/api/chats") {
       const seq = this.seq;
       const [chats, projects] = await Promise.all([call("chats:list", []), call("projects:list", [])]);
-      return this.send(res, 200, { seq, chats, projects: (projects as { id: number; name: string; archived: boolean }[]).map(({ id, name, archived }) => ({ id, name, archived })) });
+      return this.send(res, 200, { seq, chats: (chats as Chat[]).map(toRemoteChat), projects: (projects as { id: number; name: string; archived: boolean }[]).map(({ id, name, archived }) => ({ id, name, archived })) });
     }
     if (method === "GET" && path === "/api/stream") {
       const chat = url.searchParams.get("chat");
@@ -744,10 +765,11 @@ export class RemoteWeb {
       if (before !== null) {
         if (!/^\d{1,15}$/.test(before)) throw new HttpError(400, "기록 위치가 올바르지 않습니다.");
         const page = await call("chats:eventsPage", [id, Number(before)]) as EventPage;
-        return this.send(res, 200, { ...page, events: stripLocalPaths(page.events) });
+        return this.send(res, 200, remoteEventPage(page));
       }
       const [page, agents, consults] = await Promise.all([call("chats:eventsPage", [id]) as Promise<EventPage>, call("chats:agents", [id]), call("chats:consults", [id])]);
-      return this.send(res, 200, { seq, chat, events: stripLocalPaths(page.events), context: stripLocalPaths(page.context ?? []), ...(page.snapshot ? { snapshot: page.snapshot } : {}), start: page.start, hasMore: page.hasMore, agents, consults });
+      const safePage = remoteEventPage(page);
+      return this.send(res, 200, { ...safePage, context: safePage.context ?? [], seq, chat: toRemoteChat(chat as Chat), agents: toRemoteAgents(agents as ChatAgent[]), consults });
     }
     if (method !== "POST" || !m[2]) throw new HttpError(405, "지원하지 않는 요청입니다.");
     const body = await this.body(req);
@@ -766,13 +788,23 @@ export class RemoteWeb {
 
   private serveStatic(pathname: string, res: ServerResponse) {
     const root = resolve(this.opts.staticDir);
-    const file = pathname === "/" ? join(root, "remote.html") : pathname.startsWith("/assets/") ? resolve(root, `.${decodeURIComponent(pathname)}`) : "";
-    if (!file || !(file === join(root, "remote.html") || file.startsWith(join(root, "assets") + sep)) || !existsSync(file) || !statSync(file).isFile())
+    // Character art of the desktop UI (public app assets, no user data), fixed segments only:
+    // /characters/<kind>/<expression>.png (original) and /avatars/<kind>/<expression>.png (small copy made
+    // by the build; the original when the copy is missing).
+    const character = CHARACTER_PATH.exec(pathname);
+    const art = (dir: string) => join(root, dir, character![2], `${character![3]}.png`);
+    const file = pathname === "/" ? join(root, "remote.html")
+      : pathname.startsWith("/assets/") ? resolve(root, `.${decodeURIComponent(pathname)}`)
+      : character ? (character[1] === "avatars" && existsSync(art("avatars")) ? art("avatars") : art("characters")) : "";
+    const allowed = file === join(root, "remote.html") || file.startsWith(join(root, "assets") + sep)
+      || (!!character && (file.startsWith(join(root, "characters") + sep) || file.startsWith(join(root, "avatars") + sep)));
+    if (!file || !allowed || !existsSync(file) || !statSync(file).isFile())
       throw new HttpError(404, "없는 주소입니다.");
     const html = file.endsWith(".html");
     res.writeHead(200, {
       ...SECURITY_HEADERS, "Content-Type": MIME[extname(file)] ?? "application/octet-stream",
-      "Cache-Control": html ? "no-store" : "public, max-age=31536000, immutable",
+      // Hashed bundle files never change; character art keeps its name across releases, so it is revalidated daily.
+      "Cache-Control": html ? "no-store" : character ? "public, max-age=86400" : "public, max-age=31536000, immutable",
     });
     res.end(readFileSync(file));
   }

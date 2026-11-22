@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { ChevronDown, FolderOpen } from "lucide-react";
 import { APPROVAL_MODE_LABEL, DEFAULT_SETTINGS, MAX_CONSULTS, MAX_REVIEWS, parseOrchestrator, type AgentKind, type CliAccountStatus, type Project, type ProjectSettings } from "../../../shared/types";
+import { REMOTE_PROJECT_SETTING_KEYS, type RemoteProjectPatch } from "../../../shared/remote-web";
 import { CLI_KINDS, CLI_KIND_LABEL, existingCliAccountPolicies } from "../lib/cli-accounts-ui";
 import { CliAccountPolicyField } from "./CliAccountPolicyField";
 import { api, cn, errorMessage } from "../lib/utils";
+import { isRemote, remoteActions, useMobile } from "../lib/remote-mode";
 import { useStore } from "../store";
 import { defaultEffortForModel, EffortPicker } from "./EffortPicker";
 import { ModelPicker } from "./ModelPicker";
@@ -20,6 +22,8 @@ interface Props {
 }
 
 export function ProjectDialog({ open, onOpenChange, project }: Props) {
+  const remote = isRemote();
+  const mobile = useMobile();
   const createProject = useStore((s) => s.createProject);
   const updateProject = useStore((s) => s.updateProject);
   const createChat = useStore((s) => s.createChat);
@@ -34,6 +38,7 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
   const [advanced, setAdvanced] = useState(false);
   const showAdvanced = !!project || advanced;
   const folderName = folder.trim().split(/[\\/]/).filter(Boolean).at(-1);
+  const [saveError, setSaveError] = useState<string>();
 
   useEffect(() => {
     if (!open) return;
@@ -41,17 +46,18 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
     setFolder(project?.folder ?? "");
     setSettings(project ? { ...DEFAULT_SETTINGS, ...project.settings } : DEFAULT_SETTINGS);
     setAdvanced(false);
+    setSaveError(undefined);
   }, [open]);
 
   useEffect(() => {
-    if (!open || !showAdvanced) return;
+    if (!open || !showAdvanced || remote) return;
     let active = true;
     setCliAccountsError(undefined);
     setCliAccounts(undefined);
     void api.cliAccounts.list().then(accounts => { if (active) setCliAccounts(accounts); })
       .catch(error => { if (active) setCliAccountsError(errorMessage(error)); });
     return () => { active = false; };
-  }, [open, showAdvanced]);
+  }, [open, showAdvanced, remote]);
 
   const accountPolicy = cliAccounts ? existingCliAccountPolicies(settings.accountPolicy, cliAccounts) : undefined;
 
@@ -79,9 +85,25 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
 
   const submit = async () => {
     const path = folder.trim();
-    if (busy || !path) return;
+    if (busy || (!path && !(remote && project))) return;
     setBusy(true);
     try {
+      if (remote && project) {
+        setSaveError(undefined);
+        const original = { ...DEFAULT_SETTINGS, ...project.settings };
+        const changed = REMOTE_PROJECT_SETTING_KEYS.filter(key => settings[key] !== original[key]);
+        const patch: RemoteProjectPatch = {
+          ...((name?.trim() ?? "") && (name?.trim() ?? "") !== project.name ? { name: (name?.trim() ?? "") } : {}),
+          ...(changed.length ? { settings: Object.fromEntries(changed.map(key => [key, settings[key]])) } : {}),
+        };
+        if (Object.keys(patch).length) {
+          if (!remoteActions.saveProject) throw new Error("원격 연결이 준비되지 않았습니다.");
+          const saved = await remoteActions.saveProject(project.id, patch);
+          useStore.setState(s => ({ projects: s.projects.map(p => p.id === saved.id ? saved : p) }));
+        }
+        onOpenChange(false);
+        return;
+      }
       if (project) {
         const initial = { ...DEFAULT_SETTINGS, ...project.settings };
         const settingsChanged = (Object.keys(settings) as (keyof ProjectSettings)[]).some(key => settings[key] !== initial[key]);
@@ -99,7 +121,8 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
         }
       }
     } catch (error) {
-      toast(errorMessage(error));
+      if (remote) setSaveError(errorMessage(error));
+      else toast(errorMessage(error));
     } finally {
       setBusy(false);
     }
@@ -110,16 +133,16 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
       <DialogContent
         title={project ? "프로젝트 설정" : "새 프로젝트"}
         description={project ? "모델 변경은 다음 지시부터 적용됩니다." : "작업할 폴더를 선택하면 첫 채팅이 열립니다."}
-        className={showAdvanced ? "w-[min(1000px,calc(100vw-40px))]" : "w-[min(600px,calc(100vw-40px))]"}
+        className={cn(showAdvanced ? "w-[min(1000px,calc(100vw-40px))]" : "w-[min(600px,calc(100vw-40px))]", mobile && "grid-cols-1 p-4")}
       >
         <form
-          className="grid gap-5"
+          className={cn("grid gap-5", mobile && "min-w-0 grid-cols-1 [&>*]:min-w-0")}
           onSubmit={(e) => {
             e.preventDefault();
             void submit();
           }}
         >
-          <div className="grid gap-1.5">
+          {!remote && <div className="grid gap-1.5">
             <Label htmlFor="proj-folder">작업 폴더</Label>
             <div className="flex gap-2">
               <Input id="proj-folder" value={folder} onChange={(e) => setFolder(e.target.value)} placeholder="D:\\Projects\\my-app" className="font-mono text-[12.5px]" />
@@ -127,7 +150,7 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
                 <FolderOpen /> 찾아보기
               </Button>
             </div>
-          </div>
+          </div>}
           <div className="grid gap-1.5">
             <Label htmlFor="proj-name">{project ? "이름" : "이름 (선택)"}</Label>
             <Input id="proj-name" value={name ?? folderName ?? ""} onChange={(e) => setName(e.target.value)} placeholder="폴더 이름을 그대로 씁니다" />
@@ -348,7 +371,7 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
             </div>
           </div>
 
-          <section className="grid gap-3 rounded-lg border p-3.5" data-testid="project-cli-account-policy">
+          {!remote && <section className="grid gap-3 rounded-lg border p-3.5" data-testid="project-cli-account-policy">
             <div>
               <h3 className="text-[12px] font-medium text-muted-foreground">CLI 계정 선택</h3>
               <p className="text-[11.5px] text-muted-foreground">이 프로젝트에 적용할 계정 선택 모드입니다. 변경은 다음 배정부터 적용됩니다.</p>
@@ -364,11 +387,11 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
                   set("accountPolicy", next);
                 }} />
             </div>)}
-          </section>
+          </section>}
 
           <div className="grid gap-3 rounded-lg border p-3.5">
             <div className="text-[12px] font-medium text-muted-foreground">승인</div>
-            <div className="flex items-center justify-between gap-4">
+            <div className={cn("flex items-center justify-between gap-4", mobile && "flex-wrap")}>
               <div>
                 <div className="text-[13px] font-medium">작업자 승인 요청</div>
                 <div className="text-[12px] text-muted-foreground">
@@ -397,14 +420,14 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
               </div>
               <Switch checked={settings.reviewGate} onChange={(v) => set("reviewGate", v)} label="교차 리뷰" />
             </div>
-            <div className="grid grid-cols-3 gap-3">
+            <div className={cn("grid gap-3", mobile ? "grid-cols-1" : "grid-cols-3")}>
               <NumberField label="권장 클로드 작업자" suffix="명" value={settings.maxClaudeWorkers} onChange={(v) => set("maxClaudeWorkers", v)} min={1} max={6} />
               <NumberField label="권장 지피티 작업자" suffix="명" value={settings.maxGptWorkers} onChange={(v) => set("maxGptWorkers", v)} min={1} max={6} />
               <NumberField label="권장 제미나이 작업자 (0=사용 안 함)" suffix="명" value={settings.maxGeminiWorkers} onChange={(v) => set("maxGeminiWorkers", v)} min={0} max={6} />
               <NumberField label="권장 그록 작업자 (0=사용 안 함)" suffix="명" value={settings.maxGrokWorkers} onChange={(v) => set("maxGrokWorkers", v)} min={0} max={6} />
               <NumberField label="권장 딥시크 작업자 (0=사용 안 함)" suffix="명" value={settings.maxDeepseekWorkers} onChange={(v) => set("maxDeepseekWorkers", v)} min={0} max={6} />
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className={cn("grid gap-3", mobile ? "grid-cols-1" : "grid-cols-2")}>
               <NumberField label="권장 배정 횟수" suffix="회" value={settings.maxConsults} onChange={(v) => set("maxConsults", v)} min={1} max={MAX_CONSULTS} />
               <NumberField label="권장 리뷰 횟수" suffix="회" value={settings.maxReviews} onChange={(v) => set("maxReviews", v)} min={0} max={MAX_REVIEWS} />
             </div>
@@ -412,11 +435,12 @@ export function ProjectDialog({ open, onOpenChange, project }: Props) {
           </div>
           </div>
 
+          {saveError && <p role="alert" className="text-[12px] text-destructive">{saveError}</p>}
           <DialogFooter>
             <Button type="button" variant="outline" disabled={busy} onClick={() => onOpenChange(false)}>
               취소
             </Button>
-            <Button type="submit" disabled={!folder.trim() || busy}>
+            <Button type="submit" disabled={(!folder.trim() && !(remote && project)) || busy}>
               {project ? "저장" : "만들기"}
             </Button>
           </DialogFooter>
@@ -439,8 +463,9 @@ export function Segmented<T extends string>({
   ariaLabel: string;
   size?: "default" | "sm";
 }) {
+  const mobile = useMobile();
   return (
-    <div role="radiogroup" aria-label={ariaLabel} className="inline-flex shrink-0 rounded-lg border bg-muted p-0.5">
+    <div role="radiogroup" aria-label={ariaLabel} className={cn("inline-flex shrink-0 rounded-lg border bg-muted p-0.5", mobile && "max-w-full flex-wrap")}>
       {options.map((o) => (
         <button
           key={o.value}
@@ -451,6 +476,7 @@ export function Segmented<T extends string>({
           className={cn(
             "rounded-md px-2.5 font-medium whitespace-nowrap transition-colors",
             size === "sm" ? "h-6 text-[12px]" : "h-7 text-[12.5px]",
+            mobile && "min-h-11",
             value === o.value ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
           )}
         >
@@ -462,8 +488,9 @@ export function Segmented<T extends string>({
 }
 
 function ModelRow({ label, hint, children }: { label: string; hint: string; children: React.ReactNode }) {
+  const mobile = useMobile();
   return (
-    <div className="grid items-center gap-3 sm:grid-cols-[minmax(108px,150px)_minmax(0,1fr)]">
+    <div className={cn("grid items-center gap-3", mobile ? "grid-cols-1" : "sm:grid-cols-[minmax(108px,150px)_minmax(0,1fr)]")}>
       <div>
         <div className="text-[13px] font-medium">{label}</div>
         <div className="text-[11.5px] leading-snug text-muted-foreground">{hint}</div>

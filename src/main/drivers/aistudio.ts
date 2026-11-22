@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { readFile, writeFile, readdir, mkdir, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
-import type { AIStudioService } from "../aistudio";
 import type { ToolDef } from "../local-bridge";
 import { claudeToolDiffs } from "../diffs";
 import { isReadCommand } from "../execution-policy";
@@ -17,8 +16,15 @@ export interface StudioMessage {
   tool_call_id?: string;
 }
 export interface StudioContext { load(): StudioMessage[]; save(messages: StudioMessage[]): void }
+/** OpenAI-compatible chat completion endpoint (DeepSeek API). */
+export interface CompletionService {
+  response(path: string, body?: unknown, signal?: AbortSignal): Promise<Response>;
+  json(path: string, body?: unknown, signal?: AbortSignal): Promise<any>;
+  ensureReady?(signal: AbortSignal, report: (text: string) => void): Promise<unknown>;
+  settings(): { model: string; videoEnabled: boolean };
+}
 interface StudioEnv {
-  service: Pick<AIStudioService, "response" | "json"> & Partial<Pick<AIStudioService, "ensureReady">> & { settings(): { model: string; videoEnabled: boolean } };
+  service: CompletionService;
   provider?: "gemini" | "deepseek";
   context?: StudioContext;
   bridgeUrl?: () => string | undefined;

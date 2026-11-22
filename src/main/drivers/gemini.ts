@@ -126,7 +126,9 @@ export class GeminiDriver implements AgentDriver {
       const quote = (s: string) => "'" + s.replaceAll("'", process.platform === "win32" ? "''" : "'\\''") + "'";
       const invoke = `${quote(process.execPath)} ${quote(this.env.hookScript)} ${phase} ${quote(reg.url)}`;
       if (process.platform !== "win32") return invoke;
-      const script = `$ProgressPreference = 'SilentlyContinue'; $OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::In.ReadToEnd() | & ${invoke}; exit $LASTEXITCODE`;
+      // Hook stdin is UTF-8 JSON; without InputEncoding, Windows PowerShell decodes it with the
+      // console code page (e.g. CP949), losing quotes after Korean text and breaking JSON.parse.
+      const script = `$ProgressPreference = 'SilentlyContinue'; $OutputEncoding = [Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::In.ReadToEnd() | & ${invoke}; exit $LASTEXITCODE`;
       return `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`;
     };
     const handler = (phase: string) => ({ type: "command", command: command(phase), timeout: 86400 });

@@ -7,6 +7,7 @@ import { ChatView } from "./components/ChatView";
 import { ProjectDialog } from "./components/ProjectDialog";
 import { Button, TooltipProvider } from "./components/ui";
 import { cn, errorMessage } from "./lib/utils";
+import { isRemote, useMobile } from "./lib/remote-mode";
 
 export function App() {
   const ready = useStore((s) => s.ready);
@@ -19,6 +20,9 @@ export function App() {
   const toast = useStore((s) => s.toast);
   const [checkingCli, setCheckingCli] = useState(false);
   const [newProject, setNewProject] = useState(false);
+  // Remote web: the same UI in a browser; on a phone the chat list and the chat take turns.
+  const remote = isRemote();
+  const mobile = useMobile();
 
   useEffect(() => {
     void init();
@@ -26,20 +30,21 @@ export function App() {
 
   const chat = selection ? chats.find((c) => c.id === selection.chatId) : undefined;
   const project = chat ? projects.find((p) => p.id === chat.projectId) : undefined;
-  const missing = cli.filter((c) => c.agent !== "deepseek" && !c.path);
+  // Installing CLIs is done on the PC; the remote page shows each one's state in the chat header instead.
+  const missing = remote ? [] : cli.filter((c) => c.agent !== "deepseek" && !c.path);
 
   if (!ready)
     return (
-      <div className="flex h-full items-center justify-center text-muted-foreground">
+      <div className={cn("flex items-center justify-center text-muted-foreground", remote ? "h-dvh" : "h-full")}>
         <Loader2 className="size-5 animate-spin" />
       </div>
     );
 
   return (
     <TooltipProvider delayDuration={400}>
-      <div className="grid h-full grid-cols-[288px_1fr]">
-        <Sidebar onNewProject={() => setNewProject(true)} />
-        <main className="flex min-h-0 min-w-0 flex-col">
+      <div className={cn("grid grid-cols-[288px_1fr]", remote ? "h-dvh overflow-hidden" : "h-full", mobile && "grid-cols-1")} data-layout={mobile ? "mobile" : "desktop"}>
+        {(!mobile || !chat) && <Sidebar onNewProject={() => setNewProject(true)} />}
+        <main className={cn("flex min-h-0 min-w-0 flex-col", mobile && !chat && "hidden")}>
           {missing.length > 0 && (
             <div data-testid="cli-warning" className="flex items-start gap-2 border-b border-warning/40 bg-warning/10 px-4 py-2 text-[12.5px]">
               <CircleAlert className="mt-0.5 size-4 shrink-0 text-warning" />
@@ -62,18 +67,18 @@ export function App() {
             {chat && project ? (
               <ChatView key={chat.id} chat={chat} project={project} node={selection?.node} />
             ) : (
-              <Welcome hasProjects={projects.length > 0} onNewProject={() => setNewProject(true)} />
+              <Welcome hasProjects={projects.length > 0} onNewProject={remote ? undefined : () => setNewProject(true)} />
             )}
           </div>
         </main>
       </div>
-      <ProjectDialog open={newProject} onOpenChange={setNewProject} />
+      {!remote && <ProjectDialog open={newProject} onOpenChange={setNewProject} />}
       <Toasts />
     </TooltipProvider>
   );
 }
 
-function Welcome({ hasProjects, onNewProject }: { hasProjects: boolean; onNewProject: () => void }) {
+function Welcome({ hasProjects, onNewProject }: { hasProjects: boolean; onNewProject?: () => void }) {
   const projects = useStore((s) => s.projects);
   const createChat = useStore((s) => s.createChat);
   return (
@@ -88,9 +93,11 @@ function Welcome({ hasProjects, onNewProject }: { hasProjects: boolean; onNewPro
         </div>
       </div>
       <div className="flex gap-2">
-        <Button onClick={onNewProject}>
-          <FolderPlus /> 새 프로젝트
-        </Button>
+        {onNewProject && (
+          <Button onClick={onNewProject}>
+            <FolderPlus /> 새 프로젝트
+          </Button>
+        )}
         {hasProjects && (
           <Button variant="outline" onClick={() => void createChat(projects[projects.length - 1].id)}>
             <MessageSquarePlus /> 최근 프로젝트에 새 채팅
@@ -105,7 +112,7 @@ function Toasts() {
   const toasts = useStore((s) => s.toasts);
   const dismiss = useStore((s) => s.dismissToast);
   return (
-    <div className="pointer-events-none fixed right-4 bottom-4 z-[60] flex w-96 flex-col gap-2">
+    <div className="pointer-events-none fixed right-4 bottom-4 z-[60] flex w-96 max-w-[calc(100vw-2rem)] flex-col gap-2">
       {toasts.map((t) => (
         <div
           key={t.id}

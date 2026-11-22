@@ -46,7 +46,7 @@ const base = `http://127.0.0.1:${PORT}`;
 const UNIFORM_FAILURE = "로그인 실패: 아이디·비밀번호·OTP를 확인하세요.";
 
 const { app, page } = await launch(data);
-let browser;
+let browser, dsm;
 try {
   await page.click('[data-testid="connection-settings"]');
   await page.click('[data-testid="remote-web-manage"]');
@@ -59,18 +59,21 @@ try {
   check("the storage cap is saved", await page.waitForFunction(() => window.chatterbox.remoteWeb("status").then((s) => s.uploadStorageGb === 3.5), null, { timeout: 10_000 }).then(() => true, () => false));
   await page.keyboard.press("Escape");
 
-  const status = await page.evaluate(async ({ port, password }) => {
+  const status = await page.evaluate(async ({ port, password, roots }) => {
     await window.chatterbox.remoteWeb("set-password", { password });
-    return window.chatterbox.remoteWeb("update", { enabled: true, port, publicOrigin: `http://127.0.0.1:${port}` });
-  }, { port: PORT, password: PASSWORD });
+    return window.chatterbox.remoteWeb("update", { enabled: true, port, publicOrigin: `http://127.0.0.1:${port}`, projectRoots: [{ id: "", label: "e2e", path: roots }] });
+  }, { port: PORT, password: PASSWORD, roots });
   check("enabling starts the loopback server", status.running && status.port === PORT, JSON.stringify({ running: status.running, error: status.error }));
 
   const { chatId } = await page.evaluate(async (folder) => {
     const project = await window.chatterbox.createProject({ name: "원격 테스트", folder, settings: { orchestratorModel: "deepseek:deepseek-flash" } });
     const chat = await window.chatterbox.createChat(project.id);
-    await window.chatterbox.updateChat(chat.id, { title: "원격 채팅" });
+    // A new chat is a hidden draft until its first persisted instruction.
+    await window.chatterbox.send(chat.id, "테스트 준비 메시지", [], "now");
     return { chatId: chat.id };
   }, folder);
+  await page.waitForFunction(async (id) => (await window.chatterbox.listChats()).some(c => c.id === id && !c.draft && !["working", "approval", "pausing"].includes(c.status)), chatId);
+  await page.evaluate((id) => window.chatterbox.updateChat(id, { title: "원격 채팅" }), chatId);
 
   browser = await chromium.launch({ channel: "msedge", headless: true });
   const anonymous = await browser.newContext();
@@ -83,7 +86,8 @@ try {
   web.on("pageerror", (e) => console.log("[remote pageerror]", e.message));
   const cspErrors = [];
   web.on("console", (m) => { if (m.type() === "error") { console.log("[remote console]", m.text()); if (/Content Security Policy/i.test(m.text())) cspErrors.push(m.text()); } });
-  await web.goto(base);
+  // This script drives the classic remote page; the default page is the desktop UI (scripts/e2e-remote-ui-screens.mjs).
+  await web.goto(`${base}/?classic`);
   await web.fill("#remote-password", "wrong-password-123");
   await web.click('button[type="submit"]');
   check("wrong password shows the uniform error", await web.getByRole("alert").textContent().then((t) => t === UNIFORM_FAILURE, () => false));
@@ -115,7 +119,7 @@ try {
   check("the old cookie no longer works after logout", after.status() === 401, after.status());
 
   // NAS login against a mock Synology DSM (self-signed certificate, pinned by fingerprint).
-  const dsm = await mockDsm({ admin: { password: "nas-pass", otp: "123456" } });
+  dsm = await mockDsm({ admin: { password: "nas-pass", otp: "123456" } });
   const probe = await page.evaluate((dsmUrl) => window.chatterbox.remoteWeb("dsm-probe", { dsmUrl }), dsm.url);
   check("NAS certificate check reads the fingerprint", probe.dsmProbe?.fingerprint === fixture.fingerprint && !probe.dsmProbe.trusted, JSON.stringify(probe.dsmProbe));
   await page.evaluate(({ dsmUrl, pin }) => window.chatterbox.remoteWeb("update", { provider: "synology-dsm", dsmUrl, dsmCertSha256: pin, dsmAllowedUsers: ["admin"] }), { dsmUrl: dsm.url, pin: fixture.fingerprint });
@@ -128,7 +132,7 @@ try {
   check("the real reason (OTP required) is shown only in the app", /OTP.*403/.test(reasons.loginFailures[0]?.detail ?? ""), reasons.loginFailures[0]?.detail);
   await web.fill("#remote-otp", "123456");
   await web.click('button[type="submit"]');
-  check("NAS account with OTP logs in", await web.getByRole("button", { name: /원격 웹에서 보낸 지시입니다/ }).waitFor({ timeout: 15_000 }).then(() => true, () => false));
+  check("NAS account with OTP logs in", await web.getByRole("button", { name: /원격 채팅/ }).waitFor({ timeout: 15_000 }).then(() => true, () => false));
   const nasSessions = await page.evaluate(() => window.chatterbox.remoteWeb("status"));
   check("the session is recorded for the NAS account", nasSessions.sessions.some((s) => s.user === "admin"), JSON.stringify(nasSessions.sessions.map((s) => s.user)));
   check("the DSM session was closed right after the check", dsm.seen.some((s) => s.method === "logout"));
@@ -137,14 +141,16 @@ try {
   await web.getByRole("button", { name: /비상용 로컬 비밀번호/ }).click();
   await web.fill("#remote-password", PASSWORD);
   await web.click('button[type="submit"]');
-  check("the local password still works as the emergency login", await web.getByRole("button", { name: /원격 웹에서 보낸 지시입니다/ }).waitFor({ timeout: 15_000 }).then(() => true, () => false));
+  check("the local password still works as the emergency login", await web.getByRole("button", { name: /원격 채팅/ }).waitFor({ timeout: 15_000 }).then(() => true, () => false));
   dsm.close();
+  dsm = undefined;
 
-  // ---------- extended features (docs/remote-web-features.md), still on the phone-sized page
+  // The extended feature tour uses the classic controls. The default UI has its own screen suite.
+  await web.goto(`${base}/?classic`);
+  await web.getByLabel("채팅 검색").waitFor();
   const ok = (p) => p.then(() => true, () => false);
   const dialog = (name) => web.getByRole("dialog", { name });
   const desktopChats = () => page.evaluate(() => window.chatterbox.listChats());
-  await page.evaluate((path) => window.chatterbox.remoteWeb("update", { projectRoots: [{ id: "", label: "e2e", path }] }), roots);
 
   // Dark mode (D6): cycle the theme button until dark, then it survives a reload.
   for (let i = 0; i < 3 && !(await web.evaluate(() => document.documentElement.classList.contains("dark"))); i++) await web.getByRole("button", { name: /^테마:/ }).click();
@@ -249,6 +255,15 @@ try {
   check("delete removes the chat", await ok(page.waitForFunction((id) => window.chatterbox.listChats().then((l) => !l.some((c) => c.id === id)), newest.id, { timeout: 15_000 })));
   check("the desktop sidebar drops the deleted chat", await ok(page.getByText(title, { exact: true }).first().waitFor({ state: "detached", timeout: 10_000 })));
   check("deleting the chat removed its remote upload file (sent too)", !existsSync(sentPaths[0]) && pendingFiles().length === 0, JSON.stringify(pendingFiles()));
+  const reusedId = await page.evaluate(async (projectId) => {
+    const replacement = await window.chatterbox.createChat(projectId);
+    await window.chatterbox.send(replacement.id, "같은 ID의 새 채팅", [], "now");
+    return replacement.id;
+  }, newest.projectId);
+  const replacement = web.getByRole("button", { name: /같은 ID의 새 채팅/ });
+  check("classic lists a new chat even when SQLite reused the deleted id", reusedId === newest.id && await ok(replacement.waitFor({ timeout: 15_000 })));
+  await page.evaluate(id => window.chatterbox.deleteChat(id), reusedId);
+  check("classic receives a desktop deletion over the stream", await ok(replacement.waitFor({ state: "detached", timeout: 10_000 })));
 
   // Projects: a new folder under the temporary allowed root (D1), then settings.
   await web.getByRole("button", { name: "프로젝트" }).first().click();
@@ -298,6 +313,7 @@ try {
   const closed = await fetch(`${base}/`).then(() => false, () => true);
   check("disabling stops the server", !off.running && closed);
 } finally {
+  dsm?.close();
   await browser?.close().catch(() => undefined);
   await app.close().catch(() => undefined);
 }

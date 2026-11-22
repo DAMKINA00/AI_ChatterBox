@@ -2,14 +2,16 @@
 // remote-web.ts authenticates the session and checks CSRF/Origin/Host before delegating here; every
 // handler reuses the desktop core channels and strips local paths/emails from what it returns.
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { createHmac, randomBytes } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmdirSync, statSync } from "node:fs";
 import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
-import { DEFAULT_SETTINGS, type AgentKind, type ApprovalMode, type AttachmentRef, type Chat, type CliAccountStatus, type ModelOption, type Project, type UsageInfo } from "../shared/types";
-import { publicUsageError, publicUsageGroups, usageGroups } from "../shared/usage-view";
+import { DEFAULT_SETTINGS, type AgentKind, type AgentMetrics, type ApprovalMode, type AttachmentRef, type Chat, type ChatAgent, type CliAccountStatus, type CliInfo, type ModelOption, type Project, type UsageInfo } from "../shared/types";
+import { publicUsageError, publicUsageRow, usageGroups } from "../shared/usage-view";
+import type { PendingApproval } from "../shared/event-page";
 import {
-  REMOTE_ATTACHMENT_TYPES, REMOTE_COMMANDS, REMOTE_EVENTS, REMOTE_FOLDER_NAME_PATTERN, REMOTE_LIMITS, REMOTE_NUMBER_SETTINGS,
+  REMOTE_API, REMOTE_ATTACHMENT_TYPES, REMOTE_COMMANDS, REMOTE_EVENTS, REMOTE_FOLDER_NAME_PATTERN, REMOTE_LIMITS, REMOTE_NUMBER_SETTINGS,
   REMOTE_PROJECT_SETTING_KEYS, REMOTE_UPLOAD_BUDGET, REMOTE_UPLOAD_UUID, normalizeRemoteFileName,
-  type RemoteAuditAction, type RemoteProject, type RemoteProjectRoot, type RemoteUsageResponse,
+  type RemoteAuditAction, type RemoteCliStatus, type RemoteForkAnchorResponse, type RemoteProject, type RemoteProjectRoot, type RemoteUsageResponse,
   type RemoteUpload, type RemoteUploadKey,
 } from "../shared/remote-web";
 
@@ -44,13 +46,44 @@ const UPLOAD_BODY_BYTES = Math.ceil(REMOTE_LIMITS.attachmentBytes * 4 / 3) + 64 
 const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024;
 
 /** Remove local `path` from attachment refs anywhere inside events (deep copy only where needed). */
+const remoteMetricsKey = randomBytes(32);
+const safeApprovalTitles = new Set(["명령 실행", "파일 변경", "Bash", "Read", "Write", "Edit", "MultiEdit"]);
+export const toRemotePendingApprovals = (items: PendingApproval[]): PendingApproval[] =>
+  items.map(({ eventId, at, id, role, title, risk }) => ({ eventId, at, id, role, title: safeApprovalTitles.has(title) ? title : "승인 요청", risk }));
+
 export function stripLocalPaths<T>(value: T): T {
   if (Array.isArray(value)) return value.map(stripLocalPaths) as T;
   if (!value || typeof value !== "object") return value;
   const o = value as Record<string, unknown>;
+  if (o.type === "agent_usage" && o.metrics && typeof o.metrics === "object") {
+    const { turnId, inputTokens, outputTokens, cachedInputTokens, cacheWriteInputTokens, elapsedMs, model, reasoningEffort, approximate } = o.metrics as AgentMetrics;
+    // The browser groups repeats of the same turn, but never needs the native turn or resume IDs.
+    return { type: "agent_usage", metrics: { turnId: createHmac("sha256", remoteMetricsKey).update(String(turnId)).digest("hex"),
+      inputTokens, outputTokens, cachedInputTokens, cacheWriteInputTokens, elapsedMs, model, reasoningEffort, approximate } } as T;
+  }
   const isAttachment = typeof o.path === "string" && typeof o.mime === "string" && typeof o.id === "number";
   return Object.fromEntries(Object.entries(o).filter(([k]) => !(isAttachment && k === "path")).map(([k, v]) => [k, stripLocalPaths(v)])) as T;
 }
+
+/**
+ * Chat fields the remote page uses (allow-list). Native CLI session/thread ids stay on the PC; any field
+ * added to Chat later is not sent until it is listed here.
+ */
+export const REMOTE_CHAT_KEYS = [
+  "id", "projectId", "title", "status", "unread", "archived", "createdAt", "lastActiveAt", "draft", "sidebarOrder", "goal", "fork",
+  "orchestratorModelOverride", "claudeModelOverride", "codexModelOverride", "geminiModelOverride", "grokModelOverride", "deepseekModelOverride",
+  "orchestratorEffortOverride", "claudeEffortOverride", "codexEffortOverride", "geminiEffortOverride", "grokEffortOverride", "deepseekEffortOverride",
+  "approvalModeOverride",
+] as const satisfies readonly (keyof Chat)[];
+/** Worker fields the remote page uses (allow-list): no CLI session id, no CLI account ids. */
+export const REMOTE_AGENT_KEYS = ["id", "chatId", "key", "kind", "number", "nickname", "job", "status", "createdAt"] as const satisfies readonly (keyof ChatAgent)[];
+
+const pick = <T extends object>(value: T, keys: readonly string[]): T =>
+  Object.fromEntries(keys.filter(k => k in value).map(k => [k, (value as Record<string, unknown>)[k]])) as T;
+/** A chat as the remote page receives it (REMOTE_CHAT_KEYS only). */
+export const toRemoteChat = (chat: Chat): Chat => pick(chat, REMOTE_CHAT_KEYS);
+/** Workers as the remote page receives them (REMOTE_AGENT_KEYS only). */
+export const toRemoteAgents = (agents: ChatAgent[]): ChatAgent[] => agents.map(a => pick(a, REMOTE_AGENT_KEYS));
 
 /** File identity of a folder (volume + file index), used to pin an allowed root (D1). */
 export const folderId = (path: string) => { const s = statSync(path, { bigint: true }); return `${s.dev}:${s.ino}`; };
@@ -184,10 +217,17 @@ export class RemoteFeatures {
       // chats:create does not emit; an empty update announces the chat to the desktop window and the stream.
       const chat = await call("chats:update", [created.id, {}]) as Chat;
       this.ctx.audit(session, "chat.create", `채팅 ${chat.id}`, chat.title);
-      send(res, 201, { chat });
+      send(res, 201, { chat: toRemoteChat(chat) });
       return true;
     }
     if (get && path === "/api/usage") { await this.usage(url, res, session); return true; }
+    if (get && path === REMOTE_API.cli) {
+      // The state the app already knows (no CLI is run): installed + last login check. No path/version/error text.
+      const list = await call("cli:info", [false]) as CliInfo[];
+      const cli: RemoteCliStatus[] = list.filter(c => AGENTS.includes(c.agent)).map(c => ({ agent: c.agent, installed: !!c.path, ...(c.authStatus ? { authStatus: c.authStatus } : {}) }));
+      send(res, 200, { cli });
+      return true;
+    }
     let m = /^\/api\/projects\/(\d{1,12})\/update$/.exec(path);
     if (m && post) { await this.updateProject(Number(m[1]), req, res, session); return true; }
 
@@ -209,10 +249,29 @@ export class RemoteFeatures {
       throw new HttpError(405, "지원하지 않는 요청입니다.");
     }
 
-    m = /^\/api\/chats\/(\d{1,12})\/(update|delete|viewed|pause|resume|dismiss-interrupted|command|attachments|send|fork)$/.exec(path);
+    m = /^\/api\/chats\/(\d{1,12})\/(update|delete|viewed|pause|resume|dismiss-interrupted|command|attachments|send|fork|fork-anchor|reorder|pending-approvals)$/.exec(path);
     if (!m) return false;
     const id = Number(m[1]);
     const action = m[2];
+    if (action === "fork-anchor") {
+      if (!get) throw new HttpError(405, "지원하지 않는 요청입니다.");
+      await this.chat(id);
+      const anchor = await core<RemoteForkAnchorResponse["anchor"]>(call, "remote:fork-anchor", [id]);
+      send(res, 200, { anchor: anchor ? { id: anchor.id, preview: anchor.preview } : null });
+      return true;
+    }
+    if (action === "pending-approvals") {
+      if (!get) throw new HttpError(405, "지원하지 않는 요청입니다.");
+      const before = url.searchParams.get("before") ?? "";
+      const offset = url.searchParams.get("offset") ?? "0";
+      if (!/^\d{1,15}$/.test(before) || Number(before) < 1 || !/^\d{1,6}$/.test(offset))
+        throw new HttpError(400, "승인 목록의 조회 위치가 올바르지 않습니다.");
+      await this.chat(id);
+      const { items, total } = await core<{ items: PendingApproval[]; total: number }>(call, "chats:pendingApprovals", [id, Number(before), Number(offset)]);
+      // Custom tool titles can include local details. The older list needs only a short category.
+      send(res, 200, { items: toRemotePendingApprovals(items), total });
+      return true;
+    }
     // The unsent remote uploads of a chat, as stored now: the web's attachment list follows this.
     if (get && action === "attachments") {
       await this.chat(id);
@@ -222,6 +281,19 @@ export class RemoteFeatures {
     if (!post) throw new HttpError(405, "지원하지 않는 요청입니다.");
     if (action === "attachments") { await this.upload(id, req, res, session); return true; }
     const body = await this.ctx.body(req);
+    if (action === "reorder") {
+      const { targetId, placement } = body;
+      if (Object.keys(body).some(key => key !== "targetId" && key !== "placement")
+        || typeof targetId !== "number" || !Number.isSafeInteger(targetId) || targetId <= 0
+        || (placement !== "before" && placement !== "after")) throw new HttpError(400, "이동할 채팅과 위치를 지정하세요.");
+      const [chat, target] = await Promise.all([this.chat(id), this.chat(targetId)]);
+      if (chat.projectId !== target.projectId || chat.draft || target.draft)
+        throw new HttpError(409, "같은 프로젝트의 목록에 등록된 채팅만 이동할 수 있습니다.");
+      const chats = await core<Chat[]>(call, "chats:reorder", [id, targetId, placement]);
+      this.ctx.audit(session, "chat.reorder", `채팅 ${id}`, `${targetId} ${placement}`);
+      send(res, 200, { chats: chats.map(toRemoteChat) });
+      return true;
+    }
     if (action === "update") {
       await this.chat(id);
       const allowed = new Set(["title", "archived", "confirm", "approvalModeOverride", ...Object.keys(MODEL_FIELDS), ...EFFORT_FIELDS]);
@@ -239,13 +311,17 @@ export class RemoteFeatures {
       const { chat: updated, approvalChange } = await core<{ chat: Chat; approvalChange?: string }>(call, "remote:chat-patch", [id, patch, confirm === true]);
       if (approvalChange) this.ctx.audit(session, "chat.approvalMode", `채팅 ${id}`, approvalChange);
       this.ctx.audit(session, "chat.update", `채팅 ${id}`, Object.keys(patch).join(", "));
-      send(res, 200, { chat: updated });
+      send(res, 200, { chat: toRemoteChat(updated) });
       return true;
     }
     if (action === "delete") {
       if (typeof body.confirm !== "string") throw new HttpError(400, "삭제하려면 채팅 제목을 정확히 입력하세요.");
+      const { createdAt, projectId } = body;
+      const hasIdentity = createdAt !== undefined || projectId !== undefined;
+      if (hasIdentity && (!Number.isSafeInteger(createdAt) || !Number.isSafeInteger(projectId)))
+        throw new HttpError(400, "삭제할 채팅을 다시 확인하세요.");
       // D8: the core re-checks title and idleness and deletes without letting new work start in between.
-      await core(call, "remote:chat-delete", [id, body.confirm]);
+      await core(call, "remote:chat-delete", hasIdentity ? [id, body.confirm, { createdAt, projectId }] : [id, body.confirm]);
       this.ctx.audit(session, "chat.delete", `채팅 ${id}`, body.confirm);
       this.stream(REMOTE_EVENTS.chatDeleted, [id]);
       send(res, 200, { ok: true });
@@ -257,7 +333,7 @@ export class RemoteFeatures {
       // The core checks the chat, the message, and the attachments' size and disk space in one step.
       const chat = await core<Chat>(call, "remote:chat-fork", [id, { eventId: body.eventId, range: body.range, includeAttachments: body.includeAttachments }]);
       this.ctx.audit(session, "chat.fork", `채팅 ${id}`, `새 채팅 ${chat.id}`);
-      send(res, 201, { chat });
+      send(res, 201, { chat: toRemoteChat(chat) });
       return true;
     }
     if (action === "send") {
@@ -466,7 +542,13 @@ export class RemoteFeatures {
     // The same view the desktop panel builds (shared/usage-view.ts) from ChatterBox's account store.
     const [usage, accounts] = await Promise.all([this.ctx.call("usage:get", [refresh]) as Promise<UsageInfo>, this.ctx.call("cli-accounts:list", []) as Promise<CliAccountStatus[]>]);
     // Labels that look private are replaced and errors go out only as fixed texts (shared/usage-view.ts).
-    const groups = publicUsageGroups(usageGroups(accounts, usage));
+    const internalIds = accounts.map(a => a.accountId.toLowerCase());
+    const groups = usageGroups(accounts, usage).map(({ kind, name, accounts }) => ({
+      kind, name, accounts: accounts.map((account, i) => {
+        const { label, enabled, authStatus, runningWorkers, display, error, errorCode, checkedAt, windows } = publicUsageRow(account);
+        return { label: internalIds.some(id => label.toLowerCase().includes(id)) ? `계정 ${i + 1}` : label, enabled, authStatus, runningWorkers, display, error, errorCode, checkedAt, windows };
+      }),
+    }));
     const d = usage.deepseek;
     const body: RemoteUsageResponse = {
       groups,

@@ -84,16 +84,20 @@ test("live messages after the snapshot keep streaming previews", () => {
 test("a chat list snapshot read before chat:deleted does not bring the chat back", () => {
   const versions = new Map<number, number>();
   const chat = (id: number) => ({ id, projectId: 1, title: `c${id}`, status: "idle" } as Chat);
-  const deleted = new Set<number>();
+  const deleted = new Map<number, number>();
   let chats = mergeChats([], versions, [chat(1), chat(2)], 3);
   // chat:deleted [2] arrives (seq 5), then a /api/chats snapshot read at seq 4 still lists it.
-  deleted.add(2);
-  chats = withoutDeleted(chats, deleted);
-  chats = withoutDeleted(mergeChats(chats, versions, [chat(1), chat(2)], 4), deleted);
+  deleted.set(2, 5);
+  versions.set(2, 5);
+  chats = withoutDeleted(chats, deleted, versions);
+  chats = withoutDeleted(mergeChats(chats, versions, [chat(1), chat(2)], 4), deleted, versions);
   assert.deepEqual(chats.map(c => c.id), [1]);
   // A late single-chat snapshot (partial merge) is filtered the same way.
-  chats = withoutDeleted(mergeChats(chats, versions, [chat(2)], 4, true), deleted);
+  chats = withoutDeleted(mergeChats(chats, versions, [chat(2)], 4, true), deleted, versions);
   assert.deepEqual(chats.map(c => c.id), [1]);
+  chats = withoutDeleted(mergeChats(chats, versions, [chat(1), { ...chat(2), title: "new chat" }], 6), deleted, versions);
+  chats = withoutDeleted(mergeChats(chats, versions, [chat(2)], 4, true), deleted, versions);
+  assert.equal(chats.find(c => c.id === 2)?.title, "new chat");
 });
 
 test("history pages: the snapshot keeps its paging fields, an older page goes in front, live updates keep flowing", () => {

@@ -1,16 +1,18 @@
 import { useEffect, useState } from "react";
 import { ChevronRight, KeyRound, RotateCw, Settings, Smartphone, Terminal } from "lucide-react";
 import type { UsageDisplay } from "../../../shared/usage";
+import type { RemoteUsageAccount, RemoteUsageGroup } from "../../../shared/remote-web";
 
 const KIND_COLOR = { claude: "bg-claude", gpt: "bg-gpt", gemini: "bg-gemini", grok: "bg-grok" } as const;
 import { api, cn, errorMessage } from "../lib/utils";
 import { useStore } from "../store";
 import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, Tooltip } from "./ui";
-import { usageGroups, type UsageAccountRow, type UsageKindGroup } from "../../../shared/usage-view";
+import { usageGroups, type UsageKindGroup } from "../../../shared/usage-view";
 import { CliAccountsDialog } from "./CliAccountsDialog";
 import { DeepSeekDialog } from "./DeepSeekDialog";
 import { DeepSeekBalance } from "./DeepSeekBalance";
 import { RemoteWebDialog } from "./RemoteWebDialog";
+import { isRemote, useMobile, useRemoteUsage } from "../lib/remote-mode";
 
 function resetText(ts?: number | null) {
   if (!ts) return "";
@@ -21,17 +23,18 @@ function resetText(ts?: number | null) {
   return h >= 24 ? `${Math.floor(h / 24)}일 ${h % 24}시간 뒤 초기화` : `${h}시간 ${m}분 뒤 초기화`;
 }
 
-function Bar({ name, d, color, error, updatedAt, disabled }: { name: string; d: UsageDisplay | null; color: string; error?: string; updatedAt?: number; disabled?: boolean }) {
+function Bar({ name, d, color, error, updatedAt, disabled, showReset }: { name: string; d: UsageDisplay | null; color: string; error?: string; updatedAt?: number; disabled?: boolean; showReset?: boolean }) {
   const tip = error ?? (d
     ? [`${name} ${d.window} 남은 사용량 ${Math.round(d.remaining)}%`, resetText(d.resetsAt), d.warn ? "5시간 한도가 거의 찼습니다" : d.note]
         .filter(Boolean)
         .join(" · ")
     : "사용량 정보를 확인하는 중입니다");
   const full = [tip, updatedAt ? `${new Date(updatedAt).toLocaleString("ko-KR")} 조회` : "", disabled ? "배정 제외 계정(사용량을 새로 조회하지 않음)" : ""].filter(Boolean).join(" · ");
-  return (
+  const reset = showReset && !error && resetText(d?.resetsAt);
+  const row = (
     <Tooltip content={full}>
       <div className={cn("flex items-center gap-2 text-[11px] text-muted-foreground", disabled && "opacity-60")} data-testid="usage-bar">
-        <span className="w-[108px] shrink-0 whitespace-nowrap">
+        <span className={cn("w-[108px] shrink-0 whitespace-nowrap", showReset && "truncate")}>
           {name} <span className={cn(d?.warn && "font-semibold text-destructive")}>{error ? "조회 실패" : d ? d.window : "정보 없음"}</span>
         </span>
         <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
@@ -41,16 +44,20 @@ function Bar({ name, d, color, error, updatedAt, disabled }: { name: string; d: 
       </div>
     </Tooltip>
   );
+  return reset ? <div>{row}<div className="text-right text-[11px] text-muted-foreground" data-testid="usage-reset">{reset}</div></div> : row;
 }
 
 /** One family from the ChatterBox account store: a single bar for one account, a labelled bar per account otherwise. */
-export function CliUsageBars({ group, color }: { group: UsageKindGroup; color: string }) {
-  const bar = (row: UsageAccountRow, name: string) => <Bar name={name} d={row.display && group.kind === "gemini" ? { ...row.display, note: "Gemini Models · 주간/5시간 중 최소 잔여량" } : row.display} color={color} error={row.error} updatedAt={row.checkedAt} disabled={!row.enabled} />;
+export function CliUsageBars({ group, color }: { group: UsageKindGroup | RemoteUsageGroup; color: string }) {
+  const bar = (row: RemoteUsageAccount, name: string) => <Bar name={name} d={row.display && group.kind === "gemini" ? { ...row.display, note: "Gemini Models · 주간/5시간 중 최소 잔여량" } : row.display} color={color} error={row.error} updatedAt={row.checkedAt} disabled={!row.enabled} showReset={isRemote()} />;
   if (group.accounts.length === 1) return <div title={group.accounts[0].label}>{bar(group.accounts[0], group.name)}</div>;
   return <section className="space-y-1" data-testid={`cli-usage-${group.kind}`} aria-label={`${group.name} 계정별 잔여량`}>
     <div className="text-[11px] font-medium text-muted-foreground">{group.name}</div>
     <div className="space-y-1 pl-2">
-      {group.accounts.map(row => <div key={row.accountId} title={`${row.accountId}${!row.enabled ? " · 배정 제외" : ""}`}>{bar(row, row.label)}</div>)}
+      {group.accounts.map((row, i) => {
+        const id = "accountId" in row ? row.accountId : undefined;
+        return <div key={id ?? i} title={id ? `${id}${!row.enabled ? " · 배정 제외" : ""}` : undefined}>{bar(row, row.label)}</div>;
+      })}
     </div>
   </section>;
 }
@@ -65,6 +72,39 @@ export async function refreshUsageAndAccounts(wait = false): Promise<void> {
 
 /** Remaining usage: weekly by default, the 5-hour window when it has ≤ 10% left. */
 export function UsageBar() {
+  return isRemote() ? <RemoteUsageBar /> : <DesktopUsageBar />;
+}
+
+/**
+ * Remote web: the same bars from the server's read-only usage view (GET /api/usage, D5). Account and
+ * API settings stay on the PC, so there is no settings menu here.
+ */
+function RemoteUsageBar() {
+  const groups = useRemoteUsage(s => s.groups);
+  const mobile = useMobile();
+  const [refreshing, setRefreshing] = useState(false);
+  useEffect(() => {
+    const t = setInterval(() => void api.usage().then(usage => useStore.setState({ usage })).catch(() => undefined), 5 * 60 * 1000);
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <section className="space-y-1" data-testid="remote-usage" aria-label="남은 사용량 · 잔고">
+      <div className={cn("flex items-center text-[11px] font-medium text-muted-foreground", mobile ? "justify-end" : "justify-between")}>
+        {!mobile && <span>남은 사용량 · 잔고</span>}
+        <button type="button" disabled={refreshing} aria-label="사용량·잔고 새로고침" title="PC 앱의 계정 사용량을 다시 조회 (1분에 한 번)" data-testid="usage-refresh" className={cn("rounded p-1 hover:bg-accent disabled:opacity-50", mobile && "grid size-11 place-items-center")} onClick={async () => {
+          setRefreshing(true);
+          try { useStore.setState({ usage: await api.usage(true) }); }
+          catch (error) { useStore.getState().toast(errorMessage(error)); }
+          finally { setRefreshing(false); }
+        }}><RotateCw className={cn("size-3", refreshing && "animate-spin")} /></button>
+      </div>
+      {groups.map(group => <CliUsageBars key={group.kind} group={group} color={KIND_COLOR[group.kind]} />)}
+      <DeepSeekBalance compact />
+    </section>
+  );
+}
+
+function DesktopUsageBar() {
   const [cliOpen, setCliOpen] = useState(false);
   const [deepseekOpen, setDeepseekOpen] = useState(false);
   const [remoteOpen, setRemoteOpen] = useState(false);

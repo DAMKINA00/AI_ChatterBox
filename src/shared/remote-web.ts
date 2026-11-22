@@ -1,7 +1,7 @@
 // Remote web access (browser → Caddy → 127.0.0.1 → this app). Shared by main, preload and renderer.
 import type { ApprovalMode, AgentKind, Chat, CliAccountId, ModelOption, ProjectSettings } from "./types";
 import type { DeepSeekBalance } from "./deepseek";
-import type { UsageKindGroup } from "./usage-view";
+import type { UsageAccountRow, UsageErrorCode, UsageKindGroup } from "./usage-view";
 
 export const REMOTE_WEB_DEFAULT_PORT = 47821;
 export const REMOTE_WEB_DEFAULT_ORIGIN = "https://ai.damkina.net";
@@ -147,6 +147,9 @@ export const REMOTE_API = {
   chatViewed: "/api/chats/:id/viewed",              // POST {}
   chatPause: "/api/chats/:id/pause",                // POST {}
   chatFork: "/api/chats/:id/fork",                  // POST ChatForkOptions → RemoteChatResponse
+  chatForkAnchor: "/api/chats/:id/fork-anchor",     // GET RemoteForkAnchorResponse
+  chatReorder: "/api/chats/:id/reorder",            // POST {targetId, placement} → {chats}
+  chatPendingApprovals: "/api/chats/:id/pending-approvals", // GET ?before=&offset=
   chatResume: "/api/chats/:id/resume",              // POST {} (pause resume and interrupted-run resume)
   chatDismissInterrupted: "/api/chats/:id/dismiss-interrupted", // POST {}
   chatCommand: "/api/chats/:id/command",            // POST RemoteCommandRequest
@@ -160,6 +163,7 @@ export const REMOTE_API = {
   attachment: "/api/attachments/:id",               // GET file bytes, ?chat=<chatId> required (ownership check; 404 otherwise); an unsent upload also needs &uuid=
   attachmentRemove: "/api/attachments/:id/remove",  // POST RemoteAttachmentRemove → drops the record of an unsent remote upload, then collection deletes the file (later if locked)
   usage: "/api/usage",                              // GET ?refresh=0|1 (read-only, D5)
+  cli: "/api/cli",                                  // GET RemoteCliResponse (read-only: installed + stored login state)
 } as const;
 export type RemoteApiPath = (typeof REMOTE_API)[keyof typeof REMOTE_API];
 
@@ -253,7 +257,8 @@ export interface RemoteChatPatch {
 }
 
 /** D8: POST /api/chats/:id/delete. confirm must equal the chat title exactly (else 400); running chats → 409. */
-export interface RemoteChatDelete { confirm: string }
+export interface RemoteChatDelete { confirm: string; createdAt?: number; projectId?: number }
+export interface RemoteForkAnchorResponse { anchor: { id: number; preview: string } | null }
 
 /** POST /api/chats/:id/command. `stop` uses the existing stop endpoint. */
 export const REMOTE_COMMANDS = ["plan", "plan-run", "plan-cancel", "goal", "review", "compact"] as const;
@@ -352,10 +357,20 @@ export interface RemoteProjectPatch { name?: string; archived?: boolean; setting
  * account store (label, enabled, auth state, remaining, window, reset time, check time) and the DeepSeek
  * balance. No email, folder, API key or raw provider data; errors only as a code and its fixed text, labels that look like an email, path or token become "계정 N".
  */
+export type RemoteUsageAccount = Pick<UsageAccountRow, "label" | "enabled" | "authStatus" | "runningWorkers" | "display" | "error" | "checkedAt" | "windows">
+  & { errorCode?: UsageErrorCode };
+export type RemoteUsageGroup = Pick<UsageKindGroup, "kind" | "name"> & { accounts: RemoteUsageAccount[] };
 export interface RemoteUsageResponse {
-  groups: UsageKindGroup[];
+  groups: RemoteUsageGroup[];
   deepseek?: Pick<DeepSeekBalance, "state" | "balances" | "error" | "updatedAt">;
 }
+/**
+ * GET /api/cli (read-only). Per CLI: installed or not and the login state the app last checked (no new
+ * check is started). Never the install path, version or error text (those may contain PC paths).
+ */
+export interface RemoteCliStatus { agent: AgentKind; installed: boolean; authStatus?: "authenticated" | "required" | "unknown" }
+export interface RemoteCliResponse { cli: RemoteCliStatus[] }
+
 /** GET /api/aistudio/usage?range= */
 
 // ---------- SSE events
@@ -384,7 +399,7 @@ export interface RemoteEventArgs {
 
 /** Remote state changes shown in the desktop remote web dialog (memory, newest first, max 50). */
 export type RemoteAuditAction =
-  | "chat.create" | "chat.update" | "chat.delete" | "chat.approvalMode" | "chat.fork"
+  | "chat.create" | "chat.update" | "chat.delete" | "chat.approvalMode" | "chat.fork" | "chat.reorder"
   | "project.create" | "project.update" | "project.approvalMode"
   | "attachment.upload";
 export interface RemoteAuditEntry { at: number; user: string; ip: string; action: RemoteAuditAction; target: string; detail?: string }

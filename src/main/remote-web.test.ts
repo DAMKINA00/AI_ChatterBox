@@ -5,7 +5,7 @@ import { createServer } from "node:net";
 import { get as httpGet, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { COOKIE, FAIL_LIMIT_IP, GLOBAL_DELAY_AFTER, LOGIN_FAILED, LOGIN_TIME_BUCKETS_MS, Limiter, RemoteWeb, SESSION_IDLE_MS, globalDelayMs, loginPaddingMs, normalizeOrigin } from "./remote-web";
+import { COOKIE, FAIL_LIMIT_IP, GLOBAL_DELAY_AFTER, LOGIN_FAILED, LOGIN_TIME_BUCKETS_MS, Limiter, RemoteWeb, SESSION_IDLE_MS, globalDelayMs, loginPaddingMs, normalizeOrigin, remoteStreamArgs } from "./remote-web";
 
 const PASSWORD = "correct horse battery";
 
@@ -354,4 +354,79 @@ test("history pages and run statistics: older pages by ?before=, statistics aggr
   s.advance(3000);
   assert.equal((await s.request("/api/chats/1/run-stats", { cookie })).status, 200);
   assert.equal(s.calls.filter(([c]) => c === "chats:runStats").at(-1)![1][1], undefined);
+});
+
+test("character art is served without a session, but only fixed /characters/<kind>/<expression>.png paths", async (t) => {
+  const s = await setup(t);
+  mkdirSync(join(s.dir, "static", "characters", "claude"), { recursive: true });
+  writeFileSync(join(s.dir, "static", "characters", "claude", "happy.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  writeFileSync(join(s.dir, "static", "characters", "notes.txt"), "nope");
+  const ok = await s.request("/characters/claude/happy.png");
+  assert.equal(ok.status, 200);
+  assert.equal(ok.headers.get("content-type"), "image/png");
+  assert.equal(ok.headers.get("cache-control"), "public, max-age=86400");
+  assert.match(ok.headers.get("content-security-policy") ?? "", /default-src 'self'/);
+  // Small copies: served when the build made them, the original otherwise; same fixed pattern.
+  assert.deepEqual([...new Uint8Array(await (await s.request("/avatars/claude/happy.png")).arrayBuffer())], [0x89, 0x50, 0x4e, 0x47]);
+  mkdirSync(join(s.dir, "static", "avatars", "claude"), { recursive: true });
+  writeFileSync(join(s.dir, "static", "avatars", "claude", "happy.png"), Buffer.from([0x89, 0x50]));
+  const small = await s.request("/avatars/claude/happy.png");
+  assert.equal(small.headers.get("content-type"), "image/png");
+  assert.deepEqual([...new Uint8Array(await small.arrayBuffer())], [0x89, 0x50]);
+  for (const path of ["/avatars/claude/missing.png", "/avatars/../secret.txt", "/avatars/claude/..%2fhappy.png", "/characters/claude/missing.png", "/characters/notes.txt", "/characters/claude/..%2f..%2fsecret.txt", "/characters/%2e%2e/secret.png", "/characters/Claude/happy.png", "/characters/claude/happy.png.txt"])
+    assert.equal((await s.request(path)).status, 404, path);
+  assert.equal(s.calls.length, 0);
+});
+
+test("GET /api/cli needs a session and returns install/login state only (no paths or error texts)", async (t) => {
+  const s = await setup(t, {
+    "cli:info": [
+      { agent: "claude", path: "C:\Users\me\claude.exe", authStatus: "authenticated" },
+      { agent: "gemini", path: null, error: "C:\Users\me\agy 를 찾지 못했습니다" },
+      { agent: "deepseek", path: "api", authStatus: "required" },
+    ],
+  });
+  assert.equal((await s.request("/api/cli")).status, 401);
+  const { cookie } = await s.login();
+  const res = await s.request("/api/cli", { cookie });
+  assert.equal(res.status, 200);
+  const text = await res.text();
+  assert.deepEqual(JSON.parse(text), { cli: [
+    { agent: "claude", installed: true, authStatus: "authenticated" },
+    { agent: "gemini", installed: false },
+    { agent: "deepseek", installed: true, authStatus: "required" },
+  ] });
+  assert.ok(!text.includes("Users"), text);
+  // Read from what the app knows: no new login check is started.
+  assert.deepEqual(s.calls.find(([c]) => c === "cli:info")?.[1], [false]);
+});
+
+const FULL_CHAT = {
+  id: 1, projectId: 9, title: "작업", status: "working", unread: false, archived: false, createdAt: 1, lastActiveAt: 2,
+  orchClaudeSessionId: "orch-session-secret", orchCodexThreadId: "orch-thread-secret", claudeSessionId: "claude-session-secret", codexThreadId: "codex-thread-secret",
+  orchestratorModelOverride: null, claudeModelOverride: "opus", codexModelOverride: null, geminiModelOverride: null, grokModelOverride: null, deepseekModelOverride: null,
+  orchestratorEffortOverride: null, claudeEffortOverride: null, codexEffortOverride: null, geminiEffortOverride: null, grokEffortOverride: null, deepseekEffortOverride: null,
+  approvalModeOverride: null, goal: null, sidebarOrder: 3, futureInternalField: "C:\Users\me\secret",
+};
+const FULL_AGENT = { id: 4, chatId: 1, key: "w4", kind: "claude", number: 1, nickname: "클로드 1호", job: "구현", sessionId: "worker-session-secret", cliAccountId: "claude-2", sessionAccountId: "claude-2", sessionAccountGeneration: 7, status: "active", createdAt: 5 };
+const SECRET = /secret|claude-2|sessionAccount/;
+
+test("chats and workers leave the PC only with allow-listed fields (list, detail, stream)", async (t) => {
+  const s = await setup(t, { "chats:list": [FULL_CHAT], "chats:agents": [FULL_AGENT] });
+  const { cookie } = await s.login();
+  const list = await (await s.request("/api/chats", { cookie })).text();
+  const detail = await (await s.request("/api/chats/1", { cookie })).text();
+  for (const body of [list, detail]) assert.ok(!SECRET.test(body), body);
+  const chat = JSON.parse(detail).chat;
+  assert.equal(chat.title, "작업");
+  assert.equal(chat.claudeModelOverride, "opus");
+  assert.equal(chat.sidebarOrder, 3);
+  assert.deepEqual(Object.keys(JSON.parse(detail).agents[0]).sort(), ["chatId", "createdAt", "id", "job", "key", "kind", "nickname", "number", "status"]);
+  const updated = JSON.stringify(remoteStreamArgs("chat:updated", [FULL_CHAT]));
+  const agents = JSON.stringify(remoteStreamArgs("agents:updated", [1, [FULL_AGENT]]));
+  assert.ok(!SECRET.test(updated) && !SECRET.test(agents), updated + agents);
+  assert.equal(JSON.parse(agents)[1][0].nickname, "클로드 1호");
+  // Attachment paths inside events are still removed.
+  const ev = JSON.stringify(remoteStreamArgs("chat:event", [{ chatId: 1, event: { type: "user", text: "x", attachments: [{ id: 1, name: "a.png", mime: "image/png", size: 1, path: "C:\secret\a.png" }] } }]));
+  assert.ok(!ev.includes("secret"), ev);
 });

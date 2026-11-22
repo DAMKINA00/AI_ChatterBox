@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState, type DragEvent } from "react";
-import { listedChats } from "../../../shared/chat-list";
+import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { listedChats, matchesDeleteTarget } from "../../../shared/chat-list";
 import { version } from "../../../../package.json";
 import { WorkingIndicator } from "./WorkingIndicator";
 import {
@@ -16,6 +16,7 @@ import {
   History,
   Hand,
   Loader2,
+  LogOut,
   MessageSquare,
   Moon,
   MoreHorizontal,
@@ -24,16 +25,20 @@ import {
   Plus,
   Search,
   Settings2,
+  Split,
   Sun,
   Trash2,
   Workflow,
   X,
 } from "lucide-react";
-import { CONSULT_KIND_LABEL, MASTER_LABEL, roleName, roleTone, type Chat, type ChatStatus, type Consult, type NodeId, type Project } from "../../../shared/types";
-import { api, cn, timeAgo } from "../lib/utils";
+import { CONSULT_KIND_LABEL, MASTER_LABEL, roleName, roleTone, type Chat, type ChatDeleteTarget, type ChatStatus, type Consult, type NodeId, type Project } from "../../../shared/types";
+import { api, cn, errorMessage, timeAgo } from "../lib/utils";
 import { useStore } from "../store";
 import { ProjectDialog } from "./ProjectDialog";
+import { ForkDialog } from "./Fork";
+import { forkPreview } from "../lib/fork";
 import { UsageBar } from "./Usage";
+import { isRemote, RemoteDeleteTargetChanged, remoteActions, useMobile } from "../lib/remote-mode";
 import {
   Button,
   ContextMenu,
@@ -79,8 +84,13 @@ export function StatusIcon({ status, unread, chatId }: { status: ChatStatus; unr
 }
 
 type MenuAction = { label: string; icon: React.ElementType; onSelect: () => void; destructive?: boolean; separatorBefore?: boolean };
+type ConfirmAction = { title: string; body: string; run: () => Promise<void>; target?: ChatDeleteTarget };
+const changedDeleteTarget = "삭제할 채팅이 바뀌었습니다. 목록에서 다시 확인하세요.";
 
 function ItemMenus({ actions, children }: { actions: MenuAction[]; children: React.ReactNode }) {
+  // Radix opens the same context menu on a non-mouse long press and cancels on pointer movement.
+  const mobile = useMobile();
+  const touch = mobile ? "min-h-11" : undefined;
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
@@ -88,7 +98,7 @@ function ItemMenus({ actions, children }: { actions: MenuAction[]; children: Rea
         {actions.map((a) => (
           <div key={a.label}>
             {a.separatorBefore && <ContextMenuSeparator />}
-            <ContextMenuItem onSelect={a.onSelect} destructive={a.destructive}>
+            <ContextMenuItem onSelect={a.onSelect} destructive={a.destructive} className={touch}>
               <a.icon />
               {a.label}
             </ContextMenuItem>
@@ -99,13 +109,13 @@ function ItemMenus({ actions, children }: { actions: MenuAction[]; children: Rea
   );
 }
 
-function MoreMenu({ actions, label }: { actions: MenuAction[]; label: string }) {
+function MoreMenu({ actions, label, touch = false }: { actions: MenuAction[]; label: string; touch?: boolean }) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
           aria-label={label}
-          className="rounded p-0.5 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-accent hover:text-foreground focus:opacity-100 data-[state=open]:opacity-100"
+          className={cn("rounded p-0.5 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-accent hover:text-foreground focus:opacity-100 data-[state=open]:opacity-100", touch && "flex size-11 items-center justify-center opacity-100")}
           onClick={(e) => e.stopPropagation()}
         >
           <MoreHorizontal className="size-4" />
@@ -115,7 +125,7 @@ function MoreMenu({ actions, label }: { actions: MenuAction[]; label: string }) 
         {actions.map((a) => (
           <div key={a.label}>
             {a.separatorBefore && <DropdownMenuSeparator />}
-            <DropdownMenuItem onSelect={a.onSelect} destructive={a.destructive}>
+            <DropdownMenuItem onSelect={a.onSelect} destructive={a.destructive} className={touch ? "min-h-11" : undefined}>
               <a.icon />
               {a.label}
             </DropdownMenuItem>
@@ -139,8 +149,29 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
   const [showArchived, setShowArchived] = useState(false);
   const [editProject, setEditProject] = useState<Project | undefined>();
   const [rename, setRename] = useState<{ kind: "chat" | "project"; id: number; title: string } | null>(null);
-  const [confirm, setConfirm] = useState<{ title: string; body: string; run: () => Promise<void> } | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmAction | null>(null);
+  const submitting = useRef<ConfirmAction | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  const remote = isRemote();
+  // Phones: 44px touch targets, and the usage bars fold so the chat list keeps the screen.
+  const mobile = useMobile();
+  const touch = mobile ? "size-11" : undefined;
+  const [usageOpen, setUsageOpen] = useState(false);
+
+  useEffect(() => {
+    const target = confirm?.target;
+    if (!target) return;
+    let invalidated = false;
+    const check = (state: ReturnType<typeof useStore.getState>) => {
+      if (invalidated || submitting.current === confirm || matchesDeleteTarget(state.chats.find(chat => chat.id === target.id), target)) return;
+      invalidated = true;
+      setConfirm(current => current === confirm ? null : current);
+      state.toast(changedDeleteTarget);
+    };
+    const unsubscribe = useStore.subscribe(check);
+    check(useStore.getState());
+    return unsubscribe;
+  }, [confirm]);
 
   useEffect(() => {
     document.title = `AI ChatterBox v${version}`;
@@ -171,15 +202,23 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
         </div>
         <div className="flex-1 whitespace-nowrap text-[14px] font-semibold tracking-tight">AI ChatterBox <span className="text-[12px] font-normal text-muted-foreground">v{version}</span></div>
         <Tooltip content={theme === "dark" ? "라이트 테마" : "다크 테마"}>
-          <Button variant="ghost" size="icon-sm" aria-label="테마 전환" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
+          <Button variant="ghost" size="icon-sm" aria-label="테마 전환" className={touch} onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
             {theme === "dark" ? <Sun /> : <Moon />}
           </Button>
         </Tooltip>
-        <Tooltip content="새 프로젝트">
-          <Button variant="ghost" size="icon-sm" aria-label="새 프로젝트" onClick={onNewProject}>
-            <Plus />
-          </Button>
-        </Tooltip>
+        {remote ? (
+          <Tooltip content="로그아웃">
+            <Button variant="ghost" size="icon-sm" aria-label="로그아웃" data-testid="remote-logout" className={touch} onClick={() => void remoteActions.signOut?.().catch((e) => useStore.getState().toast(`로그아웃하지 못했습니다: ${e instanceof Error ? e.message : String(e)} 다시 시도하세요.`))}>
+              <LogOut />
+            </Button>
+          </Tooltip>
+        ) : (
+          <Tooltip content="새 프로젝트">
+            <Button variant="ghost" size="icon-sm" aria-label="새 프로젝트" onClick={onNewProject}>
+              <Plus />
+            </Button>
+          </Tooltip>
+        )}
       </div>
       <div className="px-3 pb-2">
         <div className="relative">
@@ -189,7 +228,7 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
             onChange={(e) => setSearch(e.target.value)}
             placeholder="채팅·메시지 검색"
             aria-label="채팅 검색"
-            className="h-8 bg-background pl-8 text-[13px]"
+            className={cn("h-8 bg-background pl-8 text-[13px]", touch && "h-11 text-[16px]")}
           />
           {search && (
             <button className="absolute top-1/2 right-2 -translate-y-1/2 text-muted-foreground" onClick={() => setSearch("")} aria-label="검색 지우기">
@@ -203,9 +242,11 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
         {visibleProjects.length === 0 && (
           <div className="px-3 py-8 text-center text-[12.5px] text-muted-foreground">
             프로젝트가 없습니다.
-            <Button variant="link" size="sm" onClick={onNewProject} className="mx-auto mt-1 block">
-              새 프로젝트 만들기
-            </Button>
+            {!remote && (
+              <Button variant="link" size="sm" onClick={onNewProject} className="mx-auto mt-1 block">
+                새 프로젝트 만들기
+              </Button>
+            )}
           </div>
         )}
         {visibleProjects.map((p) => (
@@ -223,7 +264,7 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
         ))}
       </nav>
 
-      <div className="space-y-2 border-t px-3 py-2.5">
+      <div className={cn("space-y-2 border-t px-3 py-2.5", mobile && "max-h-[55dvh] shrink-0 overflow-y-auto")}>
         {working.length > 0 ? (
           <div className="space-y-1">
             {working.slice(0, 3).map((c) => (
@@ -235,6 +276,7 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
                 aria-current={selection?.chatId === c.id ? "page" : undefined}
                 className={cn(
                   "flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-[12px] transition-colors hover:bg-accent/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  touch && "min-h-11",
                   selection?.chatId === c.id && "bg-accent/50 text-foreground",
                 )}
                 onClick={() => void select({ chatId: c.id })}
@@ -248,17 +290,33 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
         ) : (
           <div className="text-[12px] text-muted-foreground">진행 중인 작업 없음</div>
         )}
-        <UsageBar />
-        <button className="text-[11.5px] text-muted-foreground hover:text-foreground" onClick={() => setShowArchived(!showArchived)}>
-          {showArchived ? "보관된 항목 숨기기" : "보관된 항목 보기"}
-        </button>
+        {mobile ? (
+          <div>
+            <button type="button" className="flex min-h-11 w-full items-center gap-1 text-[12px] font-medium text-muted-foreground" aria-expanded={usageOpen} data-testid="mobile-usage-toggle" onClick={() => setUsageOpen(v => !v)}>
+              <ChevronRight className={cn("size-3.5 transition-transform", usageOpen && "rotate-90")} /> 남은 사용량 · 잔고
+            </button>
+            {usageOpen && <UsageBar />}
+          </div>
+        ) : (
+          <UsageBar />
+        )}
+        <div className="flex items-center justify-between gap-2">
+          <button className={cn("text-[11.5px] text-muted-foreground hover:text-foreground", touch && "min-h-11")} onClick={() => setShowArchived(!showArchived)}>
+            {showArchived ? "보관된 항목 숨기기" : "보관된 항목 보기"}
+          </button>
+          {remote && (
+            <a href="/?classic" className={cn("text-[11.5px] text-muted-foreground hover:text-foreground", touch && "flex min-h-11 items-center")} title="프로젝트 만들기·설정 등 이전 원격 화면의 기능">
+              간단 화면
+            </a>
+          )}
+        </div>
       </div>
 
       <ProjectDialog open={!!editProject} onOpenChange={(o) => !o && setEditProject(undefined)} project={editProject} />
       <RenameDialog value={rename} onClose={() => setRename(null)} />
       <Dialog open={!!confirm} onOpenChange={(o) => !o && setConfirm(null)}>
         {confirm && (
-          <DialogContent title={confirm.title} description={confirm.body} className="w-[420px]">
+          <DialogContent title={confirm.title} description={confirm.body} className={mobile ? "w-[min(420px,calc(100vw-32px))]" : "w-[420px]"}>
             <DialogFooter>
               <Button variant="outline" onClick={() => setConfirm(null)}>
                 취소
@@ -266,8 +324,31 @@ export function Sidebar({ onNewProject }: { onNewProject: () => void }) {
               <Button
                 variant="destructive"
                 onClick={async () => {
-                  await confirm.run();
-                  setConfirm(null);
+                  if (!remote) {
+                    await confirm.run();
+                    setConfirm(null);
+                    return;
+                  }
+                  if (submitting.current === confirm) return;
+                  const state = useStore.getState();
+                  if (confirm.target && !matchesDeleteTarget(state.chats.find(chat => chat.id === confirm.target?.id), confirm.target)) {
+                    setConfirm(null);
+                    state.toast(changedDeleteTarget);
+                    return;
+                  }
+                  submitting.current = confirm;
+                  try {
+                    await confirm.run();
+                    setConfirm(current => current === confirm ? null : current);
+                  } catch (error) {
+                    const current = useStore.getState();
+                    if (error instanceof RemoteDeleteTargetChanged || (confirm.target && !matchesDeleteTarget(current.chats.find(chat => chat.id === confirm.target?.id), confirm.target))) {
+                      setConfirm(value => value === confirm ? null : value);
+                      current.toast(changedDeleteTarget);
+                    } else current.toast(errorMessage(error));
+                  } finally {
+                    if (submitting.current === confirm) submitting.current = null;
+                  }
                 }}
               >
                 삭제
@@ -297,7 +378,7 @@ function ProjectNode({
   now: number;
   onEdit: () => void;
   onRename: (kind: "chat" | "project", id: number, title: string) => void;
-  onConfirm: (c: { title: string; body: string; run: () => Promise<void> }) => void;
+  onConfirm: (c: ConfirmAction) => void;
 }) {
   const expanded = useStore((s) => s.expanded[`p${project.id}`] ?? true);
   const toggle = useStore((s) => s.toggle);
@@ -307,6 +388,7 @@ function ProjectNode({
   const reorderChat = useStore(s => s.reorderChat);
   const [dragged, setDragged] = useState<number | null>(null);
   const [drop, setDrop] = useState<{ id: number; placement: "before" | "after" } | null>(null);
+  const mobile = useMobile();
   const shown = query
     ? chats.filter((c) => c.title.toLowerCase().includes(query) || hits.has(c.id) || project.name.toLowerCase().includes(query))
     : chats;
@@ -316,18 +398,20 @@ function ProjectNode({
   const dropPosition = (e: DragEvent<HTMLDivElement>) =>
     e.clientY < e.currentTarget.getBoundingClientRect().top + e.currentTarget.offsetHeight / 2 ? "before" as const : "after" as const;
 
+  // The remote project settings dialog saves only allowed settings. The PC path and deletion stay local.
+  const remote = isRemote();
   const actions: MenuAction[] = [
     { label: "새 채팅", icon: Plus, onSelect: () => void createChat(project.id) },
     { label: "프로젝트 설정", icon: Settings2, onSelect: onEdit },
     { label: "이름 변경", icon: Pencil, onSelect: () => onRename("project", project.id, project.name) },
-    { label: "폴더 열기", icon: FolderOpen, onSelect: () => void api.openPath(project.folder) },
+    ...(remote ? [] : [{ label: "폴더 열기", icon: FolderOpen, onSelect: () => void api.openPath(project.folder) }]),
     {
       label: project.archived ? "보관 해제" : "보관",
       icon: project.archived ? ArchiveRestore : Archive,
       onSelect: () => void updateProject(project.id, { archived: !project.archived }),
       separatorBefore: true,
     },
-    {
+    ...(remote ? [] : [{
       label: "삭제",
       icon: Trash2,
       destructive: true,
@@ -337,28 +421,28 @@ function ProjectNode({
           body: "앱에 저장된 채팅 기록이 모두 지워집니다. 원격 웹으로 올린 첨부 파일도 함께 지워집니다. 작업 폴더의 파일과 CLI의 원본 기록은 그대로 남습니다.",
           run: () => deleteProject(project.id),
         }),
-    },
+    }]),
   ];
 
   return (
     <div className="mb-1" data-testid="project-node">
       <ItemMenus actions={actions}>
         <div
-          className={cn("group flex h-8 cursor-default items-center gap-1 rounded-md pr-1 pl-1 hover:bg-accent/70", project.archived && "opacity-60")}
-          title={project.folder}
+          className={cn("group flex h-8 cursor-default items-center gap-1 rounded-md pr-1 pl-1 hover:bg-accent/70", mobile && "h-11 select-none [-webkit-touch-callout:none]", project.archived && "opacity-60")}
+          title={project.folder || undefined}
         >
           <button type="button" className="flex min-w-0 flex-1 items-center gap-1 text-left" aria-label={`${project.name} 폴더`} aria-expanded={open}
-            onClick={(e) => { if (e.detail === 0) toggle(`p${project.id}`, !open); }}
-            onDoubleClick={() => toggle(`p${project.id}`, !open)}>
+            onClick={(e) => { if (mobile || e.detail === 0) toggle(`p${project.id}`, !open); }}
+            onDoubleClick={mobile ? undefined : () => toggle(`p${project.id}`, !open)}>
             <ChevronRight className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", open && "rotate-90")} />
             {open ? <FolderOpen className="size-4 shrink-0 text-muted-foreground" /> : <FolderClosed className="size-4 shrink-0 text-muted-foreground" />}
             <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{project.name}</span>
           </button>
-          <MoreMenu actions={actions} label={`${project.name} 메뉴`} />
+          <MoreMenu actions={actions} label={`${project.name} 메뉴`} touch={mobile} />
           <Tooltip content="새 채팅">
             <button
               aria-label={`${project.name}에 새 채팅`}
-              className="rounded p-0.5 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-accent hover:text-foreground focus:opacity-100"
+              className={cn("rounded p-0.5 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-accent hover:text-foreground focus:opacity-100", mobile && "flex size-11 items-center justify-center opacity-100")}
               onClick={(e) => {
                 e.stopPropagation();
                 void createChat(project.id);
@@ -402,7 +486,7 @@ function ProjectNode({
           ))}
           {!query && (
             <button
-              className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-[12.5px] text-muted-foreground hover:bg-accent/70 hover:text-foreground"
+              className={cn("flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-[12.5px] text-muted-foreground hover:bg-accent/70 hover:text-foreground", mobile && "h-11")}
               onClick={() => void createChat(project.id)}
             >
               <Plus className="size-3.5" /> 새 채팅
@@ -419,12 +503,15 @@ function ChatNode({
   now,
   onRename,
   onConfirm,
+  reorder = true,
   dragging, drop, onDragStart, onDragEnd, onDragOver, onDragLeave, onDrop, moveUp, moveDown,
 }: {
   chat: Chat;
   now: number;
+  /** Whether the row offers order changes within its project. */
+  reorder?: boolean;
   onRename: (kind: "chat" | "project", id: number, title: string) => void;
-  onConfirm: (c: { title: string; body: string; run: () => Promise<void> }) => void;
+  onConfirm: (c: ConfirmAction) => void;
   dragging: boolean;
   drop?: "before" | "after";
   onDragStart: (e: DragEvent<HTMLDivElement>) => void;
@@ -444,6 +531,23 @@ function ChatNode({
   const consults = useStore((s) => s.consults[chat.id]);
   const agents = useStore((s) => s.agents[chat.id]);
   const active = selection?.chatId === chat.id && !selection.node;
+  const remote = isRemote();
+  const mobile = useMobile();
+  const [forkAnchor, setForkAnchor] = useState<{ id: number; preview: string }>();
+
+  const forkRecent = async () => {
+    try {
+      if (!remoteActions.forkAnchor) throw new Error("원격 연결이 준비되지 않았습니다.");
+      const anchor = await remoteActions.forkAnchor(chat.id);
+      if (!anchor) {
+        useStore.getState().toast("이 채팅에는 분기할 사용자 또는 마스터 메시지가 없습니다.", "info");
+        return;
+      }
+      setForkAnchor({ id: anchor.id, preview: forkPreview(anchor.preview) });
+    } catch (error) {
+      useStore.getState().toast(errorMessage(error));
+    }
+  };
 
   // Load the team and consults lazily for the tree.
   useEffect(() => {
@@ -460,8 +564,9 @@ function ChatNode({
 
   const actions: MenuAction[] = [
     { label: "이름 변경", icon: Pencil, onSelect: () => onRename("chat", chat.id, chat.title) },
-    ...(moveUp ? [{ label: "위로 이동", icon: ArrowUp, onSelect: moveUp }] : []),
-    ...(moveDown ? [{ label: "아래로 이동", icon: ArrowDown, onSelect: moveDown }] : []),
+    ...(reorder && moveUp ? [{ label: "위로 이동", icon: ArrowUp, onSelect: moveUp }] : []),
+    ...(reorder && moveDown ? [{ label: "아래로 이동", icon: ArrowDown, onSelect: moveDown }] : []),
+    ...(remote ? [{ label: "최근 메시지에서 분기", icon: Split, onSelect: () => void forkRecent() }] : []),
     {
       label: chat.archived ? "보관 해제" : "보관",
       icon: chat.archived ? ArchiveRestore : Archive,
@@ -472,12 +577,16 @@ function ChatNode({
       icon: Trash2,
       destructive: true,
       separatorBefore: true,
-      onSelect: () =>
+      onSelect: () => {
+        const { id, title, createdAt, projectId } = chat;
+        const target = remote ? { id, title, createdAt, projectId } : undefined;
         onConfirm({
-          title: `"${chat.title}" 채팅을 삭제할까요?`,
+          title: `"${title}" 채팅을 삭제할까요?`,
           body: "앱에 저장된 기록과 첨부 파일 목록이 지워집니다. 원격 웹으로 올린 첨부 파일은 파일도 함께 지워집니다. 작업 폴더의 파일과 데스크톱에서 붙인 첨부 파일은 그대로 남습니다.",
-          run: () => deleteChat(chat.id),
-        }),
+          target,
+          run: () => deleteChat(id, target),
+        });
+      },
     },
   ];
 
@@ -487,11 +596,12 @@ function ChatNode({
         <div
           role="treeitem"
           aria-selected={active}
-          draggable
+          draggable={reorder && !mobile}
           onDragStart={onDragStart} onDragEnd={onDragEnd} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}
           data-drop-position={drop}
           className={cn(
             "group flex h-8 cursor-default items-center gap-1.5 rounded-md pr-1 pl-1 text-[13px]",
+            mobile && "h-11 select-none text-[14px] [-webkit-touch-callout:none]",
             active ? "bg-accent text-foreground" : "text-foreground/90 hover:bg-accent/60",
             chat.archived && "opacity-60",
             dragging && "opacity-40",
@@ -502,7 +612,7 @@ function ChatNode({
         >
           <button
             aria-label={expanded ? "접기" : "펼치기"}
-            className="rounded p-0.5 text-muted-foreground hover:bg-accent"
+            className={cn("rounded p-0.5 text-muted-foreground hover:bg-accent", mobile && "flex size-11 shrink-0 items-center justify-center")}
             onClick={(e) => {
               e.stopPropagation();
               toggle(`c${chat.id}`);
@@ -514,15 +624,25 @@ function ChatNode({
           <span className={cn("min-w-0 flex-1 truncate", chat.unread && "font-semibold")}>{chat.title}</span>
           <span className="shrink-0 rounded border px-1 text-[9.5px] text-muted-foreground">전체 대화</span>
           <span className="relative shrink-0">
-            <span className="text-[11px] text-muted-foreground group-hover:opacity-0 group-focus-within:opacity-0 group-has-[[data-state=open]]:opacity-0" title={new Date(chat.lastActiveAt).toLocaleString()}>
-              {timeAgo(chat.lastActiveAt, now)}
-            </span>
-            <span className="absolute top-1/2 right-0 -translate-y-1/2">
-              <MoreMenu actions={actions} label={`${chat.title} 메뉴`} />
-            </span>
+            {mobile ? (
+              <span className="flex items-center gap-0.5">
+                <span className="text-[11px] text-muted-foreground" title={new Date(chat.lastActiveAt).toLocaleString()}>{timeAgo(chat.lastActiveAt, now)}</span>
+                <MoreMenu actions={actions} label={`${chat.title} 메뉴`} touch />
+              </span>
+            ) : (
+              <>
+                <span className="text-[11px] text-muted-foreground group-hover:opacity-0 group-focus-within:opacity-0 group-has-[[data-state=open]]:opacity-0" title={new Date(chat.lastActiveAt).toLocaleString()}>
+                  {timeAgo(chat.lastActiveAt, now)}
+                </span>
+                <span className="absolute top-1/2 right-0 -translate-y-1/2">
+                  <MoreMenu actions={actions} label={`${chat.title} 메뉴`} />
+                </span>
+              </>
+            )}
           </span>
         </div>
       </ItemMenus>
+      {forkAnchor && <ForkDialog chatId={chat.id} eventId={forkAnchor.id} preview={forkAnchor.preview} onClose={() => setForkAnchor(undefined)} />}
       {expanded && (
         <div className="ml-4 border-l py-0.5 pl-1.5">
           <NodeRow chatId={chat.id} node="orch" label={`${MASTER_LABEL} 대화`} icon={chat.status === "working" ? <WorkingIndicator chatId={chat.id} className="size-3" /> : null} />

@@ -20,6 +20,15 @@ export async function request<T = unknown>(path: string, body?: unknown): Promis
   return data as T;
 }
 
+/**
+ * Ends the session. Resolves when the server ended it or it had already ended (401); any other answer
+ * (503, network failure…) rejects, because the session may still be alive.
+ */
+export async function logout(): Promise<void> {
+  try { await request("/api/logout", {}); }
+  catch (e) { if (!(e instanceof AuthError)) throw e; }
+}
+
 /** REMOTE_API path with `:id` filled and an optional query string. */
 export function url(path: RemoteApiPath, id?: number, query?: Record<string, string>): string {
   const base = remotePath(path, id);

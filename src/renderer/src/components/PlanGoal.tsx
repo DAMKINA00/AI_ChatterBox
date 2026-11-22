@@ -8,12 +8,16 @@ import type { PlanHistoryEntry } from "../lib/plan-history";
 import { openPlanSteps, PLAN_STATE_LABEL, planActionsAvailable, planBlockerName, planConsultLinks, planCounts, planCountsText, planEndedEarly, planStepName, planStepViews } from "../lib/plan-view";
 import { Badge, Button } from "./ui";
 import { WorkingIndicator } from "./WorkingIndicator";
+import { useMobile } from "../lib/remote-mode";
 
 type Plan = NonNullable<ReturnType<typeof planOf>>;
 
 /** Pinned checklist from the orchestrator's native plan tool, with the /plan approval buttons. */
 export function PlanPanel({ chat, plan, onRevise }: { chat: Chat; plan: Plan; onRevise: () => void }) {
-  const [expanded, setExpanded] = useState(true);
+  // Phones (remote web): a live checklist starts folded so the conversation keeps the screen; a proposal
+  // waiting for run/cancel stays open.
+  const mobile = useMobile();
+  const [expanded, setExpanded] = useState(() => !mobile || plan.state !== "live");
   const toast = useStore((s) => s.toast);
   const agents = useStore(s => s.agents[chat.id]);
   const consults = useStore(s => s.consults[chat.id]);
@@ -25,7 +29,7 @@ export function PlanPanel({ chat, plan, onRevise }: { chat: Chat; plan: Plan; on
   const run = (name: string) => api.command(chat.id, name, "").catch((e) => toast(errorMessage(e)));
   return (
     <div className={cn("mx-auto mt-3 w-[min(860px,calc(100%-32px))] overflow-hidden rounded-xl border bg-card shadow-sm", ended && "border-warning/50")} data-testid="plan-panel" data-state={plan.state}>
-      <button className="flex w-full items-center gap-2 px-3.5 py-2 text-left" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
+      <button className={cn("flex w-full items-center gap-2 px-3.5 py-2 text-left", mobile && "min-h-11 flex-wrap")} aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
         <ListChecks className="size-4 text-orch" />
         <span className="text-[13px] font-semibold">{plan.state === "live" ? "체크리스트" : "계획"}</span>
         <Badge className={cn(plan.state === "done" ? "border-success/40 text-success" : ended && "border-warning/50 text-warning")} data-testid="plan-state">{PLAN_STATE_LABEL[plan.state]}</Badge>

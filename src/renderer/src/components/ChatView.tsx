@@ -1,5 +1,5 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ArrowDown, BarChart3, Check, ChevronDown, CircleAlert, History, ImagePlus, ListChecks, Loader2, Paperclip, Pause, Play, RotateCcw, Search, SendHorizontal, ShieldCheck, Workflow, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, BarChart3, Check, ChevronDown, CircleAlert, History, ImagePlus, ListChecks, Loader2, Paperclip, Pause, Play, RotateCcw, Search, SendHorizontal, ShieldCheck, SlidersHorizontal, Workflow, X } from "lucide-react";
 import {
   APPROVAL_MODE_LABEL,
   AGENT_LABEL,
@@ -52,6 +52,7 @@ import { ChatSearch, ChatSearchQuery } from "./ChatSearch";
 import { ForkOrigin } from "./Fork";
 import { ReviewTotalsBar } from "./ReviewResult";
 import { RunStatsDialog } from "./RunStats";
+import { useMobile } from "../lib/remote-mode";
 
 export function ChatView({ chat, project, node }: { chat: Chat; project: Project; node?: NodeId }) {
   const events = useStore((s) => s.events[chat.id]);
@@ -202,30 +203,51 @@ function ChatHeader({ chat, project, nodeLabel, masterExpression, onSearch }: { 
   const grokModel = chat.grokModelOverride ?? project.settings.grokModel;
   const deepseekModel = chat.deepseekModelOverride ?? project.settings.deepseekModel;
   const geminiModel = chat.geminiModelOverride ?? project.settings.geminiModel;
+  // Phones (remote web): back to the chat list, and the model/approval rows fold into one toggle.
+  const mobile = useMobile();
+  const [controlsOpen, setControlsOpen] = useState(false);
+  const showControls = !mobile || controlsOpen;
+  const touch = mobile ? "size-11" : undefined;
+  // The project folder is a PC path the remote page does not receive.
+  const where = project.folder ? `${project.name} · ${project.folder}` : project.name;
   return (
-    <header className="flex w-full min-w-0 max-w-full flex-col gap-1.5 overflow-hidden border-b px-4 py-2">
-      <div className="flex w-full min-w-0 max-w-full items-start gap-2" data-testid="chat-header-title-row">
+    <header className={cn("flex w-full min-w-0 max-w-full flex-col gap-1.5 overflow-hidden border-b px-4 py-2", mobile && "px-2 py-1")}>
+      <div className={cn("flex w-full min-w-0 max-w-full items-start gap-2", mobile && "items-center gap-1")} data-testid="chat-header-title-row">
+        {mobile && (
+          <Button variant="ghost" size="icon-sm" className={touch} aria-label="채팅 목록으로" data-testid="mobile-back" onClick={() => void useStore.getState().select(null)}>
+            <ArrowLeft />
+          </Button>
+        )}
         <StatusIcon status={chat.status} unread={false} chatId={chat.id} />
         <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 text-[14px] font-semibold">
-            <span className="min-w-0 break-words" data-testid="chat-title">
+          <div className={cn("flex min-w-0 flex-wrap items-baseline gap-x-1.5 text-[14px] font-semibold", mobile && "flex-nowrap")}>
+            <span className={cn("min-w-0 break-words", mobile && "truncate")} data-testid="chat-title">
               {chat.title}
             </span>
             {nodeLabel && <span className="shrink-0 font-normal text-muted-foreground">· {nodeLabel}</span>}
           </div>
+          {mobile && <div className="truncate text-[11.5px] text-muted-foreground">{project.name}</div>}
         </div>
-        <div className="max-w-[35%] truncate text-[11.5px] text-muted-foreground" title={`${project.name} · ${project.folder}`}>
-          {project.name} · {project.folder}
-        </div>
+        {!mobile && (
+          <div className="max-w-[35%] truncate text-[11.5px] text-muted-foreground" title={where}>
+            {where}
+          </div>
+        )}
         <Tooltip content="대화 내용 검색 (Ctrl+F)">
-          <Button variant="ghost" size="icon-sm" aria-label="대화 내용 검색" onClick={onSearch}><Search /></Button>
+          <Button variant="ghost" size="icon-sm" className={touch} aria-label="대화 내용 검색" onClick={onSearch}><Search /></Button>
         </Tooltip>
         <Tooltip content="실행 통계 (기록 구간·도구·승인 대기)">
-          <Button variant="ghost" size="icon-sm" aria-label="실행 통계" data-testid="run-stats-open" onClick={() => setStatsOpen(true)}><BarChart3 /></Button>
+          <Button variant="ghost" size="icon-sm" className={touch} aria-label="실행 통계" data-testid="run-stats-open" onClick={() => setStatsOpen(true)}><BarChart3 /></Button>
         </Tooltip>
+        {mobile && (
+          <Button variant="ghost" size="icon-sm" className={cn(touch, controlsOpen && "bg-accent")} aria-label="모델·승인 설정" aria-expanded={controlsOpen} data-testid="mobile-controls-toggle" onClick={() => setControlsOpen((v) => !v)}>
+            <SlidersHorizontal />
+          </Button>
+        )}
         {statsOpen && <RunStatsDialog chat={chat} open={statsOpen} onOpenChange={setStatsOpen} />}
       </div>
-      <div className="flex w-full min-w-0 max-w-full items-center gap-2 overflow-x-auto whitespace-nowrap" data-testid="chat-header-master-row">
+      {showControls && <>
+      <div className={cn("flex w-full min-w-0 max-w-full items-center gap-2 overflow-x-auto whitespace-nowrap", mobile && "flex-wrap whitespace-normal pb-1 [&_button]:min-h-11")} data-testid="chat-header-master-row">
         <ProviderControls agent={orch.agent} master>
           <AgentAvatar kind="orch" expression={masterExpression} size={24} alt="마스터 캐릭터" />
           <span className="text-[12px] text-muted-foreground">마스터</span>
@@ -259,7 +281,7 @@ function ChatHeader({ chat, project, nodeLabel, masterExpression, onSearch }: { 
         </ProviderControls>
         <ApprovalModePicker chat={chat} project={project} />
       </div>
-      <div className="flex w-full min-w-0 max-w-full items-center gap-3 overflow-x-auto whitespace-nowrap" data-testid="chat-header-agents-row">
+      <div className={cn("flex w-full min-w-0 max-w-full items-center gap-3 overflow-x-auto whitespace-nowrap", mobile && "flex-wrap gap-x-3 gap-y-1.5 whitespace-normal pb-1 [&_button]:min-h-11")} data-testid="chat-header-agents-row">
         <ProviderControls agent="claude">
           <AgentAvatar kind="claude" size={24} alt="클로드 캐릭터" />
           <span className="text-[12px] text-muted-foreground">클로드</span>
@@ -320,6 +342,7 @@ function ChatHeader({ chat, project, nodeLabel, masterExpression, onSearch }: { 
             resetLabel={`프로젝트 값 사용 (${label("deepseek", project.settings.deepseekModel)})`} />
         </ProviderControls>
       </div>
+      </>}
     </header>
   );
 }
@@ -737,7 +760,8 @@ function OlderApprovals({ chatId, before, first, total: firstTotal }: { chatId: 
               </li>
             ))}
           </ul>
-          {items.length < total && (
+          {/* Both desktop and remote load more of the older approval summaries on demand. */}
+            {items.length < total && (
             <Button variant="ghost" size="xs" disabled={loading} onClick={() => void more()}>
               {loading ? <Loader2 className="animate-spin" /> : null} 더 보기 ({total - items.length}건 남음)
             </Button>
@@ -776,6 +800,9 @@ const drafts = new Map<number, { text: string; attachments: AttachmentRef[] }>()
 const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy: boolean }>(function Composer({ chat, project, busy }, ref) {
   const toast = useStore((s) => s.toast);
   const geminiInstalled = useStore(s => !!s.cli.find(c => c.agent === "gemini")?.path);
+  // Phones: Enter makes a new line (the on-screen keyboard has no Shift+Enter); the button sends.
+  const mobile = useMobile();
+  const touch = mobile ? "size-11" : undefined;
   const [text, setText] = useState(() => drafts.get(chat.id)?.text ?? "");
   const [attachments, setAttachments] = useState<AttachmentRef[]>(() => drafts.get(chat.id)?.attachments ?? []);
   const [uploading, setUploading] = useState(0);
@@ -810,8 +837,9 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
   }, [text]);
 
   useEffect(() => {
-    area.current?.focus();
-  }, [chat.id]);
+    // Not on phones: focusing would open the keyboard over the chat as soon as it opens.
+    if (!mobile) area.current?.focus();
+  }, [chat.id, mobile]);
 
   const addFiles = useCallback(
     async (files: File[]) => {
@@ -958,7 +986,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
   };
 
   return (
-    <div className="px-4 pt-1 pb-4">
+    <div className={cn("px-4 pt-1 pb-4", mobile && "px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]")} data-testid="composer">
       <StatusDialog open={statusOpen} onOpenChange={setStatusOpen} chat={chat} project={project} />
       {unavailableMaster && <p role="status" data-testid="antigravity-master-unavailable" className="mx-auto mb-2 max-w-[860px] text-[12px] text-muted-foreground">Antigravity CLI(agy) 미설치로 마스터가 비활성화되었습니다. 다른 마스터를 선택하거나 설치 후 다시 확인하세요.</p>}
       <div className="relative mx-auto max-w-[860px] rounded-2xl border bg-card shadow-sm transition-colors focus-within:border-ring/60">
@@ -1006,8 +1034,8 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
           ref={area}
           value={text}
           aria-label="메시지 입력"
-          placeholder={paused ? "추가 지시는 재시작할 때 전달" : busy ? "추가 지시를 입력하세요. Enter 즉시 전달 · Alt+Enter 다음 단계 전달" : "원하는 결과를 입력하세요"}
-          className="block max-h-60 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[14px] leading-relaxed outline-none select-text placeholder:text-muted-foreground"
+          placeholder={paused ? "추가 지시는 재시작할 때 전달" : mobile ? (busy ? "추가 지시 (즉시 전달 버튼)" : "원하는 결과를 입력하세요") : busy ? "추가 지시를 입력하세요. Enter 즉시 전달 · Alt+Enter 다음 단계 전달" : "원하는 결과를 입력하세요"}
+          className={cn("block max-h-60 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[14px] leading-relaxed outline-none select-text placeholder:text-muted-foreground", mobile && "max-h-40 text-[16px]")}
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => {
             const files = [...e.clipboardData.files];
@@ -1034,7 +1062,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
                 return;
               }
             }
-            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && !mobile) {
               e.preventDefault();
               void send(busy && e.altKey && !e.ctrlKey && !e.metaKey ? "next" : "now");
             }
@@ -1045,6 +1073,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
             <Button
               variant="ghost"
               size="icon-sm"
+              className={touch}
               aria-label="파일 첨부"
               onClick={async () => {
                 try {
@@ -1072,19 +1101,19 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
             </Button>
           ) : paused ? (
             <Tooltip content="재시작">
-              <Button size="icon-sm" variant="ghost" disabled={missingGeminiMaster} onClick={() => void requestResume()} aria-label="재시작" data-testid="resume">
+              <Button size="icon-sm" variant="ghost" className={touch} disabled={missingGeminiMaster} onClick={() => void requestResume()} aria-label="재시작" data-testid="resume">
                 <Play />
               </Button>
             </Tooltip>
           ) : busy ? (
             <Tooltip content="일시 중지">
-              <Button size="icon-sm" variant="ghost" onClick={() => void requestPause()} aria-label="일시 중지" data-testid="pause">
+              <Button size="icon-sm" variant="ghost" className={touch} onClick={() => void requestPause()} aria-label="일시 중지" data-testid="pause">
                 <Pause />
               </Button>
             </Tooltip>
           ) : null}
-          {busy && <Button size="sm" variant="outline" onClick={() => void send("next")} disabled={!canSend} aria-label="다음 단계로 전달" title="Alt+Enter" data-testid="send-next" className="rounded-full px-3.5">다음 단계 전달</Button>}
-          <Button size="sm" onClick={() => void send()} disabled={!canSend} aria-label={paused ? "지시 보관" : busy ? "마스터에게 즉시 전달" : "보내기"} title="Enter" data-testid="send" className={cn("rounded-full px-3.5")}>
+          {busy && <Button size="sm" variant="outline" onClick={() => void send("next")} disabled={!canSend} aria-label="다음 단계로 전달" title="Alt+Enter" data-testid="send-next" className={cn("rounded-full px-3.5", mobile && "h-11")}>{mobile ? "다음 단계" : "다음 단계 전달"}</Button>}
+          <Button size="sm" onClick={() => void send()} disabled={!canSend} aria-label={paused ? "지시 보관" : busy ? "마스터에게 즉시 전달" : "보내기"} title="Enter" data-testid="send" className={cn("rounded-full px-3.5", mobile && "h-11 px-4")}>
             {sending ? <Loader2 className="animate-spin" /> : <SendHorizontal />}
             {paused ? "지시 보관" : busy ? "즉시 전달" : "보내기"}
           </Button>

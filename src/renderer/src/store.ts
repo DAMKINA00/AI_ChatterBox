@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { matchesDeleteTarget } from "../../shared/chat-list";
 import type {
   AgentKind,
   Chat,
@@ -18,7 +19,7 @@ import type {
 import { historyFromPage, prependPage, replayLive, stateEvents, type StateSnapshot } from "../../shared/event-page";
 import { emptyTeamUpdates, mergeTeamUpdates, type TeamUpdates } from "./lib/history-load";
 import { api, errorMessage } from "./lib/utils";
-import { mergeCliInfo } from "./lib/cli-status";
+import { cliAuthFromAccounts, mergeCliInfo, startupLoginNotice } from "./lib/cli-status";
 import { appendEvent, chatTimelines } from "./timeline";
 
 export interface Selection {
@@ -86,7 +87,7 @@ interface State {
   createChat(projectId: number): Promise<Chat | null>;
   reorderChat(id: number, targetId: number, placement: "before" | "after"): Promise<void>;
   updateChat(id: number, patch: Parameters<typeof api.updateChat>[1]): Promise<void>;
-  deleteChat(id: number): Promise<void>;
+  deleteChat(id: number, target?: import("../../shared/types").ChatDeleteTarget): Promise<void>;
   /** New idle chat holding a read-only transcript of the source; opens it. null on failure (toast shown). */
   forkChat(sourceChatId: number, options: ChatForkOptions): Promise<Chat | null>;
 }
@@ -196,7 +197,16 @@ export const useStore = create<State>((set, get) => ({
     ]);
     document.documentElement.classList.toggle("dark", theme === "dark");
     set({ projects, chats, cli, theme, usage: receivedUsage ?? usage, ready: true });
-    void get().refreshCli().catch(() => undefined);
+    // CLI login states come from one startup check per app run (the core shares it and runs it after the
+    // usage read, two CLIs at a time); here only installation and the DeepSeek key are re-read.
+    void get().refreshCli(false)
+      .then(() => get().cli.some(info => info.agent === "deepseek" && info.path) ? get().refreshCli(true, "deepseek") : undefined)
+      .catch(() => undefined);
+    void api.cliAccounts.startupCheck?.().then(cliAccounts => {
+      set(s => ({ cliAccounts, cli: cliAuthFromAccounts(s.cli, cliAccounts) }));
+      const notice = startupLoginNotice(cliAccounts);
+      if (notice) get().toast(notice);
+    }).catch(() => undefined);
 
     const pendingEvents: TimelineEvent[] = [];
     let eventTimer: number | undefined;
@@ -432,8 +442,11 @@ export const useStore = create<State>((set, get) => ({
       return null;
     }
   },
-  async deleteChat(id) {
-    await api.deleteChat(id);
+  async deleteChat(id, target) {
+    if (target) await api.deleteChat(id, target);
+    else await api.deleteChat(id);
+    const current = get().chats.find(chat => chat.id === id);
+    if (target && current && !matchesDeleteTarget(current, target)) return;
     chatTimelines.delete(id);
     set((s) => ({ chats: s.chats.filter((c) => c.id !== id), selection: s.selection?.chatId === id ? null : s.selection }));
   },

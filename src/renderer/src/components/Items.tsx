@@ -33,6 +33,7 @@ import { Badge, Button, Input } from "./ui";
 import { WorkingIndicator } from "./WorkingIndicator";
 import { ChatSearchQuery } from "./ChatSearch";
 import { ReviewResultView } from "./ReviewResult";
+import { attachmentSrc, isRemote, useMobile } from "../lib/remote-mode";
 import { ForkContextCard, ForkMessageButton } from "./Fork";
 import { forkEventId } from "../lib/fork";
 import { consultCardReview, consultCardStatus } from "../lib/review-summary";
@@ -83,6 +84,13 @@ export function RoleName({ chatId, role, size = 24, expression, avatar = true }:
 
 export function AttachmentChip({ a, onRemove }: { a: AttachmentRef; onRemove?: () => void }) {
   const isImage = a.mime.startsWith("image/");
+  const chatId = useStore((s) => s.selection?.chatId);
+  // Remote web: the file comes from the authenticated download route instead of the PC path.
+  const remote = isRemote();
+  const src = attachmentSrc(a.id, chatId);
+  const name = remote
+    ? <a href={src} download={a.name} className="text-primary underline underline-offset-2">{a.name}</a>
+    : <FileLink href={a.path}>{a.name}</FileLink>;
   return (
     <div
       className="group relative flex items-center gap-2 overflow-hidden rounded-lg border bg-card text-[12px]"
@@ -91,18 +99,18 @@ export function AttachmentChip({ a, onRemove }: { a: AttachmentRef; onRemove?: (
     >
       {isImage ? (
         <div className="flex min-w-0 items-center gap-2">
-          <button type="button" onClick={() => void api.openPath(a.path).catch((e) => useStore.getState().toast(errorMessage(e)))} className="block shrink-0" aria-label={`${a.name} 열기`}>
-            <img src={`cbx://attachment/${a.id}`} alt={a.name} className="size-16 object-cover" draggable={false} />
+          <button type="button" onClick={() => remote ? void window.open(src, "_blank", "noopener") : void api.openPath(a.path).catch((e) => useStore.getState().toast(errorMessage(e)))} className="block shrink-0" aria-label={`${a.name} 열기`}>
+            <img src={src} alt={a.name} className="size-16 object-cover" draggable={false} />
           </button>
           <div className="min-w-0 py-2 pr-3">
-            <span data-chat-search-text><FileLink href={a.path}>{a.name}</FileLink></span>
+            <span data-chat-search-text>{name}</span>
             <div className="text-[11px] text-muted-foreground">{formatBytes(a.size)}</div>
           </div>
         </div>
       ) : (
         <div className="flex items-center gap-2 py-2 pr-3 pl-2.5 text-left">
           <FileText className="size-4 text-muted-foreground" />
-          <span className="max-w-40 truncate"><span data-chat-search-text><FileLink href={a.path}>{a.name}</FileLink></span></span>
+          <span className="max-w-40 truncate"><span data-chat-search-text>{name}</span></span>
           <span className="text-muted-foreground">{formatBytes(a.size)}</span>
         </div>
       )}
@@ -606,6 +614,7 @@ function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval"
     }
   };
   const [busy, setBusy] = useState(false);
+  const mobile = useMobile();
   const [pendingDecision, setPendingDecision] = useState<"once" | "chat" | "deny" | null>(null);
   const [localDecision, setLocalDecision] = useState<"once" | "chat" | "deny" | "expired" | null>(null);
   const selection = useStore((s) => s.selection);
@@ -687,7 +696,8 @@ function ApprovalCard({ item, chatId }: { item: Extract<Item, { kind: "approval"
         <Button size="sm" onClick={() => void select({ chatId, node: "orch" })} data-testid="approval-open-master">마스터 대화에서 확인</Button>
       )}
       {!status && masterView && (
-        <div className="flex flex-wrap gap-2">
+        // Phones (remote web): 44px buttons.
+        <div className={cn("flex flex-wrap gap-2", mobile && "[&_button]:h-11")}>
           <Button size="sm" onClick={() => answer("once")} disabled={busy} data-testid="approve-once">
             이번만 허용
           </Button>

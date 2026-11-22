@@ -1,5 +1,7 @@
 import { DEEPSEEK_MODEL, DEEPSEEK_MODELS, type DeepSeekBalance, type DeepSeekInput, type DeepSeekStatus } from "../shared/deepseek";
-import type { SecretStorage } from "./aistudio";
+
+/** Encrypts stored API keys (Electron safeStorage in the app, a passthrough in tests). */
+export interface SecretStorage { encrypt(value: string): string; decrypt(value: string): string }
 
 interface Settings { getSetting(key: string): string | undefined; setSetting(key: string, value: string): void }
 const KEY = "deepseekApiKey";
