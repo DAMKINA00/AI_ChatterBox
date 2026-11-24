@@ -136,6 +136,9 @@ test("active helper cancels on chat stop/account change; empty or failed output 
 
 test("all provider adapters use isolated read-only drivers; Claude advertises no tools", async t => {
   const f = fixture(t);
+  t.mock.method(f.chats, "claudeExe", () => "fixture-claude");
+  t.mock.method(f.chats, "geminiExe", () => "fixture-agy");
+  t.mock.method(f.chats, "grokExe", () => "fixture-grok");
   const host: DriverHost = { nativeId() {}, emit() {}, approve: async () => ({ verdict: "deny" }) };
   for (const agent of ["claude", "codex", "gemini", "grok", "deepseek"] as const) {
     const connection = councilDriver(f.chats, { agent, model: "fixture", effort: "" }, { cwd: f.dir, exePath: "unused", nativeId: null, readOnly: true, ephemeral: true }, host);
