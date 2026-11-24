@@ -1,12 +1,19 @@
 /** Conservative commands allowed by our gate while planning/reviewing. No shell composition except a verified read pipeline. */
 
 // First command of a read pipeline (or the only command).
-const READ_HEADS = /^(pwd|ls|cat|head|tail|wc|rg|Get-Content|Get-ChildItem|Get-Item|Get-FileHash|Test-Path|Select-String|Get-Location)$/i;
+const READ_HEADS = /^(pwd|ls|cat|head|tail|wc|rg|grep|sleep|Start-Sleep|Get-Content|Get-ChildItem|Get-Item|Get-FileHash|Test-Path|Select-String|Get-Location)$/i;
 // Later pipeline stages: only filters/formatters that read their input and print.
-const PIPE_STAGES = /^(Select-Object|Select-String|Where-Object|Sort-Object|Measure-Object|Format-Table|Format-List|Out-String|head|tail|wc|rg)$/i;
-const GIT_READ = /^(status|diff|log|show|ls-files|rev-parse)$/i;
-// git options that write files or run external programs.
-const GIT_BANNED = ["--output", "--ext-diff", "--textconv", "--exec-path"];
+const PIPE_STAGES = /^(Select-Object|Select-String|Where-Object|Sort-Object|Measure-Object|Format-Table|Format-List|Out-String|head|tail|wc|rg|grep)$/i;
+const GIT_READ = /^(status|diff|log|show|ls-files|rev-parse|blame|grep)$/i;
+// Changing the working directory before a read: `cd dir && rg …` (one plain argument).
+const CD_HEADS = /^(cd|Set-Location|chdir)$/i;
+// Discarding or merging error output changes nothing: 2>/dev/null, 2>$null, 2>&1. `nul` is a device only
+// for PowerShell/cmd (a POSIX shell creates a file named nul), so 2>nul counts only inside a PowerShell wrapper.
+const STDERR_REDIRECT = /\s+2>\s*(?:\/dev\/null|\$null|&1)(?=\s|\||$)/gi;
+const STDERR_REDIRECT_PS = /\s+2>\s*(?:\/dev\/null|\$null|nul|&1)(?=\s|\||$)/gi;
+const SHELL_META = /[;&<>`$\r\n(){}]/;
+// git options that write files or run external programs (git grep -O<cmd> opens matches in a pager command).
+const GIT_BANNED = ["--output", "--ext-diff", "--textconv", "--exec-path", "--open-files-in-pager"];
 // ripgrep options that run external programs (preprocessor, decompressors, hostname command).
 const RG_BANNED = ["--pre", "--pre-glob", "--search-zip", "--hostname-bin"];
 
@@ -60,7 +67,7 @@ function hasBannedArg(head: string, args: string[]): boolean {
     // PowerShell common parameters that create variables; PowerShell accepts any unique prefix.
     if (/^-(ov|pv|outv[a-z]*|pi[a-z]*)$/.test(name)) return true;
     // git -c (config override, case-sensitive; -C on log/diff is copy detection)
-    if (lower === "git" && (arg.startsWith("-c") && name === "-c" || GIT_BANNED.includes(name))) return true;
+    if (lower === "git" && (arg.startsWith("-c") && name === "-c" || GIT_BANNED.includes(name) || /^-[a-zA-Z]*O/.test(arg) && !arg.startsWith("--"))) return true;
     if (lower === "rg" && (RG_BANNED.includes(name) || /^-[a-y]*z[a-z]*$/i.test(name))) return true;
   }
   return false;
@@ -93,10 +100,41 @@ function splitPipeline(s: string): string[] | null {
 }
 
 export function isReadCommand(command: string): boolean {
-  const s = (unwrapPowerShell(command) ?? command).trim();
-  if (!s || /[;&<>`$\r\n(){}]/.test(s) || s.includes("||")) return false;
+  const script = unwrapPowerShell(command);
+  const s = (script ?? command).trim().replace(script === null ? STDERR_REDIRECT : STDERR_REDIRECT_PS, "").trim();
+  if (!s) return false;
+  // `cd dir && read && read`: each && part is a plain cd or a read pipeline, and the last one reads.
+  const parts = splitAndChain(s);
+  if (!parts) return false;
+  const last = parts.pop()!;
+  return parts.every((p) => isPlainCd(p) || isReadPipeline(p)) && isReadPipeline(last);
+}
+
+function isReadPipeline(part: string): boolean {
+  const s = part.trim();
+  if (!s || SHELL_META.test(s) || s.includes("||")) return false;
   const stages = splitPipeline(s);
   return !!stages && stages.every((stage, i) => isReadStage(stage.trim(), i === 0));
+}
+
+function isPlainCd(part: string): boolean {
+  const args = splitArgs(part.trim());
+  return !!args && args.length === 2 && CD_HEADS.test(args[0]) && !SHELL_META.test(args[1]) && !args[1].includes("|");
+}
+
+/** Splits on && outside quotes. Unbalanced quotes → null. */
+function splitAndChain(s: string): string[] | null {
+  const parts: string[] = [];
+  let quote = "", start = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (quote) { if (c === quote) quote = ""; continue; }
+    if (c === "'" || c === '"') quote = c;
+    else if (c === "&" && s[i + 1] === "&") { parts.push(s.slice(start, i)); start = i + 2; i++; }
+  }
+  if (quote) return null;
+  parts.push(s.slice(start));
+  return parts;
 }
 
 const PS_EXE = /^(powershell|pwsh)(\.exe)?$/i;

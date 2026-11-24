@@ -73,7 +73,7 @@ export const REMOTE_CHAT_KEYS = [
   "id", "projectId", "title", "status", "unread", "archived", "createdAt", "lastActiveAt", "draft", "sidebarOrder", "goal", "fork",
   "orchestratorModelOverride", "claudeModelOverride", "codexModelOverride", "geminiModelOverride", "grokModelOverride", "deepseekModelOverride",
   "orchestratorEffortOverride", "claudeEffortOverride", "codexEffortOverride", "geminiEffortOverride", "grokEffortOverride", "deepseekEffortOverride",
-  "approvalModeOverride",
+  "approvalModeOverride", "planMode",
 ] as const satisfies readonly (keyof Chat)[];
 /** Worker fields the remote page uses (allow-list): no CLI session id, no CLI account ids. */
 export const REMOTE_AGENT_KEYS = ["id", "chatId", "key", "kind", "number", "nickname", "job", "status", "createdAt"] as const satisfies readonly (keyof ChatAgent)[];
@@ -249,7 +249,7 @@ export class RemoteFeatures {
       throw new HttpError(405, "지원하지 않는 요청입니다.");
     }
 
-    m = /^\/api\/chats\/(\d{1,12})\/(update|delete|viewed|pause|resume|dismiss-interrupted|command|attachments|send|fork|fork-anchor|reorder|pending-approvals)$/.exec(path);
+    m = /^\/api\/chats\/(\d{1,12})\/(update|delete|viewed|pause|resume|dismiss-interrupted|command|attachments|send|fork|fork-anchor|reorder|pending-approvals|plan-mode)$/.exec(path);
     if (!m) return false;
     const id = Number(m[1]);
     const action = m[2];
@@ -348,6 +348,13 @@ export class RemoteFeatures {
       // links them in the same step (else 409: the web refreshes its list). Attachments alone may go with an empty text.
       await core(call, "remote:send", [id, text(body.text ?? "", "지시", REMOTE_LIMITS.text, keys.length > 0), keys, delivery]);
       send(res, 200, { ok: true });
+      return true;
+    }
+    if (action === "plan-mode") {
+      if (Object.keys(body).some(key => key !== "on") || typeof body.on !== "boolean") throw new HttpError(400, "계획 모드는 {on: true|false}로 지정하세요.");
+      await this.chat(id);
+      await call("chats:setPlanMode", [id, body.on]);
+      send(res, 200, {});
       return true;
     }
     await this.chat(id);

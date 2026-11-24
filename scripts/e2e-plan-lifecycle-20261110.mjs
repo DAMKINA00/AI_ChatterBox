@@ -187,11 +187,11 @@ try {
   if (!(await team.getAttribute("open").catch(() => null))) await team.locator("summary").first().click();
   const teamText = await team.innerText();
   check("[UI remote] open steps, cancelled step and its reason, unfinished prerequisite", /진행되지 않은 단계 2개/.test(teamText) && teamText.includes("취소 사유: 범위에서 제외") && teamText.includes("화면 연결(취소됨)"), teamText);
-  check("[UI remote] an ended plan offers no run/cancel", (await web.getByRole("button", { name: /계획 실행|계획 취소/ }).count()) === 0);
+  check("[UI remote] an ended plan offers no run/cancel", (await web.getByRole("button", { name: /승인하고 실행|계획 취소/ }).count()) === 0);
   await web.screenshot({ path: join(base, "remote-incomplete.png") });
 
   await openRemote(3, "/plan 제안 계획");
-  check("[UI remote] an idle proposal offers run and cancel", (await web.getByRole("button", { name: "계획 실행" }).count()) === 1 && (await web.getByRole("button", { name: "계획 취소" }).count()) === 1);
+  check("[UI remote] an idle proposal offers run and cancel", (await web.getByRole("button", { name: "승인하고 실행" }).count()) === 1 && (await web.getByRole("button", { name: "계획 취소" }).count()) === 1);
   check("[UI remote] no renderer errors", remoteErrors.length === 0, remoteErrors.join("\n"));
   console.log(`Screenshots: ${base}`);
 } catch (error) {

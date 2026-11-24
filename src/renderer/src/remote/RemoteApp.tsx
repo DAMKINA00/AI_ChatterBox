@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft, BarChart3, Flag, FolderKanban, LoaderCircle, LogOut, Monitor, Moon, Pause, Play,
-  Plus, Search, Settings2, Square, Sun, Users, X,
+  MessageCircleQuestion, Pencil, Plus, Search, Settings2, Square, Sun, Users, X,
 } from "lucide-react";
 import { REMOTE_EVENTS, REMOTE_LIMITS, type RemoteChatResponse, type RemoteSearchResponse } from "../../../shared/remote-web";
 import { CONSULT_KIND_LABEL, roleName, type AttachmentRef, type Chat, type ChatAgent, type ChatStatus, type Consult, type ConsultStatus, type RunStatsRows, type TimelineEvent } from "../../../shared/types";
@@ -26,7 +26,8 @@ import { useTheme } from "./theme";
 import { Btn, Card, Clip, ConfirmHost, errorText, FIELD, Md } from "./ui";
 import { UsageSheet } from "./Usage";
 import { planHistory } from "../lib/plan-history";
-import { planActionsAvailable } from "../lib/plan-view";
+import { isPlanChangedError, PLAN_CHANGED_TEXT, planActionsAvailable, planRunArg, planVersion } from "../lib/plan-view";
+import { planAskId } from "../lib/plan-mode";
 import { consultCardDomId, ForkAction, ForkContext, ForkOriginBar, PlanHistoryList, PlanSteps, PlanSummary, ReviewBlock, ReviewTotalsLine, RunStatsSheet } from "./Improvements";
 
 const STATUS_LABEL: Record<ChatStatus, string> = {
@@ -253,7 +254,9 @@ function ChatPane({ chat, detail, onOlder, sourceExists, onOpenChat, onBack, onS
   const [pending, setPending] = useState(false);
   const act = async (path: string, body: unknown = {}) => {
     setPending(true);
-    try { await request(path, body); } catch (e) { onError(e); } finally { setPending(false); }
+    try { await request(path, body); }
+    catch (e) { onError(isPlanChangedError(e) && !(e instanceof AuthError) ? new Error(`${PLAN_CHANGED_TEXT} (${errorText(e)})`) : e); }
+    finally { setPending(false); }
   };
   const command = (name: string, arg = "") => act(url("/api/chats/:id/command", chat.id), { name, arg });
   const agents = detail?.agents ?? [];
@@ -280,7 +283,9 @@ function ChatPane({ chat, detail, onOlder, sourceExists, onOpenChat, onBack, onS
         </div>
       )}
       <GoalBar chat={chat} pending={pending} onClear={() => void command("goal", "clear")} />
-      <TeamPanel chat={chat} agents={agents} consults={detail?.consults ?? []} events={all} items={items} plan={plan} pending={pending} onPlan={name => void command(name)} />
+      <TeamPanel chat={chat} agents={agents} consults={detail?.consults ?? []} events={all} items={items} plan={plan} pending={pending} version={plan?.version ?? planVersion(all, plan?.planId)}
+        onPlan={(name, arg = "") => void command(name, arg)}
+        onRevise={() => { const box = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="지시 입력"]'); box?.focus(); box?.scrollIntoView({ block: "nearest" }); }} />
       <div ref={scroller} onScroll={e => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; }} className="flex-1 overflow-y-auto px-3 py-4 md:px-6">
         {!detail ? <div className="flex justify-center p-6 text-muted-foreground"><LoaderCircle className="size-5 animate-spin" /></div>
           : <div className="mx-auto grid max-w-3xl gap-3">
@@ -345,8 +350,10 @@ function AttachmentLinks({ chatId, attachments }: { chatId: number; attachments:
   );
 }
 
-function TeamPanel({ chat, agents, consults, events, items, plan, pending, onPlan }: {
-  chat: Chat; agents: ChatAgent[]; consults: Consult[]; events: TimelineEvent[]; items: Item[]; plan: ReturnType<typeof planOf>; pending: boolean; onPlan: (name: "plan-run" | "plan-cancel") => void;
+function TeamPanel({ chat, agents, consults, events, items, plan, pending, version, onPlan, onRevise }: {
+  chat: Chat; agents: ChatAgent[]; consults: Consult[]; events: TimelineEvent[]; items: Item[]; plan: ReturnType<typeof planOf>; pending: boolean;
+  /** Version of the proposal on screen; approval sends it so a newer one is never run unseen. */
+  version: number; onPlan: (name: "plan-run" | "plan-cancel", arg?: string) => void; onRevise: () => void;
 }) {
   const active = agents.filter(a => a.status === "active");
   const running = consults.filter(c => c.status === "running");
@@ -356,12 +363,27 @@ function TeamPanel({ chat, agents, consults, events, items, plan, pending, onPla
   const actions = !!shownPlan && planActionsAvailable(shownPlan.state, chat.status);
   const history = useMemo(() => planHistory(events), [events]);
   const reviews = consults.filter(c => c.kind === "review").length;
-  if (!active.length && !shownPlan && !reviews && !history.length) return null;
+  // The master's unanswered question while planning (live turn only).
+  const askId = useMemo(() => planAskId(events, chat.status, !!chat.planMode, !!shownPlan), [chat.status, chat.planMode, shownPlan, events]);
+  const revealAsk = () => {
+    const card = [...document.querySelectorAll<HTMLElement>("[data-ask-id]")].find(el => el.dataset.askId === askId);
+    for (let p = card?.parentElement; p; p = p.parentElement) if (p instanceof HTMLDetailsElement) p.open = true;
+    card?.scrollIntoView({ block: "center", behavior: "smooth" });
+    card?.focus({ preventScroll: true });
+  };
+  if (!active.length && !shownPlan && !reviews && !history.length && !askId) return null;
   return (
     <details className="border-b bg-muted/30 px-3 py-2 text-[12.5px] md:px-6" open={proposed || (!!shownPlan && busyStatus(chat.status))}>
       <summary className="flex cursor-pointer flex-wrap items-center gap-x-2 font-medium">
         <Users className="size-4" /> 작업자 {active.length}명{running.length ? ` · ${running.length}건 진행 중` : ""}{reviews ? ` · 리뷰 ${reviews}건` : ""}
         {shownPlan && <PlanSummary plan={shownPlan} />}
+        {/* In the summary so it shows while the panel is folded (a plan-mode turn asks before any proposal). */}
+        {askId && <span role="button" tabIndex={0} data-plan-ask-wait
+          onClick={e => { e.preventDefault(); e.stopPropagation(); revealAsk(); }}
+          onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); revealAsk(); } }}
+          className="inline-flex items-center gap-1 rounded-md border border-primary/50 bg-primary/10 px-2 py-0.5 text-[12px] font-medium text-primary">
+          <MessageCircleQuestion className="size-3.5" /> 마스터 질문 답변 대기
+        </span>}
       </summary>
       <div className="mt-2 grid gap-2">
         {active.length > 0 && <ul className="grid gap-1">
@@ -374,9 +396,10 @@ function TeamPanel({ chat, agents, consults, events, items, plan, pending, onPla
         {shownPlan && <PlanSteps plan={shownPlan} consults={consults} items={items} />}
         <ReviewTotalsLine consults={consults} events={events} />
         {actions ? <div className="flex flex-wrap gap-2">
-          <Btn disabled={pending} onClick={() => onPlan("plan-run")}><Play /> 계획 실행</Btn>
+          <Btn disabled={pending} onClick={() => onPlan("plan-run", planRunArg(shownPlan?.planId, version))} data-plan-version={version}><Play /> v{version} 승인하고 실행</Btn>
+          <Btn variant="outline" disabled={pending} onClick={onRevise}><Pencil /> 수정 요청</Btn>
           <Btn variant="outline" disabled={pending} onClick={() => onPlan("plan-cancel")}><X /> 계획 취소</Btn>
-          <span className="self-center text-[12px] text-muted-foreground">수정하려면 아래에 지시를 보내세요.</span>
+          <span className="self-center text-[12px] text-muted-foreground">수정할 점을 아래 입력창에 적어 보내면 새 계획으로 다시 제안됩니다.</span>
         </div> : proposed && <div className="text-[12px] text-muted-foreground">작업이 끝나면 이 계획을 실행하거나 취소할 수 있습니다.</div>}
         <PlanHistoryList history={history} />
       </div>
@@ -553,6 +576,7 @@ function Ask({ item, chat, live, onError }: { item: Extract<Item, { kind: "ask" 
   };
   const open = item.answer === undefined && live;
   return (
+    <div data-ask-id={item.id} tabIndex={-1}>
     <Card className={cn(open && "border-warning/60")}>
       <div className="mb-1 text-[12px] font-medium text-muted-foreground">마스터의 질문</div>
       <Md text={item.question} />
@@ -568,5 +592,6 @@ function Ask({ item, chat, live, onError }: { item: Extract<Item, { kind: "ask" 
         ) : <div className="mt-2 text-[12px] text-muted-foreground">답변하지 않은 채 종료됨</div>}
       {error && <div role="alert" className="mt-1.5 text-[12px] text-destructive">{error}</div>}
     </Card>
+    </div>
   );
 }

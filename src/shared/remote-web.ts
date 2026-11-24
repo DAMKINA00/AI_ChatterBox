@@ -153,6 +153,7 @@ export const REMOTE_API = {
   chatResume: "/api/chats/:id/resume",              // POST {} (pause resume and interrupted-run resume)
   chatDismissInterrupted: "/api/chats/:id/dismiss-interrupted", // POST {}
   chatCommand: "/api/chats/:id/command",            // POST RemoteCommandRequest
+  chatPlanMode: "/api/chats/:id/plan-mode",         // POST {on: boolean} → {}
   search: "/api/search",                            // GET ?q=
   models: "/api/models",                            // GET ?agent=
   projects: "/api/projects",                        // GET RemoteProjectsResponse · POST RemoteProjectCreate (B, D1)

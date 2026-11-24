@@ -111,7 +111,7 @@ export function latestPlanState(events: readonly TimelineEvent[]): { state: Plan
 export function pendingProposal(events: readonly TimelineEvent[]): number | undefined {
   const last = latestPlanState(events);
   if (last?.state !== "proposed") return undefined;
-  const planId = last.planId ?? events.findLast((e) => e.id < last.eventId && e.event.type === "user" && !e.event.queued && isPlanCommand(e.event.text))?.id;
+  const planId = last.planId ?? events.findLast((e) => e.id < last.eventId && e.event.type === "user" && !e.event.queued && (isPlanCommand(e.event.text) || !!e.event.plan))?.id;
   const latestUser = events.findLast((e) => e.event.type === "user")?.id;
   return planId !== undefined && latestUser === planId ? planId : undefined;
 }
@@ -126,6 +126,8 @@ export interface PlanView {
   /** "live": a checklist of an ordinary instruction, outside the /plan lifecycle. */
   state: PlanState | "live";
   reason?: string;
+  /** Version of the proposal (propose_plan revisions); absent on older plans (read as 1). */
+  version?: number;
 }
 
 /**
@@ -138,25 +140,30 @@ export function currentPlanView(events: readonly TimelineEvent[]): PlanView | nu
   let state: PlanView["state"] = "live";
   let reason: string | undefined;
   let planId: number | undefined;
+  let version: number | undefined;
+  const withVersion = (v: PlanView): PlanView => (version !== undefined ? { ...v, version } : v);
   for (const e of events) {
     const ev = e.event;
     if (ev.type === "plan_update" && e.role === "orch") {
       // An update for another plan id replaces the shown plan instead of merging into it.
-      if (ev.planId !== undefined && planId !== undefined && ev.planId !== planId) { state = "live"; reason = undefined; }
+      if (ev.planId !== undefined && planId !== undefined && ev.planId !== planId) { state = "live"; reason = undefined; version = undefined; }
       if (ev.planId !== undefined) planId = ev.planId;
-      view = ev.steps.length ? { planId, steps: ev.steps, explanation: ev.explanation, state, reason } : null;
+      view = ev.steps.length ? withVersion({ planId, steps: ev.steps, explanation: ev.explanation, state, reason }) : null;
     } else if (ev.type === "plan_state") {
       if (ev.planId !== undefined && planId !== undefined && ev.planId !== planId && ev.state !== "running") continue;
+      if (ev.planId !== undefined && ev.planId !== planId) version = undefined;
       state = ev.state;
       reason = ev.reason;
+      if (ev.version !== undefined) version = ev.version;
       if (ev.planId !== undefined) planId = ev.planId;
-      if (view) view = { ...view, planId, state, reason };
+      if (view) view = withVersion({ ...view, planId, state, reason });
     } else if (ev.type === "user" && !ev.queued && ev.text !== "계획 실행" && !/^\/plan-(?:run|cancel)\b/.test(ev.text)) {
-      if (isPlanCommand(ev.text) || state !== "running") {
+      if (isPlanCommand(ev.text) || ev.plan || state !== "running") {
         view = null;
         state = "live";
         reason = undefined;
         planId = undefined;
+        version = undefined;
       }
     }
   }

@@ -204,6 +204,13 @@ test("chats: create, rename/archive, model and approval checks (D3), commands an
   assert.ok(s.remote.status().audit!.some(a => a.action === "chat.approvalMode" && a.detail === "orchestrator → orchestrator-all"));
   assert.equal(await s.status(s.post("/api/chats/1/command", { name: "plan", arg: "계획" })), 200);
   assert.equal(await s.status(s.post("/api/chats/1/command", { name: "rm", arg: "" })), 400);
+  const planMode = await s.post("/api/chats/1/plan-mode", { on: true });
+  assert.equal(planMode.status, 200);
+  assert.deepEqual(await planMode.json(), {});
+  assert.deepEqual(s.calls.find(([c]) => c === "chats:setPlanMode")![1], [1, true]);
+  assert.equal(await s.status(s.post("/api/chats/1/plan-mode", { on: "yes" })), 400);
+  assert.equal(await s.status(s.post("/api/chats/1/plan-mode", { on: false, extra: 1 })), 400);
+  assert.equal(await s.status(s.post("/api/chats/999/plan-mode", { on: false })), 404);
   for (const a of ["viewed", "pause", "resume", "dismiss-interrupted"]) assert.equal(await s.status(s.post(`/api/chats/1/${a}`)), 200, a);
   assert.equal(await s.status(s.post("/api/chats/999/pause")), 404);
   assert.deepEqual(await (await s.get("/api/search?q=x")).json(), { chatIds: [1] });

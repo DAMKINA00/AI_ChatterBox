@@ -110,6 +110,7 @@ function registerHandlers(rpc: CoreRpc) {
   ipcMain.handle("chats:pause", (_e, id: number) => orchestrator.pause(id));
   ipcMain.handle("chats:resume", (_e, id: number) => { notDeleting(id); return orchestrator.resume(id); });
   ipcMain.handle("chats:command", (_e, id: number, name: string, arg: string) => { notDeleting(id); return orchestrator.command(id, name, arg); });
+  ipcMain.handle("chats:setPlanMode", (_e, id: number, on: boolean) => { notDeleting(id); return orchestrator.setPlanMode(id, on === true); });
   ipcMain.handle("chats:dismissInterrupted", (_e, id: number) => orchestrator.dismissInterrupted(id));
   ipcMain.handle("chats:approve", (_e, id: number, approvalId: string, decision: ApprovalDecision) =>
     chats.answerApproval(id, approvalId, decision),

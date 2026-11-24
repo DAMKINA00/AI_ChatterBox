@@ -168,6 +168,8 @@ export interface ConsultAssignment {
   accountId?: string;
   attach: string[];
   discussion?: { topic: string; peers: string[] };
+  /** Approved plan task this assignment carries out (planId:taskId), for recovery. */
+  planTask?: { planId: number; taskId: string };
 }
 
 export type ChatPatch = Partial<
@@ -195,6 +197,7 @@ export type ChatPatch = Partial<
     | "status"
     | "unread"
     | "archived"
+    | "planMode"
   > & { touch: boolean }
 >;
 
@@ -261,6 +264,7 @@ const toChat = (r: Row): Chat => ({
   draft: !!r.draft,
   sidebarOrder: r.sidebar_order,
   ...(r.fork_json ? { fork: JSON.parse(r.fork_json) } : {}),
+  ...(r.plan_mode ? { planMode: true } : {}),
 });
 const toConsult = (r: Row): Consult => ({
   requestedEffort: r.requested_effort ?? undefined,
@@ -485,6 +489,7 @@ export class Store {
     add("chats", "fork_json", "fork_json TEXT");
     add("chats", "draft", "draft INTEGER NOT NULL DEFAULT 0");
     add("chats", "sidebar_order", "sidebar_order INTEGER NOT NULL DEFAULT 0");
+    add("chats", "plan_mode", "plan_mode INTEGER NOT NULL DEFAULT 0");
     add("approvals", "decided_by", "decided_by TEXT NOT NULL DEFAULT 'user'");
     add("approvals", "reason", "reason TEXT");
     add("attachments", "uuid", "uuid TEXT"); // remote uploads only; NULL for desktop attachments
@@ -637,7 +642,7 @@ export class Store {
     this.db
       .prepare(
         `UPDATE chats SET title = ?, orch_claude_session_id = ?, orch_codex_thread_id = ?, claude_session_id = ?, codex_thread_id = ?,
-         claude_model_override = ?, codex_model_override = ?, gemini_model_override = ?, grok_model_override = ?, deepseek_model_override = ?, orchestrator_effort_override = ?, claude_effort_override = ?, codex_effort_override = ?, gemini_effort_override = ?, grok_effort_override = ?, deepseek_effort_override = ?, approval_mode_override = ?, orchestrator_model_override = ?, goal_json = ?, status = ?, unread = ?, archived = ?, last_active_at = ? WHERE id = ?`,
+         claude_model_override = ?, codex_model_override = ?, gemini_model_override = ?, grok_model_override = ?, deepseek_model_override = ?, orchestrator_effort_override = ?, claude_effort_override = ?, codex_effort_override = ?, gemini_effort_override = ?, grok_effort_override = ?, deepseek_effort_override = ?, approval_mode_override = ?, orchestrator_model_override = ?, goal_json = ?, status = ?, unread = ?, archived = ?, plan_mode = ?, last_active_at = ? WHERE id = ?`,
       )
       .run(
         pick("title"),
@@ -665,6 +670,7 @@ export class Store {
         patch.status ?? c.status,
         (patch.unread ?? c.unread) ? 1 : 0,
         (patch.archived ?? c.archived) ? 1 : 0,
+        (patch.planMode ?? c.planMode) ? 1 : 0,
         patch.touch ? Date.now() : c.lastActiveAt,
         id,
       );
@@ -778,6 +784,11 @@ export class Store {
   consultAssignment(id: number): ConsultAssignment | undefined {
     const r = this.db.prepare("SELECT assignment_json FROM consults WHERE id = ?").get(id) as Row | undefined;
     return r?.assignment_json ? JSON.parse(r.assignment_json) : undefined;
+  }
+  /** A running assignment's corrected write scope (amend_scope); null once it has ended. */
+  setConsultScope(id: number, scope: string[]): Consult | null {
+    const { changes } = this.db.prepare("UPDATE consults SET scope_json = ? WHERE id = ? AND status = 'running'").run(JSON.stringify(scope), id);
+    return changes ? this.consult(id)! : null;
   }
   /** Accepted only while the assignment runs; null once it has ended. */
   setConsultReview(id: number, review: ReviewResult): Consult | null {

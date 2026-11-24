@@ -116,10 +116,17 @@ const route = (f: { engine: any; chat: Chat }) => f.engine.call(f.chat.id, "orch
 const states = (store: Store, chatId: number) => store.events(chatId).flatMap((e) => e.event.type === "plan_state" ? [e.event] : []);
 const notices = (store: Store, chatId: number) => store.events(chatId).flatMap((e) => e.event.type === "notice" ? [e.event.text] : []);
 
-/** /plan with a checklist, then the proposal turn ends: a plan waiting for approval. */
-async function propose(f: F, steps: unknown[]) {
+/** The steps as propose_plan tasks: a step's group follows its dependency depth. */
+function tasksOf(steps: ReturnType<typeof step>[]) {
+  const depth = (s: ReturnType<typeof step>): number => 1 + Math.max(0, ...(s.dependsOn ?? []).map((d) => depth(steps.find((x) => x.id === d)!)));
+  return steps.map((s) => ({ id: s.id, title: s.title, kind: "opinion", agentKind: "claude", scope: [], group: depth(s), done: "완료", ...(s.dependsOn ? { dependsOn: s.dependsOn } : {}) }));
+}
+
+/** /plan with a submitted plan (propose_plan), then the proposal turn ends: a plan waiting for approval. */
+async function propose(f: F, steps: ReturnType<typeof step>[]) {
   await f.engine.command(f.chat.id, "plan", "계획 대상");
-  await checklist(f, steps);
+  const r = await f.engine.call(f.chat.id, "orch", "propose_plan", { summary: "계획", tasks: tasksOf(steps) });
+  assert.ok(!r.isError, r.content[0].text);
   f.master().finish();
   assert.equal(states(f.store, f.chat.id).at(-1)?.state, "proposed");
 }
@@ -127,13 +134,14 @@ async function propose(f: F, steps: unknown[]) {
 test("a run ending with open steps gets one repair, then ends incomplete and not done; no further turn", async () => {
   const f = fixture();
   try {
-    await propose(f, [step("a", "completed"), step("b", "pending")]);
+    await propose(f, [step("a", "pending"), step("b", "pending")]);
     const master = f.master();
     await f.engine.command(f.chat.id, "plan-run", "");
     const planId = states(f.store, f.chat.id).at(-1)!.planId;
     assert.ok(planId, "running carries the plan id");
-    assert.match(master.sendCalls.at(-1)!.text, /승인된 계획 단계:[^]*단계 b \(pending\)/, "the run is tied to the approved steps");
+    assert.match(master.sendCalls.at(-1)!.text, /승인된 계획:[^]*- b 단계 b/, "the run is tied to the approved steps");
     await route(f);
+    await checklist(f, [step("a", "completed"), step("b", "pending")]);
     const sends = master.sendCalls.length;
     master.finish();
     await waitFor(() => master.sendCalls.length === sends + 1);
@@ -298,7 +306,7 @@ test("/plan-cancel: refused while planning or running; an idle proposal is cance
   try {
     f.store.updateChat(f.chat.id, { goal: { objective: "목표", status: "active", progress: "", turns: 0, updatedAt: Date.now() } satisfies ChatGoal });
     await f.engine.command(f.chat.id, "plan", "계획 대상");
-    await checklist(f, [step("a", "pending")]);
+    await f.engine.call(f.chat.id, "orch", "propose_plan", { summary: "s", tasks: tasksOf([step("a", "pending")]) });
     await assert.rejects(f.engine.command(f.chat.id, "plan-cancel", ""), /취소할 수 없습니다[^]*\/stop/);
     assert.equal(f.engine.planning.has(f.chat.id), true, "the planning restriction stays while the proposal turn runs");
     assert.equal(states(f.store, f.chat.id).length, 0);

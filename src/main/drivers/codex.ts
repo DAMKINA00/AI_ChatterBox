@@ -526,6 +526,7 @@ export class CodexDriver implements AgentDriver {
             key: `cmd:${cmd.trim().split(/\s+/)[0] ?? ""}`,
             command: cmd,
             paths: p.cwd ? [p.cwd] : [],
+            ...(p.itemId ? { toolId: p.itemId } : {}),
           })
           .then(({ verdict: v, reason, cancelled }) => {
             const decision: CommandExecutionApprovalDecision = v === "deny" ? "decline" : "accept";

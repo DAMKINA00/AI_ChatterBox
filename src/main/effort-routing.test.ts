@@ -37,7 +37,7 @@ test("master defaults to auto; parallel assignments keep separate effort and res
     const response = await f.engine.call(f.chat.id, "orch", "ask_parallel", { tasks: [
       { to: claude.nickname, kind: "opinion", message: "analyze", reason: "bounded analysis: medium", effort: "medium" },
       { to: gemini.nickname, kind: "writing", message: "write dialogue", reason: "complex character voice: xhigh", effort: "xhigh" },
-    ] });
+    ], reportsOnly: false }); // the default (each result, no synthesis) changed; this checks the synthesis effort
     assert.ok(!response.isError);
     assert.deepEqual(f.sent.sort((a, b) => a.role.localeCompare(b.role)), [{ role: claude.key, effort: "medium" }, { role: claude.key, effort: "medium" }, { role: gemini.key, effort: "xhigh" }]);
     const records = f.store.listConsults(f.chat.id).sort((a, b) => a.toRole.localeCompare(b.toRole));

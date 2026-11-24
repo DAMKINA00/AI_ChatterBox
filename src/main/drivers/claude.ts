@@ -10,6 +10,7 @@ import { isReadCommand } from "../execution-policy";
 import { closeConfirmed, readLines, shutdown } from "../proc";
 import { fileNote, IMAGE_MIMES, MAX_IMAGE_BYTES, type AgentDriver, type AgentInput, type DriverHost, type DriverOptions } from "./types";
 import { ClaudeSessionArchive } from "./claude-archive";
+import { bridgeConnected, bridgeDenyNotice, findBridgeDenyRules, missingBridgeTools } from "../claude-settings";
 
 const AUTH_HINT =
   "Claude Code에 로그인되어 있지 않습니다. 터미널에서 claude 를 실행하고 /login 으로 로그인한 뒤 다시 시도하세요.";
@@ -43,7 +44,14 @@ export interface ClaudeEnv {
   /** Suppress user hooks for tool-free, one-shot helpers. Managed policy still applies. */
   disableHooks?: boolean;
   extraArgs?: string[];
+  /** Bridge tools this session must see; a session start without them is reported (deny rules). */
+  expectedTools?: () => string[];
+  /** Scope of the one-time missing-tool warning (the chat). */
+  warnKey?: string;
 }
+
+/** Missing bridge tool warnings already shown, per chat, rule files and tools. */
+const warnedBridge = new Set<string>();
 
 export class ClaudeDriver implements AgentDriver {
   private startedAt = 0;
@@ -71,6 +79,25 @@ export class ClaudeDriver implements AgentDriver {
 
   get running() {
     return this._running;
+  }
+
+  /**
+   * Warns when a session whose bridge server connected still lacks some bridge tools (Claude deny rules),
+   * once per chat (env.warnKey) and finding: every worker of the chat starts its own session.
+   */
+  private checkBridgeTools(sessionTools: unknown, mcpServers: unknown) {
+    const expected = this.env.expectedTools?.() ?? [];
+    if (!expected.length || !bridgeConnected(mcpServers)) return;
+    const missing = missingBridgeTools(sessionTools, expected);
+    if (!missing.length) return;
+    let rules: ReturnType<typeof findBridgeDenyRules> = [];
+    try { rules = findBridgeDenyRules(this.opts.cwd); } catch { /* the notice still names the missing tools */ }
+    const key = `${this.env.warnKey ?? this.opts.cwd}|${rules.map((r) => r.file).join(",")}|${missing.join(",")}`;
+    if (warnedBridge.has(key)) return;
+    const notice = bridgeDenyNotice(missing, rules);
+    if (!notice) return;
+    warnedBridge.add(key);
+    this.host.emit({ type: "notice", text: notice });
   }
 
   private start(): ChildProcess {
@@ -182,6 +209,7 @@ export class ClaudeDriver implements AgentDriver {
         if (ev.subtype === "init") {
           const v = String(ev.claude_code_version ?? "").match(/^(\d+)\.(\d+)\.(\d+)/);
           this.canSteer = !!v && (Number(v[1]) > 2 || (Number(v[1]) === 2 && (Number(v[2]) > 1 || Number(v[2]) === 1 && Number(v[3]) >= 286)));
+          this.checkBridgeTools(ev.tools, ev.mcp_servers);
         }
         if (ev.subtype === "init" && ev.session_id && ev.session_id !== this.nativeId) {
           this.nativeId = ev.session_id;
@@ -286,6 +314,7 @@ export class ClaudeDriver implements AgentDriver {
       diffs: claudeToolDiffs(req.tool_name, input, this.opts.cwd),
       readOnly: READ_ONLY_TOOLS.has(req.tool_name),
       writes: WRITE_TOOLS.has(req.tool_name),
+      ...(req.tool_use_id ? { toolId: req.tool_use_id } : {}),
     });
     return verdict === "deny"
       ? { behavior: "deny", message: reason ?? "AI_ChatterBox에서 거부되었습니다." }

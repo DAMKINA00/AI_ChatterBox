@@ -51,7 +51,7 @@ export function planHistory(events: readonly TimelineEvent[]): PlanHistoryEntry[
         ended.set(key(), { key: key(), planId, state: ev.state, reason: ev.reason, steps: steps ?? [], explanation, eventId: e.id, at: e.at });
       } else ended.delete(key());
     } else if (ev.type === "user" && !ev.queued && ev.text !== "계획 실행" && !/^\/plan-(?:run|cancel)\b/.test(ev.text)) {
-      if (isPlanCommand(ev.text) || state !== "running") {
+      if (isPlanCommand(ev.text) || ev.plan || state !== "running") {
         steps = null;
         explanation = undefined;
         state = "live";

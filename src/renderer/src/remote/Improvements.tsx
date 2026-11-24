@@ -4,9 +4,9 @@ import { useEffect, useMemo, useState } from "react";
 import { Ban, Circle, CircleCheck, CircleDot, LoaderCircle, Split } from "lucide-react";
 import type { RemoteChatResponse } from "../../../shared/remote-web";
 import type { RunStats } from "../../../shared/run-stats";
-import type { Chat, ChatAgent, ChatForkOptions, Consult, ConsultStatus, ReviewResult, RunStatsRows, TimelineEvent } from "../../../shared/types";
+import type { Chat, ChatAgent, ChatForkOptions, Consult, ConsultStatus, PlanStep, ReviewResult, RunStatsRows, TimelineEvent } from "../../../shared/types";
 import { FORK_NOT_COPIED, FORK_NOTE, FORK_RANGE_LABEL, forkOriginText, forkPreview } from "../lib/fork";
-import { consultCardIds, openPlanSteps, PLAN_STATE_LABEL, planBlockerName, planConsultLinks, planCounts, planCountsText, planEndedEarly, planStepName, planStepViews } from "../lib/plan-view";
+import { consultCardIds, openPlanSteps, PLAN_STATE_LABEL, planBlockerName, planConsultLinks, planCounts, planCountsText, planEndedEarly, planGroups, planReviewTarget, planStepName, planStepTags, planStepViews } from "../lib/plan-view";
 import type { PlanHistoryEntry } from "../lib/plan-history";
 import { NO_STRUCTURED_REVIEW, reviewCountsText, reviewDigest, reviewRunNote, reviewsFromEvents, reviewTotalsText, summarizeReviews, VERDICT_LABEL } from "../lib/review-summary";
 import { formatDuration, PENDING_TOOL_LABEL, RUN_STATS_NOTE, runStatsFlags, runStatsRows, type RunStatsRow } from "../lib/run-stats-view";
@@ -198,6 +198,7 @@ export function PlanHistoryList({ history }: { history: readonly PlanHistoryEntr
 
 export function PlanSteps({ plan, consults, items }: { plan: NonNullable<ReturnType<typeof planOf>>; consults: Consult[]; items: Item[] }) {
   const views = useMemo(() => planStepViews(plan.steps), [plan.steps]);
+  const groups = useMemo(() => planGroups(views), [views]);
   const cards = useMemo(() => consultCardIds(items), [items]);
   const open = planEndedEarly(plan.state) ? openPlanSteps(plan.steps) : [];
   return (
@@ -207,17 +208,24 @@ export function PlanSteps({ plan, consults, items }: { plan: NonNullable<ReturnT
         <span className="font-medium text-warning">진행되지 않은 단계 {open.length}개:</span> {open.map((s) => normalizePlanStepTitle(planStepName(s))).join(", ")}
       </div>
     )}
-    <ol className="grid gap-1" aria-label="체크리스트">
-      {views.map(({ step: s, key, blockers, ready }) => (
+    {(groups ?? [{ group: 0, steps: views }]).map(({ group, steps: list, undetermined }) => (
+    <div key={undetermined ? "undetermined" : group} className={cn(groups && "rounded border border-dashed px-2 py-1", undetermined && "border-warning/50")} data-plan-group={groups ? (undetermined ? "undetermined" : group) : undefined}>
+    {groups && <div className="mb-0.5 text-[11.5px] font-medium text-muted-foreground">{undetermined
+      ? <span className="text-warning">순서 미확정 · 선행 단계가 없거나 서로 순환합니다</span>
+      : <><span className="text-orch">{group}단계</span> · {list.length > 1 ? `동시 진행 ${list.length}개` : "단독"}</>}</div>}
+    <ol className="grid gap-1" aria-label={groups ? (undetermined ? "순서 미확정 체크리스트" : `${group}단계 체크리스트`) : "체크리스트"}>
+      {list.map(({ step: s, key, blockers, ready, groupWait }) => (
         <li key={key} className="flex items-start gap-1.5">
           {s.status === "completed" ? <CircleCheck className="mt-0.5 size-3.5 shrink-0 text-success" /> : s.status === "cancelled" ? <Ban className="mt-0.5 size-3.5 shrink-0 text-warning" aria-label="취소됨" /> : s.status === "inProgress" ? <CircleDot className="mt-0.5 size-3.5 shrink-0 text-primary" /> : <Circle className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />}
           <div className="min-w-0">
             <span className={cn((s.status === "completed" || s.status === "cancelled") && "text-muted-foreground line-through")}>{s.owner && <span className="mr-1 font-medium text-orch">[{s.owner}]</span>}{normalizePlanStepTitle(s.title)}</span>
             {s.status === "cancelled" && <span className="ml-1 rounded border border-warning/50 px-1 text-[11px] text-warning">취소됨</span>}
+            <PlanStepDetails step={s} steps={plan.steps} />
             {s.status === "cancelled" && <div className="text-[11.5px] text-muted-foreground">취소 사유: {s.cancelReason?.trim() || "사유가 기록되지 않았습니다."}</div>}
-            {(blockers.length > 0 || ready || !!s.consultIds?.length) && (
+            {(blockers.length > 0 || ready || groupWait || !!s.consultIds?.length) && (
               <div className="flex flex-wrap gap-x-2 text-[11.5px]">
                 {blockers.length > 0 && <span className="text-warning">대기 · 선행 미완료: {blockers.map(planBlockerName).join(", ")}</span>}
+                {groupWait && <span className="text-muted-foreground">대기 · 앞 단계 묶음이 끝나면 시작</span>}
                 {ready && <span className="text-success">시작 가능</span>}
                 {planConsultLinks(s, consults).map(({ consultId, consult }) => (
                   <button key={consultId} type="button" disabled={!cards.has(consultId)} aria-label={`협의 ${consult?.seq ?? consultId} 카드로 이동`} onClick={() => revealConsultCard(consultId)}
@@ -231,7 +239,27 @@ export function PlanSteps({ plan, consults, items }: { plan: NonNullable<ReturnT
         </li>
       ))}
     </ol>
+    </div>
+    ))}
     </>
+  );
+}
+
+/** Kind/family badges, scope and done criteria a structured plan step recorded. */
+function PlanStepDetails({ step, steps }: { step: PlanStep; steps: readonly PlanStep[] }) {
+  const tags = planStepTags(step);
+  const reviewOf = planReviewTarget(step, steps);
+  if (!tags.kind && !tags.agentKind && !step.scope?.length && !step.done?.trim() && !reviewOf) return null;
+  return (
+    <div className="grid gap-0.5 text-[11.5px] text-muted-foreground">
+      {(tags.kind || tags.agentKind) && <div className="flex flex-wrap gap-1">
+        {tags.kind && <span className="rounded border px-1">{tags.kind}</span>}
+        {tags.agentKind && <span className="rounded border px-1">{tags.agentKind}</span>}
+      </div>}
+      {!!step.scope?.length && <div className="break-all">범위: <span className="font-mono">{step.scope.join(", ")}</span></div>}
+      {!!step.done?.trim() && <div>완료 기준: {step.done.trim()}</div>}
+      {reviewOf && <div>리뷰 대상: {reviewOf}</div>}
+    </div>
   );
 }
 
