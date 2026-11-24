@@ -143,7 +143,7 @@ try {
   check("[UI] back to idle, the buttons return", (await page.getByTestId("plan-run").count()) === 1);
   check("[UI] desktop renderer completed without errors", errors.length === 0, errors.join("\n"));
 
-  // ---------- remote web (seeded data only; the live-only steps above are desktop checks)
+  // The default remote page shares the desktop renderer. Exercise the separate compact layout here.
   const PORT = 47923;
   const PASSWORD = "plan-lifecycle-e2e-pass-1";
   const remoteBase = `http://127.0.0.1:${PORT}`;
@@ -156,30 +156,35 @@ try {
   const web = await (await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })).newPage();
   const remoteErrors = [];
   web.on("pageerror", (e) => remoteErrors.push(e.message));
-  await web.goto(remoteBase);
+  await web.goto(`${remoteBase}/?classic`);
   await web.fill("#remote-password", PASSWORD);
   await web.click('button[type="submit"]');
   await web.getByRole("button", { name: /제안 대기/ }).first().waitFor({ timeout: 15_000 });
-  const openRemote = async (id, text) => { await web.goto(`${remoteBase}/#chat=${id}`); await web.reload(); await web.getByText(text).first().waitFor({ timeout: 15_000 }); };
+  const openRemote = async (title, text) => {
+    const back = web.getByRole("button", { name: "채팅 목록" });
+    if (await back.isVisible()) await back.click();
+    await web.getByRole("button", { name: title }).click();
+    await web.getByText(text, { exact: true }).first().waitFor({ timeout: 15_000 });
+  };
   const team = web.locator("details").filter({ has: web.locator("summary", { hasText: /작업자/ }) }).first();
 
-  await openRemote(1, "일반 지시 처리 완료");
+  await openRemote(/취소 후 새 지시/, "다른 일반 지시");
   const remoteHistory = web.locator('details[aria-label="이전 계획"]');
   // No plan is left to open a panel for: check the absence directly, without touching the team panel.
   check("[UI remote] the cancelled plan is dropped after a new instruction: no '이전 계획' section", (await remoteHistory.count()) === 0);
   await web.screenshot({ path: join(base, "remote-no-history.png") });
 
-  await openRemote(2, "/plan 미완료될 계획");
+  await openRemote(/미완료 계획/, "/plan 미완료될 계획");
   const summary = await team.locator("summary").first().innerText();
   check("[UI remote] summary: incomplete state, counts and reason", summary.includes("계획 미완료 · 완료 1 · 취소 1 · 남음 2") && summary.includes(`미완료 사유: ${INCOMPLETE_REASON}`), summary);
-  if (!(await team.getAttribute("open").catch(() => null))) await team.locator("summary").first().click();
+  if (!(await team.evaluate(element => element.open))) await team.locator("summary").first().click();
   const teamText = await team.innerText();
   check("[UI remote] open steps, cancelled step and its reason, unfinished prerequisite", /진행되지 않은 단계 2개/.test(teamText) && teamText.includes("취소 사유: 범위에서 제외") && teamText.includes("화면 연결(취소됨)"), teamText);
   check("[UI remote] an ended plan offers no run/cancel", (await web.getByRole("button", { name: /승인하고 실행|계획 취소/ }).count()) === 0);
   await web.screenshot({ path: join(base, "remote-incomplete.png") });
 
-  await openRemote(3, "/plan 제안 계획");
-  check("[UI remote] an idle proposal offers run and cancel", (await web.getByRole("button", { name: "승인하고 실행" }).count()) === 1 && (await web.getByRole("button", { name: "계획 취소" }).count()) === 1);
+  await openRemote(/제안 대기/, "/plan 제안 계획");
+  check("[UI remote] an idle proposal offers run and cancel", (await web.getByRole("button", { name: /승인하고 실행/ }).count()) === 1 && (await web.getByRole("button", { name: "계획 취소" }).count()) === 1);
   check("[UI remote] no renderer errors", remoteErrors.length === 0, remoteErrors.join("\n"));
   console.log(`Screenshots: ${base}`);
 } catch (error) {
