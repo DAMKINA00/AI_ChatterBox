@@ -92,7 +92,8 @@ export function PlanPanel({ chat, plan, onRevise, askId, version }: { chat: Chat
         </div>
       )}
       {expanded && (
-        <div className="space-y-2 border-t px-3.5 py-2.5">
+        // A long plan scrolls inside the card instead of being cut off below the fold.
+        <div className="max-h-[min(60vh,560px)] space-y-2 overflow-y-auto overscroll-contain border-t px-3.5 py-2.5" data-testid="plan-steps-scroll">
           {plan.explanation && <div className="text-[12.5px] text-muted-foreground">{plan.explanation}</div>}
           {ended && open.length > 0 && (
             <div className="rounded-md border border-warning/40 bg-warning/5 px-2.5 py-1.5 text-[12px]" data-testid="plan-open-steps">

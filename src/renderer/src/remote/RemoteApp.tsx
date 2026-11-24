@@ -18,7 +18,7 @@ import { ApiError, AuthError, logout as logoutRequest, request, setCsrf, url } f
 import { Login } from "./Login";
 import { ChatSettings } from "./ChatSettings";
 import { Composer } from "./Composer";
-import { chatGroups, formatBytes, INLINE_IMAGE, nextTheme, THEME_LABEL, withoutDeleted, type ProjectRef } from "./logic";
+import { chatGroups, formatBytes, INLINE_IMAGE, nextTheme, remoteAskOpen, THEME_LABEL, withoutDeleted, type ProjectRef } from "./logic";
 import { ProjectsSheet, useProjects } from "./Projects";
 import { applyChatUpdate, applyMessage, detailStateEvents, mergeChats, mergeSnapshot, prependOlder, type Detail, type StreamMessage } from "./stream";
 import type { EventPage } from "../../../shared/event-page";
@@ -385,7 +385,8 @@ function TeamPanel({ chat, agents, consults, events, items, plan, pending, versi
           <MessageCircleQuestion className="size-3.5" /> 마스터 질문 답변 대기
         </span>}
       </summary>
-      <div className="mt-2 grid gap-2">
+      {/* A long plan scrolls inside the folded panel instead of pushing the conversation away. */}
+      <div className="mt-2 grid max-h-[min(55vh,520px)] gap-2 overflow-y-auto overscroll-contain" data-plan-scroll>
         {active.length > 0 && <ul className="grid gap-1">
           {active.map(a => {
             const work = running.find(c => c.toRole === a.key);
@@ -574,7 +575,7 @@ function Ask({ item, chat, live, onError }: { item: Extract<Item, { kind: "ask" 
     catch (e) { if (e instanceof AuthError) onError(e); else setError(errorText(e)); }
     finally { setPending(false); }
   };
-  const open = item.answer === undefined && live;
+  const open = remoteAskOpen(item, live);
   return (
     <div data-ask-id={item.id} tabIndex={-1}>
     <Card className={cn(open && "border-warning/60")}>

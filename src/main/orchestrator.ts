@@ -591,7 +591,14 @@ export class Orchestrator {
   /** Implement scopes currently held, per chat. */
   private scopeLocks = new Map<number, ScopeLock[]>();
   private scopeWaiters = new Map<number, (() => void)[]>();
-  private asks = new Map<string, { chatId: number; resolve: (a: string) => void }>();
+  private asks = new Map<string, { chatId: number; resolve: (a: string) => void; keepStatus?: boolean }>();
+  /** The app's [진행/수정/취소] question for a submitted plan, and a choice made while the turn still ran. */
+  private planConfirm = new Map<number, string>();
+  private planDecision = new Map<number, "run" | "cancel">();
+  /** Chats whose messages, sent after the plan was submitted, revise that plan when the turn ends. */
+  private reviseAfterTurn = new Set<number>();
+  /** Those messages themselves, kept out of inst.queued until the submitting turn ends. */
+  private revisionHold = new Map<number, AgentInput[]>();
   private stopped = new Set<number>();
   private epochs = new Map<number, number>();
   private nextEpoch(chatId: number) {
@@ -1486,8 +1493,13 @@ export class Orchestrator {
     if (problems.length) return textResult(`계획을 받지 않았습니다. 고쳐서 다시 제출하세요.\n${problems.join("\n")}`, true);
     this.chats.emit(chatId, "orch", "orch", { type: "plan_update", steps, explanation: summary, planId: inst.id, instructionId: inst.id });
     this.planSubmitted.add(chatId);
+    // A finished plan ends plan mode, and the app itself asks the user how to go on.
+    if (this.chats.store.chat(chatId)?.planMode) this.chats.updateChat(chatId, { planMode: false });
+    const version = this.planVersions.get(chatId) ?? 1;
+    // A revision request is already waiting for this turn's end: no new approval card meanwhile.
+    if (!this.revisionHold.get(chatId)?.length) this.askPlanConfirm(chatId, version, steps.length);
     const groups = [...new Set(steps.map(s => s.group))].length;
-    return textResult(`계획 v${this.planVersions.get(chatId) ?? 1}(작업 ${steps.length}개 · group ${groups}개)을 제출했습니다. 사용자에게 두세 문장으로 요약하고 턴을 끝내세요. 승인되면 실행 단계에서 group별로 맡깁니다.` +
+    return textResult(`계획 v${version}(작업 ${steps.length}개 · group ${groups}개)을 제출했습니다. 앱이 사용자에게 [진행/수정/취소]를 물었습니다. 사용자에게 계획을 두세 문장으로 요약하고 턴을 끝내세요. 진행을 고르면 앱이 바로 group별 실행을 시작합니다.` +
       (warnings.length ? `\n[범위 경고]\n${warnings.join("\n")}\n새로 만들 경로가 아니면 scope를 고쳐 propose_plan을 다시 제출하세요.` : ""));
   }
 
@@ -1504,7 +1516,7 @@ export class Orchestrator {
     // Waiting cannot help while the user owes an approval or an answer: say so at once.
     const userWait = () => {
       const approvals = this.chats.approvals.pendingCount(chatId);
-      const questions = [...this.asks.values()].filter(a => a.chatId === chatId).length;
+      const questions = [...this.asks.values()].filter(a => a.chatId === chatId && !a.keepStatus).length;
       return approvals || questions ? `[사용자 응답 대기] ${[approvals && `승인 요청 ${approvals}건`, questions && `질문 ${questions}건`].filter(Boolean).join(", ")}이(가) 사용자의 답을 기다립니다. 결과를 계속 기다리지 말고 사용자에게 필요한 응답을 알리세요.` : "";
     };
     const report = (head = "") => {
@@ -2153,8 +2165,21 @@ export class Orchestrator {
       this.saveInstruction(chatId); // The plan and review restrictions end with the turn.
       // Extra instructions that arrived after the master's last ask become the next turn.
       const inst = this.instructions.get(chatId);
-      if (inst?.queued.length && !event.interrupted && !this.stopped.has(chatId)) {
-        const q = inst.queued.splice(0);
+      // Revision requests held since the plan was submitted run only now, as a revision turn (never
+      // consumed by a tool response of the turn that submitted it).
+      let held = this.revisionHold.get(chatId) ?? [];
+      this.revisionHold.delete(chatId);
+      // Only a turn that recorded its proposal hands the held requests on. After an error (or a stop) there
+      // is no proposal to revise, and they must never start an ordinary, writing turn: they stay in the
+      // conversation and the user sends them again.
+      if (held.length && (!event.ok || event.interrupted || this.stopped.has(chatId))) {
+        this.reviseAfterTurn.delete(chatId);
+        if (!event.interrupted && !this.stopped.has(chatId))
+          this.chats.emit(chatId, "orch", null, { type: "notice", text: "계획 턴이 오류로 끝나 보관한 계획 수정 요청을 자동으로 보내지 않았습니다. 내용을 확인한 뒤 다시 보내 주세요." });
+        held = [];
+      }
+      if (inst && (held.length || inst.queued.length) && !event.interrupted && !this.stopped.has(chatId)) {
+        const q = [...held, ...inst.queued.splice(0)];
         setTimeout(() => {
           const chat = this.chats.store.chat(chatId);
           if (!chat || this.instructions.get(chatId) !== inst || this.stopped.has(chatId) || ["pausing", "paused"].includes(chat.status)) return;
@@ -2366,18 +2391,25 @@ export class Orchestrator {
     const prefix = this.handover(chat);
     if (prefix) input = { ...input, text: prefix + input.text };
     this.instructions.set(chat.id, this.newInstruction(chat.id, input.text));
+    let heldRevision: PlanRevision | undefined;
     // Plan mode (the chat toggle) plans instead of running; so does any message to a proposal still
     // waiting for approval (it is a revision request, whatever the toggle says; see chats.send's user.plan).
     if (!continuePlan) {
+      // A new message answers the plan question by itself (a revision or new work): withdraw the card.
+      this.clearPlanConfirm(chat.id);
       const id = this.instructions.get(chat.id)!.id;
-      if (this.chats.store.chat(chat.id)?.planMode || waitingProposal(this.chats.store.events(chat.id).filter(e => e.id < id))) this.planning.add(chat.id);
+      // Messages held during the submitting turn (holdAsRevision) revise the proposal recorded at its end.
+      const fromHold = this.reviseAfterTurn.delete(chat.id);
+      heldRevision = fromHold ? waitingProposal(this.chats.store.events(chat.id)) : undefined;
+      // A held revision request is always a read-only planning turn, even if no proposal is found.
+      if (fromHold || this.chats.store.chat(chat.id)?.planMode || waitingProposal(this.chats.store.events(chat.id).filter(e => e.id < id))) this.planning.add(chat.id);
     }
     const planningTurn = !continuePlan && this.planning.has(chat.id);
     if (!continuePlan) {
       this.planRunning.delete(chat.id);
       const id = this.instructions.get(chat.id)!.id;
       const before = this.chats.store.events(chat.id).filter(e => e.id < id);
-      const revision = planningTurn ? waitingProposal(before) : undefined;
+      const revision = planningTurn ? heldRevision ?? waitingProposal(before) : undefined;
       const previous = currentPlanView(before);
       if (!revision && previous?.steps.some(isOpenStep) && ["live", "running", "incomplete", "failed"].includes(previous.state)) {
         input = { ...input, text: input.text + `\n\n[이전 작업 미완료]\n${openStepsText(previous.steps)}\n이번 지시가 같은 작업의 상태 확인·재개·보완이라면 이 남은 단계들을 현재 checklist에 등록하고 기존 결과를 확인해 이어서 수행하세요. 완료된 작업을 다시 배정하지 마세요. 별개 새 작업이면 이전 단계를 가져오지 마세요.` };
@@ -2386,7 +2418,7 @@ export class Orchestrator {
         this.chats.emit(chat.id, "orch", null, { type: "plan_state", planId: revision.planId, state: "cancelled", version: revision.version, reason: "수정 요청을 받아 새 버전 계획을 세웁니다." });
       } else if (previous && ["live", "running", "proposed"].includes(previous.state)) {
         const incomplete = previous.steps.some(isOpenStep);
-        this.chats.emit(chat.id, "orch", null, { type: "plan_state", planId: previous.planId, state: incomplete ? "incomplete" : "done", reason: incomplete ? "새 작업이 시작되어 이전 계획의 미완료 항목을 기록으로 남겼습니다." : undefined });
+        this.chats.emit(chat.id, "orch", null, { type: "plan_state", planId: previous.planId, state: incomplete ? "incomplete" : "done", reason: incomplete ? "새 작업이 시작되어 이전 계획을 정리했습니다(미완료 항목 있음)." : undefined });
       }
       this.chats.emit(chat.id, "orch", "orch", { type: "plan_update", planId: id, instructionId: id, steps: [] });
       if (planningTurn) {
@@ -2483,7 +2515,25 @@ export class Orchestrator {
   }
 
   /** The user typed while the team was working: hand it to the master at the next boundary. */
+  /**
+   * A message sent after the planning turn submitted its plan (the turn still running) is a revision of
+   * that plan: the open card and any choice made on it are void at once, and the message starts a revision
+   * turn on that proposal once this turn ends.
+   */
+  private holdAsRevision(chat: Chat): boolean {
+    if (!this.planning.has(chat.id) || !this.planSubmitted.has(chat.id)) return false;
+    this.clearPlanConfirm(chat.id);
+    this.reviseAfterTurn.add(chat.id);
+    return true;
+  }
+
   private async queue(chat: Chat, input: AgentInput) {
+    if (this.holdAsRevision(chat)) {
+      // Kept apart from inst.queued, which tool responses of the running turn would consume.
+      this.revisionHold.set(chat.id, [...(this.revisionHold.get(chat.id) ?? []), input]);
+      this.chats.emit(chat.id, "orch", null, { type: "notice", text: "계획 수정 요청을 받았습니다. 지금 턴이 끝나면 이 계획을 수정하는 턴으로 이어집니다." });
+      return;
+    }
     const state = chat.status === "paused" ? this.pauseState(chat.id) : undefined;
     const inst = this.instructions.get(chat.id) ?? (state && this.restoreInstruction(state));
     if (!inst) throw new Error("작업이 진행 중입니다.");
@@ -2499,6 +2549,8 @@ export class Orchestrator {
   private async deliverNow(chat: Chat, input: AgentInput) {
     const inst = this.instructions.get(chat.id);
     if (!inst || this.stopped.has(chat.id)) throw new Error("중지되었거나 완료된 지시입니다. 새 지시로 보내 주세요.");
+    // After the plan was submitted, the message waits for the turn's end and revises that plan.
+    if (this.planning.has(chat.id) && this.planSubmitted.has(chat.id)) return this.queue(chat, input);
     const driver = this.chats.liveDriver(chat.id, "orch");
     const text = input.text + attachmentNote(input.attachments);
     const prompt = "[사용자 즉시 질문·수정 요청 — 작업 결과를 기다리지 말고 먼저 직접 답변]\n" + input.text + "\n\n질문에 먼저 한국어로 답하고, 수정 요청이면 이해한 내용과 반영 방법을 먼저 말하세요. 기존 작업자는 유지하며 본 작업의 위임·리뷰 요건도 유지합니다.";
@@ -2582,6 +2634,7 @@ export class Orchestrator {
             throw new Error(`계획이 바뀌었습니다(승인 화면: 계획 ${m[1]} v${m[2]} → 현재: 계획 ${planId} v${version ?? 1}). 최신 계획을 확인한 뒤 다시 승인하세요.`);
         } else this.chats.emit(chatId, "orch", null, { type: "notice", text: `/plan-run: 최신 제안(계획 ${planId} v${version ?? 1})을 실행합니다.` });
         this.planning.delete(chatId);
+        this.clearPlanConfirm(chatId); // approved by button or by the plan question: one path
         this.planRunning.set(chatId, planId);
         // The definitions approved now are fixed for the run (assignments and checklists are checked against them).
         this.chats.store.setSetting(`approvedPlan:${chatId}`, JSON.stringify({ planId, version, tasks: steps ?? [] }));
@@ -2606,6 +2659,7 @@ export class Orchestrator {
         if (busy) throw new Error("계획을 세우거나 실행하는 중에는 계획을 취소할 수 없습니다. 멈추려면 중지(/stop)를 사용하세요.");
         const planId = pendingProposal(this.chats.store.events(chatId));
         if (planId === undefined) throw new Error("취소할 제안 계획이 없습니다.");
+        this.clearPlanConfirm(chatId);
         this.chats.emit(chatId, "orch", null, { type: "plan_state", state: "cancelled", planId, reason: "사용자가 제안을 취소했습니다." });
         return;
       }
@@ -2703,8 +2757,26 @@ export class Orchestrator {
       this.planVersions.delete(chatId);
       // Only a plan submitted with propose_plan waits for approval: a checklist or native todo list is not one.
       const steps = planId === undefined ? undefined : planStepsFor(this.chats.store.events(chatId), planId);
-      if (end.ok && submitted && steps?.length) this.chats.emit(chatId, "orch", null, { type: "plan_state", state: "proposed", planId, ...(version ? { version } : {}) });
-      else if (end.ok) this.chats.emit(chatId, "orch", null, { type: "notice", text: chat?.planMode ? "아직 제출된 계획이 없습니다. 답변이나 추가 설명을 보내면 계획 모드로 이어서 세웁니다." : "아직 제출된 계획이 없습니다. /plan으로 다시 요청하세요." });
+      const decision = this.planDecision.get(chatId);
+      this.planDecision.delete(chatId);
+      if (end.ok && submitted && steps?.length) {
+        this.chats.emit(chatId, "orch", null, { type: "plan_state", state: "proposed", planId, ...(version ? { version } : {}) });
+        // The user already answered the plan question during the turn: same paths as the buttons, once idle.
+        // Bound to this submission and this run: re-checked right before acting, so a stop, a new
+        // instruction or another proposal in between leaves the plan as it is.
+        const epoch = this.epochs.get(chatId);
+        if (decision) setTimeout(() => {
+          const c = this.chats.store.chat(chatId);
+          if (!c || ["paused", "pausing"].includes(c.status) || this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch) return;
+          const events = this.chats.store.events(chatId);
+          if (pendingProposal(events) !== planId || (latestPlanVersion(events, planId!) ?? 1) !== (version ?? 1)) return;
+          void this.command(chatId, decision === "run" ? "plan-run" : "plan-cancel", decision === "run" ? `${planId}:${version ?? 1}` : "")
+            .catch((e) => this.chats.emit(chatId, "orch", null, { type: "notice", text: `계획 ${decision === "run" ? "진행" : "취소"} 처리 실패: ${e instanceof Error ? e.message : String(e)}` }));
+        }, 0);
+      } else {
+        if (!end.ok || end.interrupted) this.clearPlanConfirm(chatId);
+      }
+      if (end.ok && !(submitted && steps?.length)) this.chats.emit(chatId, "orch", null, { type: "notice", text: chat?.planMode ? "아직 제출된 계획이 없습니다. 답변이나 추가 설명을 보내면 계획 모드로 이어서 세웁니다." : "아직 제출된 계획이 없습니다. /plan으로 다시 요청하세요." });
     } else if (this.planRunning.has(chatId) && !pausing) {
       const planId = this.planRunning.get(chatId)!;
       this.planRunning.delete(chatId);
@@ -2759,12 +2831,65 @@ export class Orchestrator {
     return new Promise((resolve) => this.asks.set(id, { chatId, resolve }));
   }
 
+  /** Asks [진행/수정/취소] for a submitted plan; replaces an earlier question for the same chat. */
+  private askPlanConfirm(chatId: number, version: number, tasks: number) {
+    this.clearPlanConfirm(chatId);
+    const id = `ask:${randomUUID()}`;
+    this.planConfirm.set(chatId, id);
+    this.asks.set(id, { chatId, keepStatus: true, resolve: (answer) => void this.onPlanConfirm(chatId, id, answer) });
+    this.chats.emit(chatId, "orch", "orch", { type: "ask_user", id, question: `계획 v${version}(작업 ${tasks}개)이 준비됐습니다. 진행할까요? 진행하면 바로 group별로 실행하고, 수정을 고르면 다음 메시지로 고칠 내용을 받아 계획을 보강합니다.`, options: ["진행", "수정", "취소"], planConfirm: true });
+  }
+
+  /** Withdraws an open plan question (the plan was approved, cancelled, revised or replaced another way). */
+  private clearPlanConfirm(chatId: number) {
+    const id = this.planConfirm.get(chatId);
+    this.planConfirm.delete(chatId);
+    // A choice belongs to the submission its card showed: a re-submission or a new message voids it.
+    this.planDecision.delete(chatId);
+    if (!id || !this.asks.has(id)) return;
+    this.asks.delete(id);
+    this.chats.emit(chatId, "orch", null, { type: "ask_user_answer", id, answer: "(처리됨)" });
+  }
+
+  /** The user's answer: 진행 runs the plan through the approval path, 취소 cancels, 수정 (or own words) revises. */
+  private async onPlanConfirm(chatId: number, id: string, answer: string) {
+    if (this.planConfirm.get(chatId) !== id) return;
+    this.planConfirm.delete(chatId);
+    if (!answer.startsWith("사용자 답변: ")) return; // stopped, not answered
+    const choice = answer.slice("사용자 답변: ".length).trim();
+    const fail = (e: unknown) => {
+      try { this.chats.emit(chatId, "orch", null, { type: "notice", text: `계획 ${choice} 처리 실패: ${e instanceof Error ? e.message : String(e)}` }); }
+      catch { /* the chat or the app closed meanwhile */ }
+    };
+    // Still inside the planning turn: decide once it ends (the proposal is recorded then).
+    if (this.planning.has(chatId)) {
+      if (choice === "진행") this.planDecision.set(chatId, "run");
+      else if (choice === "취소") this.planDecision.set(chatId, "cancel");
+      else {
+        this.planDecision.delete(chatId);
+        const text = choice === "수정" ? "[사용자 선택: 수정] 무엇을 바꿀지 ask_user로 물은 뒤 반영해 propose_plan으로 다시 제출하세요." : `[사용자 선택: 수정] 사용자의 수정 요청: ${choice}\n반영해 propose_plan으로 다시 제출하세요.`;
+        try { await this.chats.liveDriver(chatId, "orch")?.steer?.({ text, attachments: [] }); } catch (e) { fail(e); }
+      }
+      return;
+    }
+    const events = this.chats.store.events(chatId);
+    const planId = pendingProposal(events);
+    if (planId === undefined) return fail(new Error("승인 대기 중인 계획이 없습니다."));
+    try {
+      if (choice === "진행") await this.command(chatId, "plan-run", `${planId}:${latestPlanVersion(events, planId) ?? 1}`);
+      else if (choice === "취소") await this.command(chatId, "plan-cancel", "");
+      else if (choice === "수정") this.chats.emit(chatId, "orch", null, { type: "notice", text: "고칠 내용을 보내 주세요. 다음 메시지는 계획 수정 요청으로 처리됩니다." });
+      else await this.chats.send(chatId, choice, []); // the user's own words are the revision request
+    } catch (e) { fail(e); }
+  }
+
   answerAsk(chatId: number, askId: string, answer: string) {
     const a = this.asks.get(askId);
     if (!a || a.chatId !== chatId) return false;
     this.asks.delete(askId);
     this.chats.emit(chatId, "orch", null, { type: "ask_user_answer", id: askId, answer });
-    this.chats.updateChat(chatId, { status: "working" });
+    // The plan confirmation can be answered after the turn ended: it never marks the chat working by itself.
+    if (!a.keepStatus) this.chats.updateChat(chatId, { status: "working" });
     a.resolve(`사용자 답변: ${answer}`);
     return true;
   }

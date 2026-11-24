@@ -128,6 +128,13 @@ export function parseSlash(text: string): Slash | null {
 // ---------- plan mode (stored on the chat by the PC)
 
 /** A send becomes a plan turn only while the chat is idle; during work or a pause it stays a follow-up. */
+/**
+ * Whether a master question still takes an answer: while the turn is live, and for the app's plan
+ * confirmation card also after the turn ended (the main process withdraws it once it no longer applies).
+ */
+export const remoteAskOpen = (item: { answer?: string; planConfirm?: true }, live: boolean) =>
+  item.answer === undefined && (live || !!item.planConfirm);
+
 export const planActiveFor = (planMode: boolean, status: string) =>
   planMode && status !== "working" && status !== "approval" && status !== "pausing" && status !== "paused";
 

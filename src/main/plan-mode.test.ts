@@ -362,7 +362,8 @@ test("approved ranges are enforced: an empty task scope writes nothing, suppleme
     const outside = await f.call("ask", { to: "클로드 2호", kind: "implement", message: "m", scope: ["docs/**"], reason: "r" });
     assert.match(outside.content[0].text, /승인된 계획의 범위 밖입니다: docs\/\*\*[^]*extend_plan_scope/);
     const asking = f.call("extend_plan_scope", { scope: ["docs/**"], reason: "문서 갱신" });
-    await waitFor(() => f.store.events(f.chat.id).some((e) => e.event.type === "ask_user"));
+    const extendAsks = () => f.store.events(f.chat.id).filter((e) => e.event.type === "ask_user" && /범위 확대/.test(e.event.question));
+    await waitFor(() => extendAsks().length === 1);
     const ask = f.store.events(f.chat.id).findLast((e) => e.event.type === "ask_user")!.event as any;
     assert.match(ask.question, /계획 범위 확대 요청[^]*docs\/\*\*[^]*문서 갱신/);
     f.engine.answerAsk(f.chat.id, ask.id, "허용");
@@ -373,7 +374,7 @@ test("approved ranges are enforced: an empty task scope writes nothing, suppleme
     assert.ok(!(await allowed).isError);
     // A refusal records nothing.
     const refused = f.call("extend_plan_scope", { scope: ["other/**"], reason: "x" });
-    await waitFor(() => f.store.events(f.chat.id).filter((e) => e.event.type === "ask_user").length === 2);
+    await waitFor(() => extendAsks().length === 2);
     f.engine.answerAsk(f.chat.id, (f.store.events(f.chat.id).findLast((e) => e.event.type === "ask_user")!.event as any).id, "거부");
     assert.match((await refused).content[0].text, /허용하지 않았습니다/);
     assert.match((await f.call("ask", { to: "클로드 2호", kind: "implement", message: "m", scope: ["other/**"], reason: "r" })).content[0].text, /범위 밖입니다: other/);
@@ -382,6 +383,144 @@ test("approved ranges are enforced: an empty task scope writes nothing, suppleme
     await waitFor(() => f.worker("클로드 2호").sendCalls.length === 3);
     f.worker("클로드 2호").finish();
     assert.ok(!(await review).isError);
+  } finally { f.close(); }
+});
+
+test("a submitted plan turns plan mode off and the app asks 진행/수정/취소; each answer takes the button paths", async () => {
+  const planAsk = (f: F) => f.store.events(f.chat.id).findLast((e) => e.event.type === "ask_user" && e.event.options.join() === "진행,수정,취소")?.event as any;
+  // 진행 after the turn ended: runs exactly like the approval button.
+  const f = fixture();
+  try {
+    await planTurn(f, "계획");
+    await f.call("propose_plan", { summary: "s", tasks: goodTasks });
+    assert.ok(!f.store.chat(f.chat.id)!.planMode, "plan mode is off once the plan is complete");
+    const ask = planAsk(f);
+    assert.match(ask.question, /계획 v1[^]*진행할까요/);
+    f.master().finish();
+    assert.equal(f.states().at(-1)!.state, "proposed");
+    f.engine.answerAsk(f.chat.id, ask.id, "진행");
+    await waitFor(() => f.states().at(-1)!.state === "running");
+    await waitFor(() => /계획 v1을 승인했다/.test(f.master().sendCalls.at(-1)!.text));
+  } finally { f.close(); }
+  // 진행 chosen while the turn still runs: applied as soon as the proposal is recorded.
+  const g = fixture();
+  try {
+    await planTurn(g, "계획");
+    await g.call("propose_plan", { summary: "s", tasks: goodTasks });
+    g.engine.answerAsk(g.chat.id, planAsk(g).id, "진행");
+    assert.equal(g.store.chat(g.chat.id)!.status, "working", "the answer does not change the chat status by itself");
+    g.master().finish();
+    await waitFor(() => g.states().at(-1)!.state === "running");
+    await waitFor(() => /승인했다/.test(g.master().sendCalls.at(-1)!.text));
+  } finally { g.close(); }
+  // 취소 cancels; 수정 keeps the proposal and the next message (toggle off) revises it.
+  const h = fixture();
+  try {
+    await planTurn(h, "계획");
+    await h.call("propose_plan", { summary: "s", tasks: goodTasks });
+    h.master().finish();
+    h.engine.answerAsk(h.chat.id, planAsk(h).id, "수정");
+    await waitFor(() => h.notices().some((n) => /고칠 내용을 보내 주세요/.test(n)));
+    assert.equal(h.states().at(-1)!.state, "proposed");
+    await h.chats.send(h.chat.id, "리뷰를 추가해", []);
+    assert.equal(h.engine.planning.has(h.chat.id), true, "a revision turn although the toggle is off");
+    assert.match(h.master().sendCalls.at(-1)!.text, /계획 v1 수정/);
+    await h.call("propose_plan", { summary: "v2", tasks: goodTasks });
+    h.master().finish();
+    h.engine.answerAsk(h.chat.id, planAsk(h).id, "취소");
+    await waitFor(() => h.states().at(-1)!.state === "cancelled");
+  } finally { h.close(); }
+  // The approval button withdraws the open question.
+  const b = fixture();
+  try {
+    await planTurn(b, "계획");
+    await b.call("propose_plan", { summary: "s", tasks: goodTasks });
+    b.master().finish();
+    const ask = planAsk(b);
+    await b.engine.command(b.chat.id, "plan-run", `${b.states().at(-1)!.planId}:1`);
+    assert.ok(b.store.events(b.chat.id).some((e) => e.event.type === "ask_user_answer" && e.event.id === ask.id), "the card is closed");
+    assert.equal(b.engine.answerAsk(b.chat.id, ask.id, "진행"), false, "a late answer runs nothing");
+  } finally { b.close(); }
+});
+
+test("a choice on an earlier card never applies to a re-submitted plan; a message after submission revises it", async () => {
+  const planAsks = (f: F) => f.store.events(f.chat.id).filter((e) => e.event.type === "ask_user" && e.event.planConfirm).map((e) => e.event as any);
+  // A chosen 진행 on card A, then the master re-submits B in the same turn: B waits for its own answer.
+  const f = fixture();
+  try {
+    await planTurn(f, "계획");
+    await f.call("propose_plan", { summary: "A", tasks: goodTasks.slice(0, 1) });
+    const a = planAsks(f).at(-1);
+    f.engine.answerAsk(f.chat.id, a.id, "진행");
+    await f.call("propose_plan", { summary: "B", tasks: goodTasks });
+    f.master().finish();
+    await delay(30);
+    assert.equal(f.states().at(-1)!.state, "proposed", "A's choice did not run B");
+    assert.equal(planAsks(f).length, 2);
+    assert.equal(f.engine.answerAsk(f.chat.id, a.id, "진행"), false, "A's card is closed");
+  } finally { f.close(); }
+  // A message while the submitting turn still runs: the card and the choice are void, and it revises the plan after the turn.
+  const g = fixture();
+  try {
+    await planTurn(g, "계획");
+    await g.call("propose_plan", { summary: "A", tasks: goodTasks.slice(0, 1) });
+    const card = planAsks(g).at(-1);
+    await g.chats.send(g.chat.id, "리뷰 단계를 넣어 줘", [], "now");
+    assert.equal(g.engine.answerAsk(g.chat.id, card.id, "진행"), false, "a late answer is refused");
+    g.master().finish();
+    await waitFor(() => /계획 v1 수정[^]*리뷰 단계를 넣어 줘/.test(g.master().sendCalls.at(-1)!.text));
+    assert.equal(g.engine.planning.has(g.chat.id), true, "a revision turn on that proposal");
+    assert.equal(g.master().sendCalls.at(-1)!.noWrites, true);
+  } finally { g.close(); }
+});
+
+test("a 진행 chosen during the turn does not run once /stop came before the deferred start", async () => {
+  const f = fixture();
+  try {
+    await planTurn(f, "계획");
+    await f.call("propose_plan", { summary: "s", tasks: goodTasks });
+    const card = f.store.events(f.chat.id).findLast((e) => e.event.type === "ask_user" && e.event.planConfirm)!.event as any;
+    f.engine.answerAsk(f.chat.id, card.id, "진행");
+    f.master().finish();
+    const stopping = f.engine.stop(f.chat.id); // before the deferred start fires
+    await delay(30);
+    await stopping;
+    assert.ok(!f.states().some((s) => s.state === "running"), "the stopped chat's plan did not run");
+  } finally { f.close(); }
+});
+
+test("a revision request held during the submitting turn is not consumed by its tool responses", async () => {
+  const f = fixture();
+  try {
+    await planTurn(f, "계획");
+    await f.call("propose_plan", { summary: "A", tasks: goodTasks.slice(0, 1) });
+    await f.chats.send(f.chat.id, "리뷰 단계 추가", [], "next");
+    const toolReply = await f.call("agents", {});
+    assert.ok(!toolReply.content.some((c: any) => /리뷰 단계 추가/.test(c.text)), "not handed to the running turn");
+    // Re-submitting while the request waits opens no new approval card.
+    const cards = () => f.store.events(f.chat.id).filter((e) => e.event.type === "ask_user" && e.event.planConfirm).length;
+    const before = cards();
+    await f.call("propose_plan", { summary: "A2", tasks: goodTasks.slice(0, 1) });
+    assert.equal(cards(), before);
+    f.master().finish();
+    await waitFor(() => /계획 v1 수정[^]*리뷰 단계 추가/.test(f.master().sendCalls.at(-1)!.text));
+    assert.equal(f.master().sendCalls.filter((s) => /리뷰 단계 추가/.test(s.text)).length, 1, "used once, in the revision turn");
+  } finally { f.close(); }
+});
+
+test("held revision requests never start a writing turn after the submitting turn fails", async () => {
+  const f = fixture();
+  try {
+    await planTurn(f, "계획");
+    await f.call("propose_plan", { summary: "A", tasks: goodTasks.slice(0, 1) });
+    await f.chats.send(f.chat.id, "리뷰 단계 추가", [], "now");
+    const sends = f.master().sendCalls.length;
+    f.master().finish(false); // ok=false, interrupted=false
+    await delay(30);
+    assert.equal(f.master().sendCalls.length, sends, "not delivered automatically");
+    assert.ok(!f.master().sendCalls.some((s) => /리뷰 단계 추가/.test(s.text) && !s.noWrites), "never a writing turn");
+    assert.ok(f.notices().some((n) => /자동으로 보내지 않았습니다/.test(n)));
+    assert.equal(f.engine.reviseAfterTurn.has(f.chat.id), false);
   } finally { f.close(); }
 });
 

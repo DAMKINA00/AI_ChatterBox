@@ -451,7 +451,8 @@ export type AgentEvent =
   | { type: "review_result"; consultId: number; review: ReviewResult }
   /** Read-only transcript a branched chat starts from; the first native session receives it as reference. */
   | { type: "fork_context"; text: string; attachments: AttachmentRef[] }
-  | { type: "ask_user"; id: string; question: string; options: string[] }
+  /** planConfirm: the app's [진행/수정/취소] card for a submitted plan; it stays answerable after the turn ends. */
+  | { type: "ask_user"; id: string; question: string; options: string[]; planConfirm?: true }
   | { type: "ask_user_answer"; id: string; answer: string }
   /** Checklist from the orchestrator's native plan tool (Claude TodoWrite / Codex update_plan). */
   /**
