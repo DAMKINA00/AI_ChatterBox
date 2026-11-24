@@ -6,7 +6,10 @@ import type {
   UsageMonitorState,
   UsageNotification,
 } from "../shared/usage-companion";
+import { isMonitorCharacter, normalizeCharacterSet, type MonitorCharacterId } from "../shared/usage-companion";
 import { MONITOR_ACCOUNTS_VERSION, type MonitorAccountsPayload } from "./usage-monitor-feed";
+
+type UsageCommand = { command: UsageCommandName; value?: boolean | { id: MonitorCharacterId; on: boolean } };
 
 const MAX_LINE_BYTES = 64 * 1024;
 const START_TIMEOUT_MS = 20_000;
@@ -97,7 +100,11 @@ function validState(value: unknown): value is UsageMonitorState {
 }
 
 function copyState(state: UsageMonitorState): UsageMonitorState {
-  return { ...state };
+  const copy: UsageMonitorState = { ...state };
+  // A malformed set is treated as an older monitor (single toggle) rather than rejecting the whole state.
+  if (Array.isArray(state.characterSet)) copy.characterSet = normalizeCharacterSet(state.characterSet);
+  else delete copy.characterSet;
+  return copy;
 }
 
 export class UsageCompanion {
@@ -148,6 +155,9 @@ export class UsageCompanion {
     await this.startInternal(true);
     const session = this.session;
     if (!session || session.ended) throw new Error("AI 사용량 모니터가 실행 중이 아닙니다.");
+    // Check again against the process that will receive it: a restart while waiting may have brought up an older monitor.
+    if (command.command === "character" && !(session.initialState && Array.isArray(this.state?.characterSet)))
+      throw new Error("이 사용량 모니터 버전은 캐릭터 개별 선택을 지원하지 않습니다.");
     this.write(session, command);
   }
 
@@ -237,6 +247,9 @@ export class UsageCompanion {
       lineTooLong: false,
     };
     this.session = session;
+    // The previous process's state does not describe this one (it may be an older monitor): until this
+    // session reports its first state the menu has no state, so its monitor items stay disabled.
+    this.state = undefined;
     this.publish();
     session.startPromise = new Promise<void>((resolve, reject) => {
       session.startResolve = resolve;
@@ -330,6 +343,8 @@ export class UsageCompanion {
   }
 
   private line(session: ChildSession) {
+    // A finished process's late stdout (EOF flush of a buffered line) must not touch the current session's state.
+    if (session !== this.session || session.ended) return;
     if (session.lineTooLong) return this.protocolError(session, `상태 줄이 ${MAX_LINE_BYTES}바이트를 초과했습니다.`);
     let value: unknown;
     try {
@@ -401,7 +416,15 @@ export class UsageCompanion {
     }
   }
 
-  private validateCommand(name: string, value: unknown): { command: UsageCommandName; value?: boolean } {
+  private validateCommand(name: string, value: unknown): UsageCommand {
+    if (name === "character") {
+      const v = value as { id?: unknown; on?: unknown } | null;
+      if (!v || typeof v !== "object" || Array.isArray(v) || !isMonitorCharacter(v.id) || typeof v.on !== "boolean")
+        throw new Error("명령 'character'에는 { id: orch|claude|gpt|gemini|grok, on: 불리언 } 값이 필요합니다.");
+      // Older monitors only know the single toggle; sending them an unknown command would fail there.
+      if (!Array.isArray(this.state?.characterSet)) throw new Error("이 사용량 모니터 버전은 캐릭터 개별 선택을 지원하지 않습니다.");
+      return { command: "character", value: { id: v.id, on: v.on } };
+    }
     if (!NO_VALUE_COMMANDS.has(name as UsageCommandName) && !BOOLEAN_COMMANDS.has(name as UsageCommandName)) throw new Error(`지원하지 않는 사용량 모니터 명령입니다: ${name}`);
     const command = name as UsageCommandName;
     if (NO_VALUE_COMMANDS.has(command)) {
@@ -415,7 +438,7 @@ export class UsageCompanion {
     throw new Error(`지원하지 않는 사용량 모니터 명령입니다: ${name}`);
   }
 
-  private write(session: ChildSession, command: { command: UsageCommandName; value?: boolean }) {
+  private write(session: ChildSession, command: UsageCommand) {
     const payload: Record<string, unknown> = { command: command.command };
     if (command.value !== undefined) payload.value = command.value;
     session.child.stdin!.write(`${JSON.stringify(payload)}\n`);

@@ -1,6 +1,6 @@
 import type { MenuItemConstructorOptions } from "electron";
 import type { AppUpdateState } from "../shared/app-updates";
-import type { UsageCommandName, UsageCompanionSnapshot, UsageMonitorState } from "../shared/usage-companion";
+import { MONITOR_CHARACTER_LABEL, MONITOR_CHARACTERS, type UsageCommandName, type UsageCompanionSnapshot, type UsageMonitorState } from "../shared/usage-companion";
 
 export function suiteMenu(usage: UsageCompanionSnapshot, update: Readonly<AppUpdateState>, actions: {
   enable(value: boolean): void;
@@ -13,6 +13,24 @@ export function suiteMenu(usage: UsageCompanionSnapshot, update: Readonly<AppUpd
     label, type: "checkbox", checked: state?.[field] === true, enabled: usage.running && !!state,
     click: item => actions.command(command, item.checked),
   });
+  // Monitors that report `characterSet` get one checkbox per character; older ones keep the single toggle.
+  const characterItem = (): MenuItemConstructorOptions => {
+    const set = state?.characterSet;
+    if (!Array.isArray(set)) return toggle("캐릭터 표시", "characters", "characters");
+    const enabled = usage.running;
+    return { label: "캐릭터 표시", submenu: [
+      ...MONITOR_CHARACTERS.map((id): MenuItemConstructorOptions => ({
+        label: MONITOR_CHARACTER_LABEL[id], type: "checkbox", checked: set.includes(id), enabled,
+        click: item => actions.command("character", { id, on: item.checked }),
+      })),
+      { type: "separator" },
+      // "All": every character on, not the monitor's "restore last selection" meaning of characters=true.
+      // All five are sent (each is idempotent): the menu's checks may be older than commands still in flight.
+      { label: "모두 표시", enabled,
+        click: () => { for (const id of MONITOR_CHARACTERS) actions.command("character", { id, on: true }); } },
+      { label: "모두 숨기기", enabled, click: () => actions.command("characters", false) },
+    ] };
+  };
   const updateLabel = {
     disabled: `버전 ${update.currentVersion}`, idle: update.checkedAt ? `최신 버전 · ${update.currentVersion}` : `버전 ${update.currentVersion}`,
     checking: "업데이트 확인 중…", downloading: `업데이트 다운로드 · ${Math.round(update.percent ?? 0)}%`,
@@ -28,7 +46,7 @@ export function suiteMenu(usage: UsageCompanionSnapshot, update: Readonly<AppUpd
       // Accounts are managed in ChatterBox; the monitor only shows them.
       { label: "계정별 사용량", click: () => actions.command("accounts") },
       { type: "separator" },
-      toggle("항상 위에", "topmost", "topmost"), toggle("캐릭터 표시", "characters", "characters"),
+      toggle("항상 위에", "topmost", "topmost"), characterItem(),
       toggle("작업표시줄 사용량", "taskbar", "taskbar"), toggle("Windows 시작 시 함께 실행", "startup", "startup"),
       toggle("사용량 알림", "usageAlerts", "usage-alerts"), toggle("작업 상태 알림", "activityAlerts", "activity-alerts"),
       { type: "separator" },

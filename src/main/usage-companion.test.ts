@@ -198,3 +198,92 @@ test("allows a stop retry after timeout without spawning another child", async (
     rmSync(f.root, { recursive: true, force: true });
   }
 });
+
+test("per-character selection: characterSet is normalized and 'character' commands are validated and sent", async () => {
+  const f = fixture();
+  const starting = f.companion.start();
+  f.child.emitState({ ...state(), characterSet: ["grok", "orch", "grok", "deepseek"] as any });
+  await starting;
+  assert.deepEqual(f.companion.snapshot().state?.characterSet, ["orch", "grok"], "known ids, no duplicates, display order");
+  await f.companion.command("character", { id: "gpt", on: true });
+  await f.companion.command("character", { id: "orch", on: false });
+  await assert.rejects(f.companion.command("character", { id: "deepseek", on: true }), /character/);
+  await assert.rejects(f.companion.command("character", { id: "gpt" }), /character/);
+  await assert.rejects(f.companion.command("character", true), /character/);
+  await f.companion.command("characters", false);
+  assert.deepEqual(f.child.stdin.writes.map(line => JSON.parse(line)), [
+    { command: "character", value: { id: "gpt", on: true } },
+    { command: "character", value: { id: "orch", on: false } },
+    { command: "characters", value: false },
+  ]);
+  const quitting = f.companion.command("quit");
+  f.child.exit();
+  await quitting;
+  rmSync(f.root, { recursive: true, force: true });
+});
+
+test("an older monitor without characterSet keeps the single toggle and is never sent 'character'", async () => {
+  const f = fixture();
+  const starting = f.companion.start();
+  f.child.emitState({ ...state(), characterSet: "orch" as any });
+  await starting;
+  assert.equal(f.companion.snapshot().state?.characterSet, undefined, "a malformed set counts as an older monitor");
+  await assert.rejects(f.companion.command("character", { id: "gpt", on: true }), /지원하지 않습니다/);
+  await f.companion.command("characters", true);
+  assert.deepEqual(f.child.stdin.writes.map(line => JSON.parse(line)), [{ command: "characters", value: true }]);
+  const quitting = f.companion.command("quit");
+  f.child.exit();
+  await quitting;
+  rmSync(f.root, { recursive: true, force: true });
+});
+
+test("[review 1078-2] a restart onto an older monitor clears the state and never sends it 'character'", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cbx-usage-companion-"));
+  const children = [new FakeChild(), new FakeChild()];
+  let spawned = 0;
+  const changes: ReturnType<UsageCompanion["snapshot"]>[] = [];
+  const companion = new UsageCompanion({ exe: join(root, "m.exe"), settingsFile: join(root, "desktop.json"), allowed: true, changed: s => changes.push(s), notification: () => undefined },
+    () => children[spawned++]);
+  const first = companion.start();
+  children[0].emitState({ ...state(), characterSet: ["orch"] });
+  await first;
+  children[0].exit(); // the new monitor goes away
+  // Clicked while the older monitor is starting: passes the early check (old snapshot), must fail before writing.
+  const pending = companion.command("character", { id: "gpt", on: true });
+  assert.equal(spawned, 2);
+  assert.equal(companion.snapshot().state, undefined, "no state until the new process reports one: monitor menu items are disabled");
+  children[1].emitState(state()); // older monitor: no characterSet
+  await assert.rejects(pending, /지원하지 않습니다/);
+  assert.deepEqual(children[1].stdin.writes, [], "nothing was sent to the older monitor");
+  await assert.rejects(companion.command("character", { id: "gpt", on: true }), /지원하지 않습니다/);
+  const quitting = companion.command("quit");
+  children[1].exit();
+  await quitting;
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("[review 1081] a finished process's late stdout EOF flush never overwrites the new process's state", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cbx-usage-companion-"));
+  const children = [new FakeChild(), new FakeChild()];
+  let spawned = 0;
+  const companion = new UsageCompanion({ exe: join(root, "m.exe"), settingsFile: join(root, "desktop.json"), allowed: true, changed: () => undefined, notification: () => undefined },
+    () => children[spawned++]);
+  const first = companion.start();
+  children[0].emitState({ ...state(), characterSet: ["orch"] });
+  await first;
+  // The old process leaves a state line without its newline in the buffer, then exits before stdout ends.
+  children[0].stdout.emit("data", JSON.stringify({ type: "state", state: { ...state(), characterSet: ["grok"] } }));
+  children[0].emit("exit", 0);
+  const second = companion.start();
+  children[1].emitState({ ...state(), characterSet: ["claude", "gpt"] });
+  await second;
+  children[0].stdout.emit("end"); // late EOF of the old process flushes its buffered line
+  children[0].emit("close");
+  assert.deepEqual(companion.snapshot().state?.characterSet, ["claude", "gpt"], "the new process's state stays");
+  assert.equal(companion.snapshot().running, true);
+  assert.equal(companion.snapshot().error, undefined, "no protocol error from the old process either");
+  const quitting = companion.command("quit");
+  children[1].exit();
+  await quitting;
+  rmSync(root, { recursive: true, force: true });
+});
