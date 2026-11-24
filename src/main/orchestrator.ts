@@ -9,6 +9,8 @@
 // carry a scope (path globs) — non-overlapping scopes run concurrently, overlapping ones queue, and
 // writes outside the scope are denied. A call that would wait in a cycle, or nest deeper than 3, is refused.
 import { createHash, randomUUID } from "node:crypto";
+import { MONITOR_QUESTION_REASON } from "./character-events";
+import type { CharacterAnswer, MonitorCharacterId } from "../shared/usage-companion";
 import { existsSync, statSync } from "node:fs";
 import { basename, isAbsolute, relative, resolve as resolvePath } from "node:path";
 import {
@@ -1096,6 +1098,35 @@ export class Orchestrator {
     ].join("\n"));
   }
 
+  /** Ask the chosen, already registered worker via the usual consult and approval path. */
+  async askWorkerCharacter(chat: Chat, character: Exclude<MonitorCharacterId, "orch">, text: string): Promise<CharacterAnswer> {
+    if (this.assignments.get(chat.id)?.size || this.running.get(chat.id)?.size) return { status: "busy" };
+    const target = this.agents(chat.id).find(agent => agent.status === "active" && agent.kind === character);
+    if (!target) return { status: "error", text: "이 채팅에 해당 캐릭터의 활성 작업자가 없어요." };
+    let answer = "";
+    await this.chats.startTurn(chat.id, text, [], async () => {
+      this.nextEpoch(chat.id);
+      this.stopped.delete(chat.id);
+      this.planRunning.delete(chat.id);
+      const inst = this.newInstruction(chat.id, text);
+      this.instructions.set(chat.id, inst);
+      this.saveInstruction(chat.id);
+      let ok = false;
+      try {
+        const result = await this.consult(chat.id, "orch", target, "opinion", text, [], [], MONITOR_QUESTION_REASON,
+          undefined, undefined, undefined, false, undefined, undefined, reply => { answer = reply; });
+        ok = !result.isError;
+      } finally {
+        if (this.instructions.get(chat.id) === inst && !this.chats.liveDriver(chat.id, "orch")?.running && !this.chats.quitting) {
+          const end = { type: "turn_end", ok, interrupted: this.stopped.has(chat.id) } as const;
+          this.chats.orchTurnEnded(chat.id, end);
+          this.continueQueued(chat.id, end);
+        }
+      }
+    });
+    return answer.trim() ? { status: "answer", text: answer } : { status: "error" };
+  }
+
   // ---------- ask (consult)
   private graph(chatId: number): WaitGraph {
     let g = this.waits.get(chatId);
@@ -1231,11 +1262,11 @@ export class Orchestrator {
     for (const f of w) f();
   }
 
-  private async consult(chatId: number, caller: Role, target: ChatAgent, kind: ConsultKind, message: string, scope: string[], attach: string[], reason: string, supersedes?: number, requestedEffort?: string, discussion?: Discussion, resuming = false, accountChange?: CliAccountId | null, assignmentModel?: string): Promise<ToolResult> {
+  private async consult(chatId: number, caller: Role, target: ChatAgent, kind: ConsultKind, message: string, scope: string[], attach: string[], reason: string, supersedes?: number, requestedEffort?: string, discussion?: Discussion, resuming = false, accountChange?: CliAccountId | null, assignmentModel?: string, onAnswer?: (text: string) => void): Promise<ToolResult> {
     const epoch = this.epochs.get(chatId);
     const chat = this.chats.store.chat(chatId)!;
     const project = this.chats.store.project(chat.projectId)!;
-    const callerName = this.name(chatId, caller);
+    const callerName = onAnswer ? "사용자" : this.name(chatId, caller);
     const cliKind = cliAccountKindForAgent(WORKER_AGENT[target.kind]);
     let cliPolicy = cliKind ? this.chats.resolveAccountPolicy(cliKind, project.settings) : undefined;
     let cliSelection = accountChange !== undefined && cliPolicy
@@ -1463,6 +1494,7 @@ export class Orchestrator {
             ? `[${target.nickname}: 사용자가 중지했습니다. 더 맡기지 말고 멈추세요.]`
             : `[${target.nickname}: 오류 — ${result.error ?? "실패"}]`;
       const effortLabel = reasoning.effort || "CLI 기본";
+      if (status === "done" && result.text.trim()) onAnswer?.(result.text);
       return { ...textResult(`${head} · 추론 ${effortLabel}\n${consultResultText(finished)}`, status !== "done"), structuredContent: { consultId: consult.id, ...(status !== "done" ? { error: (quotaFailure ? "CLI 한도 소진 · " : "") + clipText(result.error ?? (status === "stopped" ? "사용자가 중지했습니다." : "작업자의 응답과 산출물이 없습니다."), 160) } : {}) } };
     } finally {
       if (cliKind) this.chats.pinRoleAccount(chatId, target.key, undefined);
@@ -1531,20 +1563,7 @@ export class Orchestrator {
       this.reviewing.delete(chatId);
       this.afterMasterTurn(chatId, event);
       this.saveInstruction(chatId); // The plan and review restrictions end with the turn.
-      // Extra instructions that arrived after the master's last ask become the next turn.
-      const inst = this.instructions.get(chatId);
-      if (inst?.queued.length && !event.interrupted && !this.stopped.has(chatId)) {
-        const q = inst.queued.splice(0);
-        setTimeout(() => {
-          const chat = this.chats.store.chat(chatId);
-          if (!chat || this.instructions.get(chatId) !== inst || this.stopped.has(chatId) || ["pausing", "paused"].includes(chat.status)) return;
-          this.chats.updateChat(chatId, { status: "working", touch: true });
-          this.instruct(chat, { text: q.map((x) => x.text).join("\n\n"), attachments: q.flatMap((x) => x.attachments) }).catch((e) => {
-            this.chats.emit(chatId, "orch", "orch", { type: "error", kind: "process", message: String(e) });
-            this.chats.orchTurnEnded(chatId, { type: "turn_end", ok: false, error: String(e) });
-          });
-        }, 0);
-      }
+      this.continueQueued(chatId, event);
       return;
     }
     const r = this.running.get(chatId)?.get(role);
@@ -1588,6 +1607,22 @@ export class Orchestrator {
         r.resolve({ ok: event.ok, interrupted: event.interrupted, error: event.error ?? (!event.ok ? r.lastError : undefined) });
         break;
     }
+  }
+
+  /** Extra instructions that arrived after the last question become the next normal master turn. */
+  private continueQueued(chatId: number, end: Extract<AgentEvent, { type: "turn_end" }>) {
+    const inst = this.instructions.get(chatId);
+    if (!inst?.queued.length || end.interrupted || this.stopped.has(chatId)) return;
+    const q = inst.queued.splice(0);
+    setTimeout(() => {
+      const chat = this.chats.store.chat(chatId);
+      if (!chat || this.instructions.get(chatId) !== inst || this.stopped.has(chatId) || ["pausing", "paused"].includes(chat.status)) return;
+      this.chats.updateChat(chatId, { status: "working", touch: true });
+      this.instruct(chat, { text: q.map((x) => x.text).join("\n\n"), attachments: q.flatMap((x) => x.attachments) }).catch((e) => {
+        this.chats.emit(chatId, "orch", "orch", { type: "error", kind: "process", message: String(e) });
+        this.chats.orchTurnEnded(chatId, { type: "turn_end", ok: false, error: String(e) });
+      });
+    }, 0);
   }
 
   // ---------- user instructions

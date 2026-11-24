@@ -6,7 +6,7 @@ import { Sidebar } from "./components/Sidebar";
 import { ChatView } from "./components/ChatView";
 import { ProjectDialog } from "./components/ProjectDialog";
 import { Button, TooltipProvider } from "./components/ui";
-import { cn, errorMessage } from "./lib/utils";
+import { api, cn, errorMessage } from "./lib/utils";
 import { isRemote, useMobile } from "./lib/remote-mode";
 
 export function App() {
@@ -30,6 +30,8 @@ export function App() {
 
   const chat = selection ? chats.find((c) => c.id === selection.chatId) : undefined;
   const project = chat ? projects.find((p) => p.id === chat.projectId) : undefined;
+  const monitorChatId = chat?.id ?? null;
+  useEffect(() => { api.setMonitorActiveChat?.(monitorChatId); }, [monitorChatId]);
   // Installing CLIs is done on the PC; the remote page shows each one's state in the chat header instead.
   const missing = remote ? [] : cli.filter((c) => c.agent !== "deepseek" && !c.path);
 

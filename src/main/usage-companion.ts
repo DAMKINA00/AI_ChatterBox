@@ -1,15 +1,20 @@
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawn as nodeSpawn, type SpawnOptions } from "node:child_process";
 import type {
+  CharacterAnswer,
+  CharacterAsk,
+  CharacterReply,
+  CharacterTarget,
   UsageCommandName,
   UsageCompanionSnapshot,
   UsageMonitorState,
   UsageNotification,
 } from "../shared/usage-companion";
-import { isMonitorCharacter, normalizeCharacterSet, type MonitorCharacterId } from "../shared/usage-companion";
+import { isMonitorCharacter, normalizeCharacterSet, parseCharacterAsk, supportedCharacters, type MonitorCharacterId } from "../shared/usage-companion";
+import type { CharacterEvent } from "./character-events";
 import { MONITOR_ACCOUNTS_VERSION, type MonitorAccountsPayload } from "./usage-monitor-feed";
 
-type UsageCommand = { command: UsageCommandName; value?: boolean | { id: MonitorCharacterId; on: boolean } };
+type UsageCommand = { command: UsageCommandName; value?: boolean | { id: MonitorCharacterId; on: boolean } | CharacterEvent | CharacterTarget | CharacterReply };
 
 const MAX_LINE_BYTES = 64 * 1024;
 const START_TIMEOUT_MS = 20_000;
@@ -48,6 +53,7 @@ export interface UsageCompanionOptions {
   notification(notification: UsageNotification): void;
   /** The monitor's refresh button/menu: ChatterBox refreshes its accounts' usage (the monitor queries nothing itself). */
   refreshRequested?(): void;
+  characterAsk?(ask: CharacterAsk): Promise<CharacterAnswer>;
   spawn?: UsageSpawn;
 }
 
@@ -70,6 +76,7 @@ interface ChildSession {
   lineTooLong: boolean;
   /** The current account snapshot went to this process (sent again after every restart). */
   accountsSent?: MonitorAccountsPayload;
+  characterTargetSent?: CharacterTarget;
 }
 
 function text(value: unknown, fallback: string): string {
@@ -104,6 +111,10 @@ function copyState(state: UsageMonitorState): UsageMonitorState {
   // A malformed set is treated as an older monitor (single toggle) rather than rejecting the whole state.
   if (Array.isArray(state.characterSet)) copy.characterSet = normalizeCharacterSet(state.characterSet);
   else delete copy.characterSet;
+  if (Array.isArray(state.characterIds)) copy.characterIds = normalizeCharacterSet(state.characterIds);
+  else delete copy.characterIds;
+  if (copy.characterEvents !== 1) delete copy.characterEvents;
+  if (copy.characterAsk !== 1) delete copy.characterAsk;
   return copy;
 }
 
@@ -113,6 +124,8 @@ export class UsageCompanion {
   private error?: string;
   private session?: ChildSession;
   private accounts?: MonitorAccountsPayload;
+  private characterTarget: CharacterTarget = { chatId: null };
+  private readonly characterRequests = new Set<string>();
   private readonly spawn: UsageSpawn;
 
   constructor(private readonly options: UsageCompanionOptions, spawn?: UsageSpawn) {
@@ -156,15 +169,69 @@ export class UsageCompanion {
     const session = this.session;
     if (!session || session.ended) throw new Error("AI 사용량 모니터가 실행 중이 아닙니다.");
     // Check again against the process that will receive it: a restart while waiting may have brought up an older monitor.
-    if (command.command === "character" && !(session.initialState && Array.isArray(this.state?.characterSet)))
+    if (command.command === "character" && !(session.initialState && Array.isArray(this.state?.characterSet)
+      && supportedCharacters(this.state).includes((command.value as { id: MonitorCharacterId }).id)))
       throw new Error("이 사용량 모니터 버전은 캐릭터 개별 선택을 지원하지 않습니다.");
     this.write(session, command);
+  }
+
+  /**
+   * A live character event. Sent only to a running monitor that has reported `characterEvents: 1` and can show
+   * that character; otherwise dropped. Nothing is queued, so a restart or reconnect never replays old events.
+   */
+  characterEvent(event: CharacterEvent): boolean {
+    const session = this.session;
+    if (!this.options.allowed || !session || session.ended || !session.initialState) return false;
+    if (this.state?.characterEvents !== 1 || !supportedCharacters(this.state).includes(event.character)) return false;
+    this.write(session, { command: "character-event", value: event });
+    return true;
   }
 
   /**
    * The ChatterBox account snapshot the monitor shows. Kept and sent to every monitor process that
    * announces the same protocol version (an older monitor would not understand it).
    */
+  setCharacterTarget(target: CharacterTarget) {
+    const previous = this.characterTarget;
+    if (previous.chatId === target.chatId &&
+        (previous.chatId === null || (target.chatId !== null && previous.title === target.title))) return;
+    this.characterTarget = target;
+    if (this.session) this.sendCharacterTarget(this.session);
+  }
+
+  private acceptsCharacterChat(session: ChildSession) {
+    return this.session === session && session.initialState && !session.ended && !session.stopping
+      && this.state?.characterAsk === 1;
+  }
+
+  private sendCharacterTarget(session: ChildSession) {
+    if (!this.acceptsCharacterChat(session) || session.characterTargetSent === this.characterTarget) return;
+    try {
+      this.write(session, { command: "character-target", value: this.characterTarget });
+      session.characterTargetSent = this.characterTarget;
+    } catch { /* The pipe may be closing; the next monitor gets the current target on its first state. */ }
+  }
+
+  private async handleCharacterAsk(session: ChildSession, message: unknown) {
+    if (!this.acceptsCharacterChat(session)) return;
+    const ask = parseCharacterAsk(message);
+    if (!ask || !supportedCharacters(this.state).includes(ask.character)) return;
+    const key = ask.requestId.toLowerCase();
+    if (this.characterRequests.has(key)) return;
+    this.characterRequests.add(key);
+    if (this.characterRequests.size > 1024) this.characterRequests.delete(this.characterRequests.values().next().value!);
+    let answer: CharacterAnswer;
+    try {
+      answer = this.characterTarget.chatId === null ? { status: "no-chat" }
+        : this.characterTarget.chatId !== ask.chatId ? { status: "chat-changed" }
+        : await this.options.characterAsk?.(ask) ?? { status: "error" };
+    } catch { answer = { status: "error" }; }
+    if (!this.acceptsCharacterChat(session)) return;
+    const { requestId, character, chatId } = ask;
+    try { this.write(session, { command: "character-reply", value: { requestId, character, chatId, ...answer } }); }
+    catch { /* No reply is replayed into a newer monitor. */ }
+  }
+
   setAccounts(payload: MonitorAccountsPayload) {
     this.accounts = payload;
     if (this.session && !this.session.ended) this.sendAccounts(this.session);
@@ -362,6 +429,7 @@ export class UsageCompanion {
       this.error = undefined;
       this.publish();
       this.sendAccounts(session);
+      this.sendCharacterTarget(session);
       if (!session.startSettled) {
         if (session.startTimer) clearTimeout(session.startTimer);
         session.startTimer = undefined;
@@ -374,6 +442,7 @@ export class UsageCompanion {
       this.options.notification({ title: text(message.title, TITLE).slice(0, 200), message: text(message.message, "AI 사용량 모니터 알림"), error: message.error });
       return;
     }
+    if (message.type === "character-ask") { void this.handleCharacterAsk(session, message); return; }
     if (message.type === "refresh") {
       this.options.refreshRequested?.();
       return;
@@ -419,7 +488,8 @@ export class UsageCompanion {
   private validateCommand(name: string, value: unknown): UsageCommand {
     if (name === "character") {
       const v = value as { id?: unknown; on?: unknown } | null;
-      if (!v || typeof v !== "object" || Array.isArray(v) || !isMonitorCharacter(v.id) || typeof v.on !== "boolean")
+      if (!v || typeof v !== "object" || Array.isArray(v) || !isMonitorCharacter(v.id) || typeof v.on !== "boolean"
+        || (Array.isArray(this.state?.characterSet) && !supportedCharacters(this.state).includes(v.id)))
         throw new Error("명령 'character'에는 { id: orch|claude|gpt|gemini|grok, on: 불리언 } 값이 필요합니다.");
       // Older monitors only know the single toggle; sending them an unknown command would fail there.
       if (!Array.isArray(this.state?.characterSet)) throw new Error("이 사용량 모니터 버전은 캐릭터 개별 선택을 지원하지 않습니다.");

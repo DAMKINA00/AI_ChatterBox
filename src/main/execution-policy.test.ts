@@ -390,6 +390,7 @@ test("failed master startup ends the review restriction and permits a later ordi
   chats.store.addEvent = () => ({});
   chats.store.linkAttachments = () => undefined;
   chats.store.addUserEvent = () => ({});
+  chats.masterQuestions = new Map();
   chats.sink = { event() {} };
   chats.updateChat = () => undefined;
   chats.orchTurnEnded = () => undefined;

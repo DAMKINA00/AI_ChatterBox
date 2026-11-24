@@ -23,6 +23,7 @@ const api: ChatterBoxApi = {
   updateChat: (id, patch) => ipcRenderer.invoke("chats:update", id, patch),
   deleteChat: (id) => ipcRenderer.invoke("chats:delete", id),
   markViewed: (id) => ipcRenderer.invoke("chats:viewed", id),
+  setMonitorActiveChat: id => ipcRenderer.send("monitor:active-chat", id),
   listConsults: (chatId) => ipcRenderer.invoke("chats:consults", chatId),
   listAgents: (chatId) => ipcRenderer.invoke("chats:agents", chatId),
   loadEvents: (chatId) => ipcRenderer.invoke("chats:events", chatId),

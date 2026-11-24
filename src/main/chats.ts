@@ -1067,6 +1067,11 @@ export class ChatManager {
       ? { id: 0, chatId, node, role, at: Date.now(), event }
       : this.store.addEvent(chatId, node, role, event);
     this.sink.event(e);
+    const question = role === "orch" && node === "orch" ? this.masterQuestions.get(chatId) : undefined;
+    if (question) {
+      if (event.type === "text" && event.text.trim()) question.answer = event.text;
+      if (event.type === "turn_end") question.finish(event.ok && !event.interrupted ? question.answer : undefined);
+    }
     // Streaming can be frequent; persist activity at most every 15s until a full event arrives.
     if (event.type !== "agent_usage" && event.type !== "expression"
       && (event.type !== "text_delta" || e.at - (this.store.chat(chatId)?.lastActiveAt ?? 0) >= 15_000))
@@ -1322,6 +1327,7 @@ export class ChatManager {
 
   /** Drop a chat's drivers (deleted chat, project folder changed). */
   async resetDrivers(chatId: number) {
+    this.masterQuestions.get(chatId)?.finish();
     const slot = this.live.get(chatId);
     this.live.delete(chatId);
     this.routes.delete(chatId);
@@ -1386,6 +1392,28 @@ export class ChatManager {
     await (await this.driver(chat.id, "orch")).send(input);
   };
 
+  private readonly masterQuestions = new Map<number, { answer?: string; finish(answer?: string): void }>();
+
+  /** Observe the regular master turn started by this question, without using earlier or streamed text. */
+  askMasterCharacter(chat: Chat, text: string): Promise<string | undefined> {
+    return new Promise(resolve => {
+      const question = {
+        answer: undefined as string | undefined,
+        finish: (answer?: string) => {
+          clearTimeout(timer);
+          if (this.masterQuestions.get(chat.id) === question) this.masterQuestions.delete(chat.id);
+          resolve(answer);
+        },
+      };
+      const timer = setTimeout(() => question.finish(), 170_000);
+      timer.unref();
+      void this.startTurn(chat.id, text, [], () => {
+        this.masterQuestions.set(chat.id, question);
+        return this.sendHandler(chat, { text, attachments: [] });
+      }).catch(() => question.finish());
+    });
+  }
+
   /** Called instead of sendHandler while the chat is working (extra instructions). */
   busySend?: (chat: Chat, input: AgentInput, delivery: "now" | "next") => Promise<void>;
 
@@ -1398,6 +1426,7 @@ export class ChatManager {
     if (chat.status === "pausing") throw new Error("마스터와 작업자의 중지 확인을 기다리고 있습니다.");
     if (chat.status === "working" || chat.status === "approval" || chat.status === "paused" || this.isBusy(chatId)) {
       if (!this.busySend) throw new Error("작업이 진행 중입니다. 끝나거나 중지한 뒤 보내 주세요.");
+      this.masterQuestions.get(chatId)?.finish(); // The new input can change the answer to the previous question.
       const ev = this.store.addUserEvent(chatId, { type: "user", text, attachments, queued: true, delivery }, attachmentIds);
       this.sink.event(ev);
       this.updateChat(chatId, { touch: true });
@@ -1412,6 +1441,7 @@ export class ChatManager {
    * use this with their own run; errors end the run with a visible message.
    */
   async startTurn(chatId: number, display: string, attachmentIds: number[], run: () => Promise<void>) {
+    this.masterQuestions.get(chatId)?.finish();
     const attachments = this.store.attachmentsFor(attachmentIds);
     const isFirst = !this.store.hasUserEvent(chatId) && !this.store.chat(chatId)?.fork;
     const userEvent = this.store.addUserEvent(chatId, { type: "user", text: display, attachments }, attachmentIds);
@@ -1455,6 +1485,7 @@ export class ChatManager {
   }
 
   async stop(chatId: number) {
+    this.masterQuestions.get(chatId)?.finish();
     this.approvals.cancelChat(chatId);
     await Promise.allSettled(Object.values(this.live.get(chatId) ?? {}).map((l) => l?.driver.stop()));
     this.pendingFinal.delete(chatId);

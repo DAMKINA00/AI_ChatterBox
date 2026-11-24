@@ -723,3 +723,49 @@ test("Antigravity and Grok can lead a discussion and collect actual peer results
     assert.equal(f.store.listConsults(f.chat.id).length, 4);
   } finally { await f.close(); }
 });
+
+test("monitor master question is recorded and returns only the actual successful reply from that chat", async () => {
+  const f = fixture();
+  try {
+    const otherChat = f.store.createChat(f.project.id, "other");
+    f.chats.emit(f.chat.id, "orch", "orch", { type: "text", text: "earlier answer" });
+    f.chats.sendHandler = async (chat, input) => {
+      assert.equal(chat.id, f.chat.id);
+      assert.equal(input.text, "actual question");
+      f.chats.emit(otherChat.id, "orch", "orch", { type: "text", text: "other chat" });
+      f.chats.emit(f.chat.id, "orch", "orch", { type: "text_delta", text: "draft" });
+      f.chats.emit(f.chat.id, "orch", "orch", { type: "text", text: "actual answer" });
+      f.chats.emit(f.chat.id, "orch", "orch", { type: "turn_end", ok: true });
+      f.chats.orchTurnEnded(f.chat.id, { type: "turn_end", ok: true });
+    };
+    assert.equal(await f.chats.askMasterCharacter(f.chat, "actual question"), "actual answer");
+    assert.ok(f.store.events(f.chat.id).some(({ event }) => event.type === "user" && event.text === "actual question"));
+    f.chats.sendHandler = async () => {
+      f.chats.emit(f.chat.id, "orch", "orch", { type: "text", text: "partial failure" });
+      f.chats.emit(f.chat.id, "orch", "orch", { type: "turn_end", ok: false });
+    };
+    assert.equal(await f.chats.askMasterCharacter(f.chat, "next question"), undefined);
+  } finally { await f.close(); }
+});
+
+test("monitor worker question uses the selected chat's existing worker consult", async () => {
+  const f = fixture();
+  try {
+    const target = f.store.createAgent(f.chat.id, "gpt", "chosen worker");
+    const other = f.store.createAgent(f.chat.id, "claude", "other worker");
+    f.behavior.set(target.key, () => f.finish(target.key, "answer from the selected worker"));
+    const result = await f.engine.askWorkerCharacter(f.chat, "gpt", "actual worker question");
+    assert.deepEqual(result, { status: "answer", text: "answer from the selected worker" });
+    assert.equal(f.sent.length, 1);
+    assert.equal(f.sent[0].role, target.key);
+    assert.match(f.sent[0].input.text, /actual worker question/);
+    const consult = f.store.listConsults(f.chat.id).at(-1);
+    assert.equal(consult?.toRole, target.key);
+    assert.equal(consult?.request, "actual worker question");
+    assert.equal(consult?.status, "done");
+    assert.equal(f.store.chat(f.chat.id)?.status, "done");
+    assert.equal(f.sent.some(sent => sent.role === other.key), false);
+    assert.equal((await f.engine.askWorkerCharacter(f.chat, "deepseek", "other question")).status, "error");
+    assert.equal(f.sent.length, 1);
+  } finally { await f.close(); }
+});

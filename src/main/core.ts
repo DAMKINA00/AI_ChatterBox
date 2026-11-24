@@ -15,6 +15,8 @@ import { Orchestrator } from "./orchestrator";
 import { resolveLink } from "./file-links";
 import { previewImage } from "./artifact-preview";
 import { CoreRpc } from "./core-rpc";
+import { summarize } from "./character-events";
+import { parseCharacterAsk, type CharacterAnswer } from "../shared/usage-companion";
 
 let store: Store;
 let runStats: RunStatsCache;
@@ -105,6 +107,20 @@ function registerHandlers(rpc: CoreRpc) {
   ipcMain.handle("chats:search", (_e, q: string) => (q.trim() ? store.searchChats(q.trim()) : []));
   const notDeleting = (id: number) => { if (remoteDeleting.has(id)) throw new Error("채팅을 삭제하는 중입니다."); };
   ipcMain.handle("chats:send", (_e, id: number, text: string, attachmentIds: number[], delivery?: "now" | "next") => { notDeleting(id); return chats.send(id, text, attachmentIds, delivery); });
+  ipcMain.handle("monitor:character-question", async (_e, value: unknown): Promise<CharacterAnswer> => {
+    const ask = parseCharacterAsk(value);
+    if (!ask) return { status: "error" };
+    const chat = store.chat(ask.chatId);
+    if (!chat || remoteDeleting.has(chat.id)) return { status: "no-chat" };
+    if (["working", "approval", "pausing", "paused", "interrupted"].includes(chat.status) || chats.isBusy(chat.id))
+      return { status: "busy" };
+    const result: CharacterAnswer = ask.character === "orch"
+      ? { status: "answer", text: await chats.askMasterCharacter(chat, ask.text) ?? "" }
+      : await orchestrator.askWorkerCharacter(chat, ask.character, ask.text);
+    if (result.status !== "answer") return result;
+    const text = summarize(result.text, 200);
+    return text ? { status: "answer", text } : { status: "error" };
+  });
   ipcMain.handle("chats:fork", (_e, id: number, options: ChatForkOptions) => { notDeleting(id); return chats.forkChat(id, options); });
   ipcMain.handle("chats:stop", (_e, id: number) => orchestrator.stop(id));
   ipcMain.handle("chats:pause", (_e, id: number) => orchestrator.pause(id));

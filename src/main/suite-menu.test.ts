@@ -63,3 +63,11 @@ test("[review 1078-1] hide all then show all on a stale Orch-only snapshot still
   // Applied in order by the monitor: everything off, then each of the five on, Orch included.
   assert.deepEqual(calls, [["characters", false], ...["orch", "claude", "gpt", "gemini", "grok"].map(id => ["character", { id, on: true }])]);
 });
+
+test("DeepSeek appears only for monitors that report it in characterIds", () => {
+  const base = { visible: true, topmost: false, characters: true, taskbar: true, startup: false, usageAlerts: true, activityAlerts: false, claudeDesktop: true, claudeLoggedIn: true };
+  const labels = (state: any) => (((suiteMenu({ enabled: true, running: true, state }, { status: "idle", currentVersion: "1" }, { enable() {}, command() {}, check() {}, install() {} })
+    .find(i => i.label === "사용량 모니터 설정")!.submenu as any[]).find(i => i.label === "캐릭터 표시").submenu) as any[]).filter(i => i.type === "checkbox").map(i => i.label);
+  assert.deepEqual(labels({ ...base, characterSet: [] }), ["마스터(Orch)", "클로드", "지피티", "제미나이", "그록"]);
+  assert.deepEqual(labels({ ...base, characterSet: [], characterIds: ["orch", "claude", "gpt", "gemini", "grok", "deepseek"] }), ["마스터(Orch)", "클로드", "지피티", "제미나이", "그록", "딥시크"]);
+});
