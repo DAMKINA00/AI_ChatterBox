@@ -9,9 +9,9 @@
 // carry a scope (path globs) — non-overlapping scopes run concurrently, overlapping ones queue, and
 // writes outside the scope are denied. A call that would wait in a cycle, or nest deeper than 3, is refused.
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { MONITOR_QUESTION_REASON } from "./character-events";
 import type { CharacterAnswer, MonitorCharacterId } from "../shared/usage-companion";
-import { existsSync, statSync } from "node:fs";
 import { basename, isAbsolute, relative, resolve as resolvePath } from "node:path";
 import {
   chatOrchestrator,
@@ -43,6 +43,7 @@ import {
   type PlanStep,
   type Project,
   type Role,
+  type TimelineEvent,
   type WorkerKind,
 } from "../shared/types";
 import type { ChatManager } from "./chats";
@@ -50,14 +51,14 @@ import { bridgeServerConfig, textResult, type ToolDef, type ToolResult } from ".
 import { mimeOf } from "./attachments";
 import type { AgentInput } from "./drivers/types";
 import { ApprovalJudge } from "./judge";
-import { scopesOverlap } from "./scope";
+import { inScope, scopesOverlap } from "./scope";
 import { isMutatingTool, isReadCommand } from "./execution-policy";
 import type { ApprovalInput } from "./approvals";
 import { addWait, checkAsk, removeWait, type WaitGraph } from "./team";
 import { completionIssue, dualInvestigationIssue } from "./dispatch";
 import { isAIStudioModel } from "../shared/aistudio";
 import { cliRemaining, CLI_LOW_REMAINING, isAuthError, isQuotaError, PRIORITY_FAILURE_LABEL, type PriorityFailureReason } from "./cli-accounts";
-import { planStepBlockers, validatePlanSteps } from "../shared/plan-steps";
+import { planStepBlockers, readyGroupSteps, validatePlanSteps, validateProposedTasks } from "../shared/plan-steps";
 import { alignNativeSteps, currentPlanView, droppedSteps, isOpenStep, keepDroppedSteps, openStepsText, pendingProposal, planStepsFor, stepKey } from "../shared/plan-lifecycle";
 import { validateReviewResult } from "../shared/review-result";
 import { forkContextPrompt } from "./chat-fork";
@@ -83,8 +84,8 @@ const DISCUSSION_INPUT = {
 
 const ROUTE_TOOL: ToolDef = {
   name: "route_request",
-  description: "사용자 지시마다 첫 단계로 처리 방식을 기록합니다. direct=간단한 답변·사전 확인만, delegated=본 작업 위임. 중요한 버그 수정·오류 분석은 delegated와 dualInvestigation=true로 기록하고 reason에 중요도를 판단한 이유를 적으세요. 팀의 모델·도구·사용량을 반환합니다. 위임은 앱 spawn/ask만 사용하세요.",
-  inputSchema: { type: "object", properties: { mode: { type: "string", enum: ["direct", "delegated"] }, reason: { type: "string" }, dualInvestigation: { type: "boolean", description: "중요한 버그·오류를 클로드와 지피티 양쪽이 독립 조사해야 하면 true. 수정 전 두 계열의 opinion 결과가 필요합니다." } }, required: ["mode", "reason"], additionalProperties: false },
+  description: "사용자 지시마다 첫 단계로 처리 방식을 기록합니다. direct=간단한 답변·사전 확인만, delegated=본 작업 위임. delegated에는 일을 먼저 나눠 본 결과를 split(single=일 하나, parallel=서로 독립인 일이 둘 이상, sequential=앞 결과가 다음 일의 입력)으로 적으세요. 중요한 버그 수정·오류 분석은 delegated와 dualInvestigation=true로 기록하고 reason에 중요도를 판단한 이유를 적으세요. 팀의 모델·도구·사용량을 반환합니다. 위임은 앱 spawn/ask만 사용하세요.",
+  inputSchema: { type: "object", properties: { mode: { type: "string", enum: ["direct", "delegated"] }, reason: { type: "string" }, dualInvestigation: { type: "boolean", description: "중요한 버그·오류를 클로드와 지피티 양쪽이 독립 조사해야 하면 true. 수정 전 두 계열의 opinion 결과가 필요합니다." }, split: { type: "string", enum: ["single", "parallel", "sequential"], description: "delegated일 때 작업 분류. parallel이면 첫 배정은 ask_parallel 한 번이어야 합니다." } }, required: ["mode", "reason"], additionalProperties: false },
 };
 
 const EXPRESSION_TOOL: ToolDef = {
@@ -94,13 +95,16 @@ const EXPRESSION_TOOL: ToolDef = {
 };
 
 // ---------- tool definitions
-const ASK_TOOL = (forMaster: boolean): ToolDef => ({
+const PLAN_TASK_INPUT = { type: "string", description: "승인된 계획을 실행할 때 이 배정이 맡는 계획 작업 id. 앱이 단계 상태와 협의 id를 자동으로 갱신합니다." };
+const scopeText = (folder?: string) =>
+  `scope: 모든 작업 종류에서 고쳐도 되는 경로 glob 목록. 기준은 작업 폴더${folder ? `(${folder})` : ""}이며 그 안의 상대경로로 적습니다(예: ["src/ui/**", "README.md"]). 하위 저장소의 파일이면 그 폴더 이름부터 적습니다. 기존 파일·폴더와 하나도 맞지 않는 glob은 배정 결과에 경고하니, 새로 만들 경로가 아니면 amend_scope로 고치세요. 범위가 겹치지 않는 변경은 동시에 진행되고, 범위 밖 쓰기는 거부됩니다. `;
+const ASK_TOOL = (forMaster: boolean, folder?: string): ToolDef => ({
   name: "ask",
   description:
     "작업자에게 닉네임으로 일을 맡기거나 질문하고 결과를 기다립니다 (예: to=\"클로드 2호\"). 받는 쪽은 이 대화를 보지 못하므로 message에 목표, 관련 파일, 조건, 완료 기준을 모두 적으세요. " +
     "kind: implement=구현·수정(받는 작업자가 파일을 고침, scope로 고칠 범위를 지정), review=기술 리뷰, opinion=의견·분석, writing=문장 다듬기·캐릭터 대사·문서 본문 등 글쓰기. 모든 작업 종류에서 필요한 파일 수정·명령 실행은 승인과 scope를 따릅니다. 사용자가 담당을 명시하면 그 작업자에게 지정한 종류 그대로 맡깁니다. " +
-    "scope: 모든 작업 종류에서 고쳐도 되는 경로 glob 목록(작업 폴더 기준, 예: [\"src/ui/**\", \"README.md\"]). 범위가 겹치지 않는 변경은 동시에 진행되고, 범위 밖 쓰기는 거부됩니다. " +
-    (forMaster ? "관련 쟁점을 묶어 토의하려면 discussion={topic, peers}를 지정해 CLI 진행자에게 맡기세요. 진행자가 참여자에게 직접 ask로 묻고 결과를 취합합니다. 독립적인 일은 ask_parallel을 사용하세요." : "토의 진행자로 지정되면 참여 작업자에게 직접 ask하고 합의·이견·근거를 취합하세요. 마스터에게는 ask를 쓰지 말고 결과 보고에 질문을 포함하세요."),
+    scopeText(folder) +
+    (forMaster ? "ask는 일 하나를 맡기고 결과를 기다립니다. 서로 독립적인 일이 둘 이상이면 ask를 여러 번 부르지 말고 ask_parallel 한 번으로 맡기세요. 관련 쟁점을 묶어 토의하려면 discussion={topic, peers}를 지정해 CLI 진행자에게 맡기세요. 진행자가 참여자에게 직접 ask로 묻고 결과를 취합합니다." :"토의 진행자로 지정되면 참여 작업자에게 직접 ask하고 합의·이견·근거를 취합하세요. 마스터에게는 ask를 쓰지 말고 결과 보고에 질문을 포함하세요."),
   inputSchema: {
     type: "object",
     properties: {
@@ -112,7 +116,7 @@ const ASK_TOOL = (forMaster: boolean): ToolDef => ({
       model: { type: "string", description: "선택 사항. route_request의 availableModels에서 담당 계열의 모델 ID를 선택합니다. 생략하면 프로젝트/채팅 모델을 유지합니다." },
       discussion: DISCUSSION_INPUT,
       ...(forMaster ? { accountId: CLI_ACCOUNT_INPUT, clearAccountId: CLEAR_CLI_ACCOUNT_INPUT } : {}),
-      ...(forMaster ? { summary: { type: "boolean", description: "단일 작업의 결과를 바로 확인하거나 취합 결과를 받을 때 true. 협의 상태와 약 400자의 결론, 주요 산출물을 반환합니다. 생략하면 ID와 상태만 반환합니다." } } : {}),
+      ...(forMaster ? { summary: { type: "boolean", description: "단일 작업의 결과를 바로 확인하거나 취합 결과를 받을 때 true. 협의 상태와 약 400자의 결론, 주요 산출물을 반환합니다. 생략하면 ID와 상태만 반환합니다." }, planTaskId: PLAN_TASK_INPUT, sequentialReason: { type: "string", description: "같은 group에 시작 가능한 계획 작업이 여럿인데 가용 작업자가 부족해 하나씩 맡겨야 할 때 그 이유. 적으면 단일 ask를 허용합니다." } } : {}),
       requiresImage: { type: "boolean", description: "실제 이미지 생성·편집 도구가 필요한 작업이면 true" },
       supersedes: { type: "integer", description: "이 배정으로 보완할 실패한 협의 id" },
       scope: { type: "array", items: { type: "string" } },
@@ -121,16 +125,17 @@ const ASK_TOOL = (forMaster: boolean): ToolDef => ({
     required: ["to", "message", "kind", ...(forMaster ? ["reason"] : [])],
   },
 });
-const ASK_PARALLEL_TOOL: ToolDef = {
+const ASK_PARALLEL_TOOL = (forMaster: boolean, folder?: string): ToolDef => ({
   name: "ask_parallel",
   description:
-    "서로 독립적인 일을 여러 작업자에게 동시에 맡깁니다. 마스터는 짧고 독립적인 결과에 reportsOnly=true를 사용해 각 결과를 바로 받을 수 있습니다. 통합 판단이 필요하면 coordinator가 결과를 취합하며, 두 옵션을 모두 생략하면 성공한 첫 담당자가 취합합니다. tasks 항목은 ask와 같습니다(to, message, kind, scope). " +
-    "구현을 나눠 맡길 때는 scope를 서로 겹치지 않게 주세요. 순서가 있는 일은 ask를 차례로 쓰세요.",
+    "서로 독립적인 일을 여러 작업자에게 동시에 맡기고 모두 끝날 때까지 기다립니다. " +
+    (forMaster ? "마스터가 coordinator를 생략하면 별도 취합 없이 각 담당자의 짧은 결과와 실패 사유를 바로 받습니다(reportsOnly 기본). 결과를 서로 대조·통합해야 할 때만 coordinator를 지정하세요. " : "coordinator를 생략하면 성공한 첫 담당자가 결과를 취합합니다. ") +
+    "tasks 항목은 ask와 같습니다(to, message, kind, scope). 구현을 나눠 맡길 때는 scope를 서로 겹치지 않게 주세요. 서로 다른 구현 결과의 리뷰도 한 번에 병렬로 맡길 수 있습니다. 앞 결과가 다음 일의 입력일 때만 차례로 맡기세요. " + scopeText(folder),
   inputSchema: {
     type: "object",
     properties: {
-      coordinator: { type: "string", description: "결과 취합을 맡을 tasks 안의 작업자 닉네임. 마스터의 복수 배정에서 사용합니다." },
-      reportsOnly: { type: "boolean", description: "마스터 전용. true이면 별도 취합 작업 없이 각 담당자의 짧은 결과와 실패 사유를 반환합니다. coordinator와 함께 지정할 수 없습니다." },
+      coordinator: { type: "string", description: "결과 취합을 맡을 tasks 안의 작업자 닉네임. 결과를 대조·통합해야 할 때만 지정합니다." },
+      reportsOnly: { type: "boolean", description: "마스터 전용. 별도 취합 없이 각 담당자의 짧은 결과와 실패 사유를 반환합니다. 마스터가 coordinator를 생략하면 기본 true이며 false로 두면 성공한 첫 담당자가 취합합니다. coordinator와 함께 지정할 수 없습니다." },
       tasks: {
         type: "array",
         items: {
@@ -149,6 +154,7 @@ const ASK_PARALLEL_TOOL: ToolDef = {
             discussion: DISCUSSION_INPUT,
             accountId: CLI_ACCOUNT_INPUT,
             clearAccountId: CLEAR_CLI_ACCOUNT_INPUT,
+            ...(forMaster ? { planTaskId: PLAN_TASK_INPUT } : {}),
           },
           required: ["to", "message", "kind"],
         },
@@ -156,7 +162,7 @@ const ASK_PARALLEL_TOOL: ToolDef = {
     },
     required: ["tasks"],
   },
-};
+});
 
 const SPAWN_TOOL: ToolDef = {
   name: "spawn",
@@ -264,6 +270,136 @@ const ASK_USER_TOOL: ToolDef = {
   },
 };
 
+const PROPOSE_PLAN_TOOL: ToolDef = {
+  name: "propose_plan",
+  description: "계획 모드 전용. 할 일을 모두 나눈 계획을 사용자 승인용으로 제출합니다. 작업마다 id, title, kind(implement|review|opinion|writing), agentKind(담당 계열), 선택 owner(기존 작업자 닉네임), scope(고칠 경로 glob, 작업 폴더 기준; 파일 변경이 없으면 []), group(병렬 묶음 번호, 1부터; 같은 group은 동시에 시작), dependsOn(앞 group의 선행 작업 id), done(완료 기준), 리뷰면 reviewOf(대상 작업 id)를 적습니다. 같은 group의 구현 scope는 겹치면 안 됩니다. 다시 호출하면 이번 제안을 최신 내용으로 바꿉니다. 제출한 뒤 계획을 짧게 요약하고 턴을 끝내면 사용자가 승인·수정 요청·취소를 고릅니다.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      summary: { type: "string", description: "계획 요약과 사용자 답변으로 정한 결정" },
+      tasks: {
+        type: "array", minItems: 1,
+        items: {
+          type: "object",
+          properties: {
+            id: { type: "string" }, title: { type: "string" },
+            kind: { type: "string", enum: KINDS },
+            agentKind: { type: "string", enum: ["claude", "gpt", "gemini", "grok", "deepseek"] },
+            owner: { type: "string", description: "이미 있는 작업자 닉네임(선택). 없으면 실행할 때 같은 계열로 확보합니다." },
+            scope: { type: "array", items: { type: "string" } },
+            group: { type: "integer", minimum: 1 },
+            dependsOn: { type: "array", items: { type: "string" } },
+            done: { type: "string", description: "완료 기준" },
+            reviewOf: { type: "string" },
+          },
+          required: ["id", "title", "kind", "agentKind", "scope", "group", "done"],
+        },
+      },
+    },
+    required: ["summary", "tasks"],
+  },
+};
+const WAIT_RESULTS_TOOL: ToolDef = {
+  name: "wait_results",
+  description: "이미 맡긴 협의가 끝날 때까지 기다립니다. sleep이나 agents 반복 조회 대신 사용하세요. consultIds를 생략하면 이번 지시에서 실행 중인 모든 협의를 기다립니다. 사용자 즉시 요청·동료의 직접 메시지·상태 점검이 오거나, 사용자 승인·질문 답을 기다리는 중이거나, 제한 시간(timeoutSec, 기본 300초·최대 1800초)이 지나면 그때까지의 상태와 미완료 목록을 반환하니 처리한 뒤 다시 호출하세요. 새 작업을 배정하지 않습니다.",
+  inputSchema: { type: "object", properties: { consultIds: { type: "array", items: { type: "integer" } }, timeoutSec: { type: "integer", minimum: 1, maximum: 1800 } }, additionalProperties: false },
+};
+const WAIT_DEFAULT_SEC = 300;
+const WAIT_MAX_SEC = 1800;
+const AMEND_SCOPE_TOOL: ToolDef = {
+  name: "amend_scope",
+  description: "실행 중인 작업자의 파일 범위(scope)를 정정합니다(예: 기준 폴더를 잘못 적은 경우). 다른 실행 중인 작업이 잡은 범위와 겹치면 거절합니다. 앱이 작업자에게 바뀐 범위를 알립니다. 범위 기준은 작업 폴더입니다.",
+  inputSchema: { type: "object", properties: { to: { type: "string", description: "작업 중인 작업자 닉네임" }, scope: { type: "array", items: { type: "string" }, minItems: 1 }, reason: { type: "string" } }, required: ["to", "scope", "reason"], additionalProperties: false },
+};
+
+const EXTEND_PLAN_SCOPE_TOOL: ToolDef = {
+  name: "extend_plan_scope",
+  description: "승인된 계획을 실행하는 중에, 계획의 승인 범위 밖 파일을 고쳐야 할 때 사용자에게 범위 확대 승인을 요청합니다. 앱이 사용자에게 직접 [허용]/[거부]를 묻고, 허용된 범위만 기록해 이후 배정·amend_scope에 허용합니다. 결과가 거부면 범위를 넓히지 말고 계획 범위 안에서 진행하거나 사용자에게 보고하세요.",
+  inputSchema: { type: "object", properties: { scope: { type: "array", items: { type: "string" }, minItems: 1, description: "추가로 허용받을 경로 glob(작업 폴더 기준)" }, reason: { type: "string", description: "왜 필요한지 사용자에게 보여 줄 설명" } }, required: ["scope", "reason"], additionalProperties: false },
+};
+
+/** Master tools refused while planning: in plan mode the master works alone and read-only. */
+const PLANNING_BLOCKED = new Set(["spawn", "ask", "ask_parallel", "release", "update_goal", "council_consult", "amend_scope", "wait_results", "extend_plan_scope"]);
+
+/**
+ * Warning for a scope glob that matches no existing path relative to the folder (a new folder or file is
+ * still allowed: this never refuses an assignment). Suggests the prefix when the glob exists under exactly
+ * one subfolder, as when the folder is the parent of a repository. null when the glob looks right.
+ */
+export function scopeIssue(folder: string, glob: string): string | null {
+  const g = glob.trim().replace(/\\/g, "/");
+  if (!g) return "빈 glob입니다.";
+  if (isAbsolute(g) || /^[A-Za-z]:\//.test(g)) {
+    const rel = relative(folder, g).replace(/\\/g, "/");
+    return rel.startsWith("..") || isAbsolute(rel) ? `기준 폴더 = ${folder} 밖의 경로라 쓰기가 거절됩니다.` : `기준 폴더 = ${folder}. 절대경로 대신 상대경로("${rel}")로 적으세요.`;
+  }
+  const wild = g.search(/[*?[{]/);
+  const head = wild < 0 ? g : g.slice(0, wild);
+  const base = (wild < 0 ? head : head.slice(0, head.lastIndexOf("/") + 1)).replace(/\/+$/, "");
+  const abs = resolvePath(folder, base || ".");
+  const rel = relative(folder, abs);
+  if (rel.startsWith("..") || isAbsolute(rel)) return `기준 폴더 = ${folder} 밖의 경로라 쓰기가 거절됩니다.`;
+  // A plain path may name a new file in an existing folder.
+  if (existsSync(abs) || (wild < 0 && existsSync(resolvePath(abs, "..")))) return null;
+  let prefix = "";
+  try {
+    const subs = readdirSync(folder, { withFileTypes: true }).filter(d => d.isDirectory() && existsSync(resolvePath(folder, d.name, base))).map(d => d.name);
+    if (subs.length === 1) prefix = subs[0];
+  } catch { /* the suggestion is optional */ }
+  return `기준 폴더 = ${folder}, 일치하는 기존 경로 없음.${prefix ? ` 하위 저장소라면 "${prefix}/${g}" 형태인지 확인하세요.` : " 새로 만들 경로가 아니라면 하위 폴더 접두사가 빠졌는지 확인하세요."}`;
+}
+
+/** Scope warnings of one assignment, one line per glob. */
+function scopeWarnings(folder: string | undefined, scope: unknown): string[] {
+  if (!folder || !Array.isArray(scope)) return [];
+  return scope.map(String).filter(Boolean).flatMap((g) => { const issue = scopeIssue(folder, g); return issue ? [`scope "${g}": ${issue}`] : []; });
+}
+const SCOPE_WARNING_HELP = "배정은 그대로 진행했습니다. 범위가 틀렸다면 재배정하지 말고 amend_scope(to, scope, reason)로 고치세요.";
+
+interface PlanRevision { planId: number; version: number; steps: PlanStep[] }
+
+/** The proposal still waiting for approval just before a new user message (that message revises it). */
+function waitingProposal(before: readonly TimelineEvent[]): PlanRevision | undefined {
+  const index = before.findLastIndex((e) => e.event.type === "plan_state");
+  const state = before[index]?.event;
+  if (state?.type !== "plan_state" || state.state !== "proposed" || state.planId === undefined) return undefined;
+  if (before.slice(index + 1).some((e) => e.event.type === "user" && !e.event.queued)) return undefined;
+  const steps = planStepsFor(before, state.planId) ?? [];
+  return { planId: state.planId, version: state.version ?? 1, steps };
+}
+
+function planTaskLine(s: PlanStep): string {
+  return `- ${s.id ?? "?"} ${s.title} [${s.kind ?? "?"} · ${s.agentKind ?? "?"}${s.owner ? ` · ${s.owner}` : ""} · scope ${s.scope?.length ? s.scope.join(", ") : "없음"}]` +
+    `${s.dependsOn?.length ? ` · 선행 ${s.dependsOn.join(", ")}` : ""}${s.reviewOf ? ` · 리뷰 대상 ${s.reviewOf}` : ""}${s.done ? ` · 완료 기준: ${s.done}` : ""}${s.status !== "pending" ? ` (${s.status})` : ""}`;
+}
+
+/** Version recorded with the plan's latest proposal, if any. */
+function latestPlanVersion(events: readonly TimelineEvent[], planId: number): number | undefined {
+  const e = events.findLast((x) => x.event.type === "plan_state" && x.event.planId === planId && x.event.state === "proposed");
+  return e?.event.type === "plan_state" ? e.event.version : undefined;
+}
+
+function planByGroup(steps: readonly PlanStep[]): string {
+  const groups = [...new Set(steps.map((s) => s.group ?? 0))].sort((a, b) => a - b);
+  return groups.map((g) => `${g ? `group ${g}` : "group 미지정"}:\n${steps.filter((s) => (s.group ?? 0) === g).map(planTaskLine).join("\n")}`).join("\n");
+}
+
+/** The planning turn's instruction: read-only, questions through ask_user, one propose_plan. */
+function planPrompt(request: string, revision?: PlanRevision): string {
+  return [
+    `[계획 모드] 읽기 전용${revision ? ` · 계획 v${revision.version} 수정` : ""}`,
+    "아래 요청의 실행 계획만 세운다. 작업자를 만들거나 맡기지 않고(spawn·ask·ask_parallel 금지), 파일을 바꾸거나 변경 명령을 실행하지 않는다.",
+    "1) 필요한 만큼 코드·문서를 직접 읽어 현재 상태를 파악한다(council_explore 사용 가능).",
+    "2) 범위·우선순위·방식처럼 사용자만 정할 수 있는 결정은 ask_user로 하나씩 묻는다(선택지는 options로). 사소한 것은 스스로 정한다.",
+    "3) 할 일을 빠짐없이 작업으로 나누고, 작업마다 담당 계열(agentKind)·종류(kind)·고칠 범위(scope, 작업 폴더 기준)·병렬 묶음(group)·선행(dependsOn)·완료 기준(done)을 정한다. 서로 독립인 작업은 같은 group에 넣어 동시에 진행되게 하고, 같은 group의 구현 scope는 겹치지 않게 한다. 코드 변경에는 만들지 않은 작업자의 리뷰 작업(kind=review, reviewOf)을 뒤 group에 둔다.",
+    "4) propose_plan(summary, tasks)으로 제출하고 사용자에게 두세 문장으로 요약한 뒤 턴을 끝낸다. 사용자가 승인하면 실행 단계에서 배정한다. TodoWrite·update_plan·checklist는 쓰지 않는다.",
+    ...(revision ? ["", `[이전 제안 v${revision.version}]`, revision.steps.length ? planByGroup(revision.steps) : "(작업 없음)", `아래 수정 요청을 반영해 계획 v${revision.version + 1}을 propose_plan으로 다시 제출한다.`] : []),
+    "",
+    revision ? "수정 요청:" : "요청:",
+    request,
+  ].join("\n");
+}
+
 function masterInstructions(project: Project, agent: AgentKind): string {
   const s = project.settings;
   const t = (n: string) => (agent === "claude" ? `mcp__chatterbox_bridge__${n}` : n);
@@ -272,8 +408,10 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     `너는 사용자의 지시를 받아 팀을 꾸리고 일을 나눠 맡기는 마스터다. 작업 폴더: ${project.folder}`,
     `- 좁은 판단에 별도 시각이 꼭 필요하면 ${t("council_consult")}에 질문과 필요한 문맥만 준다. 파일 위치·짧은 근거 탐색은 ${t("council_explore")}의 search/grep/docs를 사용한다. 단순 답변에는 호출하지 않는다. 두 도구는 파일 수정·명령 실행·하위 위임 없이 제한된 결과만 반환한다. 구현, 독립 조사, 코드 리뷰나 완료 검증을 대신하지 않으며 기존 spawn/ask·교차 리뷰 요건을 그대로 지킨다. Gemini 자문은 purpose=writing인 글쓰기만 지정한다.`,
     "- 너는 배정·방침 결정·최종 보고 담당이다. 간단한 질문·짧은 설명·이미 주어진 정보만으로 답할 수 있는 확인은 direct로 기록한 뒤 작업자를 생성하거나 호출하지 않고 직접 답한다. 상세 원인 조사·구현·이미지·문서 제작 등 본 작업은 앱 작업자에게 맡긴다. 결과에 누락·모순이 있으면 담당자에게 보완을 요청하고 통합 결론을 받아 최종 답변한다. 사용자가 명시적으로 직접 수행을 요구한 예외에도 기존 승인·작업 범위 규칙을 지킨다.",
-    "- 마스터는 목표·범위·완료 기준을 전달하고 결론을 정리한다. 한 담당자의 결론으로 충분하면 처음부터 ask(summary=true)로 짧은 결과를 받는다. 독립적인 짧은 보고는 ask_parallel(reportsOnly=true)로 받는다. 여러 근거를 대조하거나 이견을 해결해야 할 때 취합 담당에게 협의 ID를 전달한다. 상세 검증은 담당자와 비작성자 리뷰어가 수행한다. 근거가 부족하면 담당자에게 좁게 확인하고, 필요한 경우 read_consult(detail=true)로 원문을 조회한다.",
-    `- 지시마다 먼저 ${t("route_request")}(mode=direct|delegated, reason=이유)를 호출한다. 반환되는 실제 사용 가능 도구·모델·사용량으로 후보를 확인한다. 도구 사용 불가/미확인은 가능하다고 가정하지 않는다.`,
+    "- 마스터는 목표·범위·완료 기준을 전달하고 결론을 정리한다. 배정 전에 할 일을 먼저 나눈다: 서로 독립인 일(파일 범위가 다른 구현, 다른 관점의 조사, 서로 다른 구현 결과의 리뷰)은 한 번의 ask_parallel로 동시에 맡기고, 앞 결과가 다음 일의 입력인 일만 차례로 맡긴다. 정말 일 하나뿐일 때만 ask(summary=true)를 쓴다. ask_parallel에서 coordinator를 생략하면 각 결과를 바로 받는다. 여러 근거를 대조하거나 이견을 해결해야 할 때만 coordinator를 지정한다. 상세 검증은 담당자와 비작성자 리뷰어가 수행한다. 근거가 부족하면 담당자에게 좁게 확인하고, 필요한 경우 read_consult(detail=true)로 원문을 조회한다.",
+    `- 지시마다 먼저 ${t("route_request")}(mode=direct|delegated, reason=이유)를 호출한다. delegated이면 나눈 결과를 split=single|parallel|sequential로 함께 적는다(parallel이면 첫 배정은 ask_parallel 한 번). 반환되는 실제 사용 가능 도구·모델·사용량으로 후보를 확인한다. 도구 사용 불가/미확인은 가능하다고 가정하지 않는다.`,
+    `- 맡긴 결과를 기다릴 때는 sleep·agents 반복 조회 대신 ${t("wait_results")}를 호출한다. 사용자 요청·동료 메시지·상태 점검으로 대기가 먼저 풀리면 그것을 처리한 뒤 다시 ${t("wait_results")}로 기다린다. 실행 중인 작업의 범위를 잘못 줬으면 재배정하지 말고 ${t("amend_scope")}로 정정한다. 승인된 계획을 실행하는 동안의 배정·정정은 계획의 승인 범위 안에서만 가능하며, 넓혀야 하면 ${t("extend_plan_scope")}로 사용자 승인을 받는다.`,
+    `- 계획 모드([계획 모드] 지시)에서는 작업자를 만들거나 맡기지 않고 파일도 바꾸지 않는다. 직접 읽기 전용으로 코드를 살피고, 꼭 필요한 결정은 ${t("ask_user")}로 물은 뒤, 할 일 전체를 나눠 ${t("propose_plan")}으로 제출한다. TodoWrite·update_plan 같은 CLI 자체 계획 도구는 쓰지 않는다.`,
     "- 모든 위임은 이 앱의 chatterbox_bridge spawn/ask/ask_parallel만 사용한다. CLI 내부 spawn_agent/Agent/Task/팀 도구나 별도 CLI 프로세스로 작업자를 만들지 않는다. 앱 상단 모델을 기본으로 사용하며 배정마다 availableModels에 있는 담당 계열 모델을 model로 선택할 수 있다. 사용자가 담당 모델을 명시한 요청은 우선한다.",
     "- 작업자·역할·순서·병렬 수·추론 수준은 매 배정의 난도, 실제 도구, 비용, 속도, 사용량에 맞게 선정한다. 선호 역할은 참고이며 특정 업무를 특정 계열에 강제하지 않는다. effort는 route_request의 실제 지원 범위 전체에서 고르고 생략하면 기존 배정/모델 기본값을 쓴다. 동료도 질문마다 별도 effort를 선택할 수 있다. 사용자가 명시한 담당·수동 설정은 우선한다.",
     `- 클로드 선호 작업: ${s.claudeStrengths}\n  주의점: ${s.claudeCautions}`,
@@ -289,19 +427,19 @@ function masterInstructions(project: Project, agent: AgentKind): string {
     "- priority(계정 우선 할당)에서는 앱이 사용자가 정한 우선 순서의 첫 사용 가능 계정으로 배정한다(배정 제외·로그아웃 확인·잔여 0% 확인·최근 실패 계정은 건너뛰고 미확인 잔여량은 시도). 한도 소진·인증 실패·무응답으로 실패하면 앱이 같은 협의를 다음 계정의 새 세션과 요약 인계로 자동 이어서 실행하고, 모두 실패하면 실패를 보고한다. 이 경우 마스터는 같은 작업을 재배정하지 않는다. 첫 계정이 회복되면 다음 새 배정부터 다시 첫 계정을 쓰며 진행 중 작업은 바꾸지 않는다. 명시·저장된 accountId는 먼저 사용하고 실패하면 우선 순서로 넘어간다. 협의 결과의 '우선 할당' 줄과 실제 실행 계정을 확인해 보고한다.",
     "- 작업자 번호를 CLI 계정 번호로 추정하지 않는다. spawn/ask/ask_parallel의 accountId로 계정을 명시한다. 실행 계정은 앱 기록에 남으며, 계정 문제가 있거나 사용자가 물었을 때만 확인해 보고한다.",
     "- 기술 업무도 모델별 고정 역할 없이 필요한 구현·분석·검증 능력과 실제 가용성을 비교해 맡긴다. 중요한 오류의 독립 검증이 필요하면 dualInvestigation을 선택한다.",
-    "- 위 기준은 기본 선호이며 절대적인 우열이 아니다. 필요한 도구 사용 가능 여부를 먼저 확인하고, 사용자가 지정한 담당·선호 기준·관련 맥락·작업량·사용 한도를 고려한다. 두 계열을 매번 모두 부르지 않는다. 실패하면 원인을 반영해 재배정하고 가능한 담당자가 없으면 미완료 사유를 알린다.",
+    "- 위 기준은 기본 선호이며 절대적인 우열이 아니다. 필요한 도구 사용 가능 여부를 먼저 확인하고, 사용자가 지정한 담당·선호 기준·관련 맥락·작업량·사용 한도를 고려한다. 필요 없는 계열을 형식적으로 부르지는 않지만, 독립 작업이 여럿이면 인원을 늘려 병렬로 진행한다. 실패하면 원인을 반영해 재배정하고 가능한 담당자가 없으면 미완료 사유를 알린다.",
     "- 시각 작업도 구분한다. 이미지 생성·편집은 지정이 없을 때 이미지 도구가 있는 Codex에게, 명시적으로 Gemini/Grok 등 다른 작업자를 지정하면 그 작업자에게 requiresImage=true로 배정한다. 제공된 이미지 도구의 실제 결과만 완료로 인정한다. 그 밖의 모션그래픽·애니메이션은 실제 도구와 맥락에 맞는 동료가 제작하고 필요한 이미지 소재도 도구 가용성에 따라 협의한다.",
     `- 중요한 버그 수정·오류 분석이라고 판단하면 ${t("route_request")}(mode=delegated, dualInvestigation=true, reason=중요도 판단 근거)를 기록한다. 예: 데이터 손실·보안·설비 안전·서비스 중단에 영향이 크거나, 반복 장애의 원인이 불확실하고 잘못 고쳤을 때 피해가 큰 경우. 사용자에게 양쪽 조사를 명시적으로 요청받은 경우도 적용한다. 단순 문구·서식 수정이나 일반 질문에 모두 호출하지 않는다.`,
     `- 양쪽 조사: 클로드와 지피티에게 동일한 문제·증상·소스·로그·완료 기준을 주고 ${t("ask_parallel")}(각 kind=opinion)로 독립 조사시킨다. 다른 쪽 결론을 먼저 전달하거나 파일 수정을 맡기지 않는다. 각각 원인 후보·근거(파일/로그)·재현 방법·수정안·불확실성을 기록하게 한다. 두 조사가 끝난 뒤 취합 담당 작업자가 공통점·차이와 충돌하는 근거를 동료와 확인하고 통합 결론을 낸다. 마스터는 그 결론으로 수정 방침을 정해 구현을 배정하며 교차 리뷰 규칙을 유지한다. 한쪽을 실행할 수 없으면 양쪽 조사를 완료했다고 하지 말고 제한과 확인된 결과를 보고한다.`,
     `- 팀: ${t("spawn")}(kind=claude|gpt|gemini|grok|deepseek)로 작업자를 만든다. 기존 동료를 우선 재사용하고 필요한 인원과 병렬 수를 상황에 맞게 선택한다. 설정 인원은 권장 규모이며 초과해도 차단되지 않는다. 0으로 비활성화한 계열은 사용하지 않는다. 다 쓴 동료는 ${t("release")}로 해제한다.`,
-    "- 각 작업의 목표·담당·파일 범위·입출력 계약·완료 기준을 정해 배정한다. 독립 파트는 ask_parallel로 맡기고, 결과를 서로 대조해야 하면 coordinator를 지정한다. 작업자들은 필요한 쟁점을 직접 협의한다. 구현과 리뷰처럼 순서가 있는 일은 직전 결과를 다음 담당자에게 넘기고, 남은 이견이나 누락이 있을 때 보완을 맡긴다.",
+    "- 각 작업의 목표·담당·파일 범위·입출력 계약·완료 기준을 정해 배정한다. 독립 파트는 ask_parallel로 맡기고, 결과를 서로 대조해야 하면 coordinator를 지정한다. 작업자들은 필요한 쟁점을 직접 협의한다. 구현과 리뷰처럼 순서가 있는 일은 직전 결과를 다음 담당자에게 넘기되, 한 구현의 리뷰와 그와 무관한 다른 구현은 같은 ask_parallel로 묶어 동시에 진행한다. 남은 이견이나 누락이 있을 때 보완을 맡긴다.",
     "- send_message(to=all)는 사용자가 읽는 메인 대화다. 결정·질문·답변·막힘처럼 실제로 할 말이 있을 때만 쉬운 한국어 1~3문장으로 말한다. 상세 근거·로그는 해당 협의 기록이나 산출물에 남긴다. 마스터 대화에는 결과·남은 문제·링크만 짧게 정리하고 작업자 보고서나 계정 진단을 반복 출력하지 않는다. 상태 확인용 반복 발언이나 형식적인 대사는 만들지 않는다.",
     "- 작업자가 메인 채팅에 직접 보고한 진행·결과는 사용자가 이미 읽었다. 같은 내용을 바꿔 말하거나 요약·확인 응답으로 재보고하지 않는다. 새 결정·방침 변경, 사용자 질문에 대한 답변, 작업자 간 미해결 충돌, 전체 작업의 최종 결론이 있을 때만 발언한다. 새 내용이 없으면 공개 응답 없이 다음 배정·검증을 계속한다. 최종 보고도 이미 공개된 항목을 나열하지 말고 전체 완료 여부·새로 확인한 결론·남은 조치만 한 번 전달한다. 사용자가 다시 설명하거나 요약해 달라고 요청하면 답한다.",
     `- 일 맡기기: ${t("ask")}(to=닉네임, kind, message, scope). 서로 독립적인 일은 반드시 ${t("ask_parallel")}(tasks=[…])로 한 번에 맡겨 동시에 진행한다(하나씩 기다리지 말 것). 파일을 변경할 작업은 종류와 관계없이 scope를 겹치지 않게 나눈다. 읽기·토의는 동시에 가능하며, 리뷰·의견에서 수정할 때도 범위와 승인을 따른다.`,
     `- 관련 쟁점·서로 맞물린 설계·문장과 연출 등 직접 논의가 필요한 항목은 주제별 토의 그룹으로 묶는다. ${t("ask")}(to=클로드/지피티 진행자, kind=opinion|writing, discussion={topic:주제, peers:[참여 닉네임]}, message=목표·공통 자료·쟁점·완료 기준, reason, effort)로 맡긴다. 진행자가 참여자에게 직접 ask로 초안과 근거를 주고받아 합의·이견·남은 확인을 정리하고, 너는 그룹별 결과와 필요한 최종 결정만 취합한다. 사소한 확인까지 매번 중계하지 않는다.`,
     "- 토의 중 필요한 파일 수정·명령 실행도 지정 범위와 승인을 따른다. 주제와 사용자의 지정을 따라 Claude·Codex·Gemini·Grok에서 진행자와 참여자를 정한다. 참여자는 토의 시점에 대기 상태로 두고 다른 병렬 작업·토의 그룹에 중복 배정하지 않는다. 중요한 오류는 먼저 양쪽 독립 조사 결과를 확보한 뒤 토의 그룹에서 대조한다. 토의 결과를 교차 리뷰로 대신하지 않는다. 실제 참여 응답이 없으면 토의 완료로 보고하지 말고 보완하거나 미완료 사유를 알린다.",
     s.reviewGate
-      ? "- 너 자신 또는 작업자가 코드를 바꾸면 끝내기 전에, 그 코드를 만들지 않은 작업자에게 리뷰를 맡긴다 (kind=review). 일반 변경의 리뷰는 다른 클로드 작업자도 가능하다. 중요한 오류·보안·안전 등 다른 계열 관점이 꼭 필요한 경우 지피티로 교차검증한다. 네가 직접 바꾼 파일도 빠짐없이 넘긴다. 지적이 나오면 고치고 다시 리뷰받는다."
+      ? "- 너 자신 또는 작업자가 코드를 바꾸면 끝내기 전에, 그 코드를 만들지 않은 작업자에게 리뷰를 맡긴다 (kind=review). 서로 다른 구현 결과의 리뷰는 ask_parallel 한 번으로 동시에 맡긴다. 일반 변경의 리뷰는 다른 클로드 작업자도 가능하다. 중요한 오류·보안·안전 등 다른 계열 관점이 꼭 필요한 경우 지피티로 교차검증한다. 네가 직접 바꾼 파일도 빠짐없이 넘긴다. 지적이 나오면 고치고 다시 리뷰받는다."
       : "- 리뷰는 필요하다고 판단할 때만 맡긴다 (kind=review).",
     "- ask/ask_parallel의 각 배정에 reason(선택 이유)을 넣는다. 이미지 생성·편집은 requiresImage=true, kind=implement로 요청한다. 기본은 Codex이며 사용자가 다른 작업자를 지정하면 그 지정을 우선한다. 배정 내용에는 목표, 제약, 산출물, 완료 기준을 포함한다.",
     "- 작업자는 이 대화를 보지 못한다. message에 목표, 관련 파일 경로, 제약, 완료 기준을 빠짐없이 적는다. 사용자가 첨부한 파일이 필요하면 attach로 경로를 넘긴다.",
@@ -358,12 +496,43 @@ interface Instruction {
   pinnedSent?: number;
   /** A user follow-up needs a visible master reply before further team management. */
   pendingImmediate?: boolean;
+  /** route_request split: parallel requires the first assignment to be one ask_parallel. */
+  split?: "single" | "parallel" | "sequential";
 }
 
 interface Discussion { topic: string; peers: ChatAgent[] }
+interface PlanTaskRef { planId: number; taskId: string }
+/**
+ * The plan the user approved: its task definitions (the upper bound), each task's current range after an
+ * amend_scope (inherited by retries), and the write ranges the user later allowed with extend_plan_scope.
+ */
+interface ApprovedPlan { planId: number; version?: number; tasks: PlanStep[]; effective?: Record<string, string[]>; extended?: string[] }
+
+/** True when `glob` lies inside one of `allowed` (exact, or under an allowed `dir/**`). */
+export function globWithin(glob: string, allowed: readonly string[]): boolean {
+  const norm = (s: string) => s.trim().replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+  const g = norm(glob);
+  // A parent step could leave any allowed folder: never inside.
+  if (g.split("/").includes("..")) return false;
+  const wild = g.search(/[*?[{]/);
+  // The literal text before the first wildcard, kept as is: "src*" must not pass for "src/**".
+  const head = wild < 0 ? g.replace(/\/+$/, "") : g.slice(0, wild);
+  return allowed.some((raw) => {
+    const a = norm(raw);
+    if (a === g || a === "**") return true;
+    if (!a.endsWith("/**") || /[*?[{]/.test(a.slice(0, -3))) return false;
+    const dir = a.slice(0, -3);
+    // Inside only once the literal part has entered the folder (past its separator); a plain path may
+    // also name the folder itself.
+    return head.startsWith(dir + "/") || (wild < 0 && head === dir);
+  });
+}
+/** A held write range; `command` marks the short lock of one unscoped command (released when it ends). */
+interface ScopeLock { consultId: number; scope: string[]; command?: boolean; toolId?: string }
 interface PausedAssignment {
   caller: Role; target: ChatAgent; kind: ConsultKind; message: string; scope: string[];
   attach: string[]; reason: string; effort?: string; model?: string; discussion?: Discussion; consultId?: number;
+  planTask?: PlanTaskRef;
 }
 interface PauseState {
   folder: string;
@@ -371,6 +540,9 @@ interface PauseState {
   planning: boolean; reviewing: boolean; assignments: PausedAssignment[];
   /** Plan id of an approved /plan being carried out. */
   planRun?: number;
+  /** A planning turn's version and whether it already submitted propose_plan. */
+  planVersion?: number;
+  planSubmitted?: boolean;
 }
 interface Running {
   lastEventAt: number;
@@ -391,6 +563,8 @@ interface Running {
   pendingFiles: Map<string, string[]>;
   discussion?: Discussion;
   discussionReplies?: Set<Role>;
+  /** The approved plan task this assignment carries out. */
+  planTask?: PlanTaskRef;
   resolve: (r: { ok: boolean; interrupted?: boolean; error?: string }) => void;
   /** priority: failed attempts so far, the account switch in progress and the last switch shown to the team. */
   attempts?: PriorityAttempt[];
@@ -417,9 +591,16 @@ export class Orchestrator {
   /** Only the master's tool wait is released; the consultation itself keeps running. */
   private masterConsultWaiters = new Map<number, Set<(note?: string) => void>>();
   /** Implement scopes currently held, per chat. */
-  private scopeLocks = new Map<number, { consultId: number; scope: string[] }[]>();
+  private scopeLocks = new Map<number, ScopeLock[]>();
   private scopeWaiters = new Map<number, (() => void)[]>();
-  private asks = new Map<string, { chatId: number; resolve: (a: string) => void }>();
+  private asks = new Map<string, { chatId: number; resolve: (a: string) => void; keepStatus?: boolean }>();
+  /** The app's [진행/수정/취소] question for a submitted plan, and a choice made while the turn still ran. */
+  private planConfirm = new Map<number, string>();
+  private planDecision = new Map<number, "run" | "cancel">();
+  /** Chats whose messages, sent after the plan was submitted, revise that plan when the turn ends. */
+  private reviseAfterTurn = new Set<number>();
+  /** Those messages themselves, kept out of inst.queued until the submitting turn ends. */
+  private revisionHold = new Map<number, AgentInput[]>();
   private stopped = new Set<number>();
   private epochs = new Map<number, number>();
   private nextEpoch(chatId: number) {
@@ -431,6 +612,9 @@ export class Orchestrator {
   private assignments = new Map<number, Map<string, PausedAssignment>>();
   /** /plan: the master is only planning (no asks) / running an approved plan. */
   private planning = new Set<number>();
+  /** Planning turns that submitted propose_plan, and the plan version each planning turn works on. */
+  private planSubmitted = new Set<number>();
+  private planVersions = new Map<number, number>();
   private reviewing = new Set<number>();
   /** Master native tool calls which may still be changing the workspace. */
   private masterActions = new Map<number, Set<string>>();
@@ -450,11 +634,14 @@ export class Orchestrator {
       const { planId, instructionId } = this.planOwner(chatId);
       if (planId === undefined) return event;
       const previous = planStepsFor(chats.store.events(chatId), planId) ?? [];
+      // A native todo list must not rewrite a plan already submitted with propose_plan.
+      if (this.planning.has(chatId) && this.planSubmitted.has(chatId))
+        return { ...event, steps: previous.map((s) => ({ ...s })), explanation: event.explanation, planId, instructionId };
       // Title-only steps take the identity of the one same-titled step already recorded (never a guess),
       // then the same keep and cancellation rules as the checklist tool apply.
       const merged = keepDroppedSteps(previous, alignNativeSteps(previous, event.steps));
       try {
-        return { ...event, steps: validatePlanSteps(merged, previous), planId, instructionId };
+        return { ...event, steps: this.lockApproved(chatId, validatePlanSteps(merged, previous)), planId, instructionId };
       } catch (e) {
         // Never store an unchecked list over a recorded one: that would bypass the kept cancellations.
         if (previous.length) {
@@ -481,6 +668,11 @@ export class Orchestrator {
       return a ? workerInstructions(a) : undefined;
     };
     chats.toolsFor = (chat, role) => ({ chatterbox_bridge: this.bridgeFor(chat.id, role) });
+    chats.bridgeToolNames = (chatId, role) => this.bridgeToolNames(chatId, role);
+    chats.approvalDenied = (chatId, role, toolId) => {
+      const r = toolId ? this.running.get(chatId)?.get(role) : undefined;
+      if (r) this.releaseCommandLock(chatId, r.consultId, toolId);
+    };
     chats.onDriverEvent = (chatId, role, event) => this.observe(chatId, role, event);
     chats.sendHandler = (chat, input) => this.instruct(chat, input);
     chats.busySend = (chat, input, delivery) => chat.status !== "paused" && delivery === "now" ? this.deliverNow(chat, input) : this.queue(chat, input);
@@ -675,12 +867,9 @@ export class Orchestrator {
     const id = `br-${chatId}-${role}`;
     let reg = this.bridgeKeys.get(id);
     if (!reg) {
-      const master = role === "orch";
       reg = this.chats.bridge.register(
         {
-          tools: master
-            ? [ROUTE_TOOL, ...COUNCIL_TOOLS, CLI_ACCOUNTS_TOOL, SPAWN_TOOL, ASK_TOOL(true), ASK_PARALLEL_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, RELEASE_TOOL, AGENTS_TOOL, READ_CONSULT_TOOL, CHECK_AGENT_TOOL, CHECKLIST_TOOL, GOAL_TOOL, ASK_USER_TOOL, EXPRESSION_TOOL]
-            : [...COUNCIL_TOOLS, ASK_TOOL(false), ASK_PARALLEL_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, AGENTS_TOOL, READ_CONSULT_TOOL, CHECK_AGENT_TOOL, REPORT_REVIEW_TOOL, EXPRESSION_TOOL],
+          tools: this.bridgeTools(chatId, role),
           call: (name, args) => this.call(chatId, role, name, args),
         },
         id,
@@ -688,6 +877,19 @@ export class Orchestrator {
       this.bridgeKeys.set(id, reg);
     }
     return bridgeServerConfig(this.chats.bridgeScript, reg.url);
+  }
+
+  private bridgeTools(chatId: number, role: Role): ToolDef[] {
+    const chat = this.chats.store.chat(chatId);
+    const folder = chat ? this.chats.store.project(chat.projectId)?.folder : undefined;
+    return role === "orch"
+      ? [ROUTE_TOOL, ...COUNCIL_TOOLS, CLI_ACCOUNTS_TOOL, SPAWN_TOOL, ASK_TOOL(true, folder), ASK_PARALLEL_TOOL(true, folder), WAIT_RESULTS_TOOL, AMEND_SCOPE_TOOL, EXTEND_PLAN_SCOPE_TOOL, MESSAGE_TOOL, MESSAGES_TOOL, RELEASE_TOOL, AGENTS_TOOL, READ_CONSULT_TOOL, CHECK_AGENT_TOOL, CHECKLIST_TOOL, PROPOSE_PLAN_TOOL, GOAL_TOOL, ASK_USER_TOOL, EXPRESSION_TOOL]
+      : [...COUNCIL_TOOLS, ASK_TOOL(false, folder), ASK_PARALLEL_TOOL(false, folder), MESSAGE_TOOL, MESSAGES_TOOL, AGENTS_TOOL, READ_CONSULT_TOOL, CHECK_AGENT_TOOL, REPORT_REVIEW_TOOL, EXPRESSION_TOOL];
+  }
+
+  /** Native tool names a Claude session of this role should see (deny-rule detection). */
+  bridgeToolNames(chatId: number, role: Role): string[] {
+    return this.bridgeTools(chatId, role).map(t => `mcp__chatterbox_bridge__${t.name}`);
   }
 
   private readMessages(chatId: number, role: Role, consume = true, through = Infinity, received: readonly number[] = []): string {
@@ -747,6 +949,8 @@ export class Orchestrator {
     const master = caller === "orch";
     if (master && this.instructions.get(chatId)?.pendingImmediate && ["council_consult", "council_explore", "spawn", "ask", "ask_parallel", "release", "checklist", "update_goal", "ask_user"].includes(name))
       return textResult("사용자의 즉시 추가 질문·수정 요청에 먼저 직접 답변하세요. 이미 아는 내용은 바로 설명하고, 수정 요청은 이해한 내용과 반영 방법을 사용자에게 먼저 말한 뒤 기존 작업을 계속하세요. 기존 작업자는 그대로 실행 중입니다.", true);
+    if (master && this.planning.has(chatId) && PLANNING_BLOCKED.has(name))
+      return textResult(`지금은 계획 모드라 ${name}을(를) 쓸 수 없습니다. 작업자를 쓰지 말고 직접 읽기 전용으로 살핀 뒤, 꼭 필요한 결정은 ask_user로 묻고, 할 일 전체를 propose_plan으로 제출하세요. 배정은 사용자가 승인한 뒤 실행 단계에서 합니다.`, true);
     try {
       switch (name) {
         case "council_consult":
@@ -832,6 +1036,8 @@ export class Orchestrator {
           const dualInvestigation = !!inst.dualInvestigation || args.dualInvestigation === true;
           if (dualInvestigation && args.mode !== "delegated") return textResult("중요 오류의 양쪽 조사는 delegated로 기록하세요.", true);
           if (inst.mode === "delegated" && args.mode === "direct") return textResult("위임할 본 작업을 직접 처리로 바꿀 수 없습니다. 가능한 작업자에게 맡기거나 미완료 사유를 보고하세요.", true);
+          if (args.split !== undefined && !["single", "parallel", "sequential"].includes(args.split)) return textResult("split은 single, parallel, sequential 중 하나여야 합니다.", true);
+          if (args.mode === "delegated" && args.split !== undefined) inst.split = args.split;
           inst.mode = args.mode;
           inst.dualInvestigation = dualInvestigation;
           this.saveInstruction(chatId);
@@ -851,6 +1057,10 @@ export class Orchestrator {
           this.chats.emit(chatId, this.chats.route(chatId, caller), caller, { type: "expression", expression: args.expression });
           return textResult("표정을 반영했습니다.");
         case "ask": {
+          if (master) {
+            const gate = this.singleAskIssue(chatId, args);
+            if (gate) return textResult(gate, true);
+          }
           const task = this.askTool(chatId, caller, args);
           return await (master ? this.waitForMasterConsult(chatId, task) : task);
         }
@@ -860,6 +1070,17 @@ export class Orchestrator {
           if (args.coordinator !== undefined && (typeof args.coordinator !== "string" || !tasks.some(t => t.to === args.coordinator))) return textResult("coordinator는 이번 tasks에 배정한 작업자 닉네임이어야 합니다.", true);
           if (args.reportsOnly !== undefined && (!master || typeof args.reportsOnly !== "boolean")) return textResult("reportsOnly는 마스터가 지정하는 boolean 옵션입니다.", true);
           if (args.reportsOnly && args.coordinator !== undefined) return textResult("reportsOnly=true와 coordinator는 함께 지정할 수 없습니다.", true);
+          // Check every plan task before starting any, so one bad task does not leave half a batch running.
+          const issues = tasks.flatMap((t, i) => {
+            const target = this.agents(chatId).find((a) => a.nickname === String(t?.to ?? "").trim());
+            const issue = this.assignmentIssue(chatId, caller, this.withPlanDefaults(chatId, caller, t), target);
+            return issue ? [`${i + 1}. ${String(t?.to ?? "")}: ${issue}`] : [];
+          });
+          if (issues.length) return textResult(`배정을 시작하지 않았습니다.\n${issues.join("\n")}`, true);
+          const planIds = tasks.map(t => t?.planTaskId).filter((id): id is string => typeof id === "string");
+          if (new Set(planIds).size !== planIds.length) return textResult("같은 planTaskId를 한 번에 두 번 배정할 수 없습니다.", true);
+          // The master gets each result directly unless it asked for a synthesis (coordinator or reportsOnly=false).
+          if (master && args.coordinator === undefined && args.reportsOnly === undefined) args = { ...args, reportsOnly: true };
           const batches = this.parallelBatches.get(chatId) ?? new Set<Promise<ToolResult>>();
           this.parallelBatches.set(chatId, batches);
           const result = this.parallelAsks(chatId, caller, tasks, args.coordinator, args.reportsOnly === true).finally(() => {
@@ -869,6 +1090,18 @@ export class Orchestrator {
           batches.add(result);
           return await (master ? this.waitForMasterConsult(chatId, result) : result);
         }
+        case "propose_plan":
+          if (!master) break;
+          return this.proposePlan(chatId, args);
+        case "wait_results":
+          if (!master) break;
+          return await this.waitResults(chatId, args.consultIds, args.timeoutSec);
+        case "amend_scope":
+          if (!master) break;
+          return this.amendScope(chatId, String(args.to ?? ""), args.scope, String(args.reason ?? ""));
+        case "extend_plan_scope":
+          if (!master) break;
+          return await this.extendPlanScope(chatId, args.scope, String(args.reason ?? ""));
         case "cli_accounts": {
           if (!master) return textResult("CLI 계정 조회·선택은 마스터가 직접 합니다.", true);
           if (args.kind !== undefined && !(CLI_ACCOUNT_KINDS as readonly unknown[]).includes(args.kind)) return textResult("kind는 claude, gpt, grok 중 하나여야 합니다.", true);
@@ -904,6 +1137,7 @@ export class Orchestrator {
           return await this.release(chatId, String(args.nickname ?? ""));
         case "checklist":
           if (!master) break;
+          if (this.planning.has(chatId) && this.planSubmitted.has(chatId)) return textResult("이미 propose_plan으로 제출한 계획이 있습니다. 바꾸려면 propose_plan을 다시 호출하세요.", true);
           return this.checklist(chatId, args.steps);
         case "update_goal":
           if (!master) break;
@@ -1046,6 +1280,341 @@ export class Orchestrator {
     return textResult(`${a.nickname}이(가) 준비되었습니다. ask(to="${a.nickname}")로 일을 맡기세요. 이전 기록이 있으면 유지됩니다.${cliInfo ? `\n[CLI ${cliInfo}]` : ""}`);
   }
 
+  private folderOf(chatId: number): string | undefined {
+    const chat = this.chats.store.chat(chatId);
+    return chat ? this.chats.store.project(chat.projectId)?.folder : undefined;
+  }
+
+  /** Write ranges the user approved for the running plan: its tasks' scopes and any extension the user allowed. */
+  private planScopeUnion(chatId: number): string[] | undefined {
+    const plan = this.approvedPlan(chatId);
+    if (!plan) return undefined;
+    return [...new Set([...plan.tasks.flatMap((t) => t.scope ?? []), ...(plan.extended ?? [])])];
+  }
+
+  /** Globs of `scope` outside what the running plan allows (`limit` narrows it to one task's range). */
+  private outsidePlan(chatId: number, scope: readonly string[], limit?: readonly string[]): string[] {
+    const plan = this.approvedPlan(chatId);
+    if (!plan) return [];
+    const allowed = [...(limit ?? this.planScopeUnion(chatId) ?? []), ...(plan.extended ?? [])];
+    return scope.filter((g) => !globWithin(g, allowed));
+  }
+
+  /** Why a file change falls outside the running plan's approved ranges, or null (no plan / inside). */
+  private writesOutsidePlan(chatId: number, input: ApprovalInput): string | null {
+    const cap = this.planScopeUnion(chatId);
+    const folder = this.folderOf(chatId);
+    if (!cap || !folder) return null;
+    const paths = [...(input.paths ?? []), ...(input.diffs?.flatMap((d) => d.movePath ? [d.path, d.movePath] : [d.path]) ?? [])];
+    const outside = paths.map((p) => relative(folder, resolvePath(folder, p)).replace(/\\/g, "/")).filter((rel) => rel.startsWith("..") || isAbsolute(rel) || !inScope(rel, cap)); // a real path: glob matching, not glob containment
+    if (!outside.length) return null;
+    return `승인된 계획의 범위(${cap.join(", ") || "파일 수정 없음"}) 밖의 파일 변경입니다: ${[...new Set(outside)].join(", ")}. 범위를 넓혀야 하면 마스터가 extend_plan_scope로 사용자 승인을 받아야 합니다.`;
+  }
+
+  private saveApprovedPlan(chatId: number, plan: ApprovedPlan) {
+    this.chats.store.setSetting(`approvedPlan:${chatId}`, JSON.stringify(plan));
+  }
+
+  /** The task definitions fixed when the user approved the plan now running (persisted for recovery). */
+  private approvedPlan(chatId: number): ApprovedPlan | undefined {
+    const planId = this.planRunning.get(chatId);
+    if (planId === undefined) return undefined;
+    try {
+      const saved = JSON.parse(this.chats.store.getSetting(`approvedPlan:${chatId}`) ?? "null");
+      if (saved?.planId === planId && Array.isArray(saved.tasks)) return saved;
+    } catch { /* fall back to the plan as recorded */ }
+    return undefined;
+  }
+
+  /**
+   * Keeps the approved structure of the running plan: a checklist or native list may change a task's status
+   * (and add supplement steps), not its kind, family, owner, scope, group, dependencies or criterion.
+   */
+  private lockApproved(chatId: number, steps: PlanStep[]): PlanStep[] {
+    const approved = this.approvedPlan(chatId);
+    if (!approved) return steps;
+    const byId = new Map(approved.tasks.filter((t) => t.id && t.kind).map((t) => [t.id!, t]));
+    return steps.map((s) => {
+      const a = s.id ? byId.get(s.id) : undefined;
+      if (!a) return s;
+      const fixed: PlanStep = { ...s, title: a.title };
+      for (const key of ["kind", "agentKind", "scope", "group", "done", "reviewOf", "dependsOn"] as const) {
+        if (a[key] === undefined) delete fixed[key];
+        else (fixed as any)[key] = Array.isArray(a[key]) ? [...(a[key] as string[])] : a[key];
+      }
+      if (a.owner) fixed.owner = a.owner;
+      return fixed;
+    });
+  }
+
+  /** Restores a planning turn's version and submission after a pause or restart. */
+  private restorePlanTurn(chatId: number, version?: number, submitted?: boolean) {
+    if (version !== undefined) this.planVersions.set(chatId, version); else this.planVersions.delete(chatId);
+    if (submitted) this.planSubmitted.add(chatId); else this.planSubmitted.delete(chatId);
+  }
+
+  /**
+   * After a pause or restart, matches the running plan's in-progress steps to their stored assignments:
+   * a finished consult completes its step; a step whose work ended or never started goes back to pending.
+   * Steps in `resuming` are being continued by a resumed assignment and stay as they are.
+   */
+  private reconcilePlanSteps(chatId: number, resuming: ReadonlySet<string> = new Set()) {
+    const planId = this.planRunning.get(chatId);
+    if (planId === undefined) return;
+    const steps = planStepsFor(this.chats.store.events(chatId), planId);
+    if (!steps?.some((s) => s.status === "inProgress")) return;
+    const consults = this.chats.store.listConsults(chatId);
+    const linked = (taskId: string) => consults.filter((c) => c.id && this.chats.store.consultAssignment(c.id)?.planTask?.taskId === taskId && this.chats.store.consultAssignment(c.id)?.planTask?.planId === planId);
+    let changed = false;
+    const next = steps.map((s) => {
+      if (s.status !== "inProgress" || !s.id || resuming.has(s.id)) return s;
+      const last = linked(s.id).at(-1);
+      const status: PlanStep["status"] = last?.status === "done" ? "completed" : "pending";
+      changed = true;
+      return { ...s, status, ...(last ? { consultIds: [...new Set([...(s.consultIds ?? []), last.id])] } : {}) };
+    });
+    if (changed) this.chats.emit(chatId, "orch", "orch", { type: "plan_update", steps: next, planId, instructionId: this.instructions.get(chatId)?.id });
+  }
+
+  /** A plan task's approved kind and scope fill an assignment that leaves them out. */
+  private withPlanDefaults(chatId: number, caller: Role, args: any): any {
+    if (caller !== "orch" || typeof args?.planTaskId !== "string") return args;
+    const plan = this.approvedPlan(chatId);
+    const task = plan?.tasks.find(t => t.id === args.planTaskId);
+    if (!task) return args;
+    // The task's current range (narrowed by amend_scope) carries over to a retry.
+    const scope = plan!.effective?.[task.id!] ?? task.scope;
+    return { ...args, ...(args.kind === undefined && task.kind ? { kind: task.kind } : {}), ...(args.scope === undefined && scope ? { scope: [...scope] } : {}) };
+  }
+
+  /** Plan-task problems that refuse an assignment before anything starts (scope problems only warn). */
+  private assignmentIssue(chatId: number, caller: Role, args: any, target?: ChatAgent): string | null {
+    const issues: string[] = [];
+    if (args?.planTaskId !== undefined) {
+      const planId = this.planRunning.get(chatId);
+      if (caller !== "orch" || typeof args.planTaskId !== "string") issues.push("planTaskId는 마스터가 계획 작업 id 문자열로 지정합니다.");
+      else if (planId === undefined) issues.push("승인된 계획을 실행 중일 때만 planTaskId를 지정할 수 있습니다.");
+      else {
+        const steps = planStepsFor(this.chats.store.events(chatId), planId) ?? [];
+        const step = steps.find(s => s.id === args.planTaskId);
+        const approved = this.approvedPlan(chatId)?.tasks.find(t => t.id === args.planTaskId);
+        if (!step) issues.push(`계획에 없는 작업 id입니다: ${args.planTaskId}`);
+        else if (step.status !== "pending") issues.push(`계획 작업 ${step.id}은(는) 이미 ${step.status === "inProgress" ? "진행 중" : step.status === "completed" ? "완료" : "취소"}입니다. 다시 맡기려면 checklist로 pending으로 되돌리세요.`);
+        else {
+          const blockers = planStepBlockers(step, steps);
+          if (blockers.length) issues.push(`계획 작업 ${step.id}의 선행 ${blockers.map(b => b.id).join(", ")}이(가) 끝나지 않았습니다.`);
+          const open = steps.filter(s => isOpenStep(s) && s.group !== undefined).map(s => s.group!);
+          if (step.group !== undefined && open.length && Math.min(...open) < step.group)
+            issues.push(`계획 작업 ${step.id}은(는) group ${step.group}입니다. 앞 group ${Math.min(...open)}의 작업이 끝나거나 취소된 뒤 맡기세요.`);
+        }
+        // The approved definition is fixed: an assignment for it must match what the user approved.
+        if (approved) {
+          const kind = KINDS.includes(args.kind) ? args.kind : "implement";
+          if (approved.kind && kind !== approved.kind) issues.push(`계획 작업 ${approved.id}의 승인된 종류는 ${approved.kind}입니다(요청: ${kind}).`);
+          if (target && approved.agentKind && target.kind !== approved.agentKind) issues.push(`계획 작업 ${approved.id}의 승인된 담당 계열은 ${WORKER_KIND_LABEL[approved.agentKind]}입니다(요청: ${target.nickname}).`);
+          if (target && approved.owner && target.nickname !== approved.owner) issues.push(`계획 작업 ${approved.id}의 승인된 담당은 ${approved.owner}입니다(요청: ${target.nickname}).`);
+          // A narrower range (e.g. after amend_scope) is fine; anything beyond the approved one is not.
+          const scope: string[] = Array.isArray(args.scope) ? [...new Set<string>(args.scope.map(String).filter(Boolean))] : [];
+          const outside = this.outsidePlan(chatId, scope, approved.scope ?? []);
+          if (outside.length) issues.push(`계획 작업 ${approved.id}의 승인된 범위(${(approved.scope ?? []).join(", ") || "파일 변경 없음"}) 밖입니다: ${outside.join(", ")}. scope를 생략하면 현재 범위로 맡깁니다. 넓혀야 하면 extend_plan_scope로 사용자 승인을 받으세요.`);
+        }
+      }
+    } else if (Array.isArray(args?.scope)) {
+      // Supplement work (fixes, retries, checks), by the master or one worker asking another, stays inside
+      // what the user approved for the plan.
+      const outside = this.outsidePlan(chatId, args.scope.map(String).filter(Boolean));
+      if (outside.length) issues.push(`승인된 계획의 범위 밖입니다: ${outside.join(", ")}. 계획 범위(${(this.planScopeUnion(chatId) ?? []).join(", ") || "파일 수정 없음"}) 안에서 맡기거나, extend_plan_scope(scope, reason)로 사용자 승인을 받은 뒤 다시 배정하세요.`);
+    }
+    return issues.length ? issues.join("\n") : null;
+  }
+
+  /** Assignments outside the approved plan are supplements (fixes, retries, checks): allowed, with a reminder. */
+  private planSupplementNote(chatId: number, args: any): string {
+    if (typeof args?.planTaskId === "string" || this.planRunning.get(chatId) === undefined) return "";
+    const ready = readyGroupSteps(planStepsFor(this.chats.store.events(chatId), this.planRunning.get(chatId)!) ?? []);
+    return ready.length ? `[계획 보완 작업으로 맡겼습니다] 승인된 계획에 아직 시작 가능한 작업(${ready.map(s => s.id).join(", ")})이 남았습니다. 계획 작업은 planTaskId를 지정해 맡기세요.` : "";
+  }
+
+  /** Narrow gate for a single master ask that should have been one ask_parallel. */
+  private singleAskIssue(chatId: number, args: any): string | null {
+    const inst = this.instructions.get(chatId);
+    if (inst?.mode === "delegated" && inst.split === "parallel" && !this.chats.store.listConsults(chatId).some(c => c.instructionId === inst.id))
+      return "route_request에서 split=parallel로 기록했습니다. 첫 배정은 서로 독립인 작업들을 ask_parallel(tasks=[{to, kind, message, scope, reason}, …]) 한 번으로 맡기세요. 실제로 맡길 일이 하나뿐이면 route_request(mode=delegated, split=single, reason)로 다시 기록한 뒤 ask를 쓰세요.";
+    const planId = this.planRunning.get(chatId);
+    // Too few workers for the whole group: an explicit reason lets the group run one task at a time.
+    const sequential = typeof args?.sequentialReason === "string" && args.sequentialReason.trim();
+    if (planId !== undefined && typeof args?.planTaskId === "string" && !sequential) {
+      const ready = readyGroupSteps(planStepsFor(this.chats.store.events(chatId), planId) ?? []);
+      if (ready.length >= 2 && ready.some(s => s.id === args.planTaskId))
+        return `계획 group ${ready[0].group}에서 지금 시작할 수 있는 작업이 ${ready.length}개입니다(${ready.map(s => s.id).join(", ")}). ask를 하나씩 부르지 말고 ask_parallel(tasks=[{to, kind, message, scope, reason, planTaskId}, …]) 한 번으로 함께 맡기세요. 가용 작업자가 부족해 하나씩 처리해야 하면 ask에 sequentialReason(이유)을 적으세요.`;
+    }
+    if (sequential && planId !== undefined) this.chats.emit(chatId, "orch", "orch", { type: "notice", text: `계획 작업 ${String(args.planTaskId ?? "")}을(를) 순차로 맡깁니다: ${sequential}` });
+    return null;
+  }
+
+  /** Changes one step of the approved plan being carried out (app bookkeeping for planTaskId). */
+  private updatePlanStep(chatId: number, ref: PlanTaskRef, change: (step: PlanStep) => PlanStep) {
+    const { planId, taskId } = ref;
+    const steps = planStepsFor(this.chats.store.events(chatId), planId);
+    if (!steps?.some(s => s.id === taskId && s.status !== "cancelled")) return;
+    const next = steps.map(s => s.id === taskId ? change({ ...s }) : s);
+    this.chats.emit(chatId, "orch", "orch", { type: "plan_update", steps: next, planId, instructionId: this.instructions.get(chatId)?.id });
+  }
+
+  private proposePlan(chatId: number, args: any): ToolResult {
+    const inst = this.instructions.get(chatId);
+    if (!this.planning.has(chatId) || !inst) return textResult("propose_plan은 계획 모드에서만 씁니다. 지금은 checklist로 진행 단계를 관리하세요.", true);
+    const summary = String(args?.summary ?? "").trim();
+    if (!summary) return textResult("summary에 계획 요약을 적으세요.", true);
+    let steps: PlanStep[];
+    try { steps = validateProposedTasks(args?.tasks); } catch (e) { return textResult(`계획을 받지 않았습니다: ${e instanceof Error ? e.message : String(e)}`, true); }
+    const folder = this.folderOf(chatId);
+    const project = this.chats.store.project(this.chats.store.chat(chatId)!.projectId)!;
+    const problems: string[] = [];
+    const warnings = steps.flatMap((s) => scopeWarnings(folder, s.scope).map((w) => `${s.id} ${w}`));
+    for (const s of steps) {
+      const kind = s.agentKind!;
+      const max = kind === "claude" ? project.settings.maxClaudeWorkers : kind === "gpt" ? project.settings.maxGptWorkers : kind === "grok" ? project.settings.maxGrokWorkers : kind === "deepseek" ? project.settings.maxDeepseekWorkers : project.settings.maxGeminiWorkers;
+      if (max === 0) problems.push(`${s.id}: ${WORKER_KIND_LABEL[kind]}는 사용자가 비활성화했습니다.`);
+      if (s.owner) {
+        const owner = this.agents(chatId).find(a => a.nickname === s.owner);
+        if (!owner || owner.status !== "active") problems.push(`${s.id}: owner ${s.owner}은(는) ${owner ? "해제된" : "없는"} 작업자입니다. 실행 때 확보할 작업자라면 owner를 비우고 agentKind만 적으세요.`);
+        else if (owner.kind !== kind) problems.push(`${s.id}: owner ${s.owner}은(는) ${WORKER_KIND_LABEL[owner.kind]} 작업자라 agentKind=${kind}와 다릅니다.`);
+      }
+    }
+    // One worker runs one turn at a time: the same owner twice in a group would not run in parallel.
+    for (const s of steps) {
+      const twin = steps.find((t) => t !== s && t.owner && t.owner === s.owner && t.group === s.group);
+      if (twin && steps.indexOf(twin) > steps.indexOf(s)) problems.push(`${s.id}와 ${twin.id}는 같은 group ${s.group}에 같은 owner ${s.owner}입니다. 담당을 나누거나 group을 나누세요.`);
+    }
+    for (let i = 0; i < steps.length; i++) for (let j = i + 1; j < steps.length; j++) {
+      const a = steps[i], b = steps[j];
+      if (a.group === b.group && a.scope?.length && b.scope?.length && scopesOverlap(a.scope, b.scope))
+        problems.push(`${a.id}와 ${b.id}는 같은 group ${a.group}인데 scope가 겹칩니다. 범위를 나누거나 group을 나누세요.`);
+    }
+    if (problems.length) return textResult(`계획을 받지 않았습니다. 고쳐서 다시 제출하세요.\n${problems.join("\n")}`, true);
+    this.chats.emit(chatId, "orch", "orch", { type: "plan_update", steps, explanation: summary, planId: inst.id, instructionId: inst.id });
+    this.planSubmitted.add(chatId);
+    // A finished plan ends plan mode, and the app itself asks the user how to go on.
+    if (this.chats.store.chat(chatId)?.planMode) this.chats.updateChat(chatId, { planMode: false });
+    const version = this.planVersions.get(chatId) ?? 1;
+    // A revision request is already waiting for this turn's end: no new approval card meanwhile.
+    if (!this.revisionHold.get(chatId)?.length) this.askPlanConfirm(chatId, version, steps.length);
+    const groups = [...new Set(steps.map(s => s.group))].length;
+    return textResult(`계획 v${version}(작업 ${steps.length}개 · group ${groups}개)을 제출했습니다. 앱이 사용자에게 [진행/수정/취소]를 물었습니다. 사용자에게 계획을 두세 문장으로 요약하고 턴을 끝내세요. 진행을 고르면 앱이 바로 group별 실행을 시작합니다.` +
+      (warnings.length ? `\n[범위 경고]\n${warnings.join("\n")}\n새로 만들 경로가 아니면 scope를 고쳐 propose_plan을 다시 제출하세요.` : ""));
+  }
+
+  private async waitResults(chatId: number, ids: unknown, timeout?: unknown): Promise<ToolResult> {
+    const inst = this.instructions.get(chatId);
+    if (!inst) return textResult("진행 중인 사용자 지시가 없습니다.", true);
+    if (ids !== undefined && (!Array.isArray(ids) || ids.some(id => !Number.isSafeInteger(id)))) return textResult("consultIds는 협의 id(정수) 목록이어야 합니다.", true);
+    if (timeout !== undefined && (!Number.isSafeInteger(timeout) || (timeout as number) < 1)) return textResult("timeoutSec은 1 이상의 정수(초)여야 합니다.", true);
+    const limitSec = Math.min((timeout as number | undefined) ?? WAIT_DEFAULT_SEC, WAIT_MAX_SEC);
+    const limitMs = limitSec * 1000 * this.waitTimeScale;
+    const wanted = ids as number[] | undefined;
+    const targets = () => this.chats.store.listConsults(chatId).filter(c => wanted ? wanted.includes(c.id) && c.chatId === chatId : c.instructionId === inst.id);
+    if (wanted && targets().length !== new Set(wanted).size) return textResult("이 채팅에 없는 협의 id가 있습니다.", true);
+    // Waiting cannot help while the user owes an approval or an answer: say so at once.
+    const userWait = () => {
+      const approvals = this.chats.approvals.pendingCount(chatId);
+      const questions = [...this.asks.values()].filter(a => a.chatId === chatId && !a.keepStatus).length;
+      return approvals || questions ? `[사용자 응답 대기] ${[approvals && `승인 요청 ${approvals}건`, questions && `질문 ${questions}건`].filter(Boolean).join(", ")}이(가) 사용자의 답을 기다립니다. 결과를 계속 기다리지 말고 사용자에게 필요한 응답을 알리세요.` : "";
+    };
+    const report = (head = "") => {
+      const list = targets();
+      const running = list.filter(c => c.status === "running");
+      return textResult([head, list.length ? list.map(c => consultStatusText(c)).join("\n") : "이번 지시에 맡긴 협의가 없습니다.", running.length && head ? `아직 실행 중: ${running.map(c => c.id).join(", ")}` : ""].filter(Boolean).join("\n"));
+    };
+    if (!targets().some(c => c.status === "running")) return report();
+    if (userWait()) return report(userWait());
+    const epoch = this.epochs.get(chatId);
+    const deadline = Date.now() + limitMs;
+    let woken = false;
+    const settled = (async () => {
+      for (;;) {
+        if (woken || this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch || !targets().some(c => c.status === "running")) return report();
+        const waiting = userWait();
+        if (waiting) return report(waiting);
+        if (Date.now() >= deadline) return report(`[대기 제한 ${limitSec}초 경과] 일부 협의가 아직 끝나지 않았습니다. check_agent로 확인하거나 다시 wait_results로 기다리세요.`);
+        await new Promise(resolve => setTimeout(resolve, this.waitPollMs));
+      }
+    })();
+    try { return await this.waitForMasterConsult(chatId, settled); }
+    finally { woken = true; }
+  }
+
+  /** How often wait_results rechecks stored consult status, and a scale for its time limit (tests shorten both). */
+  waitPollMs = 1000;
+  waitTimeScale = 1;
+
+  private amendScope(chatId: number, to: string, raw: unknown, reason: string): ToolResult {
+    const target = this.agents(chatId).find(a => (a.nickname === to.trim() || a.key === to.trim()) && a.status === "active");
+    const running = target && this.running.get(chatId)?.get(target.key);
+    if (!target || !running) return textResult("범위를 정정할 실행 중인 작업자를 지정하세요.", true);
+    if (!reason.trim()) return textResult("reason에 정정 이유를 적으세요.", true);
+    if (!Array.isArray(raw) || !raw.length || raw.some(g => typeof g !== "string" || !g.trim())) return textResult("scope는 경로 glob 문자열 목록이어야 합니다.", true);
+    const scope = [...new Set((raw as string[]).map(g => g.trim()))];
+    const warnings = scopeWarnings(this.folderOf(chatId), scope);
+    // Under an approved plan a correction stays inside the task's approved range (or the plan's for a supplement).
+    const plan = this.approvedPlan(chatId);
+    if (plan) {
+      const task = running.planTask && plan.tasks.find((t) => t.id === running.planTask!.taskId);
+      const outside = this.outsidePlan(chatId, scope, task ? task.scope ?? [] : undefined);
+      if (outside.length) return textResult(`승인된 ${task ? `계획 작업 ${task.id}의` : "계획의"} 범위 밖이라 바꾸지 않았습니다: ${outside.join(", ")}. 넓혀야 하면 extend_plan_scope(scope, reason)로 사용자 승인을 받은 뒤 다시 정정하세요.`, true);
+    }
+    const held = this.scopeLocks.get(chatId) ?? [];
+    const conflict = held.find(h => !h.command && h.consultId !== running.consultId && scopesOverlap(h.scope, scope));
+    if (conflict) return textResult(`협의 ${conflict.consultId}가 잡은 범위(${conflict.scope.join(", ") || "작업 폴더 전체"})와 겹쳐 바꾸지 않았습니다.`, true);
+    const previous = running.scope;
+    running.scope = scope;
+    const lock = held.find(h => h.consultId === running.consultId && !h.command);
+    if (lock) lock.scope = scope;
+    // The stored assignment and the pause/resume copy carry the same range, so a resume keeps the correction.
+    const saved = this.chats.store.setConsultScope(running.consultId, scope);
+    if (saved) this.chats.sink.consult(saved);
+    for (const a of this.assignments.get(chatId)?.values() ?? []) if (a.consultId === running.consultId) a.scope = [...scope];
+    // A plan task keeps its corrected range for retries (supersedes), below the approved upper bound.
+    if (plan && running.planTask) this.saveApprovedPlan(chatId, { ...plan, effective: { ...(plan.effective ?? {}), [running.planTask.taskId]: [...scope] } });
+    // Writers waiting on the old range may fit now.
+    const waiters = this.scopeWaiters.get(chatId) ?? [];
+    this.scopeWaiters.set(chatId, []);
+    for (const wake of waiters) wake();
+    const text = `[범위 정정] 협의 ${running.consultId}에서 고칠 수 있는 범위가 ${scope.join(", ")}(으)로 바뀌었습니다(이전: ${previous.join(", ") || "지정 없음"}). 사유: ${reason.trim()}`;
+    this.chats.emit(chatId, this.chats.route(chatId, target.key), "orch", { type: "peer_message", from: "orch", to: target.key, text });
+    void this.deliverMessages(chatId, target.key);
+    this.chats.emit(chatId, "orch", "orch", { type: "notice", text: `${target.nickname} 작업 범위 정정: ${scope.join(", ")}` });
+    return textResult(`${target.nickname}의 협의 ${running.consultId} 범위를 바꾸고 알렸습니다. 이미 거절된 편집은 작업자가 다시 시도해야 합니다.${warnings.length ? `\n[범위 경고]\n${warnings.join("\n")}` : ""}`);
+  }
+
+  /**
+   * The only way past the approved plan's write ranges: the app itself asks the user (not the master's
+   * wording) and records just the ranges the user allowed.
+   */
+  private async extendPlanScope(chatId: number, raw: unknown, reason: string): Promise<ToolResult> {
+    const plan = this.approvedPlan(chatId);
+    if (!plan) return textResult("승인된 계획을 실행 중일 때만 범위 확대를 요청할 수 있습니다. 일반 실행에는 계획 범위 제한이 없습니다.", true);
+    if (!reason.trim()) return textResult("reason에 확대가 필요한 이유를 적으세요.", true);
+    if (!Array.isArray(raw) || !raw.length || raw.some((g) => typeof g !== "string" || !g.trim())) return textResult("scope는 경로 glob 문자열 목록이어야 합니다.", true);
+    const wanted = [...new Set((raw as string[]).map((g) => g.trim()))];
+    const outside = this.outsidePlan(chatId, wanted);
+    if (!outside.length) return textResult("요청한 범위는 이미 승인된 계획 범위 안입니다. 그대로 맡기세요.");
+    const answer = await this.askUser(chatId, `[계획 범위 확대 요청] 승인된 계획 밖의 파일을 고치려 합니다.\n추가 범위: ${outside.join(", ")}\n이유: ${reason.trim()}\n허용하면 이 범위의 수정이 이번 계획 실행 동안 허용됩니다.`, ["허용", "거부"]);
+    if (answer.trim() !== "사용자 답변: 허용") return textResult(`사용자가 범위 확대를 허용하지 않았습니다(${answer}). 승인된 계획 범위 안에서 진행하거나 사용자에게 보고하세요.`);
+    const current = this.approvedPlan(chatId);
+    if (!current || current.planId !== plan.planId) return textResult("그사이 계획 실행이 끝나 범위를 기록하지 않았습니다.", true);
+    this.saveApprovedPlan(chatId, { ...current, extended: [...new Set([...(current.extended ?? []), ...outside])] });
+    this.chats.emit(chatId, "orch", null, { type: "notice", text: `사용자가 계획 범위 확대를 허용했습니다: ${outside.join(", ")}` });
+    return textResult(`사용자가 허용했습니다. 이제 ${outside.join(", ")} 범위로 배정하거나 amend_scope로 정정할 수 있습니다.`);
+  }
+
+  /** Plan mode toggle (stored on the chat): the next idle send plans instead of running. */
+  setPlanMode(chatId: number, on: boolean) {
+    const chat = this.chats.store.chat(chatId);
+    if (!chat) throw new Error("채팅이 없습니다.");
+    if (!!chat.planMode !== on) this.chats.updateChat(chatId, { planMode: on });
+  }
+
   private async release(chatId: number, nickname: string): Promise<ToolResult> {
     const a = this.agents(chatId).find((x) => x.nickname === nickname.trim());
     if (!a) return textResult(`그런 작업자가 없습니다: ${nickname}`, true);
@@ -1069,7 +1638,7 @@ export class Orchestrator {
     const { planId, instructionId } = this.planOwner(chatId);
     const previous = planId === undefined ? [] : planStepsFor(this.chats.store.events(chatId), planId) ?? [];
     const kept: string[] = [];
-    const steps = validatePlanSteps(raw, previous, kept);
+    const steps = this.lockApproved(chatId, validatePlanSteps(raw, previous, kept));
     if (!steps.length) return textResult("steps가 비었습니다.", true);
     const consults = new Map(this.chats.store.listConsults(chatId).map((c) => [c.id, c]));
     const unknown = steps.flatMap((s) => s.consultIds ?? []).filter((id) => !consults.has(id));
@@ -1114,7 +1683,7 @@ export class Orchestrator {
       let ok = false;
       try {
         const result = await this.consult(chat.id, "orch", target, "opinion", text, [], [], MONITOR_QUESTION_REASON,
-          undefined, undefined, undefined, false, undefined, undefined, reply => { answer = reply; });
+          undefined, undefined, undefined, false, undefined, undefined, undefined, reply => { answer = reply; });
         ok = !result.isError;
       } finally {
         if (this.instructions.get(chat.id) === inst && !this.chats.liveDriver(chat.id, "orch")?.running && !this.chats.quitting) {
@@ -1135,6 +1704,7 @@ export class Orchestrator {
   }
 
   private async askTool(chatId: number, caller: Role, args: any): Promise<ToolResult> {
+    args = this.withPlanDefaults(chatId, caller, args);
     if (args.summary !== undefined && (caller !== "orch" || typeof args.summary !== "boolean")) return textResult("summary는 마스터가 지정하는 boolean 옵션입니다.", true);
     const to = String(args.to ?? "").trim();
     const kind: ConsultKind = KINDS.includes(args.kind) ? args.kind : "implement";
@@ -1223,12 +1793,26 @@ export class Orchestrator {
     }
     const inherited = args.effort ?? (caller === "orch" ? undefined : this.chats.store.consult(this.running.get(chatId)?.get(caller)?.consultId ?? -1)?.effort || undefined);
     if (args.model !== undefined && (typeof args.model !== "string" || !args.model.trim())) return textResult("model은 실제 모델 ID를 지정하세요.", true);
-    const response = await this.consult(chatId, caller, target, kind, message, scope, attach, reason || (parent?.discussion ? `토의 ${parent.discussion.topic} · ${callerName} → ${target.nickname}` : ""), supersedes, inherited, discussion, false, cliAccount, args.model);
+    // Checked last and marked in the same synchronous step, so parallel tasks cannot claim one plan step twice.
+    const assignment = this.assignmentIssue(chatId, caller, args, target);
+    if (assignment) return textResult(assignment, true);
+    const planId = this.planRunning.get(chatId);
+    const planTask: PlanTaskRef | undefined = caller === "orch" && typeof args.planTaskId === "string" && planId !== undefined ? { planId, taskId: args.planTaskId } : undefined;
+    // Claimed at once (the consult links itself once it starts); a refused start gives the step back.
+    if (planTask) this.updatePlanStep(chatId, planTask, (s) => ({ ...s, status: "inProgress", owner: s.owner ?? target.nickname }));
+    const supplement = caller === "orch" ? this.planSupplementNote(chatId, args) : "";
+    // A scope that matches nothing only warns: new folders and files are normal assignments.
+    const warnings = scopeWarnings(this.folderOf(chatId), scope);
+    const warning = warnings.length ? `[범위 경고 · ${target.nickname}]\n${warnings.join("\n")}\n${SCOPE_WARNING_HELP}` : "";
+    if (warning) this.chats.emit(chatId, "orch", "orch", { type: "notice", text: warning });
+    const response = await this.consult(chatId, caller, target, kind, message, scope, attach, reason || (parent?.discussion ? `토의 ${parent.discussion.topic} · ${callerName} → ${target.nickname}` : ""), supersedes, inherited, discussion, false, cliAccount, args.model, planTask);
     if (parent?.discussion && !response.isError) parent.discussionReplies!.add(target.key);
     const id = response.structuredContent?.consultId;
+    if (planTask && typeof id !== "number") this.updatePlanStep(chatId, planTask, (s) => (s.status === "inProgress" ? { ...s, status: "pending" } : s));
+    const notes = [warning, supplement].filter(Boolean).join("\n");
     const record = caller === "orch" && typeof id === "number" ? this.chats.store.consult(id) : undefined;
-    if (record) return { ...response, content: [{ type: "text", text: (args.summary ? masterResultText(record) : consultStatusText(record)) + (response.isError ? `\n원인: ${response.structuredContent?.error ?? "결과를 확인하지 못했습니다."}` : "") }] };
-    return response;
+    if (record) return { ...response, content: [{ type: "text", text: (args.summary ? masterResultText(record) : consultStatusText(record)) + (response.isError ? `\n원인: ${response.structuredContent?.error ?? "결과를 확인하지 못했습니다."}` : "") + (notes ? `\n${notes}` : "") }] };
+    return notes ? { ...response, content: [...response.content, { type: "text", text: notes }] } : response;
   }
 
   private limitCheck(chatId: number, project: Project, target: Role, kind: ConsultKind, message: string, accountId?: CliAccountId): string | null {
@@ -1255,6 +1839,19 @@ export class Orchestrator {
       await new Promise<void>((res) => this.scopeWaiters.set(chatId, [...(this.scopeWaiters.get(chatId) ?? []), res]));
     }
   }
+  /**
+   * Ends an unscoped command's short lock when that tool call reports back (done, failed or denied). Without
+   * a tool id it ends all of the assignment's command locks (its turn or assignment ended).
+   */
+  private releaseCommandLock(chatId: number, consultId: number, toolId?: string) {
+    const held = this.scopeLocks.get(chatId) ?? [];
+    const ends = (h: ScopeLock) => h.consultId === consultId && !!h.command && (toolId === undefined || h.toolId === toolId);
+    if (!held.some(ends)) return;
+    this.scopeLocks.set(chatId, held.filter((h) => !ends(h)));
+    const w = this.scopeWaiters.get(chatId) ?? [];
+    this.scopeWaiters.set(chatId, []);
+    for (const f of w) f();
+  }
   private releaseScope(chatId: number, consultId: number) {
     this.scopeLocks.set(chatId, (this.scopeLocks.get(chatId) ?? []).filter((h) => h.consultId !== consultId));
     const w = this.scopeWaiters.get(chatId) ?? [];
@@ -1262,7 +1859,7 @@ export class Orchestrator {
     for (const f of w) f();
   }
 
-  private async consult(chatId: number, caller: Role, target: ChatAgent, kind: ConsultKind, message: string, scope: string[], attach: string[], reason: string, supersedes?: number, requestedEffort?: string, discussion?: Discussion, resuming = false, accountChange?: CliAccountId | null, assignmentModel?: string, onAnswer?: (text: string) => void): Promise<ToolResult> {
+  private async consult(chatId: number, caller: Role, target: ChatAgent, kind: ConsultKind, message: string, scope: string[], attach: string[], reason: string, supersedes?: number, requestedEffort?: string, discussion?: Discussion, resuming = false, accountChange?: CliAccountId | null, assignmentModel?: string, planTask?: PlanTaskRef, onAnswer?: (text: string) => void): Promise<ToolResult> {
     const epoch = this.epochs.get(chatId);
     const chat = this.chats.store.chat(chatId)!;
     const project = this.chats.store.project(chat.projectId)!;
@@ -1299,7 +1896,7 @@ export class Orchestrator {
     const mine = new Promise<void>((r) => (done = r));
     this.workerQueue.set(queueKey, prev.then(() => mine));
     const assignmentKey = randomUUID();
-    const assignment: PausedAssignment = { caller, target, kind, message, scope, attach, reason, effort: requestedEffort, model: assignmentModel, discussion };
+    const assignment: PausedAssignment = { caller, target, kind, message, scope, attach, reason, effort: requestedEffort, model: assignmentModel, discussion, ...(planTask ? { planTask } : {}) };
     const assignments = this.assignments.get(chatId) ?? new Map();
     assignments.set(assignmentKey, assignment);
     this.assignments.set(chatId, assignments);
@@ -1320,8 +1917,11 @@ export class Orchestrator {
         ...(assignmentModel ? { model: assignmentModel } : {}),
         ...(cliSelection?.accountId ? { accountId: cliSelection.accountId } : {}),
         ...(discussion ? { discussion: { topic: discussion.topic, peers: discussion.peers.map((p) => p.nickname) } } : {}),
+        ...(planTask ? { planTask } : {}),
       });
       assignment.consultId = consult.id;
+      // The plan step is linked when the assignment is created, so a crash or pause never orphans it.
+      if (planTask) this.updatePlanStep(chatId, planTask, (s) => ({ ...s, status: "inProgress", owner: s.owner ?? target.nickname, consultIds: [...new Set([...(s.consultIds ?? []), consult.id])] }));
       this.chats.sink.consult(consult);
       const node = `consult:${consult.id}` as NodeId;
       // The card goes where the caller is (master's timeline, or inside the calling worker's consult).
@@ -1354,6 +1954,7 @@ export class Orchestrator {
           text: "",
           files: new Set(),
           pendingFiles: new Map(),
+          ...(planTask ? { planTask } : {}),
           discussion,
           discussionReplies: discussion ? new Set() : undefined,
           resolve: (end) => {
@@ -1479,6 +2080,9 @@ export class Orchestrator {
         + (!result.text.trim() && !result.error ? (status === "done" && report ? `구조화 리뷰 제출(${report.verdict}): ${report.summary}` : result.files.length ? `산출물 ${result.files.length}개를 생성·수정했습니다.` : "작업자의 응답과 산출물이 없습니다.") : "");
       const finished = this.chats.store.finishConsult(consult.id, status, summary, result.files);
       this.chats.sink.consult(finished);
+      // A paused assignment resumes into the same step; any other end decides it.
+      if (planTask && !["pausing", "paused"].includes(this.chats.store.chat(chatId)?.status ?? ""))
+        this.updatePlanStep(chatId, planTask, (s) => ({ ...s, status: status === "done" ? "completed" : "pending" }));
       this.chats.emit(chatId, this.chats.route(chatId, caller), caller, { type: "consult_end", consultId: consult.id, status, summary, files: result.files });
       // The team (including a master who did not assign this) still receives the result; kind keeps it out of the main chat view.
       this.chats.emit(chatId, "orch", target.key, { type: "room_message", from: target.key, text: consultStatusText(finished), kind: "result", consultId: consult.id, status });
@@ -1507,9 +2111,18 @@ export class Orchestrator {
   /** Every active assignment may request mutations within its scope. */
   private guardApproval(chatId: number, input: ApprovalInput): string | null {
     if (this.stopped.has(chatId) || ["pausing", "paused"].includes(this.chats.store.chat(chatId)?.status ?? "")) return "작업이 중지되었습니다.";
-    const mutation = !!input.writes || !!input.diffs?.length || (!!input.command && !isReadCommand(input.command));
+    const fileWrite = !!input.writes || !!input.diffs?.length;
+    const mutation = fileWrite || (!!input.command && !isReadCommand(input.command));
     if (!mutation) return null;
     if (this.stopped.has(chatId)) return "작업이 중지되었습니다.";
+    if (input.role === "orch" && this.planning.has(chatId))
+      return "계획 모드에서는 파일을 바꾸거나 변경 명령을 실행할 수 없습니다. 읽기 전용으로 살피고 propose_plan으로 계획을 제출하세요.";
+    // While an approved plan runs, every file change (the master's own edits included) stays inside the
+    // plan's approved ranges; a worker is held to both this and its own scope (writeScope).
+    if (fileWrite) {
+      const outside = this.writesOutsidePlan(chatId, input);
+      if (outside) return outside;
+    }
     const investigation = this.investigationIssue(chatId);
     if (investigation) {
       if (input.role === "orch") return investigation;
@@ -1519,13 +2132,26 @@ export class Orchestrator {
         "git status/diff/log/show/ls-files/rev-parse, Get-Content·Get-ChildItem·Get-Item·Select-String·rg 등 단일 읽기 명령이나 Select-Object·Sort-Object 등으로 이어진 읽기 파이프를 사용하세요.";
     }
     if (input.role === "orch") {
-      if (this.scopeLocks.get(chatId)?.length) return "작업자가 파일을 변경 중입니다. 작업이 끝난 뒤 마스터의 직접 변경을 다시 요청하세요.";
+      if (this.scopeLocks.get(chatId)?.some((h) => !h.command)) return "작업자가 파일을 변경 중입니다. 작업이 끝난 뒤 마스터의 직접 변경을 다시 요청하세요.";
     } else {
       const r = this.running.get(chatId)?.get(input.role);
       if (!r) return "작업을 맡은 동안에만 파일 수정이나 변경 명령을 실행할 수 있습니다.";
       const held = this.scopeLocks.get(chatId) ?? [];
-      if (!held.some((h) => h.consultId === r.consultId)) {
-        if (this.masterActions.get(chatId)?.size || held.some((h) => scopesOverlap(h.scope, r.scope)))
+      const writer = (h: ScopeLock) => !h.command;
+      // A command (not a file edit) from an assignment without a scope cannot be tied to files. It takes a
+      // short command lock instead of a whole-folder lock: it waits for writers and holds writers off while
+      // it runs, never blocks other such commands, and ends with the command (releaseCommandLock).
+      if (!fileWrite && r.kind !== "implement" && !r.scope.length && !held.some((h) => h.consultId === r.consultId && writer(h))) {
+        if (this.masterActions.get(chatId)?.size || held.some((h) => writer(h) && h.consultId !== r.consultId)) return "다른 작업이 같은 범위를 변경 중입니다. 해당 작업이 끝난 뒤 다시 요청하세요.";
+        // One lock per approved tool call: only that call's result (or the end of the turn/assignment) ends it.
+        if (!held.some((h) => h.consultId === r.consultId && h.command && h.toolId === input.toolId)) {
+          held.push({ consultId: r.consultId, scope: [], command: true, ...(input.toolId ? { toolId: input.toolId } : {}) });
+          this.scopeLocks.set(chatId, held);
+        }
+        return null;
+      }
+      if (!held.some((h) => h.consultId === r.consultId && writer(h))) {
+        if (this.masterActions.get(chatId)?.size || held.some((h) => h.consultId !== r.consultId && scopesOverlap(h.scope, r.scope)))
           return "다른 작업이 같은 범위를 변경 중입니다. 해당 작업이 끝난 뒤 다시 요청하세요.";
         held.push({ consultId: r.consultId, scope: r.scope });
         this.scopeLocks.set(chatId, held);
@@ -1538,7 +2164,13 @@ export class Orchestrator {
     if (!isWorkerKey(role)) return null;
     const r = this.running.get(chatId)?.get(role);
     if (!r) return null;
-    return r.scope.length ? { globs: r.scope, why: `맡은 범위(${r.scope.join(", ")}) 밖` } : null;
+    if (r.scope.length) return { globs: r.scope, why: `맡은 범위(${r.scope.join(", ")}) 밖` };
+    // Under an approved plan an empty scope is not "unchecked": an approved task without one changes no
+    // files, and a supplement assignment stays inside what the user approved for the plan.
+    if (r.planTask) return { globs: [], why: `승인된 계획 작업 ${r.planTask.taskId}은(는) 파일 수정이 없는 작업입니다` };
+    const allowed = this.planScopeUnion(chatId);
+    if (allowed) return { globs: allowed, why: `승인된 계획의 범위(${allowed.join(", ") || "파일 수정 없음"}) 밖 — 확대하려면 마스터가 extend_plan_scope로 사용자 승인을 받아야 합니다` };
+    return null;
   }
 
   /** Collect each running consult's answer and changed files from the worker's events. */
@@ -1589,6 +2221,7 @@ export class Orchestrator {
         break;
       case "tool_result": {
         r.tools?.delete(event.id);
+        this.releaseCommandLock(chatId, r.consultId, event.id);
         const files = r.pendingFiles.get(event.id);
         if (files && event.ok) for (const f of files) r.files.add(f);
         r.pendingFiles.delete(event.id);
@@ -1604,25 +2237,42 @@ export class Orchestrator {
         if (event.status === "done" && event.attachment) r.files.add(event.attachment.path);
         break;
       case "turn_end":
+        // A tool whose result never arrived ends with the worker's turn.
+        this.releaseCommandLock(chatId, r.consultId);
         r.resolve({ ok: event.ok, interrupted: event.interrupted, error: event.error ?? (!event.ok ? r.lastError : undefined) });
         break;
     }
   }
 
-  /** Extra instructions that arrived after the last question become the next normal master turn. */
+  /** Continue with a queued instruction or a held plan revision once the current turn ends. */
   private continueQueued(chatId: number, end: Extract<AgentEvent, { type: "turn_end" }>) {
+    // Extra instructions that arrived after the master's last ask become the next turn.
     const inst = this.instructions.get(chatId);
-    if (!inst?.queued.length || end.interrupted || this.stopped.has(chatId)) return;
-    const q = inst.queued.splice(0);
-    setTimeout(() => {
-      const chat = this.chats.store.chat(chatId);
-      if (!chat || this.instructions.get(chatId) !== inst || this.stopped.has(chatId) || ["pausing", "paused"].includes(chat.status)) return;
-      this.chats.updateChat(chatId, { status: "working", touch: true });
-      this.instruct(chat, { text: q.map((x) => x.text).join("\n\n"), attachments: q.flatMap((x) => x.attachments) }).catch((e) => {
-        this.chats.emit(chatId, "orch", "orch", { type: "error", kind: "process", message: String(e) });
-        this.chats.orchTurnEnded(chatId, { type: "turn_end", ok: false, error: String(e) });
-      });
-    }, 0);
+    // Revision requests held since the plan was submitted run only now, as a revision turn (never
+    // consumed by a tool response of the turn that submitted it).
+    let held = this.revisionHold.get(chatId) ?? [];
+    this.revisionHold.delete(chatId);
+    // Only a turn that recorded its proposal hands the held requests on. After an error (or a stop) there
+    // is no proposal to revise, and they must never start an ordinary, writing turn: they stay in the
+    // conversation and the user sends them again.
+    if (held.length && (!end.ok || end.interrupted || this.stopped.has(chatId))) {
+      this.reviseAfterTurn.delete(chatId);
+      if (!end.interrupted && !this.stopped.has(chatId))
+        this.chats.emit(chatId, "orch", null, { type: "notice", text: "계획 턴이 오류로 끝나 보관한 계획 수정 요청을 자동으로 보내지 않았습니다. 내용을 확인한 뒤 다시 보내 주세요." });
+      held = [];
+    }
+    if (inst && (held.length || inst.queued.length) && !end.interrupted && !this.stopped.has(chatId)) {
+      const q = [...held, ...inst.queued.splice(0)];
+      setTimeout(() => {
+        const chat = this.chats.store.chat(chatId);
+        if (!chat || this.instructions.get(chatId) !== inst || this.stopped.has(chatId) || ["pausing", "paused"].includes(chat.status)) return;
+        this.chats.updateChat(chatId, { status: "working", touch: true });
+        this.instruct(chat, { text: q.map((x) => x.text).join("\n\n"), attachments: q.flatMap((x) => x.attachments) }).catch((e) => {
+          this.chats.emit(chatId, "orch", "orch", { type: "error", kind: "process", message: String(e) });
+          this.chats.orchTurnEnded(chatId, { type: "turn_end", ok: false, error: String(e) });
+        });
+      }, 0);
+    }
   }
 
   // ---------- user instructions
@@ -1642,7 +2292,10 @@ export class Orchestrator {
   private saveInstruction(chatId: number) {
     const inst = this.instructions.get(chatId);
     if (!inst) return;
-    const snapshot: InstructionSnapshot = { id: inst.id, text: inst.text, mode: inst.mode, dualInvestigation: inst.dualInvestigation, planning: this.planning.has(chatId), reviewing: this.reviewing.has(chatId), planRun: this.planRunning.get(chatId) };
+    const snapshot: InstructionSnapshot = {
+      id: inst.id, text: inst.text, mode: inst.mode, dualInvestigation: inst.dualInvestigation, planning: this.planning.has(chatId), reviewing: this.reviewing.has(chatId), planRun: this.planRunning.get(chatId),
+      ...(this.planVersions.has(chatId) ? { planVersion: this.planVersions.get(chatId) } : {}), ...(this.planSubmitted.has(chatId) ? { planSubmitted: true } : {}), ...(inst.split ? { split: inst.split } : {}),
+    };
     this.chats.store.setSetting(`runInstruction:${chatId}:current`, JSON.stringify(snapshot));
   }
 
@@ -1775,19 +2428,41 @@ export class Orchestrator {
     const prefix = this.handover(chat);
     if (prefix) input = { ...input, text: prefix + input.text };
     this.instructions.set(chat.id, this.newInstruction(chat.id, input.text));
+    let heldRevision: PlanRevision | undefined;
+    // Plan mode (the chat toggle) plans instead of running; so does any message to a proposal still
+    // waiting for approval (it is a revision request, whatever the toggle says; see chats.send's user.plan).
+    if (!continuePlan) {
+      // A new message answers the plan question by itself (a revision or new work): withdraw the card.
+      this.clearPlanConfirm(chat.id);
+      const id = this.instructions.get(chat.id)!.id;
+      // Messages held during the submitting turn (holdAsRevision) revise the proposal recorded at its end.
+      const fromHold = this.reviseAfterTurn.delete(chat.id);
+      heldRevision = fromHold ? waitingProposal(this.chats.store.events(chat.id)) : undefined;
+      // A held revision request is always a read-only planning turn, even if no proposal is found.
+      if (fromHold || this.chats.store.chat(chat.id)?.planMode || waitingProposal(this.chats.store.events(chat.id).filter(e => e.id < id))) this.planning.add(chat.id);
+    }
+    const planningTurn = !continuePlan && this.planning.has(chat.id);
     if (!continuePlan) {
       this.planRunning.delete(chat.id);
       const id = this.instructions.get(chat.id)!.id;
-      const previous = currentPlanView(this.chats.store.events(chat.id).filter(e => e.id < id));
-      if (previous?.steps.some(isOpenStep) && ["live", "running", "incomplete", "failed"].includes(previous.state)) {
+      const before = this.chats.store.events(chat.id).filter(e => e.id < id);
+      const revision = planningTurn ? heldRevision ?? waitingProposal(before) : undefined;
+      const previous = currentPlanView(before);
+      if (!revision && previous?.steps.some(isOpenStep) && ["live", "running", "incomplete", "failed"].includes(previous.state)) {
         input = { ...input, text: input.text + `\n\n[이전 작업 미완료]\n${openStepsText(previous.steps)}\n이번 지시가 같은 작업의 상태 확인·재개·보완이라면 이 남은 단계들을 현재 checklist에 등록하고 기존 결과를 확인해 이어서 수행하세요. 완료된 작업을 다시 배정하지 마세요. 별개 새 작업이면 이전 단계를 가져오지 마세요.` };
       }
-      if (previous && ["live", "running", "proposed"].includes(previous.state)) {
+      if (revision) {
+        this.chats.emit(chat.id, "orch", null, { type: "plan_state", planId: revision.planId, state: "cancelled", version: revision.version, reason: "수정 요청을 받아 새 버전 계획을 세웁니다." });
+      } else if (previous && ["live", "running", "proposed"].includes(previous.state)) {
         const incomplete = previous.steps.some(isOpenStep);
-        this.chats.emit(chat.id, "orch", null, { type: "plan_state", planId: previous.planId, state: incomplete ? "incomplete" : "done", reason: incomplete ? "새 작업이 시작되어 이전 계획의 미완료 항목을 기록으로 남겼습니다." : undefined });
+        this.chats.emit(chat.id, "orch", null, { type: "plan_state", planId: previous.planId, state: incomplete ? "incomplete" : "done", reason: incomplete ? "새 작업이 시작되어 이전 계획을 정리했습니다(미완료 항목 있음)." : undefined });
       }
       this.chats.emit(chat.id, "orch", "orch", { type: "plan_update", planId: id, instructionId: id, steps: [] });
-      input = { ...input, text: input.text + "\n\n[새 작업 계획]\n이 지시의 작업 계획을 새로 정리하세요. 이전 작업의 완료·취소 목록을 이어 붙이지 마세요. 여러 단계 작업은 현재 목표·담당·작업자 간 취합·검증을 checklist로 등록하고, 간단한 질문은 계획 없이 답하세요. 진행 중 추가 지시에는 같은 계획을 갱신합니다." };
+      if (planningTurn) {
+        this.planSubmitted.delete(chat.id);
+        this.planVersions.set(chat.id, revision ? revision.version + 1 : 1);
+        input = { ...input, text: planPrompt(input.text, revision) };
+      } else input = { ...input, text: input.text + "\n\n[새 작업 계획]\n이 지시의 작업 계획을 새로 정리하세요. 이전 작업의 완료·취소 목록을 이어 붙이지 마세요. 여러 단계 작업은 현재 목표·담당·작업자 간 취합·검증을 checklist로 등록하고, 간단한 질문은 계획 없이 답하세요. 진행 중 추가 지시에는 같은 계획을 갱신합니다." };
     }
     this.saveInstruction(chat.id);
     // Added only to what the model reads: the approval judge's instruction text must not include old transcript.
@@ -1795,7 +2470,7 @@ export class Orchestrator {
     try {
       const driver = await this.chats.driver(chat.id, "orch");
       if (this.stopped.has(chat.id) || this.epochs.get(chat.id) !== epoch) return;
-      await driver.send({ ...input, text: forkContext + input.text + attachmentNote(input.attachments) + (this.planning.has(chat.id) ? "" : "\n\n[앱 협업 규칙] 먼저 route_request로 처리 방식을 기록하세요. 본 작업은 앱 spawn/ask로 배정하고 reason에 담당 선택 이유를 적으세요. CLI 내부 에이전트는 사용하지 마세요."), noWrites: false });
+      await driver.send({ ...input, text: forkContext + input.text + attachmentNote(input.attachments) + (this.planning.has(chat.id) ? "" : "\n\n[앱 협업 규칙] 먼저 할 일을 나눠 route_request(mode, reason, delegated이면 split=single|parallel|sequential)로 기록하세요. 서로 독립인 일은 ask_parallel 한 번으로 동시에 맡기고, 일 하나뿐일 때만 ask를 씁니다. reason에 담당 선택 이유를 적으세요. 결과는 wait_results로 기다리세요. CLI 내부 에이전트는 사용하지 마세요."), noWrites: this.planning.has(chat.id) });
     } catch (error) {
       if (!this.stopped.has(chat.id) && this.epochs.get(chat.id) === epoch) throw error;
     }
@@ -1836,7 +2511,9 @@ export class Orchestrator {
     if (current.planning) this.planning.add(chatId); else this.planning.delete(chatId);
     if (current.planRun !== undefined) this.planRunning.set(chatId, current.planRun); else this.planRunning.delete(chatId);
     if (current.reviewing) this.reviewing.add(chatId); else this.reviewing.delete(chatId);
-    const inst: Instruction = { id: current.id, mode: current.mode, dualInvestigation: current.dualInvestigation, text: current.text, asks: 0, reviews: 0, requests: new Map(), queued: [], pinned: [] };
+    this.restorePlanTurn(chatId, current.planVersion, current.planSubmitted);
+    const inst: Instruction = { id: current.id, mode: current.mode, dualInvestigation: current.dualInvestigation, text: current.text, asks: 0, reviews: 0, requests: new Map(), queued: [], pinned: [], ...(current.split ? { split: current.split } : {}) };
+    this.reconcilePlanSteps(chatId);
     const direct = events.findLast((e) => e.event.type === "user" && !e.event.queued);
     const earlier = direct?.event.type === "user" && direct.id !== inst.id ? direct.event.text : "";
     const recovery = buildResumeContext({ instructionId: inst.id, instructionText: inst.text, consults: this.chats.store.listConsults(chatId), events: this.chats.store.events(chatId), agents: this.agents(chatId), assignment: (id) => this.chats.store.consultAssignment(id), goal: chat.goal });
@@ -1851,7 +2528,7 @@ export class Orchestrator {
       "[AI_ChatterBox] 이전 실행이 앱 종료로 중단됐습니다. 작업 폴더의 현재 상태(git status, git diff, 파일 내용)를 확인하고, " +
       `아래 현재 지시의 남은 작업을 이어서 끝낸 뒤 결과를 보고하세요. 이미 끝난 부분은 다시 하지 마세요.${team ? ` 팀(${team})은 그대로 남아 있습니다.` : ""}\n\n현재 지시:\n` +
       (inst.text || "(기록 없음)") +
-      (current.planning ? "\n\n[계획 모드] 계획만 세워 보고하세요. 작업자 배정은 실행 단계에서 합니다." : "") +
+      (current.planning ? "\n\n[계획 모드] 읽기 전용입니다. 작업자를 쓰지 말고 파일을 바꾸지 마세요. 필요한 결정은 ask_user로 묻고 propose_plan으로 계획을 제출하세요. 배정은 사용자가 승인한 뒤 실행 단계에서 합니다." : "") +
       (earlier ? `\n\n이전 지시(참고용 — 현재 지시가 우선하며 다시 수행하라는 뜻이 아닙니다):\n${clipText(earlier, 2000)}` : "") +
       (recovery.text ? `\n\n${recovery.text}` : "");
     if (!this.agents(chatId).length && (chat.orchCodexThreadId || chat.orchClaudeSessionId))
@@ -1859,7 +2536,7 @@ export class Orchestrator {
     try {
       const driver = await this.chats.driver(chatId, "orch");
       if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch) return;
-      await driver.send({ text: this.forkContext(chat) + this.handover(chat) + note, attachments: [], noWrites: false });
+      await driver.send({ text: this.forkContext(chat) + this.handover(chat) + note, attachments: [], noWrites: !!current.planning });
     } catch (e) {
       if (this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch) return;
       const message = e instanceof Error ? e.message : String(e);
@@ -1875,7 +2552,25 @@ export class Orchestrator {
   }
 
   /** The user typed while the team was working: hand it to the master at the next boundary. */
+  /**
+   * A message sent after the planning turn submitted its plan (the turn still running) is a revision of
+   * that plan: the open card and any choice made on it are void at once, and the message starts a revision
+   * turn on that proposal once this turn ends.
+   */
+  private holdAsRevision(chat: Chat): boolean {
+    if (!this.planning.has(chat.id) || !this.planSubmitted.has(chat.id)) return false;
+    this.clearPlanConfirm(chat.id);
+    this.reviseAfterTurn.add(chat.id);
+    return true;
+  }
+
   private async queue(chat: Chat, input: AgentInput) {
+    if (this.holdAsRevision(chat)) {
+      // Kept apart from inst.queued, which tool responses of the running turn would consume.
+      this.revisionHold.set(chat.id, [...(this.revisionHold.get(chat.id) ?? []), input]);
+      this.chats.emit(chat.id, "orch", null, { type: "notice", text: "계획 수정 요청을 받았습니다. 지금 턴이 끝나면 이 계획을 수정하는 턴으로 이어집니다." });
+      return;
+    }
     const state = chat.status === "paused" ? this.pauseState(chat.id) : undefined;
     const inst = this.instructions.get(chat.id) ?? (state && this.restoreInstruction(state));
     if (!inst) throw new Error("작업이 진행 중입니다.");
@@ -1891,6 +2586,8 @@ export class Orchestrator {
   private async deliverNow(chat: Chat, input: AgentInput) {
     const inst = this.instructions.get(chat.id);
     if (!inst || this.stopped.has(chat.id)) throw new Error("중지되었거나 완료된 지시입니다. 새 지시로 보내 주세요.");
+    // After the plan was submitted, the message waits for the turn's end and revises that plan.
+    if (this.planning.has(chat.id) && this.planSubmitted.has(chat.id)) return this.queue(chat, input);
     const driver = this.chats.liveDriver(chat.id, "orch");
     const text = input.text + attachmentNote(input.attachments);
     const prompt = "[사용자 즉시 질문·수정 요청 — 작업 결과를 기다리지 말고 먼저 직접 답변]\n" + input.text + "\n\n질문에 먼저 한국어로 답하고, 수정 요청이면 이해한 내용과 반영 방법을 먼저 말하세요. 기존 작업자는 유지하며 본 작업의 위임·리뷰 요건도 유지합니다.";
@@ -1951,13 +2648,9 @@ export class Orchestrator {
         needIdle();
         if (!arg.trim()) throw new Error("/plan 뒤에 계획할 지시를 적어 주세요.");
         this.planRunning.delete(chatId);
+        // instruct() wraps the request in the read-only planning prompt (and revises a waiting proposal).
         this.planning.add(chatId);
-        const text =
-          "[계획 모드] 아래 지시에 대한 계획만 세워라. 작업자 배정은 실행 단계에서 하라. 계획에 필요한 파일 수정·명령 실행은 사용자 지시 범위와 승인 절차를 따라 수행할 수 있다. 필요한 만큼 코드를 읽고 조사한 뒤, " +
-          "checklist 도구로 단계를 등록하라(각 단계의 owner에 담당 예정 닉네임(클로드 1호 / 지피티 1호 / 마스터)을 적고, 선행 관계가 있으면 id와 dependsOn을 지정하고, 몇 명이 필요한지도 계획에 넣어라). 마지막에 계획을 짧게 요약해 답하라. " +
-          "사용자가 '실행'을 누르면 그때 이 계획대로 진행한다.\n\n지시: " +
-          arg;
-        await this.chats.startTurn(chatId, `/plan ${arg}`, [], () => this.instructWith(chat, text, arg));
+        await this.chats.startTurn(chatId, `/plan ${arg}`, [], () => this.instructWith(chat, arg, arg));
         return;
       }
       case "plan-run": {
@@ -1967,13 +2660,34 @@ export class Orchestrator {
         const planId = pendingProposal(events);
         if (planId === undefined) throw new Error("승인할 제안 계획이 없습니다. 취소·완료됐거나 그 뒤에 다른 지시가 있었던 계획은 실행할 수 없으니 /plan으로 새로 계획하세요.");
         const steps = planStepsFor(events, planId);
+        const version = latestPlanVersion(events, planId);
+        // An approval button names the plan and version it showed (another client may have revised or
+        // replaced it since). A bare "/plan-run" typed by the user runs the latest proposal and says which.
+        const seen = arg.trim();
+        if (seen) {
+          const m = /^(\d+):v?(\d+)$/i.exec(seen);
+          if (!m) throw new Error("승인할 계획은 \"계획ID:버전\" 형식으로 보내세요.");
+          if (Number(m[1]) !== planId || Number(m[2]) !== (version ?? 1))
+            throw new Error(`계획이 바뀌었습니다(승인 화면: 계획 ${m[1]} v${m[2]} → 현재: 계획 ${planId} v${version ?? 1}). 최신 계획을 확인한 뒤 다시 승인하세요.`);
+        } else this.chats.emit(chatId, "orch", null, { type: "notice", text: `/plan-run: 최신 제안(계획 ${planId} v${version ?? 1})을 실행합니다.` });
         this.planning.delete(chatId);
+        this.clearPlanConfirm(chatId); // approved by button or by the plan question: one path
         this.planRunning.set(chatId, planId);
-        this.chats.emit(chatId, "orch", null, { type: "plan_state", state: "running", planId });
-        const text =
-          "사용자가 계획을 승인했다. 계획대로 실행하라: 필요한 작업자를 spawn 하고, 단계마다 담당 작업자에게 ask로 맡기고(implement는 scope 지정), 단계를 시작·완료할 때마다 checklist를 갱신하고, " +
-          "모든 단계를 완료하거나, 진행하지 않을 단계는 cancelled와 cancelReason으로 표시한 뒤 결과를 보고하라. 끝나지 않은 단계가 남으면 앱은 완료로 처리하지 않는다." +
-          (steps?.length ? `\n\n승인된 계획 단계:\n${steps.map((s) => `- ${s.id ? `${s.id} ` : ""}${s.title} (${s.status})`).join("\n")}` : "");
+        // The definitions approved now are fixed for the run (assignments and checklists are checked against them).
+        this.chats.store.setSetting(`approvedPlan:${chatId}`, JSON.stringify({ planId, version, tasks: steps ?? [] }));
+        // Approval ends plan mode: the next message runs normally unless the user turns it on again.
+        if (chat.planMode) this.chats.updateChat(chatId, { planMode: false });
+        this.chats.emit(chatId, "orch", null, { type: "plan_state", state: "running", planId, ...(version ? { version } : {}) });
+        const grouped = !!steps?.some((s) => s.group !== undefined);
+        const text = grouped
+          ? `사용자가 계획${version ? ` v${version}` : ""}을 승인했다. 계획대로 실행하라.\n` +
+            "- group 번호 순서로 진행한다. 한 group에서 선행이 끝난 작업들은 ask_parallel 한 번으로 동시에 맡긴다(task마다 planTaskId=작업 id, kind, scope, reason, 완료 기준을 담은 message). 시작할 작업이 하나뿐일 때만 ask를 쓴다.\n" +
+            "- 필요한 작업자는 agentKind에 맞춰 spawn으로 그 group의 동시 작업 수만큼 확보하고, owner가 있으면 그 작업자를 쓴다.\n" +
+            "- planTaskId를 주면 앱이 단계를 진행 중·완료로 바꾸고 협의 id를 연결한다. 결과를 확인해 문제가 있으면 보완을 맡기고, 진행하지 않을 단계는 checklist에서 cancelled와 cancelReason으로 남긴다.\n" +
+            "- 결과를 기다릴 때는 wait_results를 쓴다. 끝나지 않은 단계가 남으면 앱은 완료로 처리하지 않는다.\n\n승인된 계획:\n" + planByGroup(steps!)
+          : "사용자가 계획을 승인했다. 계획대로 실행하라: 필요한 작업자를 spawn 하고, 서로 독립인 단계는 ask_parallel 한 번으로 동시에, 앞 결과가 필요한 단계만 차례로 맡기고(implement는 scope 지정), 단계를 시작·완료할 때마다 checklist를 갱신하고, " +
+            "모든 단계를 완료하거나, 진행하지 않을 단계는 cancelled와 cancelReason으로 표시한 뒤 결과를 보고하라. 끝나지 않은 단계가 남으면 앱은 완료로 처리하지 않는다." +
+            (steps?.length ? `\n\n승인된 계획 단계:\n${steps.map((s) => `- ${s.id ? `${s.id} ` : ""}${s.title} (${s.status})`).join("\n")}` : "");
         await this.chats.startTurn(chatId, "계획 실행", [], () => this.instructWith(chat, text, "계획 실행", true));
         return;
       }
@@ -1982,6 +2696,7 @@ export class Orchestrator {
         if (busy) throw new Error("계획을 세우거나 실행하는 중에는 계획을 취소할 수 없습니다. 멈추려면 중지(/stop)를 사용하세요.");
         const planId = pendingProposal(this.chats.store.events(chatId));
         if (planId === undefined) throw new Error("취소할 제안 계획이 없습니다.");
+        this.clearPlanConfirm(chatId);
         this.chats.emit(chatId, "orch", null, { type: "plan_state", state: "cancelled", planId, reason: "사용자가 제안을 취소했습니다." });
         return;
       }
@@ -2073,7 +2788,32 @@ export class Orchestrator {
     const proposal = this.planning.has(chatId);
     if (proposal) {
       this.planning.delete(chatId);
-      if (end.ok) this.chats.emit(chatId, "orch", null, { type: "plan_state", state: "proposed", planId: this.instructions.get(chatId)?.id });
+      const submitted = this.planSubmitted.delete(chatId);
+      const planId = this.instructions.get(chatId)?.id;
+      const version = this.planVersions.get(chatId);
+      this.planVersions.delete(chatId);
+      // Only a plan submitted with propose_plan waits for approval: a checklist or native todo list is not one.
+      const steps = planId === undefined ? undefined : planStepsFor(this.chats.store.events(chatId), planId);
+      const decision = this.planDecision.get(chatId);
+      this.planDecision.delete(chatId);
+      if (end.ok && submitted && steps?.length) {
+        this.chats.emit(chatId, "orch", null, { type: "plan_state", state: "proposed", planId, ...(version ? { version } : {}) });
+        // The user already answered the plan question during the turn: same paths as the buttons, once idle.
+        // Bound to this submission and this run: re-checked right before acting, so a stop, a new
+        // instruction or another proposal in between leaves the plan as it is.
+        const epoch = this.epochs.get(chatId);
+        if (decision) setTimeout(() => {
+          const c = this.chats.store.chat(chatId);
+          if (!c || ["paused", "pausing"].includes(c.status) || this.stopped.has(chatId) || this.epochs.get(chatId) !== epoch) return;
+          const events = this.chats.store.events(chatId);
+          if (pendingProposal(events) !== planId || (latestPlanVersion(events, planId!) ?? 1) !== (version ?? 1)) return;
+          void this.command(chatId, decision === "run" ? "plan-run" : "plan-cancel", decision === "run" ? `${planId}:${version ?? 1}` : "")
+            .catch((e) => this.chats.emit(chatId, "orch", null, { type: "notice", text: `계획 ${decision === "run" ? "진행" : "취소"} 처리 실패: ${e instanceof Error ? e.message : String(e)}` }));
+        }, 0);
+      } else {
+        if (!end.ok || end.interrupted) this.clearPlanConfirm(chatId);
+      }
+      if (end.ok && !(submitted && steps?.length)) this.chats.emit(chatId, "orch", null, { type: "notice", text: chat?.planMode ? "아직 제출된 계획이 없습니다. 답변이나 추가 설명을 보내면 계획 모드로 이어서 세웁니다." : "아직 제출된 계획이 없습니다. /plan으로 다시 요청하세요." });
     } else if (this.planRunning.has(chatId) && !pausing) {
       const planId = this.planRunning.get(chatId)!;
       this.planRunning.delete(chatId);
@@ -2128,12 +2868,65 @@ export class Orchestrator {
     return new Promise((resolve) => this.asks.set(id, { chatId, resolve }));
   }
 
+  /** Asks [진행/수정/취소] for a submitted plan; replaces an earlier question for the same chat. */
+  private askPlanConfirm(chatId: number, version: number, tasks: number) {
+    this.clearPlanConfirm(chatId);
+    const id = `ask:${randomUUID()}`;
+    this.planConfirm.set(chatId, id);
+    this.asks.set(id, { chatId, keepStatus: true, resolve: (answer) => void this.onPlanConfirm(chatId, id, answer) });
+    this.chats.emit(chatId, "orch", "orch", { type: "ask_user", id, question: `계획 v${version}(작업 ${tasks}개)이 준비됐습니다. 진행할까요? 진행하면 바로 group별로 실행하고, 수정을 고르면 다음 메시지로 고칠 내용을 받아 계획을 보강합니다.`, options: ["진행", "수정", "취소"], planConfirm: true });
+  }
+
+  /** Withdraws an open plan question (the plan was approved, cancelled, revised or replaced another way). */
+  private clearPlanConfirm(chatId: number) {
+    const id = this.planConfirm.get(chatId);
+    this.planConfirm.delete(chatId);
+    // A choice belongs to the submission its card showed: a re-submission or a new message voids it.
+    this.planDecision.delete(chatId);
+    if (!id || !this.asks.has(id)) return;
+    this.asks.delete(id);
+    this.chats.emit(chatId, "orch", null, { type: "ask_user_answer", id, answer: "(처리됨)" });
+  }
+
+  /** The user's answer: 진행 runs the plan through the approval path, 취소 cancels, 수정 (or own words) revises. */
+  private async onPlanConfirm(chatId: number, id: string, answer: string) {
+    if (this.planConfirm.get(chatId) !== id) return;
+    this.planConfirm.delete(chatId);
+    if (!answer.startsWith("사용자 답변: ")) return; // stopped, not answered
+    const choice = answer.slice("사용자 답변: ".length).trim();
+    const fail = (e: unknown) => {
+      try { this.chats.emit(chatId, "orch", null, { type: "notice", text: `계획 ${choice} 처리 실패: ${e instanceof Error ? e.message : String(e)}` }); }
+      catch { /* the chat or the app closed meanwhile */ }
+    };
+    // Still inside the planning turn: decide once it ends (the proposal is recorded then).
+    if (this.planning.has(chatId)) {
+      if (choice === "진행") this.planDecision.set(chatId, "run");
+      else if (choice === "취소") this.planDecision.set(chatId, "cancel");
+      else {
+        this.planDecision.delete(chatId);
+        const text = choice === "수정" ? "[사용자 선택: 수정] 무엇을 바꿀지 ask_user로 물은 뒤 반영해 propose_plan으로 다시 제출하세요." : `[사용자 선택: 수정] 사용자의 수정 요청: ${choice}\n반영해 propose_plan으로 다시 제출하세요.`;
+        try { await this.chats.liveDriver(chatId, "orch")?.steer?.({ text, attachments: [] }); } catch (e) { fail(e); }
+      }
+      return;
+    }
+    const events = this.chats.store.events(chatId);
+    const planId = pendingProposal(events);
+    if (planId === undefined) return fail(new Error("승인 대기 중인 계획이 없습니다."));
+    try {
+      if (choice === "진행") await this.command(chatId, "plan-run", `${planId}:${latestPlanVersion(events, planId) ?? 1}`);
+      else if (choice === "취소") await this.command(chatId, "plan-cancel", "");
+      else if (choice === "수정") this.chats.emit(chatId, "orch", null, { type: "notice", text: "고칠 내용을 보내 주세요. 다음 메시지는 계획 수정 요청으로 처리됩니다." });
+      else await this.chats.send(chatId, choice, []); // the user's own words are the revision request
+    } catch (e) { fail(e); }
+  }
+
   answerAsk(chatId: number, askId: string, answer: string) {
     const a = this.asks.get(askId);
     if (!a || a.chatId !== chatId) return false;
     this.asks.delete(askId);
     this.chats.emit(chatId, "orch", null, { type: "ask_user_answer", id: askId, answer });
-    this.chats.updateChat(chatId, { status: "working" });
+    // The plan confirmation can be answered after the turn ended: it never marks the chat working by itself.
+    if (!a.keepStatus) this.chats.updateChat(chatId, { status: "working" });
     a.resolve(`사용자 답변: ${answer}`);
     return true;
   }
@@ -2185,6 +2978,7 @@ export class Orchestrator {
       folder: this.chats.store.project(chat.projectId)!.folder,
       instruction: { ...inst, requests: [...inst.requests] },
       planning: this.planning.has(chat.id), reviewing: this.reviewing.has(chat.id), planRun: this.planRunning.get(chat.id),
+      ...(this.planVersions.has(chat.id) ? { planVersion: this.planVersions.get(chat.id) } : {}), ...(this.planSubmitted.has(chat.id) ? { planSubmitted: true } : {}),
       assignments: [...(this.assignments.get(chat.id)?.values() ?? [])],
     };
     this.stopped.add(chat.id);
@@ -2211,24 +3005,33 @@ export class Orchestrator {
     if (state.planning) this.planning.add(chat.id); else this.planning.delete(chat.id);
     if (state.planRun !== undefined) this.planRunning.set(chat.id, state.planRun); else this.planRunning.delete(chat.id);
     if (state.reviewing) this.reviewing.add(chat.id); else this.reviewing.delete(chat.id);
+    this.restorePlanTurn(chat.id, state.planVersion, state.planSubmitted);
     this.stopped.delete(chat.id);
     this.chats.updateChat(chat.id, { status: "working", touch: true });
     this.chats.emit(chat.id, "orch", null, { type: "notice", text: "마스터와 일시 정지했던 작업자에게 재시작을 요청합니다." });
+    const resumed = new Set<string>();
     for (const assignment of state.assignments) {
       const target = this.chats.store.agentByKey(chat.id, assignment.target.key);
       if (!target || target.status !== "active") continue;
       const prior = assignment.consultId ? this.chats.store.consult(assignment.consultId) : undefined;
+      // Finished before the pause (its log was still being archived): never run it again, just record it.
+      if (prior?.status === "done") {
+        if (assignment.planTask) this.updatePlanStep(chat.id, assignment.planTask, (s) => ({ ...s, status: "completed", consultIds: [...new Set([...(s.consultIds ?? []), prior.id])] }));
+        continue;
+      }
       const message = `[일시 정지한 작업 재시작]\n현재 파일과 이전 진행 상태를 확인하고 남은 부분만 이어가세요. 이미 완료된 변경은 반복하지 마세요.\n\n${assignment.message}${prior?.responseSummary ? `\n\n중지 전 진행 내용:\n${prior.responseSummary}` : ""}`;
-      void this.consult(chat.id, assignment.caller, target, assignment.kind, message, assignment.scope, assignment.attach, "일시 정지한 기존 작업을 같은 담당자에게 재전달", prior?.id, assignment.effort, assignment.discussion, true, undefined, assignment.model).catch(error => {
+      void this.consult(chat.id, assignment.caller, target, assignment.kind, message, assignment.scope, assignment.attach, "일시 정지한 기존 작업을 같은 담당자에게 재전달", prior?.id, assignment.effort, assignment.discussion, true, undefined, assignment.model, assignment.planTask).catch(error => {
         this.chats.emit(chat.id, target.key, target.key, { type: "error", message: `작업 재시작 실패: ${String(error)}` });
       });
+      if (assignment.planTask) resumed.add(assignment.planTask.taskId);
     }
+    this.reconcilePlanSteps(chat.id, resumed);
     try {
       const driver = await this.chats.driver(chat.id, "orch");
       if (this.stopped.has(chat.id) || this.epochs.get(chat.id) !== epoch) return;
       await driver.send({
-        text: `[일시 정지 후 기존 지시 계속]\n${inst.text}\n\n같은 작업자에게 미완료 요청을 재전달했습니다. 이미 끝난 작업은 반복하거나 중복 배정하지 말고 현재 상태를 확인하세요. 기존 배정 결과를 기다려 검토·취합하세요. 만료된 승인·질문은 필요한 경우 다시 요청하세요.${this.takeQueued(chat.id)}`,
-        attachments: [], noWrites: false,
+        text: `[일시 정지 후 기존 지시 계속]\n${inst.text}\n\n같은 작업자에게 미완료 요청을 재전달했습니다. 이미 끝난 작업은 반복하거나 중복 배정하지 말고 현재 상태를 확인하세요. 기존 배정 결과를 기다려 검토·취합하세요. 만료된 승인·질문은 필요한 경우 다시 요청하세요.${this.planning.has(chat.id) ? "\n[계획 모드] 읽기 전용입니다. 작업자를 쓰지 말고 propose_plan으로 계획을 제출하세요." : ""}${this.takeQueued(chat.id)}`,
+        attachments: [], noWrites: this.planning.has(chat.id),
       });
     } catch (error) {
       if (this.stopped.has(chat.id) || this.epochs.get(chat.id) !== epoch) return;

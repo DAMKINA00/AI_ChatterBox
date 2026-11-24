@@ -114,6 +114,8 @@ function registerHandlers(rpc: CoreRpc) {
     if (!chat || remoteDeleting.has(chat.id)) return { status: "no-chat" };
     if (["working", "approval", "pausing", "paused", "interrupted"].includes(chat.status) || chats.isBusy(chat.id))
       return { status: "busy" };
+    if (ask.character !== "orch" && chats.plansNextInput(chat))
+      return { status: "error", text: "계획 모드에서는 마스터에게 질문해 주세요." };
     const result: CharacterAnswer = ask.character === "orch"
       ? { status: "answer", text: await chats.askMasterCharacter(chat, ask.text) ?? "" }
       : await orchestrator.askWorkerCharacter(chat, ask.character, ask.text);
@@ -126,6 +128,7 @@ function registerHandlers(rpc: CoreRpc) {
   ipcMain.handle("chats:pause", (_e, id: number) => orchestrator.pause(id));
   ipcMain.handle("chats:resume", (_e, id: number) => { notDeleting(id); return orchestrator.resume(id); });
   ipcMain.handle("chats:command", (_e, id: number, name: string, arg: string) => { notDeleting(id); return orchestrator.command(id, name, arg); });
+  ipcMain.handle("chats:setPlanMode", (_e, id: number, on: boolean) => { notDeleting(id); return orchestrator.setPlanMode(id, on === true); });
   ipcMain.handle("chats:dismissInterrupted", (_e, id: number) => orchestrator.dismissInterrupted(id));
   ipcMain.handle("chats:approve", (_e, id: number, approvalId: string, decision: ApprovalDecision) =>
     chats.answerApproval(id, approvalId, decision),

@@ -324,6 +324,8 @@ export interface Chat {
   sidebarOrder?: number;
   /** Set on a chat branched from another conversation; stays valid after the source is deleted. */
   fork?: { sourceChatId: number; sourceEventId: number; sourceTitle: string; range: "through" | "from"; includeAttachments: boolean };
+  /** Plan mode toggle: an idle send starts a read-only planning turn that ends in propose_plan. */
+  planMode?: boolean;
 }
 
 /** through = the conversation up to and including the message; from = that message onward. */
@@ -432,7 +434,8 @@ export type AgentEvent =
   | { type: "dispatch"; instructionId: number; mode: "direct" | "delegated"; reason: string; dualInvestigation?: boolean }
   | { type: "image_generation"; id: string; status: "running" | "done" | "error"; prompt?: string; attachment?: AttachmentRef; error?: string }
   | { type: "expression"; expression: AgentExpression }
-  | { type: "user"; text: string; attachments: AttachmentRef[]; queued?: boolean; delivery?: "now" | "next" }
+  /** plan: sent while plan mode was on (a planning request or a revision of the waiting proposal). */
+  | { type: "user"; text: string; attachments: AttachmentRef[]; queued?: boolean; delivery?: "now" | "next"; plan?: true }
   | { type: "text_delta"; text: string }
   | { type: "text"; text: string }
   /** clipped: original length when a history page sent a shortened input/output (see shared/event-page.ts). */
@@ -448,7 +451,8 @@ export type AgentEvent =
   | { type: "review_result"; consultId: number; review: ReviewResult }
   /** Read-only transcript a branched chat starts from; the first native session receives it as reference. */
   | { type: "fork_context"; text: string; attachments: AttachmentRef[] }
-  | { type: "ask_user"; id: string; question: string; options: string[] }
+  /** planConfirm: the app's [진행/수정/취소] card for a submitted plan; it stays answerable after the turn ends. */
+  | { type: "ask_user"; id: string; question: string; options: string[]; planConfirm?: true }
   | { type: "ask_user_answer"; id: string; answer: string }
   /** Checklist from the orchestrator's native plan tool (Claude TodoWrite / Codex update_plan). */
   /**
@@ -459,7 +463,7 @@ export type AgentEvent =
   /** stepsTotal: set when a history page or snapshot sent only the first steps (shared/event-page.ts). */
   | { type: "plan_update"; steps: PlanStep[]; explanation?: string; planId?: number; instructionId?: number; stepsTotal?: number }
   /** Plan lifecycle (see PlanState); reason explains incomplete/failed/stopped/cancelled. */
-  | { type: "plan_state"; state: PlanState; planId?: number; reason?: string }
+  | { type: "plan_state"; state: PlanState; planId?: number; reason?: string; version?: number }
   | { type: "goal_update"; goal: ChatGoal | null }
   | { type: "turn_end"; ok: boolean; error?: string; interrupted?: boolean }
   | { type: "notice"; text: string; cliAccountId?: CliAccountId }
@@ -485,6 +489,17 @@ export interface PlanStep {
   dependsOn?: string[];
   /** Assignments connected to this step, shown with their current status. */
   consultIds?: number[];
+  /** Plan-mode task fields (propose_plan); absent on ordinary checklists. */
+  kind?: ConsultKind;
+  agentKind?: WorkerKind;
+  /** Write globs relative to the project folder; [] = no file changes. */
+  scope?: string[];
+  /** Parallel wave, 1-based: steps of one group start together once their dependencies are done. */
+  group?: number;
+  /** Completion criterion. */
+  done?: string;
+  /** Id of the step this review checks. */
+  reviewOf?: string;
 }
 
 export type GoalStatus = "active" | "complete" | "blocked" | "paused";
@@ -620,6 +635,8 @@ export interface ChatterBoxApi {
   resume(chatId: number): Promise<void>;
   /** Slash command from the composer: /plan, /goal, /review, /compact … */
   command(chatId: number, name: string, arg: string): Promise<void>;
+  /** Plan mode toggle (IPC chats:setPlanMode); the updated chat arrives through onChatUpdated. */
+  setPlanMode(chatId: number, on: boolean): Promise<void>;
   dismissInterrupted(chatId: number): Promise<void>;
   answerApproval(chatId: number, approvalId: string, decision: ApprovalDecision): Promise<ApprovalDecision | null>;
   /** false when the question was already answered or is gone. */

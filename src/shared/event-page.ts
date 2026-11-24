@@ -144,7 +144,7 @@ export interface PendingApproval { eventId: number; at: number; id: string; role
  *   active conversations; lastUserAt: when the latest instruction was sent.
  */
 export interface StateSnapshot {
-  plan: { view: { planId?: number; steps: PlanStep[]; explanation?: string } | null; state: PlanState | "live"; reason?: string; planId?: number; stepsOmitted: number };
+  plan: { view: { planId?: number; steps: PlanStep[]; explanation?: string } | null; state: PlanState | "live"; reason?: string; planId?: number; stepsOmitted: number; version?: number };
   approvals: { pending: PendingApproval[]; total: number };
   goal: ChatGoal | null;
   conversations: { node: NodeId; role: Role | null; expression?: AgentExpression; turnEnd?: { ok: boolean; interrupted?: boolean; at: number } }[];
@@ -157,23 +157,27 @@ function foldPlan(events: readonly TimelineEvent[]): StateSnapshot["plan"] {
   let state: PlanState | "live" = "live";
   let reason: string | undefined;
   let planId: number | undefined;
+  let version: number | undefined;
   for (const e of events) {
     const ev = e.event;
     if (ev.type === "plan_update" && e.role === "orch") {
-      if (ev.planId !== undefined && planId !== undefined && ev.planId !== planId) { state = "live"; reason = undefined; }
+      if (ev.planId !== undefined && planId !== undefined && ev.planId !== planId) { state = "live"; reason = undefined; version = undefined; }
       if (ev.planId !== undefined) planId = ev.planId;
       view = { planId, steps: ev.steps, explanation: ev.explanation, stepsTotal: ev.stepsTotal };
     } else if (ev.type === "plan_state") {
       if (ev.planId !== undefined && planId !== undefined && ev.planId !== planId && ev.state !== "running") continue;
+      if (ev.planId !== undefined && ev.planId !== planId) version = undefined;
       state = ev.state;
       reason = ev.reason;
+      if (ev.version !== undefined) version = ev.version;
       if (ev.planId !== undefined) planId = ev.planId;
       if (view) view = { ...view, planId };
-    } else if (ev.type === "user" && !ev.queued && ev.text !== "계획 실행" && !/^\/plan-(?:run|cancel)\b/.test(ev.text) && (isPlanCommandText(ev.text) || state !== "running")) {
+    } else if (ev.type === "user" && !ev.queued && ev.text !== "계획 실행" && !/^\/plan-(?:run|cancel)\b/.test(ev.text) && (isPlanCommandText(ev.text) || ev.plan || state !== "running")) {
       view = null;
       state = "live";
       reason = undefined;
       planId = undefined;
+      version = undefined;
     }
   }
   const summary = view && planSummary({ type: "plan_update", steps: view.steps, explanation: view.explanation, stepsTotal: view.stepsTotal });
@@ -181,6 +185,7 @@ function foldPlan(events: readonly TimelineEvent[]): StateSnapshot["plan"] {
     view: view && summary && { planId: view.planId, steps: summary.steps, explanation: summary.explanation },
     state, reason: short(reason, 500), planId,
     stepsOmitted: summary ? (summary.stepsTotal ?? summary.steps.length) - summary.steps.length : 0,
+    ...(version !== undefined ? { version } : {}),
   };
 }
 
@@ -241,7 +246,7 @@ export function snapshotEvents(snapshot: StateSnapshot, chatId: number): Timelin
   const out: TimelineEvent[] = [at({ type: "user", text: "/plan", attachments: [] }, snapshot.lastUserAt ?? 0, "orch", null)];
   const { plan } = snapshot;
   if (plan.view) out.push(at({ type: "plan_update", steps: plan.view.steps, explanation: plan.view.explanation, planId: plan.view.planId, ...(plan.stepsOmitted ? { stepsTotal: plan.view.steps.length + plan.stepsOmitted } : {}) }, 0));
-  if (plan.state !== "live") out.push(at({ type: "plan_state", state: plan.state, reason: plan.reason, planId: plan.planId }, 0));
+  if (plan.state !== "live") out.push(at({ type: "plan_state", state: plan.state, reason: plan.reason, planId: plan.planId, ...(plan.version !== undefined ? { version: plan.version } : {}) }, 0));
   for (const c of [...snapshot.conversations].reverse()) {
     if (c.expression) out.push(at({ type: "expression", expression: c.expression }, 0, c.node, c.role));
     if (c.turnEnd) out.push(at({ type: "turn_end", ok: c.turnEnd.ok, ...(c.turnEnd.interrupted ? { interrupted: true } : {}) }, c.turnEnd.at, c.node, c.role));

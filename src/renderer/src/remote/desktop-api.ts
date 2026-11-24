@@ -298,6 +298,7 @@ export function createRemoteApi(hooks: RemoteApiHooks): RemoteApi {
       if (!REMOTE_COMMANDS.includes(name as RemoteCommandName)) unsupported();
       await post(url("/api/chats/:id/command", chatId), { name, arg });
     },
+    setPlanMode: async (chatId, on) => { await post(url("/api/chats/:id/plan-mode", chatId), { on }); },
     dismissInterrupted: async chatId => { await post(url("/api/chats/:id/dismiss-interrupted", chatId)); },
     async answerApproval(chatId, approvalId, decision) {
       try { return (await post<{ decision: typeof decision }>(url("/api/chats/:id/approve", chatId), { approvalId, decision })).decision; }

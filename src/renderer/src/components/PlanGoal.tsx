@@ -1,11 +1,11 @@
 import { useMemo, useState } from "react";
-import { Ban, Check, ChevronDown, Circle, Flag, ListChecks, Play, Pencil, X } from "lucide-react";
+import { Ban, Check, ChevronDown, Circle, Flag, ListChecks, MessageCircleQuestion, Play, Pencil, X } from "lucide-react";
 import type { Chat } from "../../../shared/types";
 import { api, cn, errorMessage } from "../lib/utils";
 import { useStore } from "../store";
 import { normalizePlanStepTitle, type planOf } from "../timeline";
 import type { PlanHistoryEntry } from "../lib/plan-history";
-import { openPlanSteps, PLAN_STATE_LABEL, planActionsAvailable, planBlockerName, planConsultLinks, planCounts, planCountsText, planEndedEarly, planStepName, planStepViews } from "../lib/plan-view";
+import { openPlanSteps, PLAN_STATE_LABEL, planActionsAvailable, planBlockerName, planConsultLinks, planCounts, planCountsText, planEndedEarly, isPlanChangedError, PLAN_CHANGED_TEXT, planGroups, planReviewTarget, planRunArg, planStepName, planStepTags, planStepViews } from "../lib/plan-view";
 import { Badge, Button } from "./ui";
 import { WorkingIndicator } from "./WorkingIndicator";
 import { useMobile } from "../lib/remote-mode";
@@ -13,7 +13,40 @@ import { useMobile } from "../lib/remote-mode";
 type Plan = NonNullable<ReturnType<typeof planOf>>;
 
 /** Pinned checklist from the orchestrator's native plan tool, with the /plan approval buttons. */
-export function PlanPanel({ chat, plan, onRevise }: { chat: Chat; plan: Plan; onRevise: () => void }) {
+/** Opens the folded work log around the master's question card and brings it into view. */
+export function revealAskCard(askId: string) {
+  const card = [...document.querySelectorAll<HTMLElement>("[data-ask-id]")].find((el) => el.dataset.askId === askId);
+  if (!card) return false;
+  for (let parent = card.parentElement; parent; parent = parent.parentElement) if (parent instanceof HTMLDetailsElement) parent.open = true;
+  card.scrollIntoView({ block: "center", behavior: "smooth" });
+  card.focus({ preventScroll: true });
+  return true;
+}
+
+/** "마스터 질문 답변 대기" chip: jumps to the unanswered ask_user card. */
+export function AskWaitBadge({ askId }: { askId: string }) {
+  const toast = useStore((s) => s.toast);
+  return (
+    <button type="button" data-testid="plan-ask-wait"
+      className="inline-flex shrink-0 items-center gap-1 rounded-md border border-primary/50 bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary hover:bg-primary/15 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
+      onClick={(e) => { e.stopPropagation(); if (!revealAskCard(askId)) toast("질문 카드가 아직 불러와지지 않았습니다. 대화를 위로 스크롤해 확인하세요."); }}>
+      <MessageCircleQuestion className="size-3.5" /> 마스터 질문 답변 대기
+    </button>
+  );
+}
+
+/** Plan mode is on and the master asks something before any proposal exists. */
+export function PlanAskNotice({ askId }: { askId: string }) {
+  return (
+    <div className="mx-auto mt-3 flex w-[min(860px,calc(100%-32px))] items-center gap-2 rounded-xl border border-primary/40 bg-primary/6 px-3.5 py-2 text-[12.5px]" data-testid="plan-ask-notice">
+      <ListChecks className="size-4 shrink-0 text-orch" />
+      <span className="min-w-0 flex-1">마스터가 계획을 세우기 전에 확인할 것이 있습니다.</span>
+      <AskWaitBadge askId={askId} />
+    </div>
+  );
+}
+
+export function PlanPanel({ chat, plan, onRevise, askId, version }: { chat: Chat; plan: Plan; onRevise: () => void; askId?: string; version: number }) {
   // Phones (remote web): a live checklist starts folded so the conversation keeps the screen; a proposal
   // waiting for run/cancel stays open.
   const mobile = useMobile();
@@ -23,15 +56,20 @@ export function PlanPanel({ chat, plan, onRevise }: { chat: Chat; plan: Plan; on
   const consults = useStore(s => s.consults[chat.id]);
   const select = useStore(s => s.select);
   const views = useMemo(() => planStepViews(plan.steps), [plan.steps]);
+  const groups = useMemo(() => planGroups(views), [views]);
   const counts = useMemo(() => planCounts(plan.steps), [plan.steps]);
   const open = useMemo(() => openPlanSteps(plan.steps), [plan.steps]);
   const ended = planEndedEarly(plan.state);
   const run = (name: string) => api.command(chat.id, name, "").catch((e) => toast(errorMessage(e)));
+  // Approval carries the version on screen: a proposal replaced meanwhile (another window, the remote
+  // page) is refused by the main process instead of running a plan the user has not seen.
+  const approve = () => api.command(chat.id, "plan-run", planRunArg(plan.planId, version)).catch((e) => toast(isPlanChangedError(e) ? `${PLAN_CHANGED_TEXT} (${errorMessage(e)})` : errorMessage(e)));
   return (
     <div className={cn("mx-auto mt-3 w-[min(860px,calc(100%-32px))] overflow-hidden rounded-xl border bg-card shadow-sm", ended && "border-warning/50")} data-testid="plan-panel" data-state={plan.state}>
       <button className={cn("flex w-full items-center gap-2 px-3.5 py-2 text-left", mobile && "min-h-11 flex-wrap")} aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
         <ListChecks className="size-4 text-orch" />
         <span className="text-[13px] font-semibold">{plan.state === "live" ? "체크리스트" : "계획"}</span>
+        {plan.state !== "live" && <Badge className="text-muted-foreground" data-testid="plan-version">v{version}</Badge>}
         <Badge className={cn(plan.state === "done" ? "border-success/40 text-success" : ended && "border-warning/50 text-warning")} data-testid="plan-state">{PLAN_STATE_LABEL[plan.state]}</Badge>
         <Badge className={cn(counts.open === 0 && counts.cancelled === 0 && counts.total > 0 && "border-success/40 text-success")} data-testid="plan-progress">
           {planCountsText(counts)}
@@ -41,6 +79,11 @@ export function PlanPanel({ chat, plan, onRevise }: { chat: Chat; plan: Plan; on
         </div>
         <ChevronDown className={cn("size-4 text-muted-foreground transition-transform", !expanded && "-rotate-90")} />
       </button>
+      {askId && (
+        <div className="flex items-center gap-2 border-t px-3.5 py-1.5 text-[12px] text-muted-foreground">
+          <AskWaitBadge askId={askId} /> 답하면 마스터가 계획을 이어 갑니다.
+        </div>
+      )}
       {/* The reason an ended plan stopped short stays visible even when the card is collapsed. */}
       {(ended || plan.reason) && (
         <div className={cn("border-t px-3.5 py-1.5 text-[12px]", ended ? "text-warning" : "text-muted-foreground")} data-testid="plan-reason">
@@ -49,7 +92,8 @@ export function PlanPanel({ chat, plan, onRevise }: { chat: Chat; plan: Plan; on
         </div>
       )}
       {expanded && (
-        <div className="space-y-2 border-t px-3.5 py-2.5">
+        // A long plan scrolls inside the card instead of being cut off below the fold.
+        <div className="max-h-[min(60vh,560px)] space-y-2 overflow-y-auto overscroll-contain border-t px-3.5 py-2.5" data-testid="plan-steps-scroll">
           {plan.explanation && <div className="text-[12.5px] text-muted-foreground">{plan.explanation}</div>}
           {ended && open.length > 0 && (
             <div className="rounded-md border border-warning/40 bg-warning/5 px-2.5 py-1.5 text-[12px]" data-testid="plan-open-steps">
@@ -57,11 +101,22 @@ export function PlanPanel({ chat, plan, onRevise }: { chat: Chat; plan: Plan; on
               <ul className="mt-0.5 list-disc pl-4">{open.map((s, i) => <li key={`${i}:${s.id ?? ""}`}>{normalizePlanStepTitle(planStepName(s))}{s.status === "inProgress" ? " (진행 중이었음)" : ""}</li>)}</ul>
             </div>
           )}
+          {(groups ?? [{ group: 0, steps: views }]).map(({ group, steps: list, undetermined }) => (
+          <div key={undetermined ? "undetermined" : group} className={cn(groups && "rounded-lg border border-dashed px-2.5 py-1.5", undetermined && "border-warning/50")} data-testid={groups ? "plan-group" : undefined} data-group={groups ? (undetermined ? "undetermined" : group) : undefined}>
+          {groups && (
+            <div className="mb-1 flex items-center gap-1.5 text-[11.5px] font-medium text-muted-foreground">
+              {undetermined ? <span className="text-warning">순서 미확정 · 선행 단계가 없거나 서로 순환합니다</span> : <>
+                <span className="text-orch">{group}단계</span>
+                {list.length > 1 ? <span>· 동시 진행 {list.length}개</span> : <span>· 단독</span>}
+              </>}
+            </div>
+          )}
           <ol className="space-y-1">
-            {views.map(({ step: s, key, blockers, ready }) => {
+            {list.map(({ step: s, key, blockers, ready, groupWait }) => {
               const title = normalizePlanStepTitle(s.title);
               const ownerRole = agents?.find(a => (s.owner ? a.nickname === s.owner : title.startsWith(`[${a.nickname}]`)))?.key;
               const links = planConsultLinks(s, consults);
+              const tags = planStepTags(s);
               return (
                 <li key={key} className="flex items-start gap-2 text-[13px]" data-testid="plan-step" data-status={s.status} data-blocked={blockers.length > 0} data-ready={ready}>
                   {s.status === "completed" ? (
@@ -77,12 +132,23 @@ export function PlanPanel({ chat, plan, onRevise }: { chat: Chat; plan: Plan; on
                     <div className="flex flex-wrap items-baseline gap-x-1.5">
                       {s.owner && <span className="shrink-0 text-[11.5px] font-medium text-orch" data-testid="plan-step-owner">[{s.owner}]</span>}
                       <span className={cn("break-words", s.status === "completed" && "text-muted-foreground line-through decoration-muted-foreground/40", s.status === "cancelled" && "text-muted-foreground line-through decoration-warning/60")}>{title}</span>
+                      {tags.kind && <Badge className="shrink-0" data-testid="plan-step-kind">{tags.kind}</Badge>}
+                      {tags.agentKind && <Badge className="shrink-0 text-muted-foreground" data-testid="plan-step-agent-kind">{tags.agentKind}</Badge>}
                       {s.status === "cancelled" && <span className="shrink-0 rounded border border-warning/50 px-1 text-[11px] text-warning" data-testid="plan-step-cancelled">취소됨</span>}
                     </div>
+                    {(!!s.scope?.length || !!s.done?.trim() || !!s.dependsOn?.length || !!s.reviewOf) && (
+                      <div className="mt-0.5 space-y-0.5 text-[11.5px] text-muted-foreground">
+                        {!!s.scope?.length && <div className="break-all" data-testid="plan-step-scope">범위: <span className="font-mono">{s.scope.join(", ")}</span></div>}
+                        {!!s.done?.trim() && <div data-testid="plan-step-done">완료 기준: {s.done.trim()}</div>}
+                        {!!s.dependsOn?.length && <div data-testid="plan-step-depends">선행: {s.dependsOn.map((id) => { const d = plan.steps.find((x) => x.id === id); return d ? normalizePlanStepTitle(planStepName(d)) : id; }).join(", ")}</div>}
+                        {s.reviewOf && <div data-testid="plan-step-review-of">리뷰 대상: {planReviewTarget(s, plan.steps)}</div>}
+                      </div>
+                    )}
                     {s.status === "cancelled" && <div className="mt-0.5 text-[11.5px] text-muted-foreground" data-testid="plan-step-cancel-reason">취소 사유: {s.cancelReason?.trim() || "사유가 기록되지 않았습니다."}</div>}
-                    {(blockers.length > 0 || ready || links.length > 0) && (
+                    {(blockers.length > 0 || ready || groupWait || links.length > 0) && (
                       <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11.5px]">
                         {blockers.length > 0 && <span className="text-warning" data-testid="plan-step-blockers">대기 · 선행 미완료: {blockers.map(planBlockerName).join(", ")}</span>}
+                        {groupWait && <span className="text-muted-foreground" data-testid="plan-step-group-wait">대기 · 앞 단계 묶음이 끝나면 시작</span>}
                         {ready && <span className="text-success" data-testid="plan-step-ready">시작 가능</span>}
                         {links.map(({ consultId, consult }) => (
                           <button key={consultId} type="button" data-testid="plan-step-consult"
@@ -99,10 +165,12 @@ export function PlanPanel({ chat, plan, onRevise }: { chat: Chat; plan: Plan; on
               );
             })}
           </ol>
+          </div>
+          ))}
           {planActionsAvailable(plan.state, chat.status) ? (
-            <div className="flex gap-2 pt-1">
-              <Button size="sm" onClick={() => void run("plan-run")} data-testid="plan-run">
-                <Play /> 실행
+            <div className="flex flex-wrap gap-2 pt-1">
+              <Button size="sm" onClick={() => void approve()} data-testid="plan-run" data-version={version}>
+                <Play /> 승인하고 실행
               </Button>
               <Button size="sm" variant="secondary" onClick={onRevise}>
                 <Pencil /> 수정 요청

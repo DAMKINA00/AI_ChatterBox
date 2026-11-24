@@ -274,10 +274,11 @@ test("worker remains reserved until native archive finishes before its next queu
   assert.equal(o.running.get(1).has("w1"), false);
 });
 
-test("planning and review can mutate; idle, stopped and overlapping work remains blocked", () => {
+test("planning is read-only for the master; review can mutate; idle, stopped and overlapping work remains blocked", () => {
   const { chats, orchestrator: o } = engine();
   o.planning.add(1);
-  assert.equal(chats.approvalGuard(1, write), null);
+  assert.match(chats.approvalGuard(1, write), /계획 모드/);
+  assert.equal(chats.approvalGuard(1, { ...write, writes: false, command: "git status" }), null);
   o.planning.clear(); o.reviewing.add(1);
   assert.equal(chats.approvalGuard(1, { ...write, writes: false, command: "npm run build" }), null);
   o.reviewing.clear();
@@ -404,8 +405,21 @@ test("failed master startup ends the review restriction and permits a later ordi
   assert.equal(chats.approvalGuard(1, write), null);
 });
 
-test("resuming an interrupted plan or review after restart allows normal mutation approvals", async () => {
-  for (const command of ["/plan change a file", "/review"]) {
+test("resuming an interrupted plan stays read-only; a resumed review allows normal mutation approvals", async () => {
+  {
+    const { chats, orchestrator: o } = engine();
+    chats.store.chat = () => ({ id: 1, status: "interrupted" });
+    chats.store.events = () => [{ event: { type: "user", text: "/plan change a file" } }];
+    chats.updateChat = () => undefined;
+    o.handover = () => "";
+    let input: any;
+    chats.driver = async () => ({ send: async (value: any) => { input = value; } });
+    await o.resume(1);
+    assert.equal(input.noWrites, true);
+    assert.match(input.text, /\[계획 모드\] 읽기 전용/);
+    assert.match(chats.approvalGuard(1, write), /계획 모드/);
+  }
+  for (const command of ["/review"]) {
     const { chats, orchestrator: o } = engine();
     chats.store.chat = () => ({ id: 1, status: "interrupted" });
     chats.store.events = () => [{ event: { type: "user", text: command } }];

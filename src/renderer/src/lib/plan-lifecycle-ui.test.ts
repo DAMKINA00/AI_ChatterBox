@@ -69,6 +69,7 @@ test("desktop panel: cancelled plan is shown with state, reason, cancelled step 
   assert.match(html, /data-testid="plan-reason"[^>]*>취소됨 · 사용자가 제안을 취소했습니다\./);
   assert.match(html, /data-testid="plan-step-cancelled"/);
   assert.match(html, /취소 사유: 범위에서 제외/);
+  assert.match(html, /class="[^"]*max-h-\[[^"]*overflow-y-auto[^"]*" data-testid="plan-steps-scroll"/, "a long expanded list scrolls inside the card");
   assert.match(html, /진행되지 않은 단계 2개/);
   assert.match(html, /선행 미완료: UI\(취소됨\)/);
   assert.doesNotMatch(html, /data-testid="plan-run"/, "a cancelled plan has no run button");
@@ -105,53 +106,38 @@ const user = (text: string) => ev("orch", null, { type: "user", text, attachment
 const update = (s: PlanStep[], planId?: number) => ev("orch", "orch", { type: "plan_update", steps: s, ...(planId !== undefined ? { planId } : {}) });
 const stateEv = (state: PlanState, planId?: number, reason?: string) => ev("orch", "orch", { type: "plan_state", state, ...(planId !== undefined ? { planId } : {}), ...(reason ? { reason } : {}) });
 
-test("a new task boundary clears the pinned plan while its completed predecessor stays in history", () => {
+test("a new task boundary clears the pinned plan and drops its predecessor (no history kept)", () => {
   const old = [{ title: "previous result", status: "completed" as const }];
   const events = [update(old, 10), stateEv("done", 10), user("new task"), update([], 20)];
   assert.equal(planOf(events), null);
-  assert.deepEqual(planHistory(events).map(p => [p.planId, p.steps]), [[10, old]]);
+  assert.deepEqual(planHistory(events), []);
   events.push(update([{ title: "new work", status: "pending" }], 20));
   assert.deepEqual(planOf(events)?.steps.map(s => s.title), ["new work"]);
-  assert.deepEqual(planHistory(events).map(p => p.planId), [10]);
+  assert.deepEqual(planHistory(events), [], "only the current plan remains");
 });
 
-test("history: a cancelled proposal stays readable after the next ordinary instruction", () => {
-  const events = [user("/plan A"), update(steps, 1), stateEv("proposed", 1), stateEv("cancelled", 1, "사용자가 제안을 취소했습니다."), user("다른 일")];
-  assert.equal(planOf(events), null, "the pinned panel moves on");
-  const h = planHistory(events);
-  assert.equal(h.length, 1);
-  assert.equal(h[0].state, "cancelled");
-  assert.equal(h[0].reason, "사용자가 제안을 취소했습니다.");
-  assert.equal(h[0].steps.find((s) => s.id === "b")?.cancelReason, "범위에서 제외");
-});
-
-test("history: an incomplete plan stays apart from the new /plan that replaced it", () => {
-  const h = hist(user("/plan A"), update(steps, 1), stateEv("running", 1), stateEv("incomplete", 1, "끝나지 않은 단계 2개: c, d"),
-    user("/plan B"), update([{ title: "B1", status: "pending" }], 9), stateEv("proposed", 9));
-  assert.deepEqual(h.map((x) => [x.key, x.state, x.steps.length]), [["plan:1", "incomplete", 4]]);
-});
-
-test("history: plans with different ids never mix; the shown plan is not history", () => {
-  const h = hist(update([{ title: "A1", status: "cancelled", cancelReason: "중복" }], 1), stateEv("cancelled", 1, "취소 A"),
-    update([{ title: "B1", status: "pending" }], 2), stateEv("running", 2));
-  assert.deepEqual(h.map((x) => [x.planId, x.state, x.steps.map((s) => s.title)]), [[1, "cancelled", ["A1"]]]);
+test("history: a new plan start drops ended plans of every kind (cancelled, incomplete, other ids, legacy)", () => {
+  assert.deepEqual(hist(user("/plan A"), update(steps, 1), stateEv("proposed", 1), stateEv("cancelled", 1, "사용자가 제안을 취소했습니다."), user("다른 일")), []);
+  assert.deepEqual(hist(user("/plan A"), update(steps, 1), stateEv("running", 1), stateEv("incomplete", 1, "끝나지 않은 단계 2개: c, d"),
+    user("/plan B"), update([{ title: "B1", status: "pending" }], 9), stateEv("proposed", 9)), []);
+  assert.deepEqual(hist(update([{ title: "A1", status: "cancelled", cancelReason: "중복" }], 1), stateEv("cancelled", 1, "취소 A"),
+    update([{ title: "B1", status: "pending" }], 2), stateEv("running", 2)), []);
   assert.equal(planOf([update([{ title: "B1", status: "pending" }], 2)])?.steps[0].title, "B1");
+  assert.deepEqual(hist(update(steps, 3), stateEv("stopped", 3, "중지"), stateEv("failed", 3, "오류"), user("다음")), []);
+  assert.deepEqual(hist(user("/plan 옛 A"), update([{ title: "A", status: "pending" }]), stateEv("cancelled"), user("/plan 옛 B"), update([{ title: "B", status: "completed" }]), stateEv("done"), user("일반 지시")), []);
+  // The app's closing record for the replaced plan (written right after the new start) does not bring it back.
+  assert.deepEqual(hist(update(steps, 1), stateEv("running", 1), user("새 작업"), stateEv("incomplete", 1, "새 작업이 시작되어 이전 계획을 정리했습니다(미완료 항목 있음)."), update([], 7)), []);
 });
 
-test("history: several end states of one plan keep only the latest; running again leaves the history", () => {
-  const twice = hist(update(steps, 3), stateEv("stopped", 3, "중지"), stateEv("failed", 3, "오류"), user("다음"));
-  assert.deepEqual(twice.map((x) => [x.state, x.reason]), [["failed", "오류"]]);
-  const resumed = hist(update(steps, 3), stateEv("stopped", 3, "중지"), stateEv("running", 3));
-  assert.equal(resumed.length, 0, "a plan back on the panel is not stale history");
-});
-
-test("history: legacy plans without ids are kept per segment, newest first", () => {
-  const h = hist(user("/plan 옛 A"), update([{ title: "A", status: "pending" }]), stateEv("cancelled"), user("/plan 옛 B"), update([{ title: "B", status: "completed" }]), stateEv("done"), user("일반 지시"));
-  assert.deepEqual(h.map((x) => [x.state, x.steps[0]?.title, x.reason]), [["done", "B", undefined], ["cancelled", "A", undefined]]);
+test("history: a follow-up to a running plan is not a new start; running again leaves no history", () => {
+  const events = [update(steps, 3), stateEv("running", 3), user("추가 지시")];
+  assert.deepEqual(planOf(events)?.steps.map((s) => s.id), steps.map((s) => s.id), "the running plan stays");
+  assert.deepEqual(hist(...events), []);
+  assert.equal(hist(update(steps, 3), stateEv("stopped", 3, "중지"), stateEv("running", 3)).length, 0);
 });
 
 test("history UI: desktop and remote show state, reason and step reasons, with no buttons", () => {
-  const entries = hist(user("/plan A"), update(steps, 1), stateEv("cancelled", 1, "사용자가 제안을 취소했습니다."), user("다른 일"));
+  const entries = [{ key: "plan:1", planId: 1, state: "cancelled" as PlanState, reason: "사용자가 제안을 취소했습니다.", steps, eventId: 1, at: 0 }];
   for (const html of [renderToStaticMarkup(createElement(PlanHistory, { history: entries })), renderToStaticMarkup(createElement(PlanHistoryList, { history: entries }))]) {
     assert.match(html, /이전 계획 1개/);
     assert.match(html, /취소됨/);

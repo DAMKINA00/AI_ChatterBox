@@ -346,27 +346,34 @@ try {
   const newProject = await page.evaluate(() => window.chatterbox.listProjects().then(projects => projects.find(p => p.name === "workspace")));
   check("creating from a folder opens a first chat with the default review gate", newProject?.folder === workspace && newProject?.settings.reviewGate === true);
 
+  // Plan mode toggle: the first request fails (state unchanged, error shown), the second goes through;
+  // Alt+P toggles it back. The send button and placeholder follow the chat's stored planMode.
   await app.evaluate(({ ipcMain }) => {
-    globalThis.quickPlanRequests = [];
-    ipcMain.removeHandler("chats:command");
-    ipcMain.handle("chats:command", (_event, chatId, name, arg) => {
-      globalThis.quickPlanRequests.push({ chatId, name, arg });
-      if (globalThis.quickPlanRequests.length === 1) throw new Error("계획 요청 테스트 실패");
+    globalThis.planModeRequests = [];
+    ipcMain.removeHandler("chats:setPlanMode");
+    ipcMain.handle("chats:setPlanMode", (_event, chatId, on) => {
+      globalThis.planModeRequests.push({ chatId, on });
+      if (globalThis.planModeRequests.length === 1) throw new Error("계획 모드 테스트 실패");
     });
   });
-  const plan = page.getByRole("button", { name: "계획 먼저" });
+  const toggle = page.getByTestId("plan-mode-toggle");
   const composer = page.getByLabel("메시지 입력");
-  check("plan shortcut waits for an instruction", await plan.isDisabled());
+  check("plan mode starts off", await toggle.getAttribute("aria-pressed") === "false");
   const instruction = "검증 순서를 먼저 정리해 주세요.\n작업 범위도 제안해 주세요.";
   await composer.fill(instruction);
-  await plan.click();
-  await page.getByRole("alert").filter({ hasText: "계획 요청 테스트 실패" }).waitFor();
-  check("a failed plan request preserves the typed instruction", await composer.inputValue() === instruction);
-  await plan.click();
-  await page.waitForFunction(() => document.querySelector('textarea[aria-label="메시지 입력"]')?.value === "");
-  const requests = await app.evaluate(() => globalThis.quickPlanRequests);
-  check("plan shortcut uses the existing plan command with unmodified task text",
-    requests.length === 2 && requests.every(r => r.name === "plan" && r.arg === instruction && r.chatId === requests[0].chatId));
+  await toggle.click();
+  await page.getByRole("alert").filter({ hasText: "계획 모드 테스트 실패" }).waitFor();
+  check("a failed toggle keeps the typed instruction and the off state",
+    await composer.inputValue() === instruction && await toggle.getAttribute("aria-pressed") === "false");
+  await toggle.click();
+  await composer.focus();
+  await page.keyboard.press("Alt+KeyP");
+  for (let i = 0; i < 50 && (await app.evaluate(() => globalThis.planModeRequests.length)) < 3; i++) await page.waitForTimeout(100);
+  // The mocked handler does not store the state, so the chat stays off and every request asks for on.
+  const requests = await app.evaluate(() => globalThis.planModeRequests);
+  check("the toggle and Alt+P ask the main process to switch plan mode for this chat",
+    requests.length === 3 && requests.every(r => r.on === true && r.chatId === requests[0].chatId));
+  check("the typed instruction is still in the box", await composer.inputValue() === instruction);
 } catch (error) {
   console.error(error);
   check("GUI test run completed", false, error instanceof Error ? error.message : String(error));

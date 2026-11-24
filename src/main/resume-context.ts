@@ -25,6 +25,11 @@ export interface InstructionSnapshot {
   reviewing: boolean;
   /** Id of the approved /plan being carried out; absent on older snapshots (never inferred). */
   planRun?: number;
+  /** Planning turn: the version it works on and whether propose_plan was submitted. */
+  planVersion?: number;
+  planSubmitted?: boolean;
+  /** route_request split of the instruction. */
+  split?: "single" | "parallel" | "sequential";
 }
 
 export function parseInstructionSnapshot(raw: string | undefined): InstructionSnapshot | undefined {

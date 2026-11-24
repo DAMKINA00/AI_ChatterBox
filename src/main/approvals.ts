@@ -39,6 +39,8 @@ export interface ApprovalInput {
   readOnly?: boolean;
   /** The action writes these paths (vs. only reading them). */
   writes?: boolean;
+  /** The native tool call this approval is for (same id as its tool_call/tool_result events). */
+  toolId?: string;
 }
 
 export interface JudgeAnswer {
@@ -135,6 +137,9 @@ export class ApprovalService {
   private restriction(chatId: number, input: ApprovalInput): string | null {
     const blocked = this.host.guard?.(chatId, input);
     if (blocked) return blocked;
+    // Known limit: a shell command that may change files but reports no writes/diffs cannot be held to a
+    // path scope (or an approved plan's range) here. Such commands go through the approval policy (the
+    // judge or the user) and the scope locks; blocking them all would also stop legitimate tests and builds.
     if (!input.writes && !input.diffs?.length) return null;
     const sc = this.host.writeScope?.(chatId, input.role);
     if (!sc?.globs) return null;

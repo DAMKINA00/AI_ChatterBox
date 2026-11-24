@@ -49,7 +49,7 @@ type ItemKinds =
       at: number;
     }
   | { kind: "image"; key: string; role: Role; node: NodeId; id: string; status: "running" | "done" | "error"; prompt?: string; attachment?: AttachmentRef; error?: string }
-  | { kind: "ask"; key: string; id: string; question: string; options: string[]; answer?: string }
+  | { kind: "ask"; key: string; id: string; question: string; options: string[]; answer?: string; planConfirm?: true }
   | { kind: "peer"; key: string; from: Role; to: Role; text: string }
   /** origin "system": an app status line from the group chat; detail keeps its full original text. */
   | { kind: "notice"; key: string; tone: "error" | "auth" | "info"; text: string; detail?: string; origin?: "system" };
@@ -511,7 +511,7 @@ export function apply(items: Item[], e: TimelineEvent, expression?: AgentExpress
       ];
     }
     case "ask_user":
-      return [...closeStream(items, role, node), { kind: "ask", key: key, id: ev.id, question: ev.question, options: ev.options }];
+      return [...closeStream(items, role, node), { kind: "ask", key: key, id: ev.id, question: ev.question, options: ev.options, ...(ev.planConfirm ? { planConfirm: true as const } : {}) }];
     case "ask_user_answer":
       return items.map((x) => (x.kind === "ask" && x.id === ev.id ? { ...x, answer: ev.answer } : x));
     case "notice":

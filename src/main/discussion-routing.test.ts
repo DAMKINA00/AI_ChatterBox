@@ -313,7 +313,8 @@ test("an interrupted master waits through worker consolidation before its contin
       else { await work; f.finish(role, "part done"); }
     });
     f.store.updateChat(f.chat.id, { status: "working" });
-    const pending = f.engine.call(f.chat.id, "orch", "ask_parallel", { tasks: [a, b].map(w => ({ to: w.nickname, kind: "opinion", message: "task", reason: "test" })) });
+    // An explicit synthesis: the master's default now returns each result without one.
+    const pending = f.engine.call(f.chat.id, "orch", "ask_parallel", { reportsOnly: false, tasks: [a, b].map(w => ({ to: w.nickname, kind: "opinion", message: "task", reason: "test" })) });
     await f.chats.send(f.chat.id, "quick question", [], "now");
     assert.match(textOf(await pending), /quick question/);
     master.running = false;

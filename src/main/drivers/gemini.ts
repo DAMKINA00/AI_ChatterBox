@@ -102,7 +102,7 @@ export class GeminiDriver implements AgentDriver {
     if (bridge) return { decision: "auto_approve" };
     if (writes && !files?.length) return deny("수정할 파일 경로를 확인하지 못했습니다.");
     // Generated images are CLI artifacts, subsequently copied into app attachments; project edits remain scoped.
-    const approval = await this.host.approve({ title: display, detail: command ?? JSON.stringify(args), key: name, ...(computerUse ? { userOnly: true } : {}), paths, command, diffs: files, writes: writes || (imageTool && paths.length > 0), readOnly });
+    const approval = await this.host.approve({ title: display, detail: command ?? JSON.stringify(args), key: name, ...(computerUse ? { userOnly: true } : {}), paths, command, diffs: files, writes: writes || (imageTool && paths.length > 0), readOnly, toolId: String(id) });
     if (approval.verdict === "deny" || epoch !== this.epoch || !this._running || this.stopping) return deny(approval.reason || "실행이 거부되거나 중지되었습니다.");
     if (files?.length) this.diffs.set(id, files);
     if (imageTool) this.imageCalls.set(id, { directory: payload.artifactDirectoryPath, before: imageFileSnapshot(payload.artifactDirectoryPath) });

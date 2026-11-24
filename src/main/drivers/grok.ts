@@ -177,7 +177,7 @@ export class GrokDriver implements AgentDriver {
     try {
       const answer = await Promise.race([
         // Native image_gen/image_edit save session artifacts; an explicit output destination is still a scoped write.
-        this.host.approve({ title: name, detail: command ?? JSON.stringify(args), key: name, command, paths, diffs, writes: writing || (image ? !!args.output_path : !readOnly && !command), readOnly }),
+        this.host.approve({ title: name, detail: command ?? JSON.stringify(args), key: name, command, paths, diffs, writes: writing || (image ? !!args.output_path : !readOnly && !command), readOnly, toolId: id }),
         new Promise<{ verdict: "deny"; reason: string }>(resolve => { timer = setTimeout(() => resolve({ verdict: "deny", reason: "승인 대기 시간이 초과되었습니다. 다시 요청하세요." }), 540_000); }),
       ]);
       if (!this.running || epoch !== this.epoch || answer.verdict === "deny") return deny(answer.reason || "도구 실행이 거부되었습니다.");

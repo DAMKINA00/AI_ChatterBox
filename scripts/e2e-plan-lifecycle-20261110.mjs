@@ -96,18 +96,11 @@ try {
   const panel = page.getByTestId("plan-panel");
   const history = page.getByTestId("plan-history");
 
-  // ---------- 1 cancelled proposal → read-only history after a new instruction [UI desktop]
+  // ---------- 1 cancelled proposal → dropped (not kept as history) after a new instruction [UI desktop]
   await open(1);
   check("[UI] the pinned panel moves on after a new instruction", (await panel.count()) === 0);
-  check("[UI] the cancelled plan stays in the collapsed history", await ok(history.waitFor({ timeout: 5_000 })) && /이전 계획 1개/.test(await history.innerText()));
-  await history.locator("summary").first().click();
-  const entry = history.getByTestId("plan-history-entry");
-  check("[UI] history entry: cancelled, reason, counts", (await entry.getAttribute("data-state")) === "cancelled" && (await entry.innerText()).includes(`사유: ${CANCEL_REASON}`) && (await entry.innerText()).includes("완료 1 · 취소 1 · 남음 2"), await entry.innerText());
-  await entry.locator("summary").click();
-  const entryText = await entry.innerText();
-  check("[UI] history keeps each step's state and the cancelled step's reason", entryText.includes("취소 사유: 범위에서 제외") && entryText.includes("미진행") && entryText.includes("진행 중이었음"), entryText);
-  check("[UI] history is read-only (no buttons)", (await history.locator("button").count()) === 0);
-  await page.screenshot({ path: join(base, "desktop-cancelled-history-dark.png") });
+  check("[UI] the cancelled plan is dropped: no '이전 계획' section", !(await ok(history.waitFor({ timeout: 1_500 }))) && (await history.count()) === 0);
+  await page.screenshot({ path: join(base, "desktop-no-history-dark.png") });
 
   // ---------- 2 incomplete plan on the panel [UI desktop]
   await open(2);
@@ -124,7 +117,7 @@ try {
   await page.getByLabel("테마 전환").click();
   await page.screenshot({ path: join(base, "desktop-incomplete-light.png") });
 
-  // A new /plan replaces it on the panel; the incomplete plan moves to history (renderer-only events).
+  // A new /plan replaces it on the panel; the incomplete plan is dropped, not kept (renderer-only events).
   const NEW = 900_001;
   const live = (id, role, value) => send("chat:event", { id, chatId: 2, node: "orch", role, at: Date.now(), event: value });
   await live(NEW, null, { type: "user", text: "/plan 새 계획", attachments: [] });
@@ -132,7 +125,7 @@ try {
   await live(NEW + 2, "orch", { type: "plan_state", state: "proposed", planId: NEW });
   await page.waitForFunction(() => document.querySelector('[data-testid="plan-panel"]')?.getAttribute("data-state") === "proposed", null, { timeout: 5_000 }).catch(() => undefined);
   check("[UI] a new /plan replaces the panel without mixing steps", (await panel.getAttribute("data-state")) === "proposed" && !(await panel.innerText()).includes("API 정리") && (await panel.innerText()).includes("새 단계"));
-  check("[UI] the replaced incomplete plan is in history", /이전 계획 1개/.test(await history.innerText()) && (await history.getByTestId("plan-history-entry").getAttribute("data-state")) === "incomplete");
+  check("[UI] the replaced incomplete plan is dropped: only the current plan remains", (await history.count()) === 0);
 
   // ---------- 3 run/cancel only on an idle proposal [UI desktop]
   await open(3);
@@ -172,14 +165,9 @@ try {
 
   await openRemote(1, "일반 지시 처리 완료");
   const remoteHistory = web.locator('details[aria-label="이전 계획"]');
-  if (!(await team.getAttribute("open").catch(() => null))) await team.locator("summary").first().click();
-  await remoteHistory.locator("summary").first().click();
-  const remoteEntry = remoteHistory.locator("[data-plan-history]");
-  await remoteEntry.locator("summary").click();
-  const remoteEntryText = await remoteEntry.innerText();
-  check("[UI remote] cancelled plan in history with reason, counts and the step's reason", (await remoteEntry.getAttribute("data-plan-history")) === "cancelled" && remoteEntryText.includes(`사유: ${CANCEL_REASON}`) && remoteEntryText.includes("완료 1 · 취소 1 · 남음 2") && remoteEntryText.includes("취소 사유: 범위에서 제외"), remoteEntryText);
-  check("[UI remote] history is read-only (no buttons)", (await remoteHistory.locator("button").count()) === 0);
-  await web.screenshot({ path: join(base, "remote-cancelled-history.png") });
+  // No plan is left to open a panel for: check the absence directly, without touching the team panel.
+  check("[UI remote] the cancelled plan is dropped after a new instruction: no '이전 계획' section", (await remoteHistory.count()) === 0);
+  await web.screenshot({ path: join(base, "remote-no-history.png") });
 
   await openRemote(2, "/plan 미완료될 계획");
   const summary = await team.locator("summary").first().innerText();
@@ -187,11 +175,11 @@ try {
   if (!(await team.getAttribute("open").catch(() => null))) await team.locator("summary").first().click();
   const teamText = await team.innerText();
   check("[UI remote] open steps, cancelled step and its reason, unfinished prerequisite", /진행되지 않은 단계 2개/.test(teamText) && teamText.includes("취소 사유: 범위에서 제외") && teamText.includes("화면 연결(취소됨)"), teamText);
-  check("[UI remote] an ended plan offers no run/cancel", (await web.getByRole("button", { name: /계획 실행|계획 취소/ }).count()) === 0);
+  check("[UI remote] an ended plan offers no run/cancel", (await web.getByRole("button", { name: /승인하고 실행|계획 취소/ }).count()) === 0);
   await web.screenshot({ path: join(base, "remote-incomplete.png") });
 
   await openRemote(3, "/plan 제안 계획");
-  check("[UI remote] an idle proposal offers run and cancel", (await web.getByRole("button", { name: "계획 실행" }).count()) === 1 && (await web.getByRole("button", { name: "계획 취소" }).count()) === 1);
+  check("[UI remote] an idle proposal offers run and cancel", (await web.getByRole("button", { name: "승인하고 실행" }).count()) === 1 && (await web.getByRole("button", { name: "계획 취소" }).count()) === 1);
   check("[UI remote] no renderer errors", remoteErrors.length === 0, remoteErrors.join("\n"));
   console.log(`Screenshots: ${base}`);
 } catch (error) {

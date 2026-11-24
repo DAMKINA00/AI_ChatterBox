@@ -57,6 +57,7 @@ import type { AgentDriver, AgentInput, DriverHost } from "./drivers/types";
 import { ChatCompletionDriver, type StudioMessage } from "./drivers/aistudio";
 import { DeepSeekService } from "./deepseek";
 import { AISTUDIO_MODEL, isAIStudioModel } from "../shared/aistudio";
+import { pendingProposal } from "../shared/plan-lifecycle";
 
 export interface Sink {
   agents(chatId: number, agents: ChatAgent[]): void;
@@ -1168,6 +1169,10 @@ export class ChatManager {
   instructionsFor?: (chat: Chat, project: Project, role: Role, agent: AgentKind) => string | undefined;
   /** Extra MCP servers for a role: Claude --mcp-config entries and the same entries as Codex config. */
   toolsFor?: (chat: Chat, role: Role, agent: AgentKind) => Record<string, any> | undefined;
+  /** A role's tool call was refused or cancelled at approval (releases its command lock). */
+  approvalDenied?: (chatId: number, role: Role, toolId?: string) => void;
+  /** Native names of the bridge tools a role's Claude session must see (deny-rule warning). */
+  bridgeToolNames?: (chatId: number, role: Role) => string[];
 
   /**
    * Driver for a role, created on demand. If the role's CLI or model changed since the driver was
@@ -1221,7 +1226,12 @@ export class ChatManager {
         }
       },
       nativeId: (id) => this.saveNativeId(chatId, role, cfg.agent, id, accountId, account?.createdAt),
-      approve: (input) => this.approvals.request(chatId, project.folder, { ...input, role, node: this.route(chatId, role) }),
+      approve: async (input) => {
+        const result = await this.approvals.request(chatId, project.folder, { ...input, role, node: this.route(chatId, role) });
+        // A refused or cancelled call never runs: anything held for it ends now.
+        if (result.verdict === "deny") this.approvalDenied?.(chatId, role, input.toolId);
+        return result;
+      },
       usage: (u) => this.mergeUsage(u, accountId, usageToken),
       image: (image) => this.generatedImage(chatId, image),
     };
@@ -1262,6 +1272,8 @@ export class ChatManager {
           mcpServers: () => this.toolsFor?.(this.store.chat(chatId)!, role, "claude") ?? {},
           // Bridge tools (master: spawn/ask/…; workers: ask/agents) never need a permission prompt.
           allowedTools: ["mcp__chatterbox_bridge"],
+          expectedTools: () => this.bridgeToolNames?.(chatId, role) ?? [],
+          warnKey: `chat-${chatId}`,
         },
         host,
       );
@@ -1410,8 +1422,13 @@ export class ChatManager {
       void this.startTurn(chat.id, text, [], () => {
         this.masterQuestions.set(chat.id, question);
         return this.sendHandler(chat, { text, attachments: [] });
-      }).catch(() => question.finish());
+      }, this.plansNextInput(chat)).catch(() => question.finish());
     });
+  }
+
+  /** A message to a pending proposal starts a revision even if the plan toggle is off. */
+  plansNextInput(chat: Chat): boolean {
+    return !!chat.planMode || pendingProposal(this.store.events(chat.id)) !== undefined;
   }
 
   /** Called instead of sendHandler while the chat is working (extra instructions). */
@@ -1433,18 +1450,19 @@ export class ChatManager {
       await this.busySend(chat, { text, attachments }, delivery);
       return;
     }
-    await this.startTurn(chatId, text, attachmentIds, () => this.sendHandler(chat, { text, attachments }));
+    // Plan mode, or a proposal waiting for approval: the message asks for a plan (or revises the proposal).
+    await this.startTurn(chatId, text, attachmentIds, () => this.sendHandler(chat, { text, attachments }), this.plansNextInput(chat));
   }
 
   /**
    * Record the user's message (as shown) and start an orchestrator run. Commands (/plan, /goal …)
    * use this with their own run; errors end the run with a visible message.
    */
-  async startTurn(chatId: number, display: string, attachmentIds: number[], run: () => Promise<void>) {
+  async startTurn(chatId: number, display: string, attachmentIds: number[], run: () => Promise<void>, plan = false) {
     this.masterQuestions.get(chatId)?.finish();
     const attachments = this.store.attachmentsFor(attachmentIds);
     const isFirst = !this.store.hasUserEvent(chatId) && !this.store.chat(chatId)?.fork;
-    const userEvent = this.store.addUserEvent(chatId, { type: "user", text: display, attachments }, attachmentIds);
+    const userEvent = this.store.addUserEvent(chatId, { type: "user", text: display, attachments, ...(plan ? { plan: true as const } : {}) }, attachmentIds);
     this.sink.event(userEvent);
     this.updateChat(chatId, {
       status: "working",

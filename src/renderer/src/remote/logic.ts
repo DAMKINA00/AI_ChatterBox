@@ -125,6 +125,27 @@ export function parseSlash(text: string): Slash | null {
   return { kind: "command", name: name as RemoteCommandName, arg };
 }
 
+// ---------- plan mode (stored on the chat by the PC)
+
+/** A send becomes a plan turn only while the chat is idle; during work or a pause it stays a follow-up. */
+/**
+ * Whether a master question still takes an answer: while the turn is live, and for the app's plan
+ * confirmation card also after the turn ended (the main process withdraws it once it no longer applies).
+ */
+export const remoteAskOpen = (item: { answer?: string; planConfirm?: true }, live: boolean) =>
+  item.answer === undefined && (live || !!item.planConfirm);
+
+export const planActiveFor = (planMode: boolean, status: string) =>
+  planMode && status !== "working" && status !== "approval" && status !== "pausing" && status !== "paused";
+
+export function planModeTip(planMode: boolean, status: string): string {
+  if (status === "paused") return "일시 중지 중입니다. 재개한 작업이 끝난 뒤 보내는 지시부터 계획 모드로 처리됩니다. (Alt+P)";
+  if (status === "working" || status === "approval" || status === "pausing") return "작업 중입니다. 지금 보내는 지시는 진행 중인 작업에 전달되고, 끝난 뒤 보내는 지시부터 계획 모드로 처리됩니다. (Alt+P)";
+  return planMode
+    ? "켜짐: 보내면 마스터가 질문·조사 후 작업 분류와 담당을 담은 계획을 제안하고, 승인하면 실행합니다. (Alt+P)"
+    : "꺼짐: 보내면 바로 실행합니다. 켜면 계획을 먼저 확인합니다. (Alt+P)";
+}
+
 // ---------- projects
 
 export function folderNameProblem(name: string): string | null {

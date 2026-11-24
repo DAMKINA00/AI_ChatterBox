@@ -4,8 +4,25 @@ import { REMOTE_LIMITS } from "../../../shared/remote-web";
 import type { Chat, ModelOption } from "../../../shared/types";
 import {
   attachmentMime, attachmentProblem, chatGroups, effortChoices, folderNameProblem, isDark, modelChoices, nextTheme, parseSlash,
-  projectApprovalMode, raisesAutonomy, readTheme, toBase64, withoutDeleted,
+  planActiveFor, planModeTip, projectApprovalMode, raisesAutonomy, readTheme, remoteAskOpen, toBase64, withoutDeleted,
 } from "./logic";
+
+test("remote questions: the plan confirmation card stays answerable after the turn; other questions follow the turn", () => {
+  assert.equal(remoteAskOpen({ planConfirm: true }, false), true, "idle/done chat: 진행/수정/취소 still works");
+  assert.equal(remoteAskOpen({}, false), false, "a stopped turn's ordinary question stays closed");
+  assert.equal(remoteAskOpen({}, true), true);
+  assert.equal(remoteAskOpen({ planConfirm: true, answer: "(처리됨)" }, false), false, "a withdrawn card is closed");
+});
+
+test("plan mode: a send plans only while the chat is idle", () => {
+  for (const s of ["idle", "done", "error", "interrupted"]) assert.equal(planActiveFor(true, s), true, s);
+  for (const s of ["working", "approval", "pausing", "paused"]) assert.equal(planActiveFor(true, s), false, s);
+  assert.equal(planActiveFor(false, "idle"), false);
+  assert.match(planModeTip(true, "idle"), /^켜짐/);
+  assert.match(planModeTip(false, "idle"), /^꺼짐/);
+  assert.match(planModeTip(true, "working"), /끝난 뒤/);
+  assert.match(planModeTip(true, "paused"), /일시 중지/);
+});
 
 test("theme: stored value, system fallback and cycle", () => {
   assert.equal(readTheme("dark"), "dark");

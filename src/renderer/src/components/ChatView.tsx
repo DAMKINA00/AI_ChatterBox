@@ -24,8 +24,10 @@ import { retryHistory, stateEventsOf, useStore } from "../store";
 import type { PendingApproval } from "../../../shared/event-page";
 import { withoutAnswered } from "../lib/history-load";
 import { buildItems, chatTimelines, latestExpression, markClipped, planOf } from "../timeline";
-import { GoalBar, PlanHistory, PlanPanel } from "./PlanGoal";
+import { GoalBar, PlanAskNotice, PlanHistory, PlanPanel } from "./PlanGoal";
 import { planHistory } from "../lib/plan-history";
+import { planVersion } from "../lib/plan-view";
+import { isPlanHotkey, PLAN_TOGGLE_SETTLE_MS, planAskId, planToggleSettled } from "../lib/plan-mode";
 import { SLASH_COMMANDS, StatusDialog, type SlashCommand } from "./Commands";
 import { AttachmentChip, ItemList, MainTimeline } from "./Items";
 import { AgentAvatar } from "./AgentAvatar";
@@ -76,6 +78,8 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
     return last?.event.type === "plan_update" && last.event.stepsTotal ? last.event.stepsTotal - last.event.steps.length : 0;
   }, [all]);
   const ended = useMemo(() => planHistory(all), [all]);
+  // Only while the turn is live: a question left unanswered by an ended turn is no longer waited on.
+  const askId = useMemo(() => planAskId(all, chat.status, !!chat.planMode, !!plan), [all, chat.status, chat.planMode, plan]);
   const canAttach = !node || node === "orch";
 
   useEffect(() => {
@@ -136,7 +140,8 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
       <TeamChips chat={chat} />
       {!node && <ForkOrigin chat={chat} />}
       {!node && <GoalBar chat={chat} />}
-      {!node && plan && <PlanPanel chat={chat} plan={plan} onRevise={() => composer.current?.setText("/plan 수정: ")} />}
+      {!node && plan && <PlanPanel chat={chat} plan={plan} askId={askId} version={plan.version ?? planVersion(all, plan.planId)} onRevise={() => composer.current?.focus()} />}
+      {!node && !plan && chat.planMode && askId && <PlanAskNotice askId={askId} />}
       {!node && plan && planOmitted > 0 && (
         <div className="mx-auto mt-1 w-[min(860px,calc(100%-32px))] text-[11.5px] text-muted-foreground" data-testid="plan-steps-omitted">
           체크리스트가 길어 앞 {plan.steps.length}단계만 표시합니다 ({planOmitted}단계 생략).
@@ -781,7 +786,7 @@ function EmptyChat() {
       </div>
       <div className="text-[15px] font-semibold">무엇을 할까요?</div>
       <div className="max-w-md text-[13px] leading-relaxed text-muted-foreground">
-        원하는 결과를 적어 주세요. 마스터가 필요에 따라 작업자를 배정하고 결과를 정리합니다. 실행 전에 단계를 확인하려면 아래의 <strong className="font-medium text-foreground">계획 먼저</strong>를 선택하세요.
+        원하는 결과를 적어 주세요. 마스터가 필요에 따라 작업자를 배정하고 결과를 정리합니다. 실행 전에 작업 분류와 담당을 확인하려면 아래의 <strong className="font-medium text-foreground">계획 모드</strong>를 켜고 보내세요(<Kbd>Alt+P</Kbd>).
       </div>
     </div>
   );
@@ -791,6 +796,8 @@ function EmptyChat() {
 export interface ComposerHandle {
   addFiles(files: File[]): void;
   setText(text: string): void;
+  /** Focus the box without touching the draft (plan revision requests). */
+  focus(): void;
 }
 
 /** Unsent text and attachments survive switching chats. */
@@ -873,6 +880,13 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
           area.current?.setSelectionRange(t.length, t.length);
         }, 0);
       },
+      focus: () => {
+        const el = area.current;
+        if (!el) return;
+        el.focus();
+        el.setSelectionRange(el.value.length, el.value.length);
+        el.scrollIntoView({ block: "nearest" });
+      },
     }),
     [addFiles],
   );
@@ -919,7 +933,8 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
   };
 
   const send = async (delivery: "now" | "next" = "now") => {
-    if (pauseInFlight) return;
+    // A plan-mode change still on its way must reach the main process first (see planToggleSettled).
+    if (pauseInFlight || planBusy) return;
     const t = text.trim();
     // "/name arg" → command (attachments are not used by commands).
     const cmd = /^\/([a-z-]+)(?:\s+([\s\S]*))?$/i.exec(t);
@@ -944,22 +959,50 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
     }
   };
 
-  const canSend = (!!text.trim() || attachments.length > 0) && !sending && !uploading && !pauseInFlight && (!unavailableMaster || text.trim().startsWith("/"));
-  const canPlan = canSend && !!text.trim() && !text.trim().startsWith("/") && !attachments.length;
-
-  const requestPlan = async () => {
-    if (!canPlan || busy || paused) return;
-    const instruction = text;
-    setSending(true);
+  // Plan mode is stored on the chat by the main process; an ordinary send becomes a plan turn while the
+  // chat is idle. While work runs or is paused, a send is still a follow-up to that work.
+  const planMode = !!chat.planMode;
+  const planActive = planMode && !busy && !paused && !pauseInFlight;
+  const slashInput = text.trim().startsWith("/");
+  // The value a toggle asked for, until the chat shown here carries it (or the request failed).
+  const [planTarget, setPlanTarget] = useState<boolean | null>(null);
+  const planBusy = !planToggleSettled(planTarget, planMode);
+  useEffect(() => { setPlanTarget(null); }, [chat.id]);
+  useEffect(() => { if (planTarget !== null && planToggleSettled(planTarget, planMode)) setPlanTarget(null); }, [planTarget, planMode]);
+  useEffect(() => {
+    if (planTarget === null) return;
+    const t = setTimeout(() => setPlanTarget(null), PLAN_TOGGLE_SETTLE_MS);
+    return () => clearTimeout(t);
+  }, [planTarget]);
+  const canSend = (!!text.trim() || attachments.length > 0) && !sending && !uploading && !pauseInFlight && !planBusy && (!unavailableMaster || text.trim().startsWith("/"));
+  const togglePlanMode = useCallback(async () => {
+    // Serialized with sends: no toggle while a send is in flight, no send while a toggle settles.
+    if (planTarget !== null || sending) return;
+    const target = !planMode;
+    setPlanTarget(target);
     try {
-      await api.command(chat.id, "plan", instruction.trim());
-      setText(current => current === instruction ? "" : current);
-    } catch (error) {
-      toast(errorMessage(error));
-    } finally {
-      setSending(false);
+      await api.setPlanMode(chat.id, target);
+    } catch (e) {
+      setPlanTarget(null);
+      toast(errorMessage(e));
     }
-  };
+  }, [chat.id, planMode, planTarget, sending, toast]);
+  useEffect(() => {
+    const keydown = (e: KeyboardEvent) => {
+      if (!isPlanHotkey(e) || document.querySelector('[role="dialog"]')) return;
+      e.preventDefault();
+      void togglePlanMode();
+    };
+    window.addEventListener("keydown", keydown);
+    return () => window.removeEventListener("keydown", keydown);
+  }, [togglePlanMode]);
+  const planTip = paused
+    ? "일시 중지 중입니다. 재시작한 작업이 끝난 뒤 보내는 지시부터 계획 모드로 처리됩니다."
+    : busy || pauseInFlight
+      ? "작업 중입니다. 지금 보내는 지시는 진행 중인 작업에 전달되고, 작업이 끝난 뒤 보내는 지시부터 계획 모드로 처리됩니다."
+      : planMode
+        ? "켜짐: 보내면 마스터가 질문·조사 후 작업 분류와 담당을 담은 계획을 제안하고, 승인하면 실행합니다."
+        : "꺼짐: 보내면 바로 실행합니다. 켜면 계획을 먼저 확인합니다.";
 
   const requestPause = async () => {
     if (pauseInFlight || !busy) return;
@@ -989,7 +1032,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
     <div className={cn("px-4 pt-1 pb-4", mobile && "px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]")} data-testid="composer">
       <StatusDialog open={statusOpen} onOpenChange={setStatusOpen} chat={chat} project={project} />
       {unavailableMaster && <p role="status" data-testid="antigravity-master-unavailable" className="mx-auto mb-2 max-w-[860px] text-[12px] text-muted-foreground">Antigravity CLI(agy) 미설치로 마스터가 비활성화되었습니다. 다른 마스터를 선택하거나 설치 후 다시 확인하세요.</p>}
-      <div className="relative mx-auto max-w-[860px] rounded-2xl border bg-card shadow-sm transition-colors focus-within:border-ring/60">
+      <div className={cn("relative mx-auto max-w-[860px] rounded-2xl border bg-card shadow-sm transition-colors", planActive ? "border-orch/70 ring-2 ring-orch/20 focus-within:border-orch" : "focus-within:border-ring/60")} data-plan-mode={planActive || undefined}>
         {menu.length > 0 && (
           <div role="listbox" aria-label="명령" className="absolute bottom-full left-0 z-30 mb-2 w-96 overflow-hidden rounded-xl border bg-card p-1 shadow-xl" data-testid="slash-menu">
             {menu.map((c, i) => (
@@ -1034,7 +1077,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
           ref={area}
           value={text}
           aria-label="메시지 입력"
-          placeholder={paused ? "추가 지시는 재시작할 때 전달" : mobile ? (busy ? "추가 지시 (즉시 전달 버튼)" : "원하는 결과를 입력하세요") : busy ? "추가 지시를 입력하세요. Enter 즉시 전달 · Alt+Enter 다음 단계 전달" : "원하는 결과를 입력하세요"}
+          placeholder={paused ? "추가 지시는 재시작할 때 전달" : planActive ? "계획할 작업을 설명하세요 — 확인 후 실행" : mobile ? (busy ? "추가 지시 (즉시 전달 버튼)" : "원하는 결과를 입력하세요") : busy ? "추가 지시를 입력하세요. Enter 즉시 전달 · Alt+Enter 다음 단계 전달" : "원하는 결과를 입력하세요"}
           className={cn("block max-h-60 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[14px] leading-relaxed outline-none select-text placeholder:text-muted-foreground", mobile && "max-h-40 text-[16px]")}
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => {
@@ -1087,9 +1130,29 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
               <Paperclip />
             </Button>
           </Tooltip>
-          {!busy && !paused && <Button size="sm" variant="ghost" onClick={() => void requestPlan()} disabled={!canPlan} title={attachments.length ? "계획은 텍스트 지시로 시작할 수 있습니다." : "계획을 확인한 뒤 실행합니다."}>
-            <ListChecks /> 계획 먼저
-          </Button>}
+          <Tooltip content={<span className="block max-w-72">{planTip} <Kbd>Alt+P</Kbd></span>}>
+            <button
+              type="button"
+              aria-pressed={planMode}
+              aria-label={`계획 모드 ${planMode ? "켜짐" : "꺼짐"} (Alt+P)`}
+              disabled={planBusy || sending}
+              aria-busy={planBusy || undefined}
+              onClick={() => void togglePlanMode()}
+              data-testid="plan-mode-toggle"
+              data-on={planMode}
+              className={cn(
+                "inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-[12.5px] font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/60 disabled:opacity-45 [&_svg]:size-4",
+                planMode ? "border-orch/60 bg-orch/12 text-orch hover:bg-orch/18" : "border-border text-muted-foreground hover:bg-accent hover:text-foreground",
+                mobile && "h-11",
+              )}
+            >
+              {planBusy ? <Loader2 className="animate-spin" /> : <ListChecks />}
+              계획 모드
+              <span className={cn("rounded-full px-1.5 py-px text-[10.5px] leading-tight", planMode ? "bg-orch text-white" : "bg-muted text-muted-foreground")}>
+                {planMode ? (planActive ? "켜짐" : "다음 지시부터") : "꺼짐"}
+              </span>
+            </button>
+          </Tooltip>
           <span className="ml-1 hidden text-[11.5px] text-muted-foreground xl:inline">
             {busy && <><Kbd>Alt+Enter</Kbd> 다음 단계 · </>}
             <Kbd>Shift+Enter</Kbd> 줄바꿈
@@ -1113,9 +1176,9 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
             </Tooltip>
           ) : null}
           {busy && <Button size="sm" variant="outline" onClick={() => void send("next")} disabled={!canSend} aria-label="다음 단계로 전달" title="Alt+Enter" data-testid="send-next" className={cn("rounded-full px-3.5", mobile && "h-11")}>{mobile ? "다음 단계" : "다음 단계 전달"}</Button>}
-          <Button size="sm" onClick={() => void send()} disabled={!canSend} aria-label={paused ? "지시 보관" : busy ? "마스터에게 즉시 전달" : "보내기"} title="Enter" data-testid="send" className={cn("rounded-full px-3.5", mobile && "h-11 px-4")}>
-            {sending ? <Loader2 className="animate-spin" /> : <SendHorizontal />}
-            {paused ? "지시 보관" : busy ? "즉시 전달" : "보내기"}
+          <Button size="sm" onClick={() => void send()} disabled={!canSend} aria-label={paused ? "지시 보관" : busy ? "마스터에게 즉시 전달" : planActive && !slashInput ? "계획 세우기" : "보내기"} title="Enter" data-testid="send" className={cn("rounded-full px-3.5", planActive && !slashInput && "bg-orch text-white hover:bg-orch/90", mobile && "h-11 px-4")}>
+            {sending ? <Loader2 className="animate-spin" /> : planActive && !slashInput ? <ListChecks /> : <SendHorizontal />}
+            {paused ? "지시 보관" : busy ? "즉시 전달" : planActive && !slashInput ? "계획 세우기" : "보내기"}
           </Button>
         </div>
       </div>

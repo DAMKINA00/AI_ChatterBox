@@ -348,7 +348,9 @@ test("planning survives pause, keeps the write guard, and sends the resumed mast
     assert.match(denied ?? "", /작업이 중지되었습니다/);
     await f.engine.resume(f.chat.id);
     await waitFor(() => master.sendCalls.length === 1);
-    assert.equal(master.sendCalls[0].noWrites, false);
+    // Plan mode is read-only: the resumed planning master keeps no-writes.
+    assert.equal(master.sendCalls[0].noWrites, true);
+    assert.match(master.sendCalls[0].text, /\[계획 모드\] 읽기 전용/);
     await f.engine.stop(f.chat.id);
   } finally {
     await f.close();

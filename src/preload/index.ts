@@ -37,6 +37,7 @@ const api: ChatterBoxApi = {
   pause: (chatId) => ipcRenderer.invoke("chats:pause", chatId),
   resume: (chatId) => ipcRenderer.invoke("chats:resume", chatId),
   command: (chatId, name, arg) => ipcRenderer.invoke("chats:command", chatId, name, arg),
+  setPlanMode: (chatId, on) => ipcRenderer.invoke("chats:setPlanMode", chatId, on),
   dismissInterrupted: (chatId) => ipcRenderer.invoke("chats:dismissInterrupted", chatId),
   answerApproval: (chatId, approvalId, decision) => ipcRenderer.invoke("chats:approve", chatId, approvalId, decision),
   answerAskUser: (chatId, askId, answer) => ipcRenderer.invoke("chats:answerAsk", chatId, askId, answer),

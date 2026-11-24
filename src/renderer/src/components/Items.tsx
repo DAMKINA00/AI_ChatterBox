@@ -898,7 +898,7 @@ function AskCard({ item, chatId }: { item: Extract<Item, { kind: "ask" }>; chatI
   const toast = useStore((s) => s.toast);
   const answer = (a: string) => api.answerAskUser(chatId, item.id, a).catch((e) => toast(errorMessage(e)));
   return (
-    <div className="space-y-2.5 rounded-xl border border-primary/40 bg-primary/6 p-3" data-testid="ask-card">
+    <div className="space-y-2.5 rounded-xl border border-primary/40 bg-primary/6 p-3" data-testid="ask-card" data-ask-id={item.id} tabIndex={-1}>
       <div className="flex items-center gap-2 text-[13px] font-semibold">
         <MessageCircleQuestion className="size-4 text-primary" />
         마스터의 질문

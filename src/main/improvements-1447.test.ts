@@ -846,6 +846,8 @@ test("plan and review restrictions follow the snapshot, not an earlier command's
     // Cancelling is for a proposal waiting for approval; the proposal turn itself is stopped with /stop.
     await assert.rejects(cancelled.engine.command(cancelled.chat.id, "plan-cancel", ""), /\/stop/);
     assert.equal(cancelled.engine.planning.has(cancelled.chat.id), true, "a refused cancel changes nothing");
+    // Only a submitted plan waits for approval (and can be cancelled).
+    await cancelled.engine.call(cancelled.chat.id, "orch", "propose_plan", { summary: "s", tasks: [{ id: "a", title: "조사", kind: "opinion", agentKind: "claude", scope: [], group: 1, done: "보고" }] });
     cancelled.driverFor(cancelled.chat.id, "orch").finish();
     await cancelled.engine.command(cancelled.chat.id, "plan-cancel", "");
     assert.equal(cancelled.engine.planning.has(cancelled.chat.id), false);

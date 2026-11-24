@@ -1,6 +1,7 @@
-// Read-only history of plans that ended (done/cancelled/incomplete/failed/stopped), kept after a new
-// instruction or a new /plan replaced them on the pinned panel. Display only: it never feeds the
-// completion guard or the run/cancel commands, and the current plan (currentPlanView) is excluded.
+// Plans that ended (done/cancelled/incomplete/failed/stopped) but are no longer on the pinned panel. A new
+// plan start (a new instruction or /plan, or a plan update for another plan id: the same boundaries as
+// currentPlanView) drops every earlier plan, so only plans ended since the current start can appear. The
+// timeline events themselves stay; this is display only and never feeds the completion guard or commands.
 import type { PlanState, PlanStep, TimelineEvent } from "../../../shared/types";
 
 const TERMINAL: ReadonlySet<PlanState> = new Set<PlanState>(["done", "cancelled", "incomplete", "failed", "stopped"]);
@@ -38,12 +39,15 @@ export function planHistory(events: readonly TimelineEvent[]): PlanHistoryEntry[
   for (const e of events) {
     const ev = e.event;
     if (ev.type === "plan_update" && e.role === "orch") {
-      if (ev.planId !== undefined && planId !== undefined && ev.planId !== planId) { state = "live"; segment++; }
+      // A new plan starts: earlier plans are dropped, not kept as history.
+      if (ev.planId !== undefined && planId !== undefined && ev.planId !== planId) { state = "live"; segment++; ended.clear(); }
       if (ev.planId !== undefined) planId = ev.planId;
       steps = ev.steps;
       explanation = ev.explanation;
     } else if (ev.type === "plan_state") {
       if (ev.planId !== undefined && planId !== undefined && ev.planId !== planId && ev.state !== "running") continue;
+      // The closing record the app writes for the replaced plan right after a new start: already dropped.
+      if (steps === null && planId === undefined && TERMINAL.has(ev.state)) continue;
       state = ev.state;
       if (ev.planId !== undefined) planId = ev.planId;
       if (TERMINAL.has(ev.state)) {
@@ -51,12 +55,13 @@ export function planHistory(events: readonly TimelineEvent[]): PlanHistoryEntry[
         ended.set(key(), { key: key(), planId, state: ev.state, reason: ev.reason, steps: steps ?? [], explanation, eventId: e.id, at: e.at });
       } else ended.delete(key());
     } else if (ev.type === "user" && !ev.queued && ev.text !== "계획 실행" && !/^\/plan-(?:run|cancel)\b/.test(ev.text)) {
-      if (isPlanCommand(ev.text) || state !== "running") {
+      if (isPlanCommand(ev.text) || ev.plan || state !== "running") {
         steps = null;
         explanation = undefined;
         state = "live";
         planId = undefined;
         segment++;
+        ended.clear();
       }
     }
   }
