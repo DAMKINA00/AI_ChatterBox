@@ -39,6 +39,7 @@ export const normalizeCharacterSet = (values: readonly unknown[]): MonitorCharac
 
 
 export const CHARACTER_ASK_VERSION = 2;
+export const MAX_CHARACTER_QUESTION = 4_000;
 export const MAX_CHARACTER_ANSWER = 12_000;
 
 export interface CharacterAsk {
@@ -58,7 +59,7 @@ export function parseCharacterAsk(value: unknown): CharacterAsk | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const { requestId, character, text } = value as Partial<CharacterAsk>;
   if (typeof requestId !== "string" || !/^[0-9a-f]{32}$/i.test(requestId) || !isMonitorCharacter(character)
-    || typeof text !== "string" || text.length > 1000 || !text.trim()) return;
+    || typeof text !== "string" || text.length > MAX_CHARACTER_QUESTION || !text.trim()) return;
   return { requestId, character, text: text.trim() };
 }
 
