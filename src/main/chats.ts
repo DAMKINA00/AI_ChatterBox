@@ -1406,12 +1406,16 @@ export class ChatManager {
   /** Called instead of sendHandler while the chat is working (extra instructions). */
   busySend?: (chat: Chat, input: AgentInput, delivery: "now" | "next") => Promise<void>;
 
+  /** App-level chat commands must be handled before a new user event supersedes a proposal. */
+  beforeSend?: (chat: Chat, input: AgentInput, delivery: "now" | "next") => Promise<boolean>;
+
   async send(chatId: number, text: string, attachmentIds: number[], delivery: "now" | "next" = "now") {
     if (!["now", "next"].includes(delivery)) throw new Error("지원하지 않는 전달 방식입니다.");
     const chat = this.store.chat(chatId);
     if (!chat) throw new Error("채팅이 없습니다.");
     const attachments = this.store.attachmentsFor(attachmentIds);
     if (!text.trim() && !attachments.length) throw new Error("메시지나 첨부 파일을 입력하세요.");
+    if (await this.beforeSend?.(chat, { text, attachments }, delivery)) return;
     if (chat.status === "pausing") throw new Error("마스터와 작업자의 중지 확인을 기다리고 있습니다.");
     if (chat.status === "working" || chat.status === "approval" || chat.status === "paused" || this.isBusy(chatId)) {
       if (!this.busySend) throw new Error("작업이 진행 중입니다. 끝나거나 중지한 뒤 보내 주세요.");

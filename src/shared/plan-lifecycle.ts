@@ -104,16 +104,28 @@ export function latestPlanState(events: readonly TimelineEvent[]): { state: Plan
 
 /**
  * The plan id of the proposal waiting for approval, if it is still the latest thing the user asked
- * for: the last plan_state is "proposed" and no user message came after its /plan. A proposal followed
- * by another instruction (sent directly or queued) is superseded and can no longer be run or cancelled.
+ * for: the last plan_state is "proposed" and no user message came after its submitted steps. Queued
+ * input received before submission belongs to that plan; input after it supersedes the proposal.
  * Older proposals without a planId resolve to the /plan message just before them.
  */
 export function pendingProposal(events: readonly TimelineEvent[]): number | undefined {
   const last = latestPlanState(events);
   if (last?.state !== "proposed") return undefined;
   const planId = last.planId ?? events.findLast((e) => e.id < last.eventId && e.event.type === "user" && !e.event.queued && (isPlanCommand(e.event.text) || !!e.event.plan))?.id;
-  const latestUser = events.findLast((e) => e.event.type === "user")?.id;
-  return planId !== undefined && latestUser === planId ? planId : undefined;
+  if (planId === undefined) return undefined;
+  const submitted = events.findLast((e) => e.id < last.eventId && isMasterPlan(e) && e.event.type === "plan_update" && e.event.planId === planId)?.id ?? planId;
+  const superseded = events.some((e) => e.event.type === "user" && e.id > planId && (!e.event.queued || e.id > submitted));
+  return superseded ? undefined : planId;
+}
+
+/** Explicit chat approval, not a question, quotation, conditional instruction or negated command. */
+export function isPlanExecutionRequest(text: string): boolean {
+  const direct = text.replace(/```[\s\S]*?```/g, "").replace(/`[^`]*`|“[^”]*”|‘[^’]*’|"[^"\n]*"|'[^'\n]*'/g, "")
+    .split(/\r?\n/).filter((line) => !/^\s*>/.test(line)).join("\n");
+  // A qualification anywhere in the message must not accidentally approve work now.
+  if (/(?:진행|실행|시작)(?:하|해|하지|시키)?\s*(?:지\s*마|주지\s*마|말|안|않|금지|취소)|(?:진행|실행|시작)하지|(?:아직|지금은|당장은|나중에|다음에)\s*(?:진행|실행|시작)|(?:검토|확인|승인|완료)\s*(?:후|뒤)|(?:하면|되면|끝나면|완료되면|승인하면|전에는)|[?？]/.test(direct)) return false;
+  return /(?:^|[\s.!。])(?:진행|실행|시작)(?:해(?:\s*줘|\s*주세요|라)?|하(?:세요|자|십시오|도록\s*해(?:줘|주세요)))(?=\s*(?:$|[.!。,\n]|그리고\s))/.test(direct.trim())
+    || /^(?:진행|실행|시작|계획\s*실행)[.!。]*$/.test(direct.trim());
 }
 
 /** "/plan …" itself; "/plan-run" and "/plan-cancel" are commands on the same plan. */

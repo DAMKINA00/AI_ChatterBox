@@ -8,7 +8,7 @@ import type { AgentDriver, AgentInput } from "./drivers/types";
 import { Store } from "./db";
 import { ChatManager } from "./chats";
 import { globWithin, Orchestrator, scopeIssue } from "./orchestrator";
-import { currentPlanView, pendingProposal, planStepsFor } from "../shared/plan-lifecycle";
+import { currentPlanView, isPlanExecutionRequest, pendingProposal, planStepsFor } from "../shared/plan-lifecycle";
 import { readyGroupSteps, validatePlanSteps, validateProposedTasks } from "../shared/plan-steps";
 import { isReadCommand } from "./execution-policy";
 import { bridgeConnected, bridgeDenyNotice, findBridgeDenyRules, missingBridgeTools } from "./claude-settings";
@@ -16,6 +16,7 @@ import { GEMINI_BRIDGE_TOOLS } from "./drivers/gemini-protocol";
 
 class FakeDriver implements AgentDriver {
   running = false;
+  steer?: (input: AgentInput) => Promise<boolean>;
   readonly sendCalls: AgentInput[] = [];
   constructor(readonly agent: AgentKind, readonly emitEvent: (event: AgentEvent) => void) {}
   async send(input: AgentInput) { this.sendCalls.push(input); this.running = true; }
@@ -98,6 +99,183 @@ async function planTurn(f: F, text: string) {
   f.engine.setPlanMode(f.chat.id, true);
   await f.chats.send(f.chat.id, text, []);
 }
+
+test("chat execution directives exclude questions, negation, conditions and quoted examples", () => {
+  for (const text of ["진행", "진행해", "진행해줘", "계획대로 진행해 줘.", "작업을 시작해주세요", "계획에 담지 말고 그대로 작업을 진행해. 계획 모드는 종료야.", "진행하세요. 그리고 중복 카드도 정리해."])
+    assert.equal(isPlanExecutionRequest(text), true, text);
+  for (const text of ["진행 왜 못해?", "진행하지 마", "진행해 주지 마", "진행해 주면 안 돼", "진행해 달라는 문구를 표시해", "진행해. 아니 진행하지 말고 설명만 해", "확인이 끝나면 진행해", "승인 후 진행해", "나중에 진행해", '"진행해"라는 문구를 표시해', "> 진행해", "`진행해`", "```text\n진행해\n```", "진행해도 될까?", "리뷰도 넣어 줘"])
+    assert.equal(isPlanExecutionRequest(text), false, text);
+});
+
+test("plan approval accepts additions delivered before submission (reported failure)", async () => {
+  const f = fixture();
+  try {
+    await planTurn(f, "계획");
+    f.master().steer = async () => true;
+    await f.chats.send(f.chat.id, "리뷰도 포함해", []);
+    await f.call("propose_plan", { summary: "리뷰 포함", tasks: goodTasks });
+    const ask = f.store.events(f.chat.id).findLast(e => e.event.type === "ask_user" && e.event.planConfirm)!.event as any;
+    f.master().finish();
+    assert.ok(pendingProposal(f.store.events(f.chat.id)));
+    f.engine.answerAsk(f.chat.id, ask.id, "진행");
+    await waitFor(() => f.states().at(-1)?.state === "running");
+    assert.ok(!f.notices().some(n => /처리 실패/.test(n)));
+  } finally { f.close(); }
+});
+
+test("chat approval runs the submitted plan and keeps the original message and its conditions", async () => {
+  const f = fixture();
+  try {
+    await planTurn(f, "계획");
+    await f.call("propose_plan", { summary: "s", tasks: goodTasks });
+    f.master().finish();
+    const planId = pendingProposal(f.store.events(f.chat.id));
+    await f.chats.send(f.chat.id, "진행하세요. 그리고 중복 카드도 정리해.", []);
+    assert.equal(f.engine.planning.has(f.chat.id), false);
+    assert.equal(f.master().sendCalls.at(-1)!.noWrites, false);
+    assert.deepEqual([f.states().at(-1)!.state, f.states().at(-1)!.planId], ["running", planId]);
+    assert.match(f.master().sendCalls.at(-1)!.text, /승인했다[^]*중복 카드도 정리해/);
+    const user = f.store.events(f.chat.id).findLast(e => e.event.type === "user")!.event as any;
+    assert.equal(user.text, "진행하세요. 그리고 중복 카드도 정리해.");
+    assert.equal(user.plan, undefined);
+  } finally { f.close(); }
+});
+
+test("an execution request interrupts an unfinished read-only planning turn and retains additions", async () => {
+  const f = fixture();
+  try {
+    await planTurn(f, "로그인 오류를 고쳐");
+    await f.chats.send(f.chat.id, "별도의 리뷰도 추가", [], "next");
+    await f.chats.send(f.chat.id, "계획에 담지 말고 그대로 작업을 진행해. 계획 모드는 종료야.", []);
+    assert.ok(!f.store.chat(f.chat.id)!.planMode);
+    assert.equal(f.engine.planning.has(f.chat.id), false);
+    assert.equal(f.master().sendCalls.length, 2);
+    assert.equal(f.master().sendCalls.at(-1)!.noWrites, false);
+    assert.match(f.master().sendCalls.at(-1)!.text, /로그인 오류를 고쳐[^]*별도의 리뷰도 추가/);
+    const spawned = await f.call("spawn", { kind: "claude", job: "로그인 수정" });
+    assert.ok(!spawned.isError, JSON.stringify(spawned));
+    await delay(30);
+    assert.equal(f.master().sendCalls.length, 2, "no stale queued planning turn restarts");
+  } finally { f.close(); }
+});
+
+test("chat approval during submission runs once after the read-only turn is interrupted", async () => {
+  const f = fixture();
+  try {
+    await planTurn(f, "계획");
+    await f.call("propose_plan", { summary: "s", tasks: goodTasks });
+    await f.chats.send(f.chat.id, "진행해", []);
+    assert.equal(f.states().at(-1)!.state, "running");
+    assert.equal(f.master().sendCalls.at(-1)!.noWrites, false);
+    await delay(30);
+    assert.equal(f.master().sendCalls.length, 2);
+  } finally { f.close(); }
+});
+
+test("next-stage chat execution waits for the plan turn and then starts writable work", async () => {
+  for (const submitted of [false, true]) {
+    const f = fixture();
+    try {
+      await planTurn(f, "계획");
+      if (submitted) await f.call("propose_plan", { summary: "s", tasks: goodTasks });
+      await f.chats.send(f.chat.id, "진행해", [], "next");
+      assert.equal(f.master().sendCalls.length, 1, "next means wait for this turn");
+      assert.equal(f.master().running, true);
+      f.master().finish();
+      await waitFor(() => f.master().sendCalls.length === 2);
+      assert.equal(f.master().sendCalls.at(-1)!.noWrites, false);
+      assert.equal(f.engine.planning.has(f.chat.id), false);
+      await delay(30);
+      assert.equal(f.master().sendCalls.length, 2);
+    } finally { f.close(); }
+  }
+});
+
+test("paused planning can be explicitly continued as execution", async () => {
+  const f = fixture();
+  try {
+    await planTurn(f, "로그인 수정");
+    await f.engine.pause(f.chat.id);
+    assert.equal(f.store.chat(f.chat.id)!.status, "paused");
+    await f.chats.send(f.chat.id, "진행해", []);
+    assert.equal(f.master().sendCalls.at(-1)!.noWrites, false);
+    assert.equal(f.store.chat(f.chat.id)!.status, "working");
+    assert.equal(f.store.getSetting(`pause:${f.chat.id}`), "");
+  } finally { f.close(); }
+});
+
+test("question and negation keep a pending plan in revision mode, not execution", async () => {
+  for (const text of ["진행 왜 못해?", "진행하지 말고 리뷰 추가해"]) {
+    const f = fixture();
+    try {
+      await planTurn(f, "계획");
+      await f.call("propose_plan", { summary: "s", tasks: goodTasks });
+      f.master().finish();
+      await f.chats.send(f.chat.id, text, []);
+      assert.equal(f.master().sendCalls.at(-1)!.noWrites, true);
+      assert.equal(f.states().some(s => s.state === "running"), false);
+    } finally { f.close(); }
+  }
+});
+
+test("an explicit stop during a planning-to-execution transition prevents restarting", async () => {
+  const f = fixture();
+  try {
+    await planTurn(f, "계획");
+    let release!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    f.master().stop = async () => { await barrier; f.master().finish(false, true); };
+    const proceeding = f.chats.send(f.chat.id, "진행해", []);
+    await delay(5);
+    const stopping = f.engine.stop(f.chat.id);
+    release();
+    await assert.rejects(proceeding, /중지한 계획/);
+    await stopping;
+    assert.equal(f.master().sendCalls.length, 1);
+    assert.equal(f.states().some(s => s.state === "running"), false);
+  } finally { f.close(); }
+});
+
+test("a next-input plan toggle does not interrupt work that is already running", async () => {
+  const f = fixture();
+  try {
+    await f.chats.send(f.chat.id, "로그인 수정", []);
+    f.engine.setPlanMode(f.chat.id, true);
+    f.master().steer = async () => true;
+    await f.chats.send(f.chat.id, "진행해", []);
+    assert.equal(f.master().sendCalls.length, 1);
+    assert.equal(f.master().running, true);
+    assert.equal(f.engine.planning.has(f.chat.id), false);
+  } finally { f.close(); }
+});
+
+test("a held revision is delivered when the user explicitly runs the submitted plan", async () => {
+  const f = fixture();
+  try {
+    await planTurn(f, "계획");
+    await f.call("propose_plan", { summary: "s", tasks: goodTasks });
+    await f.chats.send(f.chat.id, "중복 카드도 정리", []);
+    await f.chats.send(f.chat.id, "진행해", []);
+    assert.equal(f.states().at(-1)!.state, "running");
+    assert.match(f.master().sendCalls.at(-1)!.text, /중복 카드도 정리/);
+    await delay(30);
+    assert.equal(f.master().sendCalls.length, 2);
+  } finally { f.close(); }
+});
+
+test("execution retains planning attachments without attaching them twice in the chat history", async () => {
+  const f = fixture();
+  try {
+    const a = f.store.addAttachment(f.chat.id, "reference.png", join(f.root, "reference.png"), "image/png", 1);
+    f.engine.setPlanMode(f.chat.id, true);
+    await f.chats.send(f.chat.id, "첨부를 참고해 계획", [a.id]);
+    const b = f.store.addAttachment(f.chat.id, "change.png", join(f.root, "change.png"), "image/png", 1);
+    await f.chats.send(f.chat.id, "이 조건으로 진행해", [b.id]);
+    assert.deepEqual(f.master().sendCalls.at(-1)!.attachments.map(x => x.id), [a.id, b.id]);
+    const user = f.store.events(f.chat.id).findLast(e => e.event.type === "user")!.event as any;
+    assert.deepEqual(user.attachments.map((x: any) => x.id), [b.id]);
+  } finally { f.close(); }
+});
 
 test("plan mode: a send starts a read-only planning turn and workers are refused", async () => {
   const f = fixture();

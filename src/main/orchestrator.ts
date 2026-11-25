@@ -57,7 +57,7 @@ import { completionIssue, dualInvestigationIssue } from "./dispatch";
 import { isAIStudioModel } from "../shared/aistudio";
 import { cliRemaining, CLI_LOW_REMAINING, isAuthError, isQuotaError, PRIORITY_FAILURE_LABEL, type PriorityFailureReason } from "./cli-accounts";
 import { planStepBlockers, readyGroupSteps, validatePlanSteps, validateProposedTasks } from "../shared/plan-steps";
-import { alignNativeSteps, currentPlanView, droppedSteps, isOpenStep, keepDroppedSteps, openStepsText, pendingProposal, planStepsFor, stepKey } from "../shared/plan-lifecycle";
+import { alignNativeSteps, currentPlanView, droppedSteps, isOpenStep, isPlanExecutionRequest, keepDroppedSteps, openStepsText, pendingProposal, planStepsFor, stepKey } from "../shared/plan-lifecycle";
 import { validateReviewResult } from "../shared/review-result";
 import { forkContextPrompt } from "./chat-fork";
 import { buildResumeContext, instructionToResume, parseInstructionSnapshot, type InstructionSnapshot } from "./resume-context";
@@ -595,6 +595,7 @@ export class Orchestrator {
   /** The app's [진행/수정/취소] question for a submitted plan, and a choice made while the turn still ran. */
   private planConfirm = new Map<number, string>();
   private planDecision = new Map<number, "run" | "cancel">();
+  private planExecutionFlights = new Set<number>();
   /** Chats whose messages, sent after the plan was submitted, revise that plan when the turn ends. */
   private reviseAfterTurn = new Set<number>();
   /** Those messages themselves, kept out of inst.queued until the submitting turn ends. */
@@ -673,6 +674,7 @@ export class Orchestrator {
     };
     chats.onDriverEvent = (chatId, role, event) => this.observe(chatId, role, event);
     chats.sendHandler = (chat, input) => this.instruct(chat, input);
+    chats.beforeSend = (chat, input, delivery) => this.proceedFromMessage(chat, input, delivery);
     chats.busySend = (chat, input, delivery) => chat.status !== "paused" && delivery === "now" ? this.deliverNow(chat, input) : this.queue(chat, input);
   }
 
@@ -2235,7 +2237,10 @@ export class Orchestrator {
         const chat = this.chats.store.chat(chatId);
         if (!chat || this.instructions.get(chatId) !== inst || this.stopped.has(chatId) || ["pausing", "paused"].includes(chat.status)) return;
         this.chats.updateChat(chatId, { status: "working", touch: true });
-        this.instruct(chat, { text: q.map((x) => x.text).join("\n\n"), attachments: q.flatMap((x) => x.attachments) }).catch((e) => {
+        const input = { text: q.map((x) => x.text).join("\n\n"), attachments: q.flatMap((x) => x.attachments) };
+        (async () => {
+          if (!await this.proceedFromMessage(chat, input, "now", true)) await this.instruct(chat, input);
+        })().catch((e) => {
           this.chats.emit(chatId, "orch", "orch", { type: "error", kind: "process", message: String(e) });
           this.chats.orchTurnEnded(chatId, { type: "turn_end", ok: false, error: String(e) });
         });
@@ -2244,6 +2249,73 @@ export class Orchestrator {
   }
 
   // ---------- user instructions
+  /** A direct execution request is an app command, not another read-only plan revision. */
+  private async proceedFromMessage(chat: Chat, input: AgentInput, delivery: "now" | "next", queued = false): Promise<boolean> {
+    const chatId = chat.id;
+    if (this.planExecutionFlights.has(chatId)) throw new Error("계획 모드를 종료하는 중입니다. 전환이 끝난 뒤 메시지를 보내 주세요.");
+    if (!isPlanExecutionRequest(input.text)) return false;
+    const events = this.chats.store.events(chatId);
+    const pending = pendingProposal(events);
+    const saved = chat.status === "paused" ? this.pauseState(chatId) : undefined;
+    const planning = this.planning.has(chatId) || !!saved?.planning;
+    const held = queued && this.reviseAfterTurn.has(chatId);
+    if (!planning && !chat.planMode && pending === undefined && !held) return false;
+    if (delivery === "next" && planning && chat.status !== "paused") return false;
+    if (chat.status === "pausing") throw new Error("계획 턴의 일시 중지 확인을 기다리고 있습니다.");
+    // A normal execution with workers running must not be stopped just because its next-input toggle is on.
+    if (!planning && !held && (this.chats.isBusy(chatId) || ["working", "approval", "paused"].includes(chat.status))) return false;
+    this.planExecutionFlights.add(chatId);
+    try {
+      const inst = this.instructions.get(chatId) ?? (saved && this.restoreInstruction(saved));
+      const view = currentPlanView(events);
+      const revision = inst ? waitingProposal(events.filter(e => e.id < inst.id)) : undefined;
+      const submitted = this.planSubmitted.has(chatId) || saved?.planSubmitted;
+      const planId = pending ?? (submitted ? inst?.id : held ? waitingProposal(events)?.planId : undefined);
+      const steps = planId === undefined ? undefined : planStepsFor(events, planId);
+      const version = this.planVersions.get(chatId) ?? saved?.planVersion ?? (planId === undefined ? undefined : latestPlanVersion(events, planId));
+      // Preserve every original message/attachment, including edits not yet delivered to the CLI.
+      const messages = events.filter(e => e.event.type === "user" && e.id >= (inst?.id ?? events.at(-1)?.id ?? 0))
+        .flatMap(e => e.event.type === "user" ? [e.event] : []);
+      const notes = [...new Set([inst?.text, ...messages.map(e => e.text)].filter(Boolean))].join("\n\n");
+      const contextSteps = steps?.length ? steps : view?.steps.length ? view.steps : revision?.steps;
+      const context = `[사용자 실행 승인] 계획 모드는 종료됐습니다. 이전의 읽기 전용·계획 재제출 지시는 더 이상 적용하지 않습니다. 기존 대화와 아래 지시를 반영해 작업을 시작하세요. 필요한 작업자를 배정하고 checklist로 진행을 관리하세요.\n\n${notes}` +
+        (contextSteps?.length ? `\n\n기존 작업 계획(사용자 추가 조건을 우선 반영):\n${planByGroup(contextSteps)}` : "") + `\n\n[사용자 실행 지시]\n${input.text}`;
+      const attachments = [...new Map([...messages.flatMap(e => e.attachments), ...input.attachments].map(a => [a.id, a])).values()];
+      // Native turns have immutable read-only permissions. Wait for their interruption before sending a writable turn.
+      if (planning && chat.status !== "paused") {
+        const stopping = this.stop(chatId, true);
+        const epoch = this.epochs.get(chatId);
+        await stopping;
+        const until = Date.now() + 15_000;
+        while (this.chats.isBusy(chatId) && Date.now() < until && this.epochs.get(chatId) === epoch)
+          await new Promise(resolve => setTimeout(resolve, 25));
+        if (this.epochs.get(chatId) !== epoch || ["pausing", "paused"].includes(this.chats.store.chat(chatId)?.status ?? ""))
+          throw new Error("사용자가 중지한 계획은 자동 실행하지 않습니다.");
+        if (this.chats.isBusy(chatId)) throw new Error("계획 턴의 중지 응답을 기다리고 있습니다. 중지된 뒤 진행해 주세요.");
+      }
+      this.clearPlanConfirm(chatId);
+      this.planning.delete(chatId);
+      this.planSubmitted.delete(chatId);
+      this.planVersions.delete(chatId);
+      this.reviseAfterTurn.delete(chatId);
+      this.revisionHold.delete(chatId);
+      this.planRunning.delete(chatId);
+      this.chats.store.setSetting(`pause:${chatId}`, "");
+      this.chats.updateChat(chatId, { planMode: false });
+      this.chats.emit(chatId, "orch", null, { type: "notice", text: "명시적인 실행 지시를 받아 계획 모드를 종료하고 작업을 시작합니다." });
+      if (planId !== undefined && steps?.length) {
+        const submittedAt = events.findLast(e => e.event.type === "plan_update" && e.event.planId === planId)?.id ?? planId;
+        const additions = events.filter(e => e.id > submittedAt && e.event.type === "user")
+          .flatMap(e => e.event.type === "user" && e.event.text !== input.text ? [e.event.text] : []).join("\n\n");
+        await this.executeApprovedPlan(this.chats.store.chat(chatId)!, planId, version, steps, input, { text: additions, attachments });
+      } else {
+        if (view?.planId !== undefined) this.chats.emit(chatId, "orch", null, { type: "plan_state", state: "cancelled", planId: view.planId, reason: "사용자의 실행 지시에 따라 일반 작업으로 이어갑니다." });
+        await this.chats.startTurn(chatId, input.text, input.attachments.map(a => a.id), () => this.instruct(chat, { text: context, attachments }, true));
+      }
+      return true;
+    } finally { this.planExecutionFlights.delete(chatId); }
+  }
+
   private newInstruction(chatId: number, text: string, restore = false): Instruction {
     const events = this.chats.store.events(chatId);
     let id = events.findLast((e) => e.event.type === "user" && !(restore && e.event.queued))?.id ?? 0;
@@ -2533,6 +2605,13 @@ export class Orchestrator {
   }
 
   private async queue(chat: Chat, input: AgentInput) {
+    if (this.planning.has(chat.id) && isPlanExecutionRequest(input.text)) {
+      this.clearPlanConfirm(chat.id);
+      this.reviseAfterTurn.add(chat.id);
+      this.revisionHold.set(chat.id, [...(this.revisionHold.get(chat.id) ?? []), input]);
+      this.chats.emit(chat.id, "orch", null, { type: "notice", text: "실행 지시를 보관했습니다. 현재 계획 턴이 끝나면 계획 모드를 종료하고 작업을 시작합니다." });
+      return;
+    }
     if (this.holdAsRevision(chat)) {
       // Kept apart from inst.queued, which tool responses of the running turn would consume.
       this.revisionHold.set(chat.id, [...(this.revisionHold.get(chat.id) ?? []), input]);
@@ -2603,6 +2682,30 @@ export class Orchestrator {
     return "\n\n[사용자 추가 지시 — 작업 중에 도착함, 최종 보고까지 반드시 반영]\n" + unsent.map((t) => `- ${t}`).join("\n") + (recovery ? `\n\n${recovery}` : "");
   }
 
+  private async executeApprovedPlan(chat: Chat, planId: number, version: number | undefined, steps: PlanStep[] | undefined, input?: AgentInput, additional?: AgentInput) {
+    const chatId = chat.id;
+    this.planning.delete(chatId);
+    this.clearPlanConfirm(chatId); // approved by button or by the plan question: one path
+    this.planRunning.set(chatId, planId);
+    // The definitions approved now are fixed for the run (assignments and checklists are checked against them).
+    this.chats.store.setSetting(`approvedPlan:${chatId}`, JSON.stringify({ planId, version, tasks: steps ?? [] }));
+    // Approval ends plan mode: the next message runs normally unless the user turns it on again.
+    if (chat.planMode) this.chats.updateChat(chatId, { planMode: false });
+    this.chats.emit(chatId, "orch", null, { type: "plan_state", state: "running", planId, ...(version ? { version } : {}) });
+    const grouped = !!steps?.some((s) => s.group !== undefined);
+    const text = grouped
+      ? `사용자가 계획${version ? ` v${version}` : ""}을 승인했다. 계획대로 실행하라.\n` +
+        "- group 번호 순서로 진행한다. 한 group에서 선행이 끝난 작업들은 ask_parallel 한 번으로 동시에 맡긴다(task마다 planTaskId=작업 id, kind, scope, reason, 완료 기준을 담은 message). 시작할 작업이 하나뿐일 때만 ask를 쓴다.\n" +
+        "- 필요한 작업자는 agentKind에 맞춰 spawn으로 그 group의 동시 작업 수만큼 확보하고, owner가 있으면 그 작업자를 쓴다.\n" +
+        "- planTaskId를 주면 앱이 단계를 진행 중·완료로 바꾸고 협의 id를 연결한다. 결과를 확인해 문제가 있으면 보완을 맡기고, 진행하지 않을 단계는 checklist에서 cancelled와 cancelReason으로 남긴다.\n" +
+        "- 결과를 기다릴 때는 wait_results를 쓴다. 끝나지 않은 단계가 남으면 앱은 완료로 처리하지 않는다.\n\n승인된 계획:\n" + planByGroup(steps!)
+      : "사용자가 계획을 승인했다. 계획대로 실행하라: 필요한 작업자를 spawn 하고, 서로 독립인 단계는 ask_parallel 한 번으로 동시에, 앞 결과가 필요한 단계만 차례로 맡기고(implement는 scope 지정), 단계를 시작·완료할 때마다 checklist를 갱신하고, " +
+        "모든 단계를 완료하거나, 진행하지 않을 단계는 cancelled와 cancelReason으로 표시한 뒤 결과를 보고하라. 끝나지 않은 단계가 남으면 앱은 완료로 처리하지 않는다." +
+        (steps?.length ? `\n\n승인된 계획 단계:\n${steps.map((s) => `- ${s.id ? `${s.id} ` : ""}${s.title} (${s.status})`).join("\n")}` : "");
+    const followUp = [additional?.text, input?.text].filter(Boolean).join("\n\n");
+    await this.chats.startTurn(chatId, input?.text ?? "계획 실행", input?.attachments.map(a => a.id) ?? [], () => this.instruct(chat, { text: text + (followUp ? `\n\n[사용자 실행 지시 — 추가 조건도 반영]\n${followUp}` : ""), attachments: additional?.attachments ?? input?.attachments ?? [] }, true));
+  }
+
   // ---------- slash commands
   async command(chatId: number, name: string, arg: string) {
     const chat = this.chats.store.chat(chatId);
@@ -2638,25 +2741,7 @@ export class Orchestrator {
           if (Number(m[1]) !== planId || Number(m[2]) !== (version ?? 1))
             throw new Error(`계획이 바뀌었습니다(승인 화면: 계획 ${m[1]} v${m[2]} → 현재: 계획 ${planId} v${version ?? 1}). 최신 계획을 확인한 뒤 다시 승인하세요.`);
         } else this.chats.emit(chatId, "orch", null, { type: "notice", text: `/plan-run: 최신 제안(계획 ${planId} v${version ?? 1})을 실행합니다.` });
-        this.planning.delete(chatId);
-        this.clearPlanConfirm(chatId); // approved by button or by the plan question: one path
-        this.planRunning.set(chatId, planId);
-        // The definitions approved now are fixed for the run (assignments and checklists are checked against them).
-        this.chats.store.setSetting(`approvedPlan:${chatId}`, JSON.stringify({ planId, version, tasks: steps ?? [] }));
-        // Approval ends plan mode: the next message runs normally unless the user turns it on again.
-        if (chat.planMode) this.chats.updateChat(chatId, { planMode: false });
-        this.chats.emit(chatId, "orch", null, { type: "plan_state", state: "running", planId, ...(version ? { version } : {}) });
-        const grouped = !!steps?.some((s) => s.group !== undefined);
-        const text = grouped
-          ? `사용자가 계획${version ? ` v${version}` : ""}을 승인했다. 계획대로 실행하라.\n` +
-            "- group 번호 순서로 진행한다. 한 group에서 선행이 끝난 작업들은 ask_parallel 한 번으로 동시에 맡긴다(task마다 planTaskId=작업 id, kind, scope, reason, 완료 기준을 담은 message). 시작할 작업이 하나뿐일 때만 ask를 쓴다.\n" +
-            "- 필요한 작업자는 agentKind에 맞춰 spawn으로 그 group의 동시 작업 수만큼 확보하고, owner가 있으면 그 작업자를 쓴다.\n" +
-            "- planTaskId를 주면 앱이 단계를 진행 중·완료로 바꾸고 협의 id를 연결한다. 결과를 확인해 문제가 있으면 보완을 맡기고, 진행하지 않을 단계는 checklist에서 cancelled와 cancelReason으로 남긴다.\n" +
-            "- 결과를 기다릴 때는 wait_results를 쓴다. 끝나지 않은 단계가 남으면 앱은 완료로 처리하지 않는다.\n\n승인된 계획:\n" + planByGroup(steps!)
-          : "사용자가 계획을 승인했다. 계획대로 실행하라: 필요한 작업자를 spawn 하고, 서로 독립인 단계는 ask_parallel 한 번으로 동시에, 앞 결과가 필요한 단계만 차례로 맡기고(implement는 scope 지정), 단계를 시작·완료할 때마다 checklist를 갱신하고, " +
-            "모든 단계를 완료하거나, 진행하지 않을 단계는 cancelled와 cancelReason으로 표시한 뒤 결과를 보고하라. 끝나지 않은 단계가 남으면 앱은 완료로 처리하지 않는다." +
-            (steps?.length ? `\n\n승인된 계획 단계:\n${steps.map((s) => `- ${s.id ? `${s.id} ` : ""}${s.title} (${s.status})`).join("\n")}` : "");
-        await this.chats.startTurn(chatId, "계획 실행", [], () => this.instructWith(chat, text, "계획 실행", true));
+        await this.executeApprovedPlan(chat, planId, version, steps);
         return;
       }
       case "plan-cancel": {

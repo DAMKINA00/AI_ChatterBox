@@ -32,14 +32,35 @@ test("keepDroppedSteps puts steps that must stay back after their previous neigh
 test("pendingProposal: only the proposal that is still the latest request", () => {
   seq = 0;
   const a = user("/plan A");
-  const events = [a, ev({ type: "plan_update", steps: [...steps("pending")], planId: a.id }), ev({ type: "plan_state", state: "proposed", planId: a.id })];
+  const queuedBeforeSubmission = ev({ type: "user", text: "제출 전에 대기 지시", attachments: [], queued: true }, null);
+  const submitted = ev({ type: "plan_update", steps: [...steps("pending")], planId: a.id });
+  const proposed = ev({ type: "plan_state", state: "proposed", planId: a.id });
+  assert.equal(pendingProposal([a, queuedBeforeSubmission, submitted, proposed]), a.id, "queued input before the master submission belongs to the proposal");
+
+  const events = [a, submitted, proposed];
   assert.equal(pendingProposal(events), a.id);
   assert.equal(pendingProposal([...events, user("다른 지시")]), undefined, "superseded by a later instruction");
   assert.equal(pendingProposal([...events, ev({ type: "user", text: "대기 지시", attachments: [], queued: true }, null)]), undefined, "a queued one counts too");
+
+  const queuedAfterSubmission = ev({ type: "user", text: "제출 후 보완", attachments: [], queued: true }, null);
+  const resubmitted = ev({ type: "plan_update", steps: [...steps("pending", "보완 반영")], planId: a.id });
+  const reProposed = ev({ type: "plan_state", state: "proposed", planId: a.id });
+  assert.equal(pendingProposal([...events, queuedAfterSubmission, resubmitted, reProposed]), a.id, "a resubmission reflecting the queued input is current again");
+
   assert.equal(pendingProposal([...events, ev({ type: "plan_state", state: "cancelled", planId: a.id })]), undefined);
   seq = 0;
   const legacy = [user("/plan 예전"), ev({ type: "plan_state", state: "proposed" })];
   assert.equal(pendingProposal(legacy), 1, "an older proposal without planId resolves to its /plan message");
+  assert.equal(pendingProposal([...legacy, ev({ type: "user", text: "예전 후속", attachments: [], queued: true }, null)]), undefined, "legacy proposals still use the /plan id when no plan_update exists");
+});
+
+test("pendingProposal: a late plan update cannot revive a proposal superseded by an ordinary instruction", () => {
+  seq = 0;
+  const a = user("/plan 늦은 계획");
+  const staleInstruction = user("새 지시");
+  const lateSubmission = ev({ type: "plan_update", steps: [...steps("pending")], planId: a.id });
+  const proposed = ev({ type: "plan_state", state: "proposed", planId: a.id });
+  assert.equal(pendingProposal([a, staleInstruction, lateSubmission, proposed]), undefined, "a nonqueued instruction before a late plan_update still supersedes the proposal");
 });
 
 test("planStepsFor and latestPlanState read only the plan asked for", () => {
