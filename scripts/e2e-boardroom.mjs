@@ -49,6 +49,16 @@ try {
   assert.deepEqual(rendered.filter(row => sequence.some(text => row.includes(text))).map(row => sequence.find(text => row.includes(text))), sequence);
   assert.equal(await page.getByRole("link", { name: "공식 비교 자료" }).getAttribute("href"), "https://www.iana.org/help/example-domains");
   assert.equal(await page.locator("#boardroom-panel table").count(), 1);
+  const chatScroll = page.getByRole("region", { name: "회의 대화" }).locator(".boardroom-scroll");
+  assert.equal(await chatScroll.locator("article").first().evaluate(el => getComputedStyle(el).userSelect), "text");
+  const selected = await chatScroll.evaluate(el => {
+    const selection = window.getSelection();
+    selection.selectAllChildren(el);
+    const text = selection.toString();
+    selection.removeAllRanges();
+    return text;
+  });
+  assert.ok(selected.includes("비교해 줘") && selected.includes("공식 비교 자료") && selected.includes("A안을 추천합니다"));
   assert.equal(await page.locator('article img[alt="회의 자료"]').count(), 0);
   await page.getByRole("button", { name: "이미지 보기" }).click();
   await page.waitForFunction(() => document.querySelector('article img[alt="회의 자료"]')?.naturalWidth > 0);
@@ -62,7 +72,6 @@ try {
   await members.click();
   await roster.waitFor();
   await members.click();
-  const chatScroll = page.getByRole("region", { name: "회의 대화" }).locator(".boardroom-scroll");
   await chatScroll.evaluate(el => { el.scrollTop = 0; });
   const latest = page.getByRole("button", { name: "최신 메시지", exact: true });
   await latest.waitFor();
@@ -75,7 +84,7 @@ try {
   await page.setViewportSize({ width: 390, height: 760 });
   await page.screenshot({ path: join(output, "boardroom-mobile.png") });
   assert.deepEqual(errors, []);
-  console.log("PASS Boardroom streaming, rich messages, roster toggle, result navigation and mobile layout");
+  console.log("PASS Boardroom streaming, rich messages, transcript selection, roster toggle, result navigation and mobile layout");
 } finally {
   await browser.close();
   await server.stop();

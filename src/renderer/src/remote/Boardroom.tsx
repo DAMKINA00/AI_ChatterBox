@@ -180,7 +180,7 @@ function Boardroom() {
           const atEnd = el.scrollHeight - el.clientHeight - el.scrollTop < 24;
           follow.current = atEnd;
           setAtLatest(atEnd);
-        }} className="boardroom-scroll min-h-0 flex-1 overflow-y-auto py-2.5 sm:py-3">
+          }} className="boardroom-scroll min-h-0 flex-1 overflow-y-auto py-2.5 select-text sm:py-3">
           {!posts.length && <p className="mx-auto max-w-[940px] px-6 py-7 text-sm text-[var(--room-muted)]">
             안건을 보내면 마스터가 첫 질문을 던지고 참가자들이 차례로 의견을 이어갑니다.
           </p>}
