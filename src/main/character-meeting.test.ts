@@ -5,6 +5,8 @@ import { CharacterMeeting } from "./character-meeting";
 import { parseCharacterModels, parseMeetingRequest, type MeetingEvent } from "../shared/character-meeting";
 import type { ChatManager } from "./chats";
 import { CharacterChat } from "./character-chat";
+import { BoardroomMemory } from "./boardroom-memory";
+import { agendaUrls, parseWebSources, type WebLookup } from "./boardroom-web";
 
 const id = "a".repeat(32);
 
@@ -160,4 +162,73 @@ test("a room with only low budgets ends without a provider call", async () => {
   assert.equal(room.snapshot().messages.length, 1);
   assert.deepEqual(room.snapshot().resting, ["orch", "gpt", "deepseek"]);
   assert.match(room.snapshot().status, /잔여 사용량/);
+});
+
+test("two speakers can return to each other, followed by a new voice, a short agreement and an objection with evidence", async () => {
+  const store = new Map<string, string>();
+  const storage = { getSetting: (key: string) => store.get(key), setSetting: (key: string, value: string) => { store.set(key, value); } };
+  const memory = new BoardroomMemory(storage);
+  const url = "https://www.iana.org/help/example-domains";
+  const first = { speaker: "gpt", focus: "첫날 항구에서 이동하는 법", webQuery: "히타카츠항 대중교통 공식" };
+  const turns = [
+    first, { speaker: "claude", focus: "배편 도착 뒤 이동" }, { speaker: "gpt", focus: "짐을 맡길 시간" },
+    { speaker: "grok", focus: "해 지기 전에 전망대를 보는 조건", mode: "interject" },
+    { speaker: "gemini", focus: "도착 직후 짐 보관", mode: "reaction" },
+    { speaker: "deepseek", focus: "마지막 버스", mode: "reaction" },
+    { action: "conclude", credits: [{ turn: 4, strength: "risks" }, { turn: 7, strength: "verification" }] },
+  ];
+  const searches: WebLookup[] = [];
+  const observed: Array<{ stage: string; input: Record<string, unknown> }> = [];
+  let floor = 0;
+  const room = new CharacterMeeting({
+    configured: () => ["claude", "codex", "grok", "gemini", "deepseek"],
+    meetingEligibility: () => "available",
+    meetingReply: async (agent, _model, data, _signal, _onText, onModel) => {
+      const input = data as Record<string, unknown>;
+      const stage = String(input.stage);
+      observed.push({ stage, input });
+      if (stage === "opening" || stage === "moderate") return JSON.stringify(turns[floor++]);
+      onModel?.(`${agent}-current`);
+      if (stage === "react") return agent === "gemini" ? '{"kind":"agree","text":"짐부터 맡기면 동선이 짧아요."}'
+        : '{"kind":"object","text":"마지막 버스가 있다는 전제에는 이의가 있어요.","webQuery":"히타카츠 최종 버스 공식 시간표"}';
+      return stage === "evidence" ? "공식 시간표의 막차 조건을 확인했습니다." : "대화를 이어갑니다.";
+    },
+  }, () => ({}), () => {}, undefined, { memory, web: async query => {
+    searches.push(query);
+    return [{ url, title: "공식 자료", note: "확인한 공개 자료 요약", kind: "page" }];
+  } });
+
+  await room.start({ requestId: id, text: `여행 동선을 확인해 줘. ${url}` });
+  const posts = room.snapshot().messages;
+  assert.deepEqual(posts.map(post => [post.sender, post.kind]), [
+    ["user", undefined], ["orch", "assignment"], ["system", "sources"], ["gpt", "discussion"],
+    ["claude", "discussion"], ["gpt", "discussion"], ["grok", "interjection"], ["gemini", "agreement"],
+    ["deepseek", "objection"], ["deepseek", "evidence"], ["orch", "summary"],
+  ]);
+  assert.deepEqual(searches.map(value => value.query), [first.webQuery, "히타카츠 최종 버스 공식 시간표"]);
+  assert.deepEqual(searches[0]?.urls, [url]);
+  assert.match(JSON.stringify(observed.find(entry => entry.stage === "evidence")?.input.web), /공개 자료 요약/);
+  const reloaded = new BoardroomMemory(storage);
+  assert.equal(reloaded.hints("grok", "grok-current")?.strengths[0]?.strength, "빠진 예외나 위험 발견");
+  assert.equal(reloaded.hints("grok", "grok-other"), undefined);
+  assert.equal(store.values().next().value?.includes("항구"), false);
+
+  floor = 0;
+  await room.start({ requestId: "b".repeat(32), text: "다음 여행을 준비해 줘" });
+  const next = observed.filter(entry => entry.stage === "opening").at(-1);
+  assert.match(JSON.stringify(next?.input.members), /빠진 예외나 위험 발견/);
+});
+
+test("web evidence only includes public URLs observed in completed page events", () => {
+  const url = "https://www.iana.org/help/example-domains";
+  assert.deepEqual(agendaUrls(`로컬 http://127.0.0.1:9222/json, 사설 https://printer.local/docs, 공개 [자료](${url}#main).`), [url]);
+  const items = [
+    { url, title: "IANA", note: "공개 자료" },
+    { url: "https://www.iana.org/guess", title: "Guess", note: "추측한 페이지" },
+    { url: "file:///test", title: "Local", note: "로컬" },
+  ];
+  const search = "https://www.iana.org/domains/reserved";
+  const observed = new Map([[url, { kind: "page" as const }], [search, { kind: "search" as const, title: "색인", snippet: "실제 검색 발췌" }]]);
+  assert.deepEqual(parseWebSources(JSON.stringify({ sources: items }), observed),
+    [{ ...items[0], kind: "page" }, { url: search, title: "색인", note: "실제 검색 발췌", kind: "search" }]);
 });

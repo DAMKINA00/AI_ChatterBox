@@ -17,6 +17,7 @@ import { previewImage } from "./artifact-preview";
 import { CoreRpc } from "./core-rpc";
 import { CharacterChat } from "./character-chat";
 import { CharacterMeeting } from "./character-meeting";
+import { BoardroomMemory } from "./boardroom-memory";
 import { CHARACTER_PROVIDERS, meetingRequestId, parseCharacterModels, parseMeetingRequest } from "../shared/character-meeting";
 import { parseCharacterAsk, type CharacterAnswer } from "../shared/usage-companion";
 
@@ -297,7 +298,10 @@ export async function runCore(dataDir: string, pipe: string, token: string, test
     }, dataDir, join(import.meta.dirname, "bridge-mcp.js").replace(/app\.asar([\\/])/, "app.asar.unpacked$1"));
     orchestrator = new Orchestrator(chats);
     characterChat = new CharacterChat(chats, undefined, characterModels);
-    characterMeeting = new CharacterMeeting(characterChat, characterModels, event => rpc.emit("monitor:meeting-event", event));
+    characterMeeting = new CharacterMeeting(characterChat, characterModels, event => rpc.emit("monitor:meeting-event", event), undefined, {
+      web: (input, signal) => characterChat.meetingWeb(input, signal),
+      memory: new BoardroomMemory(store),
+    });
     const channels = registerHandlers(rpc);
     await chats.start();
     orchestrator.startRecovery();

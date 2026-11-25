@@ -191,6 +191,35 @@ test("image failure prevents a successful worker turn; readonly turns disable na
   assert.equal(f.events.at(-1).ok, false);
 });
 
+test("Boardroom live search is separate from ordinary readonly turns, and only completed page events reach the source collector", async () => {
+  for (const publicWebResearch of [false, true]) {
+    const f = codex(true);
+    const server = (f.driver as any).server;
+    const pages: string[] = [];
+    const driver = new CodexDriver({ ...opts, readOnly: true, ephemeral: true, publicWebResearch }, server, {
+      emit() {}, nativeId() {}, approve: async () => ({ verdict: "deny" }), webSource: (url, source) => pages.push(`${source.kind} ${url}`),
+    });
+    await driver.send({ text: "공개 자료", attachments: [], noWrites: true });
+    const thread = f.calls.find(call => call.method === "thread/start")!.params;
+    assert.equal(thread.config.web_search, publicWebResearch ? "live" : "disabled");
+    assert.equal(thread.config["features.shell_tool"], false);
+    const turn = f.calls.find(call => call.method === "turn/start")!.params;
+    assert.equal(turn.sandboxPolicy.networkAccess, false);
+    const params = { threadId: "thread", turnId: "turn", item: { type: "webSearch", id: "page", query: "",
+      action: { type: "openPage", url: "https://www.iana.org/help/example-domains" } } };
+    driver.onNotification({ method: "item/started", params } as any);
+    assert.equal(pages.length, 0);
+    driver.onNotification({ method: "item/completed", params } as any);
+    assert.equal(pages.length, publicWebResearch ? 1 : 0);
+    const url = "https://www.iana.org/domains/reserved";
+    const result = { type: "text_result", ref_id: "turn1view0", url, title: "Reserved Domains", snippet: "Total lines: 25" };
+    driver.onNotification({ method: "item/completed", params: { ...params,
+      item: { type: "webSearch", id: "results", query: "", action: { type: "other" }, results: [result] } } } as any);
+    assert.equal(pages.length, publicWebResearch ? 2 : 0);
+    if (publicWebResearch) assert.equal(pages.at(-1), `page ${url}`);
+  }
+});
+
 test("Codex never grants session-wide native approval that bypasses changed app settings", async () => {
   const f = codex();
   f.driver.onServerRequest({ id: 1, method: "item/commandExecution/requestApproval", params: { command: "npm test", threadId: "thread", turnId: "turn" } } as any);

@@ -303,7 +303,7 @@ export class CodexDriver implements AgentDriver {
       ...(this.opts.allowImages === false || this.noWrites ? { "features.image_generation": false } : {}) };
     if (this.opts.readOnly && !this.judgeConfigured) {
       const inherited = await this.server.request<any>("config/read", { includeLayers: false, cwd: this.opts.cwd });
-      config = { ...config, "web_search": "disabled", "project_doc_max_bytes": 0 };
+      config = { ...config, "web_search": this.opts.ephemeral && this.opts.publicWebResearch ? "live" : "disabled", "project_doc_max_bytes": 0 };
       for (const feature of ["shell_tool", "multi_agent", "multi_agent_v2", "apps", "plugins", "browser_use", "computer_use", "image_generation", "view_image", "hooks", "tool_suggest", "sleep_tool"])
         config[`features.${feature}`] = false;
       for (const name of Object.keys(inherited?.config?.mcp_servers ?? {})) config[`mcp_servers.${name}.enabled`] = false;
@@ -660,6 +660,21 @@ export class CodexDriver implements AgentDriver {
 
   private onItem(item: ThreadItem, done: boolean) {
     switch (item.type) {
+      case "webSearch": {
+        if (!done || !this.opts.publicWebResearch || !this.host.webSource) break;
+        if (item.action && "url" in item.action && item.action.url) this.host.webSource(item.action.url, { kind: "page" });
+        // Some app-server releases deliver page opens in a completed result list instead of an action URL.
+        const results = (item as ThreadItem & { results?: unknown }).results;
+        if (!Array.isArray(results)) break;
+        for (const result of results.slice(0, 24)) {
+          if (result?.type !== "text_result" || typeof result.url !== "string") continue;
+          const opened = typeof result.ref_id === "string" && /^turn\d+view\d+$/.test(result.ref_id);
+          this.host.webSource(result.url, { kind: opened ? "page" : "search",
+            title: typeof result.title === "string" ? result.title.slice(0, 150) : undefined,
+            snippet: typeof result.snippet === "string" ? result.snippet.slice(0, 900) : undefined });
+        }
+        break;
+      }
       case "imageGeneration": {
         if (!done) {
           this.host.emit({ type: "image_generation", id: item.id, status: "running", prompt: item.revisedPrompt ?? undefined });

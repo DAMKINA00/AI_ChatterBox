@@ -11,7 +11,8 @@ import { AuthError, request, url } from "./api";
 
 const EMPTY: MeetingSnapshot = { seq: -1, requestId: null, messages: [], drafts: [], connected: [], resting: [], status: "" };
 const NAME = { ...MONITOR_CHARACTER_LABEL, orch: "마스터", user: "사용자", system: "회의 안내" };
-const ROLE = { assignment: "질문", report: "발표", review: "의견", discussion: "발언", summary: "결론" };
+const ROLE = { assignment: "질문", report: "발표", review: "의견", discussion: "발언", interjection: "끼어들기",
+  agreement: "동의", objection: "이의", evidence: "근거", sources: "웹 출처", summary: "결론" };
 const TONE = { orch: "text-[#a0edcd]", claude: "text-[#ffb0a3]", gpt: "text-[#d0c1ff]", gemini: "text-[#ffd284]",
   grok: "text-[#b1c9ff]", deepseek: "text-[#8cdaff]", user: "text-[#e6d9ef]", system: "text-[#c4c8dc]" };
 const CLOCK = new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit" });
@@ -244,7 +245,8 @@ const Post = memo(function Post({ post, streaming }: { post: MeetingMessage; str
   return <article id={`boardroom-message-${post.id}`} className={cn("flex min-w-0 items-start gap-3 rounded-md border-l-2 border-transparent px-2 py-1.5 sm:px-3",
     post.kind === "summary" ? "border-l-[var(--room-accent)] bg-[var(--room-result)]"
       : streaming ? "border-l-[var(--room-mint)] bg-[var(--room-live)]"
-      : post.kind === "assignment" ? "bg-[var(--room-well)]" : "hover:bg-[var(--room-hover)]")}>
+      : post.kind === "objection" ? "border-l-[var(--room-coral)] bg-[var(--room-well)]"
+      : post.kind === "assignment" || post.kind === "sources" ? "bg-[var(--room-well)]" : "hover:bg-[var(--room-hover)]")}>
     {post.sender === "user" || post.sender === "system"
       ? <span className="grid size-[34px] shrink-0 place-items-center rounded-full border border-[var(--room-line)] bg-[var(--room-side)] text-sm text-[var(--room-muted)]">{post.sender === "user" ? "나" : "✦"}</span>
       : <Portrait id={post.sender} active={streaming} />}

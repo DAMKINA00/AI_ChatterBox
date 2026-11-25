@@ -1,5 +1,6 @@
 import type { AgentEvent, AgentKind, AttachmentRef, UsageInfo, TokenCounts } from "../../shared/types";
 import type { ApprovalInput, VerdictResult } from "../approvals";
+import type { WebObservation } from "../boardroom-web";
 
 export interface AgentInput {
   text: string;
@@ -18,6 +19,7 @@ export interface DriverHost {
   nativeId(id: string): void;
   approve(input: Omit<ApprovalInput, "role" | "node">): Promise<VerdictResult>;
   usage?(u: UsageInfo): void;
+  webSource?(url: string, source: WebObservation): void;
 }
 
 /** One conversation backed by a CLI. Emits normalized AgentEvents through DriverHost. */
@@ -62,6 +64,8 @@ export interface DriverOptions {
   instructions?: string;
   /** Explicit read-only driver; independent of the session role. */
   readOnly?: boolean;
+  /** Enable the Codex built-in web search only for an isolated read-only research turn. */
+  publicWebResearch?: boolean;
   /** Codex thread config overrides (e.g. mcp_servers for the orchestrator's tools). */
   codexConfig?: Record<string, unknown>;
   /** Don't keep the conversation on disk (the approval judge). */

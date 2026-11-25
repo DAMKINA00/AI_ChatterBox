@@ -150,9 +150,14 @@ export async function startFixture(staticDir: string, password: string) {
     meetingEligibility: agent => agent === "grok" ? "resting" : "available",
     meetingReply: async (agent, _model, input, signal, stream) => {
       const { stage, discussion } = input as { stage: string; discussion: { speaker: string }[] };
-      if (stage === "opening") return '{"speaker":"gpt","focus":"비교 기준 한 가지"}';
-      if (stage === "moderate") return discussion.length === 1
-        ? '{"speaker":"deepseek","focus":"앞선 기준에 맞는 선택지 하나"}' : '{"action":"conclude"}';
+      if (stage === "opening") return '{"speaker":"gpt","focus":"비교 기준 한 가지","webQuery":"공개 비교 자료"}';
+      if (stage === "moderate") {
+        if (discussion.length === 1) return '{"speaker":"deepseek","focus":"앞선 기준에 맞는 선택지 하나","mode":"interject"}';
+        if (discussion.length === 2) return '{"speaker":"claude","focus":"A안에는 어떤 제약이 있나요?","mode":"reaction"}';
+        return '{"action":"conclude"}';
+      }
+      if (stage === "react") return '{"kind":"object","text":"A안은 운영 시간 확인이 먼저예요."}';
+      if (stage === "evidence") return "공식 자료에 명시된 운영 시간을 확인해야 해요.";
       if (agent === "codex") {
         stream?.("비교 기준을 확인하고 있어요.");
         await new Promise(resolve => setTimeout(resolve, 1_200));
@@ -162,7 +167,9 @@ export async function startFixture(staticDir: string, password: string) {
       if (stage === "conclude") return "A안을 추천합니다.";
       return "그 기준이라면 A안으로 좁히죠.";
     },
-  }, () => ({}), event => remote.publish("boardroom:event", [event]));
+  }, () => ({}), event => remote.publish("boardroom:event", [event]), undefined, {
+    web: async () => [{ url: "https://www.iana.org/help/example-domains", title: "공식 비교 자료", note: "공개 자료 요약", kind: "page" }],
+  });
   const remote = new RemoteWeb({
     file: join(dir, "remote-web.json"), staticDir,
     call: async (channel, args) => {

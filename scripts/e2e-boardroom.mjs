@@ -45,7 +45,9 @@ try {
   await page.screenshot({ path: join(output, "streaming.png") });
   await page.getByText("회의를 마쳤어요.").waitFor();
   const rendered = await page.locator("#boardroom-panel article").allTextContents();
-  assert.ok(rendered[2].includes("검토를 마쳤어요") && rendered[3].includes("그 기준이라면 A안") && rendered[4].includes("A안을 추천합니다"));
+  const sequence = ["검토를 마쳤어요", "그 기준이라면 A안", "A안은 운영 시간 확인이 먼저예요", "공식 자료에 명시된 운영 시간", "A안을 추천합니다"];
+  assert.deepEqual(rendered.filter(row => sequence.some(text => row.includes(text))).map(row => sequence.find(text => row.includes(text))), sequence);
+  assert.equal(await page.getByRole("link", { name: "공식 비교 자료" }).getAttribute("href"), "https://www.iana.org/help/example-domains");
   assert.equal(await page.locator("#boardroom-panel table").count(), 1);
   assert.equal(await page.locator('article img[alt="회의 자료"]').count(), 0);
   await page.getByRole("button", { name: "이미지 보기" }).click();
