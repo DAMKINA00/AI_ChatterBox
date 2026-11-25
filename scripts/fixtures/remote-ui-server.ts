@@ -148,15 +148,18 @@ export async function startFixture(staticDir: string, password: string) {
   const meeting = new CharacterMeeting({
     configured: () => ["claude", "codex", "deepseek"],
     meetingReply: async (agent, _model, input, signal, stream) => {
-      if (!stream) return '{"assignee":"gpt","task":"비교 기준 검토","keywords":[]}';
+      const { stage, discussion } = input as { stage: string; discussion: { speaker: string }[] };
+      if (stage === "opening") return '{"speaker":"gpt","focus":"비교 기준 한 가지"}';
+      if (stage === "moderate") return discussion.length === 1
+        ? '{"speaker":"deepseek","focus":"앞선 기준에 맞는 선택지 하나"}' : '{"action":"conclude"}';
       if (agent === "codex") {
-        stream("비교 기준을 확인하고 있어요.");
+        stream?.("비교 기준을 확인하고 있어요.");
         await new Promise(resolve => setTimeout(resolve, 1_200));
         signal.throwIfAborted();
         return "검토를 마쳤어요.\n\n| 방안 | 검토 |\n| --- | --- |\n| A | 추천 |\n\n![회의 자료](https://images.example/meeting.png)";
       }
-      if ("reviews" in input) return "A안을 추천합니다.";
-      return "추천 결과에 동의합니다.";
+      if (stage === "conclude") return "A안을 추천합니다.";
+      return "그 기준이라면 A안으로 좁히죠.";
     },
   }, () => ({}), event => remote.publish("boardroom:event", [event]));
   const remote = new RemoteWeb({

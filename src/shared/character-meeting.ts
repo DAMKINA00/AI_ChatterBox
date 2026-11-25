@@ -6,7 +6,7 @@ export const CHARACTER_MEETING_VERSION = 1;
 export type CharacterModel = { agent: AgentKind; model: string };
 export type CharacterModels = Partial<Record<MonitorCharacterId, CharacterModel>>;
 export type MeetingRequest = { requestId: string; text: string; folder?: string };
-export type MeetingMessage = { id: string; at: number; sender: MonitorCharacterId | "user" | "system"; text: string; kind?: "assignment" | "report" | "review" | "summary" };
+export type MeetingMessage = { id: string; at: number; sender: MonitorCharacterId | "user" | "system"; text: string; kind?: "assignment" | "report" | "review" | "discussion" | "summary" };
 export type MeetingEvent = { requestId: string; seq: number } & (
   | { type: "roster"; connected: MonitorCharacterId[] }
   | { type: "status"; text: string }

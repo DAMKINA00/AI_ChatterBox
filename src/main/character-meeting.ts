@@ -5,9 +5,14 @@ import type { CharacterChat } from "./character-chat";
 import { exploreRepository } from "./council-repository";
 
 type Participant = Exclude<MonitorCharacterId, "orch">;
-type Agenda = { assignee: Participant; task: string; keywords: string[] };
+type SpeakingTurn = { speaker: Participant; focus: string; keywords: string[] };
+type DiscussionEntry = { speaker: Participant; focus: string; text: string };
 type Event = MeetingEvent extends infer E ? E extends MeetingEvent ? Omit<E, "requestId" | "seq"> : never : never;
 type MessageContent = Omit<MeetingMessage, "id" | "at">;
+const MAX_TURNS = 6;
+const DISCUSSION_TIMEOUT_MS = 350_000;
+const OPENING_FOCUS = "안건에서 가장 먼저 정해야 할 항목 하나에 대해서만 의견을 주세요.";
+const FOLLOWUP_FOCUS = "직전 발언을 받아 아직 정하지 못한 다음 항목 하나를 제안하거나 질문해 주세요.";
 
 export class CharacterMeeting {
   private active?: { requestId: string; controller: AbortController; result: Promise<void> };
@@ -80,23 +85,27 @@ export class CharacterMeeting {
         end = "회의를 진행하려면 마스터 모델과 에이전트 한 명 이상을 연결해 주세요.";
         return;
       }
-      const ask = (choice: CharacterModel, input: object, timeout = 65_000, onText?: (value: string) => void) =>
+      const discussionSignal = AbortSignal.any([signal, AbortSignal.timeout(DISCUSSION_TIMEOUT_MS)]);
+      const ask = (choice: CharacterModel, input: object, phase: AbortSignal, timeout: number, onText?: (value: string) => void) =>
         this.chat.meetingReply(choice.agent, choice.model, { question: text, previous, ...input },
-          AbortSignal.any([signal, AbortSignal.timeout(timeout)]), onText);
+          AbortSignal.any([phase, AbortSignal.timeout(timeout)]), onText);
       const memberModel = (id: Participant) => settings[id] ?? { agent: CHARACTER_PROVIDERS[id], model: "" };
-      const speak = async (sender: MonitorCharacterId, kind: NonNullable<MeetingMessage["kind"]>, choice: CharacterModel, input: object, timeout?: number) => {
-        let message: MeetingMessage = { id: `${requestId}:${kind}:${sender}`, at: Date.now(), sender, kind, text: "" };
+      const speak = async (sender: MonitorCharacterId, kind: "discussion" | "summary", choice: CharacterModel,
+        input: object, phase: AbortSignal, timeout: number) => {
+        phase.throwIfAborted();
+        let message: MeetingMessage = { id: `${requestId}:${this.seq + 1}`, at: Date.now(), sender, kind, text: "" };
         let lastSent = 0;
         this.drafts.set(message.id, message);
         emit({ type: "draft", message });
         try {
-          const result = await ask(choice, input, timeout, value => {
-            if (signal.aborted || Date.now() - lastSent < 105) return;
+          const result = await ask(choice, input, phase, timeout, value => {
+            if (phase.aborted || Date.now() - lastSent < 105) return;
             lastSent = Date.now();
             message = { ...message, text: value };
             this.drafts.set(message.id, message);
             emit({ type: "draft", message });
           });
+          phase.throwIfAborted();
           return post({ sender, kind, text: result }, message);
         } catch (error) {
           this.drafts.delete(message.id);
@@ -105,62 +114,70 @@ export class CharacterMeeting {
         }
       };
 
-      status("마스터가 안건을 읽는 중…");
-      let agenda: Agenda;
-      try {
-        const raw = await ask(master, {
-          task: "회의 진행을 맡은 마스터입니다. 안건에 맞는 에이전트 한 명을 명단에서 지명하고 그가 검토할 내용을 한 문장으로 적으세요. 조사 폴더가 있으면 파일 내용에서 검색할 짧고 구체적인 키워드를 최대 3개 고르세요. JSON 객체만 반환하세요. 형식은 {assignee: 참가자 ID, task: 검토 내용, keywords: [검색어]}입니다.",
-          members: members.map(id => ({ id, name: MONITOR_CHARACTER_LABEL[id] })), folderSelected: !!folder,
-        }, 32_000);
-        agenda = parseAgenda(raw, members);
-        post({ sender: "orch", kind: "assignment", text: `@${MONITOR_CHARACTER_LABEL[agenda.assignee]} · ${agenda.task}` });
-      } catch {
-        signal.throwIfAborted();
-        agenda = { assignee: first, task: "사용자의 안건을 검토하고 결과를 발표해 주세요.", keywords: [] };
-        post({ sender: "system", kind: "assignment", text: `마스터 지명을 받지 못해 ${MONITOR_CHARACTER_LABEL[first]}에게 검토를 맡겼어요.` });
-      }
-
-      const research = await this.research(folder, agenda.keywords, text, signal);
-      let report: string | undefined;
-      for (const assignee of [agenda.assignee, ...members.filter(id => id !== agenda.assignee)]) {
-        signal.throwIfAborted();
-        status(`${MONITOR_CHARACTER_LABEL[assignee]} 검토 중…`);
+      const discussion: DiscussionEntry[] = [];
+      const failed = new Set<Participant>();
+      const transcript = () => discussion.map(turn => ({ ...turn, name: MONITOR_CHARACTER_LABEL[turn.speaker] }));
+      let research: Awaited<ReturnType<CharacterMeeting["research"]>> | undefined;
+      for (let step = 0; step < MAX_TURNS && !discussionSignal.aborted; step++) {
+        const available = members.filter(member => !failed.has(member));
+        if (!available.length) break;
+        const last = discussion.at(-1)?.speaker;
+        const alternates = available.filter(member => member !== last);
+        const candidates = alternates.length ? alternates : available;
+        const opening = discussion.length === 0;
+        const minimumTurns = members.length > 1 && alternates.length ? 2 : 1;
+        const mayConclude = discussion.length >= minimumTurns;
+        status(opening ? "마스터가 첫 쟁점을 고르는 중…" : "마스터가 다음 발언을 고르는 중…");
+        let turn: SpeakingTurn | "conclude";
+        let moderated = true;
         try {
-          report = (await speak(assignee, "report", memberModel(assignee), {
-            task: `회의에서 지명된 담당자입니다. ${agenda.task} 조사 결과나 분석을 발표하고, 확인한 사항과 추정을 구분하세요. 파일 근거는 경로와 줄 번호를 표시하세요. 답변은 1800자 안으로 작성하세요.`,
-            research,
-          })).text;
+          const raw = await ask(master, {
+            stage: opening ? "opening" : "moderate",
+            task: opening
+              ? "회의를 여세요. 안건 전체를 맡기지 말고, 가장 먼저 결정할 항목 하나를 구체적인 질문으로 좁히고 적합한 참가자에게 첫 답변만 요청하세요. 조사 폴더가 있으면 안건에서 검색할 키워드를 최대 세 개 고르세요. JSON 객체만 반환하세요. 형식은 {speaker: 참가자 ID, focus: 첫 질문, keywords: [검색어]}입니다."
+              : "회의를 이어가세요. 가장 최근 발언에 직접 응답하거나 그 발언이 열어 준 다음 미결 쟁점 하나를 다룰 참가자를 고르세요. 같은 초안의 병렬 검토나 단순 동의 확인을 요청하지 마세요. 필요한 사람은 앞서 발언했어도 다시 부를 수 있습니다. 사용자가 명시한 항목이나 발언자가 아직 남았다면 이어가세요. 충분히 다뤘고 mayConclude가 true이면 {action:\"conclude\"}, 더 논의해야 하면 {speaker: 참가자 ID, focus: 다음에 다룰 한 가지 쟁점}을 반환하세요. 두 경우 모두 JSON 객체만 반환하세요.",
+            members: candidates.map(id => ({ id, name: MONITOR_CHARACTER_LABEL[id] })),
+            folderSelected: !!folder, discussion: transcript(), mayConclude, remainingTurns: MAX_TURNS - step,
+          }, discussionSignal, opening ? 32_000 : 22_000);
+          turn = parseFloor(raw, candidates, mayConclude);
         } catch {
-          signal.throwIfAborted();
-          post({ sender: "system", text: `${MONITOR_CHARACTER_LABEL[assignee]}의 답변을 받지 못했어요.` });
-          continue;
+          if (discussionSignal.aborted) break;
+          moderated = false;
+          const speaker = candidates.find(candidate => !discussion.some(entry => entry.speaker === candidate)) ?? candidates[0]!;
+          turn = { speaker, focus: opening ? OPENING_FOCUS : FOLLOWUP_FOCUS, keywords: [] };
         }
-        agenda.assignee = assignee;
-        break;
-      }
-      if (!report) { end = "조사 보고를 받지 못했어요. 모델 연결을 확인해 주세요."; return; }
-
-      const reviews: MeetingMessage[] = [];
-      const peers = members.filter(id => id !== agenda.assignee);
-      if (peers.length) status("참가자들이 조사 결과를 검토하는 중…");
-      await Promise.all(peers.map(async member => {
+        if (turn === "conclude" || discussionSignal.aborted) break;
+        const { speaker, focus, keywords } = turn;
+        if (opening) post({ sender: moderated ? "orch" : "system", kind: "assignment", text: `@${MONITOR_CHARACTER_LABEL[speaker]} · ${focus}` });
+        if (!research) {
+          try { research = await this.research(folder, keywords, text, discussionSignal); }
+          catch (error) { if (discussionSignal.aborted) break; throw error; }
+        }
+        status(`${MONITOR_CHARACTER_LABEL[speaker]} 발언 중…`);
         try {
-          const review = await speak(member, "review", memberModel(member), {
-            task: "다른 참가자의 발표를 검토하세요. 동의하거나 바로잡을 점 또는 빠진 관점을 750자 안으로 적고, 확인할 수 없는 것은 구분하세요.",
-            report: { sender: MONITOR_CHARACTER_LABEL[agenda.assignee], text: report.slice(0, 4_000) }, research,
-          }, 45_000);
-          reviews.push(review);
+          const message = await speak(speaker, "discussion", memberModel(speaker), {
+            stage: "speak",
+            task: opening
+              ? "첫 질문에 대한 발언 한 번만 하세요. 주어진 쟁점 하나에만 답하고 전체 계획, 나머지 쟁점, 최종 결론은 미루세요."
+              : "같은 방에서 이야기하는 참가자입니다. 직전 발언의 구체적인 내용을 짚어 받아서 현재 쟁점에 제안 하나나 질문 하나를 더하세요. 조정이나 반론을 할 때도 대화를 앞으로 이끌어 주세요. 앞사람의 작업물을 채점하거나 앞선 발언을 반복하지 마세요.",
+            focus, discussion: transcript(), research,
+            format: "사용자와 다른 참가자가 듣는 짧은 발언으로 2~5문장만 작성하세요. 확인한 사실과 추정을 구분하고, 실제 파일 근거에 한해 경로와 줄 번호를 표시하세요.",
+          }, discussionSignal, 55_000);
+          discussion.push({ speaker, focus, text: message.text.slice(0, 2_500) });
         } catch {
-          if (!signal.aborted) post({ sender: "system", text: `${MONITOR_CHARACTER_LABEL[member]}의 검토 의견을 받지 못했어요.` });
+          if (discussionSignal.aborted) break;
+          failed.add(speaker);
+          post({ sender: "system", text: `${MONITOR_CHARACTER_LABEL[speaker]}의 발언을 받지 못해 다음 참가자로 넘어갑니다.` });
         }
-      }));
+      }
       signal.throwIfAborted();
+      if (!discussion.length) { end = "참가자 발언을 받지 못했어요. 모델 연결을 확인해 주세요."; return; }
       status("마스터가 회의 결과를 정리하는 중…");
       await speak("orch", "summary", master, {
-        task: "회의 진행자로서 사용자 질문에 답하고, 담당자의 발견, 참가자들이 합의한 사항, 남은 이견이나 미확인 사항을 정리하세요. 자료에 실제로 있는 인용만 유지하세요.",
-        report: { sender: MONITOR_CHARACTER_LABEL[agenda.assignee], text: report.slice(0, 4_000) },
-        reviews: reviews.map(review => ({ sender: review.sender, text: review.text.slice(0, 1_800) })), research,
-      });
+        stage: "conclude",
+        task: "회의 진행자로서 사용자 질문에 답하세요. 오간 발언에서 어떻게 제안이 발전했는지 필요한 만큼 반영하고, 합의·이견·미결 항목을 구분하세요. 발언이 없거나 검증되지 않은 사항을 합의 또는 사실로 쓰지 마세요. 실제 자료의 인용만 유지하세요.",
+        discussion: transcript(), research,
+      }, signal, 75_000);
       end = "회의를 마쳤어요.";
     } catch {
       end = signal.aborted ? "회의를 중단했어요." : "회의를 마치지 못했어요. 모델 연결이나 사용량을 확인해 주세요.";
@@ -187,11 +204,12 @@ export class CharacterMeeting {
   }
 }
 
-function parseAgenda(raw: string, members: Participant[]): Agenda {
-  const value = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/gi, "")) as Partial<Agenda>;
-  if (!value.assignee || !members.includes(value.assignee) || typeof value.task !== "string" || !value.task.trim())
-    throw new Error("Invalid assignment");
+function parseFloor(raw: string, members: Participant[], mayConclude: boolean): SpeakingTurn | "conclude" {
+  const value = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/gi, "")) as Partial<SpeakingTurn> & { action?: string };
+  if (value?.action === "conclude" && mayConclude) return "conclude";
+  if (!value?.speaker || !members.includes(value.speaker) || typeof value.focus !== "string" || !value.focus.trim())
+    throw new Error("Invalid floor decision");
   const keywords = Array.isArray(value.keywords) ? value.keywords.filter(term =>
     typeof term === "string" && term.trim().length > 1 && term.length <= 64 && !/[\r\n]/.test(term)).slice(0, 3).map(term => term.trim()) : [];
-  return { assignee: value.assignee, task: value.task.trim().slice(0, 360), keywords: [...new Set(keywords)] };
+  return { speaker: value.speaker, focus: value.focus.trim().slice(0, 360), keywords: [...new Set(keywords)] };
 }

@@ -11,7 +11,7 @@ import { AuthError, request, url } from "./api";
 
 const EMPTY: MeetingSnapshot = { seq: -1, requestId: null, messages: [], drafts: [], connected: [], status: "" };
 const NAME = { ...MONITOR_CHARACTER_LABEL, orch: "마스터", user: "사용자", system: "회의 안내" };
-const ROLE = { assignment: "지명", report: "발표", review: "의견", summary: "결론" };
+const ROLE = { assignment: "질문", report: "발표", review: "의견", discussion: "발언", summary: "결론" };
 const TONE = { orch: "text-[#a0edcd]", claude: "text-[#ffb0a3]", gpt: "text-[#d0c1ff]", gemini: "text-[#ffd284]",
   grok: "text-[#b1c9ff]", deepseek: "text-[#8cdaff]", user: "text-[#e6d9ef]", system: "text-[#c4c8dc]" };
 const CLOCK = new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit" });
@@ -178,7 +178,7 @@ function Boardroom() {
           setAtLatest(atEnd);
         }} className="boardroom-scroll min-h-0 flex-1 overflow-y-auto py-2.5 sm:py-3">
           {!posts.length && <p className="mx-auto max-w-[940px] px-6 py-7 text-sm text-[var(--room-muted)]">
-            검토할 안건을 보내면 마스터가 담당자를 지정합니다.
+            안건을 보내면 마스터가 첫 질문을 던지고 참가자들이 차례로 의견을 이어갑니다.
           </p>}
           <div className="mx-auto grid max-w-[940px] gap-0.5 px-2 sm:px-4">
             {posts.map(post => <Post key={post.id} post={post} streaming={room.drafts.some(draft => draft.id === post.id)} />)}
