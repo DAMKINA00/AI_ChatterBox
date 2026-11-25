@@ -310,7 +310,7 @@ test("character events reach only a monitor that reports characterEvents: 1 and 
   rmSync(f.root, { recursive: true, force: true });
 });
 
-test("character questions use the advertised chat, deduplicate requests, and keep the original reply keys", async () => {
+test("character questions work without an open chat and deduplicate requests", async () => {
   const root = mkdtempSync(join(tmpdir(), "cbx-character-questions-"));
   const children = [new FakeChild(), new FakeChild()];
   let spawned = 0;
@@ -320,39 +320,30 @@ test("character questions use the advertised chat, deduplicate requests, and kee
     exe: "monitor", settingsFile: join(root, "desktop.json"), allowed: true, changed() {}, notification() {},
     characterAsk: async ask => { asked.push(ask); return new Promise(resolve => { answer = resolve; }); },
   }, () => children[spawned++]);
-  const request = (requestId: string, chatId: number) => ({ type: "character-ask", requestId, character: "gpt", chatId, text: "질문입니다" });
+  const request = (requestId: string) => ({ type: "character-ask", requestId, character: "gpt", text: "질문입니다" });
   const emit = (child: FakeChild, value: unknown) => child.stdout.emit("data", JSON.stringify(value) + "\n");
   const writes = (child: FakeChild) => child.stdin.writes.map(line => JSON.parse(line));
   const tick = () => new Promise<void>(resolve => setImmediate(resolve));
 
   try {
     const started = companion.start();
-    children[0].emitState({ ...state(), characterAsk: 1 });
+    children[0].emitState({ ...state(), characterAsk: 2 });
     await started;
-    const absent = request("a".repeat(32), 12);
-    emit(children[0], absent);
-    assert.deepEqual(writes(children[0]).at(-1), { command: "character-reply", value: { requestId: absent.requestId, character: "gpt", chatId: 12, status: "no-chat" } });
-    companion.setCharacterTarget({ chatId: 12, title: "선택됨" });
-    assert.deepEqual(writes(children[0]).at(-1), { command: "character-target", value: { chatId: 12, title: "선택됨" } });
-    const stale = request("b".repeat(32), 11);
-    emit(children[0], stale);
-    assert.equal(writes(children[0]).at(-1).value.status, "chat-changed");
-    const ask = request("c".repeat(32), 12);
+    const ask = request("c".repeat(32));
     emit(children[0], ask);
     emit(children[0], { ...ask, requestId: ask.requestId.toUpperCase() });
     assert.equal(asked.length, 1);
-    companion.setCharacterTarget({ chatId: 13, title: "새로 선택됨" });
     answer({ status: "answer", text: "실제 답변" });
     await tick();
-    assert.deepEqual(writes(children[0]).at(-1), { command: "character-reply", value: { requestId: ask.requestId, character: "gpt", chatId: 12, status: "answer", text: "실제 답변" } });
-    emit(children[0], request("d".repeat(32), 13));
+    assert.deepEqual(writes(children[0]).at(-1), { command: "character-reply", value: { requestId: ask.requestId, character: "gpt", status: "answer", text: "실제 답변" } });
+    emit(children[0], request("d".repeat(32)));
     children[0].exit();
     const restarted = companion.start();
-    children[1].emitState({ ...state(), characterAsk: 1 });
+    children[1].emitState({ ...state(), characterAsk: 2 });
     await restarted;
     answer({ status: "answer", text: "지연 답변" });
     await tick();
-    assert.deepEqual(writes(children[1]), [{ command: "character-target", value: { chatId: 13, title: "새로 선택됨" } }]);
+    assert.deepEqual(writes(children[1]), []);
   } finally {
     if (companion.snapshot().running) {
       const stopping = companion.stop();

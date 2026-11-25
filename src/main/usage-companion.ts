@@ -4,17 +4,16 @@ import type {
   CharacterAnswer,
   CharacterAsk,
   CharacterReply,
-  CharacterTarget,
   UsageCommandName,
   UsageCompanionSnapshot,
   UsageMonitorState,
   UsageNotification,
 } from "../shared/usage-companion";
-import { isMonitorCharacter, normalizeCharacterSet, parseCharacterAsk, supportedCharacters, type MonitorCharacterId } from "../shared/usage-companion";
+import { CHARACTER_ASK_VERSION, isMonitorCharacter, normalizeCharacterSet, parseCharacterAsk, supportedCharacters, type MonitorCharacterId } from "../shared/usage-companion";
 import type { CharacterEvent } from "./character-events";
 import { MONITOR_ACCOUNTS_VERSION, type MonitorAccountsPayload } from "./usage-monitor-feed";
 
-type UsageCommand = { command: UsageCommandName; value?: boolean | { id: MonitorCharacterId; on: boolean } | CharacterEvent | CharacterTarget | CharacterReply };
+type UsageCommand = { command: UsageCommandName; value?: boolean | { id: MonitorCharacterId; on: boolean } | CharacterEvent | CharacterReply };
 
 const MAX_LINE_BYTES = 64 * 1024;
 const START_TIMEOUT_MS = 20_000;
@@ -76,7 +75,6 @@ interface ChildSession {
   lineTooLong: boolean;
   /** The current account snapshot went to this process (sent again after every restart). */
   accountsSent?: MonitorAccountsPayload;
-  characterTargetSent?: CharacterTarget;
 }
 
 function text(value: unknown, fallback: string): string {
@@ -114,7 +112,7 @@ function copyState(state: UsageMonitorState): UsageMonitorState {
   if (Array.isArray(state.characterIds)) copy.characterIds = normalizeCharacterSet(state.characterIds);
   else delete copy.characterIds;
   if (copy.characterEvents !== 1) delete copy.characterEvents;
-  if (copy.characterAsk !== 1) delete copy.characterAsk;
+  if (copy.characterAsk !== CHARACTER_ASK_VERSION) delete copy.characterAsk;
   return copy;
 }
 
@@ -124,7 +122,6 @@ export class UsageCompanion {
   private error?: string;
   private session?: ChildSession;
   private accounts?: MonitorAccountsPayload;
-  private characterTarget: CharacterTarget = { chatId: null };
   private readonly characterRequests = new Set<string>();
   private readonly spawn: UsageSpawn;
 
@@ -187,29 +184,9 @@ export class UsageCompanion {
     return true;
   }
 
-  /**
-   * The ChatterBox account snapshot the monitor shows. Kept and sent to every monitor process that
-   * announces the same protocol version (an older monitor would not understand it).
-   */
-  setCharacterTarget(target: CharacterTarget) {
-    const previous = this.characterTarget;
-    if (previous.chatId === target.chatId &&
-        (previous.chatId === null || (target.chatId !== null && previous.title === target.title))) return;
-    this.characterTarget = target;
-    if (this.session) this.sendCharacterTarget(this.session);
-  }
-
   private acceptsCharacterChat(session: ChildSession) {
     return this.session === session && session.initialState && !session.ended && !session.stopping
-      && this.state?.characterAsk === 1;
-  }
-
-  private sendCharacterTarget(session: ChildSession) {
-    if (!this.acceptsCharacterChat(session) || session.characterTargetSent === this.characterTarget) return;
-    try {
-      this.write(session, { command: "character-target", value: this.characterTarget });
-      session.characterTargetSent = this.characterTarget;
-    } catch { /* The pipe may be closing; the next monitor gets the current target on its first state. */ }
+      && this.state?.characterAsk === CHARACTER_ASK_VERSION;
   }
 
   private async handleCharacterAsk(session: ChildSession, message: unknown) {
@@ -222,13 +199,11 @@ export class UsageCompanion {
     if (this.characterRequests.size > 1024) this.characterRequests.delete(this.characterRequests.values().next().value!);
     let answer: CharacterAnswer;
     try {
-      answer = this.characterTarget.chatId === null ? { status: "no-chat" }
-        : this.characterTarget.chatId !== ask.chatId ? { status: "chat-changed" }
-        : await this.options.characterAsk?.(ask) ?? { status: "error" };
+      answer = await this.options.characterAsk?.(ask) ?? { status: "error" };
     } catch { answer = { status: "error" }; }
     if (!this.acceptsCharacterChat(session)) return;
-    const { requestId, character, chatId } = ask;
-    try { this.write(session, { command: "character-reply", value: { requestId, character, chatId, ...answer } }); }
+    const { requestId, character } = ask;
+    try { this.write(session, { command: "character-reply", value: { requestId, character, ...answer } }); }
     catch { /* No reply is replayed into a newer monitor. */ }
   }
 
@@ -429,7 +404,6 @@ export class UsageCompanion {
       this.error = undefined;
       this.publish();
       this.sendAccounts(session);
-      this.sendCharacterTarget(session);
       if (!session.startSettled) {
         if (session.startTimer) clearTimeout(session.startTimer);
         session.startTimer = undefined;

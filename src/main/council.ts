@@ -59,7 +59,7 @@ function field(value: unknown, name: string, max: number, optional = false): str
   if (typeof value !== "string" || !value.trim() && !optional || value.length > max) throw new Error(`${name}: ${max}자 이내의 문자열이 필요합니다.`);
   return value.trim();
 }
-function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+export function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise((resolve, reject) => {
     const abort = () => reject(signal.reason ?? new Error("자문·탐색이 취소되었습니다."));
     if (signal.aborted) { promise.catch(() => undefined); abort(); return; }

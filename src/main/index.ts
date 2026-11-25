@@ -4,7 +4,7 @@ import updaterPackage from "electron-updater";
 import { mkdirSync, readFileSync, existsSync, statSync, copyFileSync, writeFileSync, cpSync } from "node:fs";
 import { join, basename, resolve } from "node:path";
 import type { AttachmentRef, Chat, ChatAgent, Consult, Theme, UsageInfo } from "../shared/types";
-import { CharacterEventFeed, summarize } from "./character-events";
+import { CharacterEventFeed } from "./character-events";
 import type { CharacterAnswer } from "../shared/usage-companion";
 import { ChatNotifications } from "./chat-notifications";
 import { AppTray } from "./tray";
@@ -39,12 +39,6 @@ let quitting = false;
 let tray: AppTray | undefined;
 let core: CoreRpc | undefined;
 let chatCache: Chat[] = [];
-let activeMonitorChatId: number | null = null;
-
-function updateMonitorTarget() {
-  const chat = chatCache.find(value => value.id === activeMonitorChatId);
-  usage?.setCharacterTarget(chat ? { chatId: chat.id, title: summarize(chat.title, 80) || "선택한 채팅" } : { chatId: null });
-}
 let windowSetting: string | undefined;
 let usage: UsageCompanion | undefined;
 let updates: AppUpdates | undefined;
@@ -95,9 +89,8 @@ function startDesktopServices() {
     notification: notice => { if (Notification.isSupported()) new Notification({ title: notice.title, body: notice.message }).show(); },
     // The monitor's own refresh: ChatterBox re-reads its accounts' usage; the usage event then pushes it.
     refreshRequested: () => { void core?.call("usage:get", [true]).catch(() => undefined); },
-    characterAsk: async ask => core ? core.call<CharacterAnswer>("monitor:character-question", [ask], 178_000) : { status: "no-chat" },
+    characterAsk: async ask => core ? core.call<CharacterAnswer>("monitor:character-question", [ask], 178_000) : { status: "error" },
   });
-  updateMonitorTarget();
   monitorFeed = new MonitorFeed({ accounts: () => core!.call("cli-accounts:list", []), send: payload => usage?.setAccounts(payload) });
   monitorFeed.changed();
   updates = new AppUpdates(autoUpdater, {
@@ -170,12 +163,7 @@ function createWindow() {
   });
   if (process.env.ELECTRON_RENDERER_URL) void win.loadURL(process.env.ELECTRON_RENDERER_URL);
   else void win.loadFile(join(import.meta.dirname, "../renderer/index.html"));
-  const clearTarget = () => { activeMonitorChatId = null; updateMonitorTarget(); };
-  win.webContents.on("render-process-gone", clearTarget);
-  win.webContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
-    if (!isInPlace && isMainFrame) clearTarget();
-  });
-  win.on("closed", () => { win = null; clearTarget(); });
+  win.on("closed", () => { win = null; });
 }
 
 function registerUi(channels: string[], rpc: CoreRpc) {
@@ -189,20 +177,12 @@ function registerUi(channels: string[], rpc: CoreRpc) {
       for (const id of deletedIds) remote?.publish("chat:deleted", [id]);
       if (["chats:create", "chats:fork", "chats:delete", "projects:delete"].includes(channel)) {
         chatCache = await rpc.call("chats:list");
-        if (deletedIds.includes(activeMonitorChatId)) activeMonitorChatId = null;
-        updateMonitorTarget();
       }
       // Account added, renamed, enabled/disabled, logged in/out or removed: the monitor follows at once.
       if (channel.startsWith("cli-accounts:") && channel !== "cli-accounts:list" && channel !== "cli-accounts:get-policy") monitorFeed?.changed();
       return result;
     });
   }
-  ipcMain.on("monitor:active-chat", (event, chatId: unknown) => {
-    if (win?.webContents !== event.sender || event.senderFrame !== event.sender.mainFrame) return;
-    if (chatId !== null && (typeof chatId !== "number" || !Number.isSafeInteger(chatId) || chatId <= 0)) return;
-    activeMonitorChatId = chatId;
-    updateMonitorTarget();
-  });
   ipcMain.handle("projects:pickFolder", async () => {
     const result = await dialog.showOpenDialog(win!, { title: "작업 폴더 선택", properties: ["openDirectory", "createDirectory"] });
     return result.canceled ? null : result.filePaths[0] ?? null;
@@ -221,8 +201,6 @@ function registerUi(channels: string[], rpc: CoreRpc) {
     notifyDesktop: (channel, args) => {
       if (channel === "chat:deleted") {
         chatCache = chatCache.filter(chat => chat.id !== args[0]);
-        if (activeMonitorChatId === args[0]) activeMonitorChatId = null;
-        updateMonitorTarget();
       }
       win?.webContents.send(channel, ...args);
     },
@@ -301,7 +279,6 @@ app.whenReady().then(async () => {
         if (channel === "chat:updated") {
           const chat = args[0] as Chat;
           chatCache = chatCache.some(value => value.id === chat.id) ? chatCache.map(value => value.id === chat.id ? chat : value) : [chat, ...chatCache];
-          if (activeMonitorChatId === chat.id) updateMonitorTarget();
           tray?.chatChanged(chat);
           characterNotices.chatChanged(chat);
         }

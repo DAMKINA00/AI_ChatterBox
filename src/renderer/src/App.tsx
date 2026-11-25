@@ -30,8 +30,6 @@ export function App() {
 
   const chat = selection ? chats.find((c) => c.id === selection.chatId) : undefined;
   const project = chat ? projects.find((p) => p.id === chat.projectId) : undefined;
-  const monitorChatId = chat?.id ?? null;
-  useEffect(() => { api.setMonitorActiveChat?.(monitorChatId); }, [monitorChatId]);
   // Installing CLIs is done on the PC; the remote page shows each one's state in the chat header instead.
   const missing = remote ? [] : cli.filter((c) => c.agent !== "deepseek" && !c.path);
 

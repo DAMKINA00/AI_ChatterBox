@@ -10,8 +10,6 @@
 // writes outside the scope are denied. A call that would wait in a cycle, or nest deeper than 3, is refused.
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { MONITOR_QUESTION_REASON } from "./character-events";
-import type { CharacterAnswer, MonitorCharacterId } from "../shared/usage-companion";
 import { basename, isAbsolute, relative, resolve as resolvePath } from "node:path";
 import {
   chatOrchestrator,
@@ -1667,35 +1665,6 @@ export class Orchestrator {
     ].join("\n"));
   }
 
-  /** Ask the chosen, already registered worker via the usual consult and approval path. */
-  async askWorkerCharacter(chat: Chat, character: Exclude<MonitorCharacterId, "orch">, text: string): Promise<CharacterAnswer> {
-    if (this.assignments.get(chat.id)?.size || this.running.get(chat.id)?.size) return { status: "busy" };
-    const target = this.agents(chat.id).find(agent => agent.status === "active" && agent.kind === character);
-    if (!target) return { status: "error", text: "이 채팅에 해당 캐릭터의 활성 작업자가 없어요." };
-    let answer = "";
-    await this.chats.startTurn(chat.id, text, [], async () => {
-      this.nextEpoch(chat.id);
-      this.stopped.delete(chat.id);
-      this.planRunning.delete(chat.id);
-      const inst = this.newInstruction(chat.id, text);
-      this.instructions.set(chat.id, inst);
-      this.saveInstruction(chat.id);
-      let ok = false;
-      try {
-        const result = await this.consult(chat.id, "orch", target, "opinion", text, [], [], MONITOR_QUESTION_REASON,
-          undefined, undefined, undefined, false, undefined, undefined, undefined, reply => { answer = reply; });
-        ok = !result.isError;
-      } finally {
-        if (this.instructions.get(chat.id) === inst && !this.chats.liveDriver(chat.id, "orch")?.running && !this.chats.quitting) {
-          const end = { type: "turn_end", ok, interrupted: this.stopped.has(chat.id) } as const;
-          this.chats.orchTurnEnded(chat.id, end);
-          this.continueQueued(chat.id, end);
-        }
-      }
-    });
-    return answer.trim() ? { status: "answer", text: answer } : { status: "error" };
-  }
-
   // ---------- ask (consult)
   private graph(chatId: number): WaitGraph {
     let g = this.waits.get(chatId);
@@ -1859,11 +1828,11 @@ export class Orchestrator {
     for (const f of w) f();
   }
 
-  private async consult(chatId: number, caller: Role, target: ChatAgent, kind: ConsultKind, message: string, scope: string[], attach: string[], reason: string, supersedes?: number, requestedEffort?: string, discussion?: Discussion, resuming = false, accountChange?: CliAccountId | null, assignmentModel?: string, planTask?: PlanTaskRef, onAnswer?: (text: string) => void): Promise<ToolResult> {
+  private async consult(chatId: number, caller: Role, target: ChatAgent, kind: ConsultKind, message: string, scope: string[], attach: string[], reason: string, supersedes?: number, requestedEffort?: string, discussion?: Discussion, resuming = false, accountChange?: CliAccountId | null, assignmentModel?: string, planTask?: PlanTaskRef): Promise<ToolResult> {
     const epoch = this.epochs.get(chatId);
     const chat = this.chats.store.chat(chatId)!;
     const project = this.chats.store.project(chat.projectId)!;
-    const callerName = onAnswer ? "사용자" : this.name(chatId, caller);
+    const callerName = this.name(chatId, caller);
     const cliKind = cliAccountKindForAgent(WORKER_AGENT[target.kind]);
     let cliPolicy = cliKind ? this.chats.resolveAccountPolicy(cliKind, project.settings) : undefined;
     let cliSelection = accountChange !== undefined && cliPolicy
@@ -2098,7 +2067,6 @@ export class Orchestrator {
             ? `[${target.nickname}: 사용자가 중지했습니다. 더 맡기지 말고 멈추세요.]`
             : `[${target.nickname}: 오류 — ${result.error ?? "실패"}]`;
       const effortLabel = reasoning.effort || "CLI 기본";
-      if (status === "done" && result.text.trim()) onAnswer?.(result.text);
       return { ...textResult(`${head} · 추론 ${effortLabel}\n${consultResultText(finished)}`, status !== "done"), structuredContent: { consultId: consult.id, ...(status !== "done" ? { error: (quotaFailure ? "CLI 한도 소진 · " : "") + clipText(result.error ?? (status === "stopped" ? "사용자가 중지했습니다." : "작업자의 응답과 산출물이 없습니다."), 160) } : {}) } };
     } finally {
       if (cliKind) this.chats.pinRoleAccount(chatId, target.key, undefined);

@@ -15,7 +15,7 @@ import { Orchestrator } from "./orchestrator";
 import { resolveLink } from "./file-links";
 import { previewImage } from "./artifact-preview";
 import { CoreRpc } from "./core-rpc";
-import { summarize } from "./character-events";
+import { CharacterChat } from "./character-chat";
 import { parseCharacterAsk, type CharacterAnswer } from "../shared/usage-companion";
 
 let store: Store;
@@ -23,6 +23,7 @@ let runStats: RunStatsCache;
 let chats: ChatManager;
 let attachments: AttachmentStore;
 let orchestrator: Orchestrator;
+let characterChat: CharacterChat;
 let preparingUpdate = false;
 /** Chats being deleted from the remote web; no new work may start on them. */
 const remoteDeleting = new Set<number>();
@@ -110,18 +111,7 @@ function registerHandlers(rpc: CoreRpc) {
   ipcMain.handle("monitor:character-question", async (_e, value: unknown): Promise<CharacterAnswer> => {
     const ask = parseCharacterAsk(value);
     if (!ask) return { status: "error" };
-    const chat = store.chat(ask.chatId);
-    if (!chat || remoteDeleting.has(chat.id)) return { status: "no-chat" };
-    if (["working", "approval", "pausing", "paused", "interrupted"].includes(chat.status) || chats.isBusy(chat.id))
-      return { status: "busy" };
-    if (ask.character !== "orch" && chats.plansNextInput(chat))
-      return { status: "error", text: "계획 모드에서는 마스터에게 질문해 주세요." };
-    const result: CharacterAnswer = ask.character === "orch"
-      ? { status: "answer", text: await chats.askMasterCharacter(chat, ask.text) ?? "" }
-      : await orchestrator.askWorkerCharacter(chat, ask.character, ask.text);
-    if (result.status !== "answer") return result;
-    const text = summarize(result.text, 200);
-    return text ? { status: "answer", text } : { status: "error" };
+    return characterChat.ask(ask);
   });
   ipcMain.handle("chats:fork", (_e, id: number, options: ChatForkOptions) => { notDeleting(id); return chats.forkChat(id, options); });
   ipcMain.handle("chats:stop", (_e, id: number) => orchestrator.stop(id));
@@ -273,6 +263,7 @@ export async function runCore(dataDir: string, pipe: string, token: string, test
       usage: usage => rpc.emit("usage", usage),
     }, dataDir, join(import.meta.dirname, "bridge-mcp.js").replace(/app\.asar([\\/])/, "app.asar.unpacked$1"));
     orchestrator = new Orchestrator(chats);
+    characterChat = new CharacterChat(chats);
     const channels = registerHandlers(rpc);
     await chats.start();
     orchestrator.startRecovery();
@@ -283,6 +274,7 @@ export async function runCore(dataDir: string, pipe: string, token: string, test
     stopping = true;
     orchestrator?.stopRecovery();
     await boot.catch(() => undefined);
+    await characterChat?.dispose();
     await orchestrator?.council.dispose().catch(() => undefined);
     await orchestrator?.judge.dispose().catch(() => undefined);
     await chats?.dispose().catch(() => undefined);

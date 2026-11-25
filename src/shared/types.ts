@@ -613,7 +613,6 @@ export interface ChatterBoxApi {
   deleteChat(id: number, target?: ChatDeleteTarget): Promise<void>;
   markViewed(id: number): Promise<void>;
   /** Desktop only: the explicitly selected chat for the local usage monitor. */
-  setMonitorActiveChat?(id: number | null): void;
   listConsults(chatId: number): Promise<Consult[]>;
   listAgents(chatId: number): Promise<ChatAgent[]>;
   /** Whole history at once (tests and small chats only; windows use loadEventsPage). */

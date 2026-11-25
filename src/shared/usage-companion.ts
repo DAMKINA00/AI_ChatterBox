@@ -19,7 +19,7 @@ export interface UsageMonitorState {
   characterIds?: MonitorCharacterId[];
   /** 1 = the monitor accepts "character-event" (assignment, result and chat notices for a character). */
   characterEvents?: number;
-  /** 1 = the monitor supports character-target, character-ask, and character-reply. */
+  /** 2 = the monitor supports private character questions independent of the desktop chat. */
   characterAsk?: number;
 }
 
@@ -38,29 +38,28 @@ export const normalizeCharacterSet = (values: readonly unknown[]): MonitorCharac
   MONITOR_CHARACTERS.filter(id => values.some(v => v === id));
 
 
-export type CharacterTarget = { chatId: null } | { chatId: number; title: string };
+export const CHARACTER_ASK_VERSION = 2;
+export const MAX_CHARACTER_ANSWER = 12_000;
 
 export interface CharacterAsk {
   requestId: string;
   character: MonitorCharacterId;
-  chatId: number;
   text: string;
 }
 
 export type CharacterAnswer =
   | { status: "answer"; text: string }
-  | { status: "no-chat" | "chat-changed" | "busy" | "error"; text?: string };
+  | { status: "busy" | "error"; text?: string };
 
 export type CharacterReply = Omit<CharacterAsk, "text"> & CharacterAnswer;
 
 /** Validate the typed question at both process boundaries. */
 export function parseCharacterAsk(value: unknown): CharacterAsk | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
-  const { requestId, character, chatId, text } = value as Partial<CharacterAsk>;
+  const { requestId, character, text } = value as Partial<CharacterAsk>;
   if (typeof requestId !== "string" || !/^[0-9a-f]{32}$/i.test(requestId) || !isMonitorCharacter(character)
-    || typeof chatId !== "number" || !Number.isSafeInteger(chatId) || chatId <= 0
     || typeof text !== "string" || text.length > 1000 || !text.trim()) return;
-  return { requestId, character, chatId, text: text.trim() };
+  return { requestId, character, text: text.trim() };
 }
 
 export interface UsageNotification {
@@ -87,7 +86,6 @@ export type UsageCommandName =
   | "character"
   /** A character event for the monitor (value: CharacterEvent); only sent when the state reports characterEvents: 1. */
   | "character-event"
-  | "character-target"
   | "character-reply"
   | "taskbar"
   | "startup"
