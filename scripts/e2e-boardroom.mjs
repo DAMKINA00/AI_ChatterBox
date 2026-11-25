@@ -51,6 +51,15 @@ try {
   assert.equal(await page.locator("#boardroom-panel table").count(), 1);
   const chatScroll = page.getByRole("region", { name: "회의 대화" }).locator(".boardroom-scroll");
   assert.equal(await chatScroll.locator("article").first().evaluate(el => getComputedStyle(el).userSelect), "text");
+  await chatScroll.evaluate(el => { el.scrollTop = 0; });
+  const dragStart = await page.getByText("두 방안을 비교해 줘.", { exact: true }).boundingBox();
+  const dragEnd = await page.getByText("검토를 마쳤어요", { exact: false }).boundingBox();
+  assert.ok(dragStart && dragEnd);
+  await page.mouse.move(dragStart.x + 1, dragStart.y + dragStart.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(dragEnd.x + 4, dragEnd.y + dragEnd.height / 2, { steps: 10 });
+  await page.mouse.up();
+  assert.match(await page.evaluate(() => window.getSelection().toString()), /방안을 비교해 줘/);
   const selected = await chatScroll.evaluate(el => {
     const selection = window.getSelection();
     selection.selectAllChildren(el);
