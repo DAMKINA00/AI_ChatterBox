@@ -146,7 +146,8 @@ export async function startFixture(staticDir: string, password: string) {
     return current;
   };
   const meeting = new CharacterMeeting({
-    configured: () => ["claude", "codex", "deepseek"],
+    configured: () => ["claude", "codex", "deepseek", "grok"],
+    meetingEligibility: agent => agent === "grok" ? "resting" : "available",
     meetingReply: async (agent, _model, input, signal, stream) => {
       const { stage, discussion } = input as { stage: string; discussion: { speaker: string }[] };
       if (stage === "opening") return '{"speaker":"gpt","focus":"비교 기준 한 가지"}';

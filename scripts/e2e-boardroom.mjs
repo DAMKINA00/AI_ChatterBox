@@ -31,6 +31,7 @@ try {
   const roster = page.getByRole("complementary", { name: "참가자" });
   const members = page.getByRole("button", { name: "참가자", exact: true });
   assert.equal(await roster.locator("li").count(), 6);
+  await roster.getByText("잔여량 낮음 · 발언 쉼", { exact: true }).waitFor();
   await members.click();
   assert.equal(await roster.isVisible(), false);
   await members.click();

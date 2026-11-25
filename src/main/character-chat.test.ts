@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { CharacterAsk } from "../shared/usage-companion";
-import type { AgentKind } from "../shared/types";
+import type { AgentKind, CliAccountId, ResolvedCliAccount } from "../shared/types";
 import type { ChatManager } from "./chats";
 import { CharacterChat } from "./character-chat";
 
@@ -57,4 +57,31 @@ test("the master does not claim cross-checking when only one provider answers", 
   });
   assert.equal((await chat.ask(question("orch", "check"))).status, "error");
   assert.equal(calls, 2);
+});
+
+test("meeting eligibility checks the selected CLI account's lowest window and the USD balance boundary", async () => {
+  let used = 90;
+  let mode: ResolvedCliAccount["mode"] = "fixed";
+  let usd = "0.99";
+  const order: CliAccountId[] = ["gpt-1", "gpt-2"];
+  const chat = new CharacterChat({
+    resolveAccountPolicy: () => ({ kind: "gpt", mode, accountId: order[0], order }),
+    cliAccounts: () => ({ get: (accountId: CliAccountId) => ({ enabled: true, usage: {
+      checkedAt: Date.now(), fiveHour: { usedPercent: 30 }, weekly: { usedPercent: accountId === "gpt-1" ? used : 10 },
+    } }) }),
+    priorityCandidates: (ids: CliAccountId[]) => ids.map(accountId => ({ accountId })),
+    deepSeek: () => ({ status: () => ({ apiKeySet: true }) }),
+    usage: () => ({ deepseek: { state: "ready", isAvailable: true, balances: [{ currency: "USD", total: usd }] } }),
+  } as unknown as ChatManager);
+
+  assert.equal(chat.meetingEligibility("codex"), "resting");
+  await assert.rejects(chat.meetingReply("codex", "model", {}, new AbortController().signal), /잔여 사용량/);
+  assert.equal(chat.meetingEligibility("deepseek"), "resting");
+  usd = "1.00";
+  assert.equal(chat.meetingEligibility("deepseek"), "available");
+  used = 89.9;
+  assert.equal(chat.meetingEligibility("codex"), "available");
+  used = 91;
+  mode = "priority";
+  assert.equal(chat.meetingEligibility("codex"), "available");
 });

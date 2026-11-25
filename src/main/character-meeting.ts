@@ -20,10 +20,10 @@ export class CharacterMeeting {
   private drafts = new Map<string, MeetingMessage>();
   private seq = 0;
   private status = "";
-  private members: MonitorCharacterId[] | undefined;
+  private roster?: { connected: MonitorCharacterId[]; resting: MonitorCharacterId[] };
 
   constructor(
-    private readonly chat: Pick<CharacterChat, "configured" | "meetingReply">,
+    private readonly chat: Pick<CharacterChat, "configured" | "meetingReply" | "meetingEligibility">,
     private readonly models: () => CharacterModels,
     private readonly publish: (event: MeetingEvent) => void,
     private readonly explore = exploreRepository,
@@ -38,8 +38,9 @@ export class CharacterMeeting {
   }
 
   snapshot(): MeetingSnapshot {
+    const { connected, resting } = (this.active && this.roster) || this.availability();
     return { seq: this.seq, requestId: this.active?.requestId ?? null, status: this.status,
-      messages: this.history, drafts: [...this.drafts.values()], connected: this.members ?? this.availability().connected };
+      messages: this.history, drafts: [...this.drafts.values()], connected, resting };
   }
 
   cancel(id: string) {
@@ -51,15 +52,20 @@ export class CharacterMeeting {
     await this.active?.result;
   }
 
-  private availability() {
-    const settings = this.models();
-    const providers = this.chat.configured();
-    const members = MONITOR_CHARACTERS.filter((id): id is Participant => id !== "orch" && providers.includes(CHARACTER_PROVIDERS[id]));
+  private availability(settings = this.models(), providers = this.chat.configured()) {
+    const state = new Map(providers.map(agent => [agent, this.chat.meetingEligibility(agent)]));
+    const participants = MONITOR_CHARACTERS.filter((id): id is Participant => id !== "orch");
+    const members = participants.filter(id => state.get(CHARACTER_PROVIDERS[id]) === "available");
+    const resting: MonitorCharacterId[] = participants.filter(id => state.get(CHARACTER_PROVIDERS[id]) === "resting");
+    const preferred = settings.orch;
+    const preferredState = preferred && state.get(preferred.agent);
     const first = members[0];
-    const master = settings.orch ?? (first ? { agent: CHARACTER_PROVIDERS[first], model: "" } : undefined);
-    const leader = master && providers.includes(master.agent) ? master : undefined;
-    const connected: MonitorCharacterId[] = leader ? ["orch", ...members] : members;
-    return { settings, members, first, leader, connected };
+    const fallback = first ? { agent: CHARACTER_PROVIDERS[first], model: "" } : undefined;
+    const leader = preferredState === "available" ? preferred : !preferred || preferredState === "resting" ? fallback : undefined;
+    const masterResting = !leader && (preferredState === "resting" || (!preferred && resting.length > 0));
+    if (masterResting) resting.unshift("orch");
+    const connected = MONITOR_CHARACTERS.filter(id => (id === "orch" && !!leader) || resting.includes(id) || (id !== "orch" && members.includes(id)));
+    return { members, leader, connected, resting };
   }
 
   private async run({ requestId, text, folder }: MeetingRequest, signal: AbortSignal) {
@@ -78,11 +84,21 @@ export class CharacterMeeting {
     let end = "";
     try {
       post({ sender: "user", text });
-      const { settings, members, first, leader: master, connected } = this.availability();
-      this.members = connected;
-      emit({ type: "roster", connected });
-      if (!first || !master) {
-        end = "회의를 진행하려면 마스터 모델과 에이전트 한 명 이상을 연결해 주세요.";
+      const settings = this.models();
+      const providers = this.chat.configured();
+      this.roster = undefined;
+      const refreshRoster = () => {
+        const { connected, resting, ...floor } = this.availability(settings, providers);
+        if (this.roster?.connected.join() !== connected.join() || this.roster?.resting.join() !== resting.join()) {
+          this.roster = { connected, resting };
+          emit({ type: "roster", connected, resting });
+        }
+        return { ...floor, resting };
+      };
+      const start = refreshRoster();
+      if (!start.members.length || !start.leader) {
+        end = start.resting.length ? "잔여 사용량을 확인해 주세요. 지금 회의를 진행할 모델이 부족해요."
+          : "회의를 진행하려면 마스터 모델과 에이전트 한 명 이상을 연결해 주세요.";
         return;
       }
       const discussionSignal = AbortSignal.any([signal, AbortSignal.timeout(DISCUSSION_TIMEOUT_MS)]);
@@ -119,6 +135,8 @@ export class CharacterMeeting {
       const transcript = () => discussion.map(turn => ({ ...turn, name: MONITOR_CHARACTER_LABEL[turn.speaker] }));
       let research: Awaited<ReturnType<CharacterMeeting["research"]>> | undefined;
       for (let step = 0; step < MAX_TURNS && !discussionSignal.aborted; step++) {
+        const { members, leader: master } = refreshRoster();
+        if (!master) break;
         const available = members.filter(member => !failed.has(member));
         if (!available.length) break;
         const last = discussion.at(-1)?.speaker;
@@ -171,7 +189,12 @@ export class CharacterMeeting {
         }
       }
       signal.throwIfAborted();
+      const { leader: master, resting } = refreshRoster();
       if (!discussion.length) { end = "참가자 발언을 받지 못했어요. 모델 연결을 확인해 주세요."; return; }
+      if (!master) {
+        end = resting.length ? "잔여 사용량이 낮아 회의 결론을 정리하지 못했어요." : "회의를 정리할 마스터 모델에 연결할 수 없어요.";
+        return;
+      }
       status("마스터가 회의 결과를 정리하는 중…");
       await speak("orch", "summary", master, {
         stage: "conclude",

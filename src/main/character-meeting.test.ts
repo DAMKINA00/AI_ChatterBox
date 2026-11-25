@@ -23,6 +23,7 @@ test("room narrows the first question, passes each finished contribution to the 
   let spoken = 0;
   const room = new CharacterMeeting({
     configured: () => ["claude", "codex", "deepseek"],
+    meetingEligibility: () => "available",
     meetingReply: async (agent, model, input, _signal, onText) => {
       calls.push({ agent, model, input: input as Record<string, unknown> });
       if (!onText) return JSON.stringify(topics[floor++] ?? { action: "conclude" });
@@ -68,6 +69,7 @@ test("a stopped contribution withdraws its draft and releases the room for anoth
   const ready = new Promise<void>(resolve => { reporting = resolve; });
   const room = new CharacterMeeting({
     configured: () => ["codex"],
+    meetingEligibility: () => "available",
     meetingReply: async (_agent, _model, _input, signal, onText) => {
       if (!onText) return '{"speaker":"gpt","focus":"첫 발언"}';
       onText("미완성");
@@ -93,6 +95,7 @@ test("the floor moves to a successful participant and permits conclusion without
   const spoken: string[] = [];
   const room = new CharacterMeeting({
     configured: () => ["claude", "codex", "deepseek"],
+    meetingEligibility: () => "available",
     meetingReply: async (agent, _model, input) => {
       const { stage, mayConclude } = input as { stage: string; mayConclude?: boolean };
       if (stage === "opening") return '{"speaker":"claude","focus":"첫 발언"}';
@@ -120,4 +123,41 @@ test("a personal question uses its conversation model and rejects incompatible s
   const chat = new CharacterChat({} as ChatManager, async (agent, _input, _signal, model) => `${agent}/${model}`, () => settings);
   assert.deepEqual(await chat.ask({ requestId: id, character: "gpt", text: "안녕" }), { status: "answer", text: "codex/choice" });
   assert.equal(parseMeetingRequest({ requestId: id, text: " " }), undefined);
+});
+
+test("resting participants stay on the roster while a healthy account chairs and alternating speakers continue", async () => {
+  const events: MeetingEvent[] = [];
+  const calls: string[] = [];
+  const room = new CharacterMeeting({
+    configured: () => ["claude", "codex", "grok", "deepseek"],
+    meetingEligibility: agent => agent === "claude" || agent === "deepseek" ? "resting" : "available",
+    meetingReply: async (agent, model, input) => {
+      const { stage, discussion, members } = input as { stage: string; discussion: unknown[]; members?: { id: string }[] };
+      if (members) assert.ok(members.every(member => ["gpt", "grok"].includes(member.id)));
+      calls.push(`${stage}/${agent}/${model ?? ""}`);
+      if (stage === "opening") return '{"speaker":"gpt","focus":"첫 쟁점"}';
+      if (stage === "moderate") return discussion.length === 1
+        ? '{"speaker":"grok","focus":"다음 쟁점"}' : '{"action":"conclude"}';
+      return "발언";
+    },
+  }, () => ({ orch: { agent: "claude", model: "configured-chair" }, gpt: { agent: "codex", model: "active-chair" } }),
+  event => events.push(event));
+  await room.start({ requestId: id, text: "회의 질문" });
+  assert.deepEqual(room.snapshot().resting, ["claude", "deepseek"]);
+  assert.deepEqual(room.snapshot().connected, ["orch", "claude", "gpt", "grok", "deepseek"]);
+  assert.deepEqual(calls, ["opening/codex/", "speak/codex/active-chair", "moderate/codex/",
+    "speak/grok/", "moderate/codex/", "conclude/codex/"]);
+  assert.deepEqual(events.find(event => event.type === "roster")?.resting, ["claude", "deepseek"]);
+});
+
+test("a room with only low budgets ends without a provider call", async () => {
+  const room = new CharacterMeeting({
+    configured: () => ["codex", "deepseek"],
+    meetingEligibility: () => "resting",
+    meetingReply: async () => { assert.fail("A low-budget provider was called"); },
+  }, () => ({}), () => {});
+  await room.start({ requestId: id, text: "회의 질문" });
+  assert.equal(room.snapshot().messages.length, 1);
+  assert.deepEqual(room.snapshot().resting, ["orch", "gpt", "deepseek"]);
+  assert.match(room.snapshot().status, /잔여 사용량/);
 });

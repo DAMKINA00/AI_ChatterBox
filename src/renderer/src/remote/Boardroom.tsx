@@ -9,7 +9,7 @@ import { cn, errorMessage } from "../lib/utils";
 import { useMobile } from "../lib/remote-mode";
 import { AuthError, request, url } from "./api";
 
-const EMPTY: MeetingSnapshot = { seq: -1, requestId: null, messages: [], drafts: [], connected: [], status: "" };
+const EMPTY: MeetingSnapshot = { seq: -1, requestId: null, messages: [], drafts: [], connected: [], resting: [], status: "" };
 const NAME = { ...MONITOR_CHARACTER_LABEL, orch: "마스터", user: "사용자", system: "회의 안내" };
 const ROLE = { assignment: "질문", report: "발표", review: "의견", discussion: "발언", summary: "결론" };
 const TONE = { orch: "text-[#a0edcd]", claude: "text-[#ffb0a3]", gpt: "text-[#d0c1ff]", gemini: "text-[#ffd284]",
@@ -46,7 +46,10 @@ function applyEvent(state: MeetingSnapshot, event: MeetingEvent): MeetingSnapsho
   if (event.seq <= state.seq) return state;
   const next = { ...state, seq: event.seq, requestId: event.type === "end" ? null : event.requestId };
   if (event.type === "status" || event.type === "end") next.status = event.text;
-  if (event.type === "roster") next.connected = event.connected;
+  if (event.type === "roster") {
+    next.connected = event.connected;
+    next.resting = event.resting;
+  }
   if (event.type === "draft") {
     next.drafts = [...next.drafts.filter(post => post.id !== event.message.id), event.message];
   }
@@ -215,11 +218,13 @@ function Boardroom() {
           {MONITOR_CHARACTERS.map(id => {
             const active = speaking.has(id);
             const connected = room.seq >= 0 && room.connected.includes(id);
+            const resting = room.resting?.includes(id);
             return <li key={id} className={cn("flex items-center gap-2 rounded-md px-2 py-1.5",
               active && "bg-[var(--room-live)]", room.seq >= 0 && !connected && "opacity-65")}>
               <Portrait id={id} active={active} />
-              <div><div className="text-xs font-semibold">{NAME[id]}</div><div className={cn("text-[11px]", active ? "text-[var(--room-mint)]" : "text-[var(--room-muted)]")}>
-                {active ? "작성 중…" : room.seq < 0 ? "연결 확인 중" : connected ? "참여 가능" : "연결 필요"}</div></div>
+              <div><div className="text-xs font-semibold">{NAME[id]}</div><div className={cn("text-[11px]",
+                active ? "text-[var(--room-mint)]" : resting ? "text-[var(--room-coral)]" : "text-[var(--room-muted)]")}>
+                {active ? "작성 중…" : room.seq < 0 ? "연결 확인 중" : resting ? "잔여량 낮음 · 발언 쉼" : connected ? "참여 가능" : "연결 필요"}</div></div>
             </li>;
           })}
         </ul>
