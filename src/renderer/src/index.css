@@ -161,12 +161,39 @@ body[data-scroll-locked] {
 .prose-chat hr { @apply my-4; }
 
 @keyframes boardroom-speaking { to { transform: translateY(-3px); } }
-.boardroom-rich a { color: #a0edcd; }
-.boardroom-rich th { background: #34394d; }
-.boardroom-rich :is(th, td) { border-color: #505876; }
-.boardroom-rich blockquote { border-color: #a0edcd; color: #bcc1d6; }
-.boardroom-rich :not(pre) > code { color: #f4f1fc; background: #1b1e2a; }
-.boardroom-rich pre { padding: 0.75rem; overflow-x: auto; border-radius: 0.5rem; background: #1b1e2a; }
+.boardroom {
+  --room-side: #1b1e26;
+  --room-bg: #22262e;
+  --room-well: #2a303c;
+  --room-hover: #2b313c;
+  --room-line: #363e4d;
+  --room-ink: #f2f4fa;
+  --room-muted: #b4bdce;
+  --room-accent: #afc2ff;
+  --room-mint: #96e2cb;
+  --room-coral: #ffb1a7;
+  --room-live: #27353d;
+  --room-result: #2d2d43;
+  background: var(--room-bg);
+  color: var(--room-ink);
+}
+.boardroom-action {
+  @apply inline-flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium focus-visible:outline-2;
+  color: var(--room-muted);
+  outline-color: var(--room-accent);
+}
+.boardroom-action:hover:not(:disabled), .boardroom-action[aria-pressed="true"] {
+  color: var(--room-accent);
+  background: var(--room-well);
+}
+.boardroom-action:disabled { opacity: 0.42; }
+.boardroom-scroll { scrollbar-width: thin; scrollbar-color: #515969 transparent; }
+.boardroom-rich a { color: var(--room-accent); }
+.boardroom-rich th { background: var(--room-well); }
+.boardroom-rich :is(th, td) { border-color: var(--room-line); }
+.boardroom-rich blockquote { border-color: var(--room-accent); color: var(--room-muted); }
+.boardroom-rich :not(pre) > code { color: var(--room-ink); background: var(--room-side); }
+.boardroom-rich pre { padding: 0.75rem; overflow-x: auto; border-radius: 0.5rem; background: var(--room-side); }
 
 /* highlight.js tokens, both themes */
 .hljs { color: var(--foreground); }
