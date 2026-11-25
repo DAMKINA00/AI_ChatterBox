@@ -16,6 +16,7 @@ import { consultReason } from "../../../shared/room-message";
 import { cn } from "../lib/utils";
 import { ApiError, AuthError, logout as logoutRequest, request, setCsrf, url } from "./api";
 import { Login } from "./Login";
+import { BoardroomTabs } from "./Boardroom";
 import { ChatSettings } from "./ChatSettings";
 import { Composer } from "./Composer";
 import { chatGroups, formatBytes, INLINE_IMAGE, nextTheme, remoteAskOpen, THEME_LABEL, withoutDeleted, type ProjectRef } from "./logic";
@@ -46,7 +47,7 @@ export function RemoteApp() {
   }, []);
   if (auth === "checking") return <div className="flex h-dvh items-center justify-center text-muted-foreground"><LoaderCircle className="size-5 animate-spin" /></div>;
   if (auth === "login") return <Login onDone={() => setAuth("ok")} />;
-  return <Workspace onLoggedOut={() => { setCsrf(""); setAuth("login"); }} />;
+  return <BoardroomTabs><Workspace onLoggedOut={() => { setCsrf(""); setAuth("login"); }} /></BoardroomTabs>;
 }
 
 function Workspace({ onLoggedOut }: { onLoggedOut: () => void }) {
@@ -140,7 +141,7 @@ function Workspace({ onLoggedOut }: { onLoggedOut: () => void }) {
   };
   const ThemeIcon = theme === "dark" ? Moon : theme === "light" ? Sun : Monitor;
   return (
-    <div className="flex h-dvh bg-background text-foreground">
+    <div className="flex h-full bg-background text-foreground">
       <aside className={cn("flex w-full flex-col border-r bg-sidebar md:w-[320px] md:shrink-0", selected && "hidden md:flex")}>
         <div className="flex items-center gap-1 border-b px-3 py-2">
           <div className="min-w-0 flex-1 truncate font-semibold">AI ChatterBox</div>

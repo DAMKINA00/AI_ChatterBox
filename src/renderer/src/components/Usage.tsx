@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ChevronRight, KeyRound, RotateCw, Settings, Smartphone, Terminal } from "lucide-react";
+import { ChevronRight, KeyRound, MessagesSquare, RotateCw, Settings, Smartphone, Terminal } from "lucide-react";
 import type { UsageDisplay } from "../../../shared/usage";
 import type { RemoteUsageAccount, RemoteUsageGroup } from "../../../shared/remote-web";
 
@@ -12,6 +12,7 @@ import { CliAccountsDialog } from "./CliAccountsDialog";
 import { DeepSeekDialog } from "./DeepSeekDialog";
 import { DeepSeekBalance } from "./DeepSeekBalance";
 import { RemoteWebDialog } from "./RemoteWebDialog";
+import { CharacterModelsDialog } from "./CharacterModelsDialog";
 import { isRemote, useMobile, useRemoteUsage } from "../lib/remote-mode";
 
 function resetText(ts?: number | null) {
@@ -108,6 +109,7 @@ function DesktopUsageBar() {
   const [cliOpen, setCliOpen] = useState(false);
   const [deepseekOpen, setDeepseekOpen] = useState(false);
   const [remoteOpen, setRemoteOpen] = useState(false);
+  const [characterModelsOpen, setCharacterModelsOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const usage = useStore((s) => s.usage);
   const cliAccounts = useStore((s) => s.cliAccounts);
@@ -149,6 +151,11 @@ function DesktopUsageBar() {
                 <span className="min-w-0 flex-1"><span className="block text-[12px] font-medium">DeepSeek API 설정</span><span className="mt-0.5 block text-[11px] text-muted-foreground">API 키 · 모델 · 잔고</span></span>
                 <ChevronRight className="!size-3.5 opacity-40 group-data-[highlighted]:opacity-100" />
               </DropdownMenuItem>
+              {api.characterModels && <DropdownMenuItem onSelect={() => setCharacterModelsOpen(true)} data-testid="character-models-manage" className="group gap-3 rounded-lg px-3 py-2.5">
+                <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10"><MessagesSquare className="!text-primary" /></span>
+                <span className="min-w-0 flex-1"><span className="block text-[12px] font-medium">캐릭터 채팅 모델</span><span className="mt-0.5 block text-[11px] text-muted-foreground">개별 대화와 회의실에 사용할 모델</span></span>
+                <ChevronRight className="!size-3.5 opacity-40 group-data-[highlighted]:opacity-100" />
+              </DropdownMenuItem>}
               <DropdownMenuItem onSelect={() => setRemoteOpen(true)} data-testid="remote-web-manage" className="group gap-3 rounded-lg px-3 py-2.5">
                 <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10"><Smartphone className="!text-primary" /></span>
                 <span className="min-w-0 flex-1"><span className="block text-[12px] font-medium">원격 웹 접속</span><span className="mt-0.5 block text-[11px] text-muted-foreground">브라우저에서 채팅 확인 · 추가 지시 · 승인</span></span>
@@ -164,6 +171,7 @@ function DesktopUsageBar() {
       <DeepSeekBalance compact />
       <CliAccountsDialog open={cliOpen} onOpenChange={setCliOpen} />
       <DeepSeekDialog open={deepseekOpen} onOpenChange={setDeepseekOpen} />
+      <CharacterModelsDialog open={characterModelsOpen} onOpenChange={setCharacterModelsOpen} />
       <RemoteWebDialog open={remoteOpen} onOpenChange={setRemoteOpen} />
     </div>
   );

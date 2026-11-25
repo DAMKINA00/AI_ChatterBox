@@ -40,6 +40,7 @@ export function suiteMenu(usage: UsageCompanionSnapshot, update: Readonly<AppUpd
   return [
     { type: "separator" },
     { label: "AI 사용량 모니터", type: "checkbox", checked: usage.enabled, click: item => actions.enable(item.checked) },
+    ...(state?.characterMeeting === 1 ? [{ label: "캐릭터 회의실  (Alt+Space)", click: () => actions.command("meeting-open") }] : []),
     ...(usage.error ? [{ label: usage.error, enabled: false }] : []),
     { label: "사용량 모니터 설정", submenu: [
       { label: state?.visible ? "모니터 숨기기" : "모니터 열기", click: () => actions.command(state?.visible ? "hide" : "show") },

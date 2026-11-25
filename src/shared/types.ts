@@ -649,6 +649,9 @@ export interface ChatterBoxApi {
   // misc
   cliInfo(checkAuth?: boolean, agent?: AgentKind): Promise<CliInfo[]>;
   models(agent: AgentKind): Promise<ModelOption[]>;
+  characterModels?(): Promise<import("./character-meeting").CharacterModels>;
+  characterModelOptions?(agent: AgentKind): Promise<ModelOption[]>;
+  saveCharacterModels?(choices: import("./character-meeting").CharacterModels): Promise<import("./character-meeting").CharacterModels>;
   remoteWeb(action: RemoteWebAction, input?: RemoteWebInput): Promise<RemoteWebStatus>;
   getTheme(): Promise<Theme>;
   setTheme(theme: Theme): Promise<void>;

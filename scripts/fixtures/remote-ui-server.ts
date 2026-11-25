@@ -8,6 +8,8 @@ import { RemoteWeb } from "../../src/main/remote-web";
 import { DEFAULT_SETTINGS, type Chat, type ChatAgent, type Consult, type ModelOption, type Project, type TimelineEvent } from "../../src/shared/types";
 import type { PendingApproval } from "../../src/shared/event-page";
 import { remoteError } from "../../src/main/remote-core";
+import { CharacterMeeting } from "../../src/main/character-meeting";
+import type { MeetingRequest } from "../../src/shared/character-meeting";
 
 const NOW = Date.now();
 const min = 60_000;
@@ -143,12 +145,31 @@ export async function startFixture(staticDir: string, password: string) {
     if (publish) remote.publish("chat:updated", [current]);
     return current;
   };
+  const meeting = new CharacterMeeting({
+    configured: () => ["claude", "codex", "deepseek"],
+    meetingReply: async (agent, _model, input, signal, stream) => {
+      if (!stream) return '{"assignee":"gpt","task":"비교 기준 검토","keywords":[]}';
+      if (agent === "codex") {
+        stream("비교 기준을 확인하고 있어요.");
+        await new Promise(resolve => setTimeout(resolve, 1_200));
+        signal.throwIfAborted();
+        return "검토를 마쳤어요.\n\n| 방안 | 검토 |\n| --- | --- |\n| A | 추천 |\n\n![회의 자료](https://images.example/meeting.png)";
+      }
+      if ("reviews" in input) return "A안을 추천합니다.";
+      return "추천 결과에 동의합니다.";
+    },
+  }, () => ({}), event => remote.publish("boardroom:event", [event]));
   const remote = new RemoteWeb({
     file: join(dir, "remote-web.json"), staticDir,
     call: async (channel, args) => {
       calls.push(channel);
       const id = args[0] as number;
       switch (channel) {
+        case "monitor:meeting-snapshot": return meeting.snapshot();
+        case "monitor:meeting-submit":
+          try { void meeting.start(args[0] as MeetingRequest); return true; }
+          catch { return false; }
+        case "monitor:meeting-cancel": meeting.cancel(String(args[0])); return undefined;
         case "chats:list": return chats;
         case "projects:list": return projects;
         case "chats:eventsPage": {
@@ -227,6 +248,6 @@ export async function startFixture(staticDir: string, password: string) {
       chats.splice(chats.findIndex(c => c.id === chatId), 1);
       remote.publish("chat:deleted", [chatId]);
     },
-    async stop() { await remote.stop(); rmSync(dir, { recursive: true, force: true }); },
+    async stop() { await meeting.dispose(); await remote.stop(); rmSync(dir, { recursive: true, force: true }); },
   };
 }

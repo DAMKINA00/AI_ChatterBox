@@ -11,16 +11,18 @@ import type {
 } from "../shared/usage-companion";
 import { CHARACTER_ASK_VERSION, isMonitorCharacter, normalizeCharacterSet, parseCharacterAsk, supportedCharacters, type MonitorCharacterId } from "../shared/usage-companion";
 import type { CharacterEvent } from "./character-events";
+import { CHARACTER_MEETING_VERSION, meetingRequestId, parseMeetingRequest, type MeetingEvent, type MeetingMessage, type MeetingRequest, type MeetingSnapshot } from "../shared/character-meeting";
 import { MONITOR_ACCOUNTS_VERSION, type MonitorAccountsPayload } from "./usage-monitor-feed";
 
-type UsageCommand = { command: UsageCommandName; value?: boolean | { id: MonitorCharacterId; on: boolean } | CharacterEvent | CharacterReply };
+type UsageCommand = { command: UsageCommandName; value?: boolean | { id: MonitorCharacterId; on: boolean } | CharacterEvent | CharacterReply | MeetingEvent
+  | Omit<MeetingSnapshot, "messages" | "drafts"> | { message: MeetingMessage; draft: boolean } };
 
 const MAX_LINE_BYTES = 64 * 1024;
 const START_TIMEOUT_MS = 20_000;
 const STOP_TIMEOUT_MS = 15_000;
 const TITLE = "AI 사용량 모니터";
 const NO_VALUE_COMMANDS = new Set<UsageCommandName>([
-  "show", "hide", "refresh", "accounts", "claude-login", "claude-logout", "data-folder", "quit",
+  "show", "hide", "refresh", "accounts", "claude-login", "claude-logout", "data-folder", "quit", "meeting-open",
 ]);
 const BOOLEAN_COMMANDS = new Set<UsageCommandName>([
   "topmost", "characters", "taskbar", "startup", "usage-alerts", "activity-alerts", "claude-desktop",
@@ -53,6 +55,9 @@ export interface UsageCompanionOptions {
   /** The monitor's refresh button/menu: ChatterBox refreshes its accounts' usage (the monitor queries nothing itself). */
   refreshRequested?(): void;
   characterAsk?(ask: CharacterAsk): Promise<CharacterAnswer>;
+  meetingStart?(request: MeetingRequest): Promise<void>;
+  meetingCancel?(requestId: string): void;
+  meetingSnapshot?(): Promise<MeetingSnapshot>;
   spawn?: UsageSpawn;
 }
 
@@ -75,6 +80,9 @@ interface ChildSession {
   lineTooLong: boolean;
   /** The current account snapshot went to this process (sent again after every restart). */
   accountsSent?: MonitorAccountsPayload;
+  meetingRequest?: string;
+  meetingSync?: MeetingEvent[];
+  meetingActive?: string;
 }
 
 function text(value: unknown, fallback: string): string {
@@ -113,6 +121,7 @@ function copyState(state: UsageMonitorState): UsageMonitorState {
   else delete copy.characterIds;
   if (copy.characterEvents !== 1) delete copy.characterEvents;
   if (copy.characterAsk !== CHARACTER_ASK_VERSION) delete copy.characterAsk;
+  if (copy.characterMeeting !== CHARACTER_MEETING_VERSION) delete copy.characterMeeting;
   return copy;
 }
 
@@ -212,6 +221,54 @@ export class UsageCompanion {
     if (this.session && !this.session.ended) this.sendAccounts(this.session);
   }
 
+  meetingEvent(event: MeetingEvent) {
+    const session = this.session;
+    if (!session || session.ended || session.stopping || this.state?.characterMeeting !== CHARACTER_MEETING_VERSION) return;
+    if (event.type === "end" && session.meetingRequest === event.requestId) session.meetingRequest = undefined;
+    session.meetingActive = event.type === "end" ? undefined : event.requestId;
+    if (session.meetingSync) { session.meetingSync.push(event); return; }
+    try { this.write(session, { command: "meeting-event", value: event }); }
+    catch { /* The monitor can close while a reply is being sent. */ }
+  }
+
+  private async syncMeeting(session: ChildSession) {
+    if (!this.options.meetingSnapshot || session.meetingSync || session.stopping || this.state?.characterMeeting !== CHARACTER_MEETING_VERSION) return;
+    const queued: MeetingEvent[] = session.meetingSync = [];
+    let seq = -1;
+    try {
+      const { messages, drafts, ...state } = await this.options.meetingSnapshot();
+      if (this.session !== session || session.ended || session.stopping) return;
+      seq = state.seq;
+      if (!queued.some(event => event.seq > seq)) session.meetingActive = state.requestId ?? undefined;
+      this.write(session, { command: "meeting-reset", value: state });
+      for (const message of messages) this.write(session, { command: "meeting-restore", value: { message, draft: false } });
+      for (const message of drafts) this.write(session, { command: "meeting-restore", value: { message, draft: true } });
+    } finally {
+      session.meetingSync = undefined;
+      if (this.session === session && !session.ended && !session.stopping)
+        for (const event of queued) if (event.seq > seq) this.write(session, { command: "meeting-event", value: event });
+    }
+  }
+
+  private async startMeeting(session: ChildSession, value: object) {
+    if (session.stopping || this.state?.characterMeeting !== CHARACTER_MEETING_VERSION) return;
+    const request = parseMeetingRequest(value);
+    if (!request) return;
+    if (session.meetingRequest) {
+      if (session.meetingRequest !== request.requestId)
+        this.write(session, { command: "meeting-event", value: { requestId: request.requestId, seq: 0, type: "end", text: "다른 회의 안건을 처리 중이에요." } });
+      return;
+    }
+    session.meetingRequest = request.requestId;
+    let message = "회의 연결이 끊겼어요. 다시 시도해 주세요.";
+    try { await this.options.meetingStart?.(request); }
+    catch (error) { if (error instanceof Error && error.message === "다른 회의 안건을 처리 중이에요.") message = error.message; }
+    if (session === this.session && !session.ended && !session.stopping && session.meetingRequest === request.requestId) {
+      session.meetingRequest = undefined;
+      this.write(session, { command: "meeting-event", value: { requestId: request.requestId, seq: 0, type: "end", text: message } });
+    }
+  }
+
   private sendAccounts(session: ChildSession) {
     const payload = this.accounts;
     if (!payload || !session.initialState || session.accountsSent === payload || this.state?.accountsVersion !== MONITOR_ACCOUNTS_VERSION || session.stopping) return;
@@ -231,6 +288,7 @@ export class UsageCompanion {
     if (!session || session.ended) return Promise.resolve();
     if (session.stopPromise) return session.stopPromise;
     session.stopping = true;
+    if (session.meetingRequest) this.options.meetingCancel?.(session.meetingRequest);
     session.stopPromise = new Promise<void>((resolve, reject) => {
       session.stopResolve = resolve;
       session.stopReject = reject;
@@ -348,6 +406,7 @@ export class UsageCompanion {
   private childExit(session: ChildSession, code: number | null) {
     if (session !== this.session || session.ended) return;
     session.ended = true;
+    if (!session.stopping && session.meetingRequest) this.options.meetingCancel?.(session.meetingRequest);
     if (session.startTimer) clearTimeout(session.startTimer);
     if (session.stopTimer) clearTimeout(session.stopTimer);
     session.startTimer = session.stopTimer = undefined;
@@ -417,6 +476,14 @@ export class UsageCompanion {
       return;
     }
     if (message.type === "character-ask") { void this.handleCharacterAsk(session, message); return; }
+    if (message.type === "meeting-start") { void this.startMeeting(session, message).catch(() => undefined); return; }
+    if (message.type === "meeting-sync") { void this.syncMeeting(session).catch(() => undefined); return; }
+    if (message.type === "meeting-cancel") {
+      const { requestId } = message as { requestId?: unknown };
+      if (meetingRequestId(requestId) && (requestId === session.meetingRequest || requestId === session.meetingActive))
+        this.options.meetingCancel?.(requestId);
+      return;
+    }
     if (message.type === "refresh") {
       this.options.refreshRequested?.();
       return;

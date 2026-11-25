@@ -6,6 +6,7 @@ import { join, basename, resolve } from "node:path";
 import type { AttachmentRef, Chat, ChatAgent, Consult, Theme, UsageInfo } from "../shared/types";
 import { CharacterEventFeed } from "./character-events";
 import type { CharacterAnswer } from "../shared/usage-companion";
+import type { MeetingEvent, MeetingSnapshot } from "../shared/character-meeting";
 import { ChatNotifications } from "./chat-notifications";
 import { AppTray } from "./tray";
 import { ensureOnlyInstance } from "./instance-guard";
@@ -90,6 +91,12 @@ function startDesktopServices() {
     // The monitor's own refresh: ChatterBox re-reads its accounts' usage; the usage event then pushes it.
     refreshRequested: () => { void core?.call("usage:get", [true]).catch(() => undefined); },
     characterAsk: async ask => core ? core.call<CharacterAnswer>("monitor:character-question", [ask], 178_000) : { status: "error" },
+    meetingStart: async request => {
+      if (!core) throw new Error("코어 연결이 닫혔습니다.");
+      await core.call("monitor:meeting-start", [request], 540_000);
+    },
+    meetingCancel: requestId => { void core?.call("monitor:meeting-cancel", [requestId]).catch(() => undefined); },
+    meetingSnapshot: () => core!.call<MeetingSnapshot>("monitor:meeting-snapshot", []),
   });
   monitorFeed = new MonitorFeed({ accounts: () => core!.call("cli-accounts:list", []), send: payload => usage?.setAccounts(payload) });
   monitorFeed.changed();
@@ -167,7 +174,7 @@ function createWindow() {
 }
 
 function registerUi(channels: string[], rpc: CoreRpc) {
-  const internal = new Set(["monitor:character-question", "attachment:info", "window:save", "files:resolve-link", "remote:chat-patch", "remote:project-patch", "remote:chat-delete", "remote:chat-fork", "remote:fork-anchor", "remote:attachment-remove", "remote:att-bytes", "remote:uploads", "remote:send"]);
+  const internal = new Set(["monitor:character-question", "monitor:meeting-start", "monitor:meeting-cancel", "monitor:meeting-snapshot", "monitor:meeting-submit", "attachment:info", "window:save", "files:resolve-link", "remote:chat-patch", "remote:project-patch", "remote:chat-delete", "remote:chat-fork", "remote:fork-anchor", "remote:attachment-remove", "remote:att-bytes", "remote:uploads", "remote:send"]);
   const local = new Set(["theme:set"]);
   for (const channel of channels.filter(channel => !internal.has(channel) && !local.has(channel))) {
     ipcMain.handle(channel, async (_event, ...args) => {
@@ -275,6 +282,11 @@ app.whenReady().then(async () => {
       };
       const events = new Set(["chat:event", "chat:updated", "consult:updated", "agents:updated", "usage"]);
       rpc.onEvent = (channel, args) => {
+        if (channel === "monitor:meeting-event") {
+          usage?.meetingEvent(args[0] as MeetingEvent);
+          remote?.publish("boardroom:event", args);
+          return;
+        }
         if (!events.has(channel)) return;
         if (channel === "chat:updated") {
           const chat = args[0] as Chat;

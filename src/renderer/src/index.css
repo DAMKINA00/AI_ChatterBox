@@ -160,6 +160,14 @@ body[data-scroll-locked] {
 .prose-chat th { @apply bg-muted font-medium; }
 .prose-chat hr { @apply my-4; }
 
+@keyframes boardroom-speaking { to { transform: translateY(-3px); } }
+.boardroom-rich a { color: #a0edcd; }
+.boardroom-rich th { background: #34394d; }
+.boardroom-rich :is(th, td) { border-color: #505876; }
+.boardroom-rich blockquote { border-color: #a0edcd; color: #bcc1d6; }
+.boardroom-rich :not(pre) > code { color: #f4f1fc; background: #1b1e2a; }
+.boardroom-rich pre { padding: 0.75rem; overflow-x: auto; border-radius: 0.5rem; background: #1b1e2a; }
+
 /* highlight.js tokens, both themes */
 .hljs { color: var(--foreground); }
 .hljs-comment, .hljs-quote { color: var(--muted-foreground); font-style: italic; }

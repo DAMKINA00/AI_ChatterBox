@@ -16,6 +16,8 @@ import { resolveLink } from "./file-links";
 import { previewImage } from "./artifact-preview";
 import { CoreRpc } from "./core-rpc";
 import { CharacterChat } from "./character-chat";
+import { CharacterMeeting } from "./character-meeting";
+import { CHARACTER_PROVIDERS, meetingRequestId, parseCharacterModels, parseMeetingRequest } from "../shared/character-meeting";
 import { parseCharacterAsk, type CharacterAnswer } from "../shared/usage-companion";
 
 let store: Store;
@@ -24,10 +26,16 @@ let chats: ChatManager;
 let attachments: AttachmentStore;
 let orchestrator: Orchestrator;
 let characterChat: CharacterChat;
+let characterMeeting: CharacterMeeting;
 let preparingUpdate = false;
 /** Chats being deleted from the remote web; no new work may start on them. */
 const remoteDeleting = new Set<number>();
 let pendingCalls = 0;
+
+function characterModels() {
+  try { return parseCharacterModels(JSON.parse(store.getSetting("characterChatModels") ?? "{}")); }
+  catch { return {}; }
+}
 
 function withAccountPolicy(settings: ProjectSettings): ProjectSettings {
   if (!settings || settings.accountPolicy === undefined) return settings;
@@ -39,7 +47,7 @@ function registerHandlers(rpc: CoreRpc) {
   const ipcMain = { handle(channel: string, handler: (...args: any[]) => unknown) {
     channels.push(channel);
     rpc.handle(channel, async (...args) => {
-      if (preparingUpdate && channel !== "window:save") throw new Error("업데이트 적용을 준비하고 있습니다. 새 작업은 재시작 후 보내 주세요.");
+      if (preparingUpdate && channel !== "window:save" && channel !== "monitor:meeting-cancel") throw new Error("업데이트 적용을 준비하고 있습니다. 새 작업은 재시작 후 보내 주세요.");
       const backgroundRead = ["usage:get", "cli:info", "models:list", "cli-accounts:startup-check"].includes(channel);
       if (!backgroundRead) pendingCalls++;
       try { return await handler(undefined, ...args); }
@@ -112,6 +120,31 @@ function registerHandlers(rpc: CoreRpc) {
     const ask = parseCharacterAsk(value);
     if (!ask) return { status: "error" };
     return characterChat.ask(ask);
+  });
+  ipcMain.handle("monitor:meeting-start", async (_e, value: unknown) => {
+    const request = parseMeetingRequest(value);
+    if (!request) throw new Error("회의 요청이 올바르지 않습니다.");
+    await characterMeeting.start(request);
+  });
+  ipcMain.handle("monitor:meeting-cancel", (_e, value: unknown) => {
+    if (meetingRequestId(value)) characterMeeting.cancel(value);
+  });
+  ipcMain.handle("monitor:meeting-snapshot", () => characterMeeting.snapshot());
+  ipcMain.handle("monitor:meeting-submit", (_e, value: unknown) => {
+    const request = parseMeetingRequest(value);
+    if (!request) return false;
+    try {
+      void characterMeeting.start({ requestId: request.requestId, text: request.text }).catch(() => undefined);
+      return true;
+    } catch { return false; }
+  });
+  ipcMain.handle("character-models:get", () => characterModels());
+  ipcMain.handle("character-models:list", (_e, agent: AgentKind) => (Object.values(CHARACTER_PROVIDERS) as AgentKind[]).includes(agent)
+    ? characterChat.modelOptions(agent) : []);
+  ipcMain.handle("character-models:save", (_e, value: unknown) => {
+    const models = parseCharacterModels(value);
+    store.setSetting("characterChatModels", JSON.stringify(models));
+    return models;
   });
   ipcMain.handle("chats:fork", (_e, id: number, options: ChatForkOptions) => { notDeleting(id); return chats.forkChat(id, options); });
   ipcMain.handle("chats:stop", (_e, id: number) => orchestrator.stop(id));
@@ -263,7 +296,8 @@ export async function runCore(dataDir: string, pipe: string, token: string, test
       usage: usage => rpc.emit("usage", usage),
     }, dataDir, join(import.meta.dirname, "bridge-mcp.js").replace(/app\.asar([\\/])/, "app.asar.unpacked$1"));
     orchestrator = new Orchestrator(chats);
-    characterChat = new CharacterChat(chats);
+    characterChat = new CharacterChat(chats, undefined, characterModels);
+    characterMeeting = new CharacterMeeting(characterChat, characterModels, event => rpc.emit("monitor:meeting-event", event));
     const channels = registerHandlers(rpc);
     await chats.start();
     orchestrator.startRecovery();
@@ -274,7 +308,7 @@ export async function runCore(dataDir: string, pipe: string, token: string, test
     stopping = true;
     orchestrator?.stopRecovery();
     await boot.catch(() => undefined);
-    await characterChat?.dispose();
+    await Promise.all([characterChat?.dispose(), characterMeeting?.dispose()]);
     await orchestrator?.council.dispose().catch(() => undefined);
     await orchestrator?.judge.dispose().catch(() => undefined);
     await chats?.dispose().catch(() => undefined);
@@ -287,7 +321,7 @@ export async function runCore(dataDir: string, pipe: string, token: string, test
     orchestrator.stopRecovery();
     const deadline = Date.now() + 5_000;
     while ((pendingCalls || orchestrator.recovering) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
-    if (pendingCalls || orchestrator.recovering || chats.isBusyForUpdate()) {
+    if (pendingCalls || orchestrator.recovering || chats.isBusyForUpdate() || characterMeeting.snapshot().requestId) {
       preparingUpdate = false;
       orchestrator.startRecovery();
       return false;

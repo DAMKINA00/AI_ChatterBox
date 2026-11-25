@@ -8,6 +8,7 @@ import { remoteActions } from "../lib/remote-mode";
 import { logout, request, setCsrf } from "./api";
 import { remoteApi, remoteHooks } from "./install-api";
 import { Login } from "./Login";
+import { BoardroomTabs } from "./Boardroom";
 
 export function DesktopShell() {
   const [auth, setAuth] = useState<"checking" | "login" | "ok">("checking");
@@ -76,5 +77,5 @@ function RemoteDesktop() {
     });
     return () => { unsubscribe(); unsubscribeHistory(); window.removeEventListener("popstate", onPop); };
   }, []);
-  return <App />;
+  return <BoardroomTabs><App embedded /></BoardroomTabs>;
 }

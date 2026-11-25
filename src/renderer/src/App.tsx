@@ -9,7 +9,7 @@ import { Button, TooltipProvider } from "./components/ui";
 import { api, cn, errorMessage } from "./lib/utils";
 import { isRemote, useMobile } from "./lib/remote-mode";
 
-export function App() {
+export function App({ embedded = false }: { embedded?: boolean } = {}) {
   const ready = useStore((s) => s.ready);
   const init = useStore((s) => s.init);
   const selection = useStore((s) => s.selection);
@@ -35,14 +35,14 @@ export function App() {
 
   if (!ready)
     return (
-      <div className={cn("flex items-center justify-center text-muted-foreground", remote ? "h-dvh" : "h-full")}>
+      <div className={cn("flex items-center justify-center text-muted-foreground", remote && !embedded ? "h-dvh" : "h-full")}>
         <Loader2 className="size-5 animate-spin" />
       </div>
     );
 
   return (
     <TooltipProvider delayDuration={400}>
-      <div className={cn("grid grid-cols-[288px_1fr]", remote ? "h-dvh overflow-hidden" : "h-full", mobile && "grid-cols-1")} data-layout={mobile ? "mobile" : "desktop"}>
+      <div className={cn("grid grid-cols-[288px_1fr]", remote && !embedded ? "h-dvh" : "h-full", remote && "overflow-hidden", mobile && "grid-cols-1")} data-layout={mobile ? "mobile" : "desktop"}>
         {(!mobile || !chat) && <Sidebar onNewProject={() => setNewProject(true)} />}
         <main className={cn("flex min-h-0 min-w-0 flex-col", mobile && !chat && "hidden")}>
           {missing.length > 0 && (

@@ -128,6 +128,9 @@ export type RemoteApiStatus = 200 | 201 | 400 | 404 | 409 | 413 | 428 | 429 | 50
 
 /** Paths. `:id` segments are filled with `remotePath()`. */
 export const REMOTE_API = {
+  boardroom: "/api/boardroom",
+  boardroomStream: "/api/boardroom/stream",
+  boardroomStop: "/api/boardroom/stop",
   // existing
   login: "/api/login",
   logout: "/api/logout",

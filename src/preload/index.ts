@@ -49,6 +49,9 @@ const api: ChatterBoxApi = {
 
   cliInfo: (checkAuth, agent) => ipcRenderer.invoke("cli:info", checkAuth, agent),
   models: (agent) => ipcRenderer.invoke("models:list", agent),
+  characterModels: () => ipcRenderer.invoke("character-models:get"),
+  characterModelOptions: agent => ipcRenderer.invoke("character-models:list", agent),
+  saveCharacterModels: choices => ipcRenderer.invoke("character-models:save", choices),
   cliAccounts: {
     list: () => ipcRenderer.invoke("cli-accounts:list"),
     create: (kind, label) => ipcRenderer.invoke("cli-accounts:create", kind, label),

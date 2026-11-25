@@ -14,6 +14,7 @@ import {
 import { HttpError, RemoteFeatures, folderId, stripLocalPaths, toRemoteAgents, toRemoteChat, toRemotePendingApprovals } from "./remote-features";
 import type { Chat, ChatAgent } from "../shared/types";
 import type { EventPage, RemoteEventText } from "../shared/event-page";
+import { meetingRequestId, parseMeetingRequest, type MeetingSnapshot } from "../shared/character-meeting";
 import { DSM_DEFAULT_URL, DsmProvider, normalizeDsmUrl, normalizeFingerprint, probeDsm, type AuthProvider, type DsmSettings, type LoginResult } from "./remote-auth";
 
 export type CoreCall = (channel: string, args: unknown[]) => Promise<any>;
@@ -30,7 +31,7 @@ interface Config { enabled: boolean; port: number; publicOrigin: string; passwor
 type ClientKind = "local" | "lan" | "internet" | "unknown";
 /** provider/clientKind: an internet session made with the local password ends when that permission is withdrawn. */
 interface Session extends RemoteWebSession { key: string; csrf: string; provider: RemoteAuthProvider; clientKind: ClientKind }
-interface Stream { res: ServerResponse; sessionKey: string; chatId: number | null }
+interface Stream { res: ServerResponse; sessionKey: string; chatId: number | null; boardroom?: boolean }
 interface Failures { count: number; first: number; lockedUntil: number }
 
 export const COOKIE = "__Host-cbx_session";
@@ -472,6 +473,11 @@ export class RemoteWeb {
   publish(channel: string, args: unknown[]) {
     const seq = ++this.seq;
     if (!this.streams.size) return;
+    if (channel === "boardroom:event") {
+      const data = `event: ${channel}\ndata: ${JSON.stringify(args)}\n\n`;
+      for (const stream of this.streams) if (stream.boardroom) stream.res.write(data);
+      return;
+    }
     const chatId = channel === "chat:event" ? (args[0] as { chatId?: number })?.chatId
       : channel === "agents:updated" ? args[0] as number
       : channel === "consult:updated" ? (args[0] as { chatId?: number })?.chatId
@@ -480,7 +486,7 @@ export class RemoteWeb {
     const broadcast = channel === "chat:updated" || channel === "chat:deleted" || channel === "projects:updated";
     if (!broadcast && chatId === undefined) return;
     const data = `id: ${seq}\nevent: ${channel}\ndata: ${JSON.stringify(remoteStreamArgs(channel, args))}\n\n`;
-    for (const stream of this.streams) if (broadcast || stream.chatId === chatId) stream.res.write(data);
+    for (const stream of this.streams) if (!stream.boardroom && (broadcast || stream.chatId === chatId)) stream.res.write(data);
   }
 
   // ---------- HTTP
@@ -706,14 +712,29 @@ export class RemoteWeb {
       this.endSession(session.key);
       return this.send(res, 200, { ok: true }, { "Set-Cookie": `${COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0` });
     }
+    if (method === "GET" && path === "/api/boardroom")
+      return this.send(res, 200, await call("monitor:meeting-snapshot", []) as MeetingSnapshot);
+    if (method === "POST" && path === "/api/boardroom") {
+      const body = await this.body(req, 26_000);
+      const request = parseMeetingRequest({ requestId: randomBytes(16).toString("hex"), text: body?.text });
+      if (!request) throw new HttpError(400, "안건을 1~4,000자로 입력해 주세요.");
+      if (!(await call("monitor:meeting-submit", [request]))) throw new HttpError(409, "다른 회의 안건을 처리 중이에요.");
+      return this.send(res, 202, { requestId: request.requestId });
+    }
+    if (method === "POST" && path === "/api/boardroom/stop") {
+      const body = await this.body(req, 256);
+      if (!meetingRequestId(body?.requestId)) throw new HttpError(400, "회의 안건 번호가 올바르지 않습니다.");
+      await call("monitor:meeting-cancel", [body.requestId]);
+      return this.send(res, 200, { ok: true });
+    }
     if (method === "GET" && path === "/api/chats") {
       const seq = this.seq;
       const [chats, projects] = await Promise.all([call("chats:list", []), call("projects:list", [])]);
       return this.send(res, 200, { seq, chats: (chats as Chat[]).map(toRemoteChat), projects: (projects as { id: number; name: string; archived: boolean }[]).map(({ id, name, archived }) => ({ id, name, archived })) });
     }
-    if (method === "GET" && path === "/api/stream") {
+    if (method === "GET" && (path === "/api/stream" || path === "/api/boardroom/stream")) {
       const chat = url.searchParams.get("chat");
-      const stream: Stream = { res, sessionKey: session.key, chatId: chat ? this.chatId(chat) : null };
+      const stream: Stream = { res, sessionKey: session.key, chatId: chat ? this.chatId(chat) : null, boardroom: path === "/api/boardroom/stream" };
       res.writeHead(200, { ...SECURITY_HEADERS, "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store", "X-Accel-Buffering": "no", Connection: "keep-alive" });
       res.write("retry: 3000\n\n");
       this.streams.add(stream);
@@ -803,6 +824,7 @@ export class RemoteWeb {
     const html = file.endsWith(".html");
     res.writeHead(200, {
       ...SECURITY_HEADERS, "Content-Type": MIME[extname(file)] ?? "application/octet-stream",
+      ...(html ? { "Content-Security-Policy": SECURITY_HEADERS["Content-Security-Policy"].replace("img-src 'self' data:", "img-src 'self' data: https:") } : {}),
       // Hashed bundle files never change; character art keeps its name across releases, so it is revalidated daily.
       "Cache-Control": html ? "no-store" : character ? "public, max-age=86400" : "public, max-age=31536000, immutable",
     });

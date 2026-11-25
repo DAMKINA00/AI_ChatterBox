@@ -21,6 +21,7 @@ export interface UsageMonitorState {
   characterEvents?: number;
   /** 2 = the monitor supports private character questions independent of the desktop chat. */
   characterAsk?: number;
+  characterMeeting?: number;
 }
 
 /** Every character the monitor may show, in display order. */
@@ -88,6 +89,10 @@ export type UsageCommandName =
   /** A character event for the monitor (value: CharacterEvent); only sent when the state reports characterEvents: 1. */
   | "character-event"
   | "character-reply"
+  | "meeting-open"
+  | "meeting-event"
+  | "meeting-reset"
+  | "meeting-restore"
   | "taskbar"
   | "startup"
   | "usage-alerts"
