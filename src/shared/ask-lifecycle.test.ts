@@ -54,4 +54,3 @@ test("only a follow-up question remains, and a newer plan card supersedes an old
   const newPlan = ask("new-plan", true);
   assert.deepEqual(ids([oldPlan, newPlan]), ["new-plan"]);
 });
-
