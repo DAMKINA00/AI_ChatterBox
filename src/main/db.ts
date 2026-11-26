@@ -810,6 +810,14 @@ export class Store {
       .all(chatId)
       .map((r: Row) => ({ id: r.id, chatId: r.chat_id, node: r.node, role: r.role, at: r.ts, event: JSON.parse(r.payload_json) }));
   }
+  unansweredQuestions(chatId?: number): TimelineEvent[] {
+    return this.db.prepare(`SELECT q.* FROM chat_events q INDEXED BY chat_events_chat_type WHERE q.type = 'ask_user'
+      ${chatId === undefined ? "" : "AND q.chat_id = ?"}
+      AND NOT EXISTS (SELECT 1 FROM chat_events a WHERE a.chat_id = q.chat_id AND a.type = 'ask_user_answer'
+        AND json_extract(a.payload_json, '$.id') = json_extract(q.payload_json, '$.id')) ORDER BY q.id`)
+      .all(...(chatId === undefined ? [] : [chatId]))
+      .map((r: Row) => ({ id: r.id, chatId: r.chat_id, node: r.node, role: r.role, at: r.ts, event: JSON.parse(r.payload_json) }));
+  }
   latestMasterEnd(chatId: number): Extract<AgentEvent, { type: "turn_end" }> | undefined {
     const row = this.db.prepare(`
       SELECT CASE WHEN type = 'turn_end' THEN payload_json END AS payload_json

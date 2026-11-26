@@ -3,6 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AgentEvent, NodeId, Role, TimelineEvent } from "../../shared/types";
 import { apply, buildItems, createTimelineBuilder, createTimelineCache, currentExpression, latestExpression, normalizePlanStepTitle } from "./timeline.ts";
+import { EXPIRED_ASK_ANSWER } from "../../shared/ask-lifecycle";
 
 let nextId = 1;
 function event(node: NodeId, role: Role | null, payload: AgentEvent): TimelineEvent {
@@ -15,6 +16,28 @@ function liveEvent(node: NodeId, role: Role | null, payload: AgentEvent, at: num
 }
 
 const emptyAttachments = [];
+
+test("legacy unanswered questions expire at the master turn boundary and never revive in a later turn", () => {
+  const ask = event("orch", "orch", { type: "ask_user", id: "old", question: "이전 질문", options: ["예"] });
+  const end = event("orch", "orch", { type: "turn_end", ok: true });
+  const next = event("orch", null, { type: "user", text: "다음 작업", attachments: [] });
+  for (const view of [undefined, "orch"] as const) {
+    const items = buildItems([ask, end, next], view, true);
+    const card = items.find(i => i.kind === "ask");
+    assert.equal(card?.kind === "ask" && card.answer, EXPIRED_ASK_ANSWER);
+  }
+});
+
+test("plan confirmations survive successful master turns, and actual answers replace inferred expiry", () => {
+  const ask = event("orch", "orch", { type: "ask_user", id: "plan", question: "계획 승인", options: ["진행"], planConfirm: true });
+  const end = event("orch", "orch", { type: "turn_end", ok: true });
+  let items = buildItems([ask, end], undefined, false);
+  assert.equal(items.find(i => i.kind === "ask")?.answer, undefined);
+  items = apply(items, event("orch", null, { type: "user", text: "새 작업", attachments: [] }));
+  assert.equal(items.find(i => i.kind === "ask")?.answer, EXPIRED_ASK_ANSWER);
+  items = apply(items, event("orch", null, { type: "ask_user_answer", id: "plan", answer: "다른 창에서 답변" }));
+  assert.equal(items.find(i => i.kind === "ask")?.answer, "다른 창에서 답변");
+});
 
 test("group chat shows each speaker at top level in every view", () => {
   const events = [event("orch", "w1", { type: "room_message", from: "w1", text: "반론과 근거" })];

@@ -78,7 +78,7 @@ test("a finished incomplete master turn stops showing work, while a live user qu
     assert.equal(f.store.chat(id)?.status, "approval");
     f.engine.checkCompletion(id, { type: "turn_end", ok: false });
     assert.match(await answer, /종료/);
-    assert.ok(f.store.events(id).some(e => e.event.type === "ask_user_answer" && e.event.answer === "(응답 대기 종료)"));
+    assert.ok(f.store.events(id).some(e => e.event.type === "ask_user_answer" && e.event.answer.includes("응답 대기 종료")));
   } finally { await f.close(); }
 });
 

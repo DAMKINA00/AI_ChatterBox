@@ -3,6 +3,7 @@ import { planStepBlockers, readyGroupSteps } from "../../../shared/plan-steps";
 import { isOpenStep, type PlanView } from "../../../shared/plan-lifecycle";
 import { CONSULT_KIND_LABEL, WORKER_KIND_LABEL, type Consult, type PlanStep, type TimelineEvent } from "../../../shared/types";
 import type { Item } from "../timeline";
+import { pendingAsks } from "../../../shared/ask-lifecycle";
 
 /** Plan lifecycle label; "live" is an ordinary instruction's checklist outside /plan. */
 export const PLAN_STATE_LABEL: Record<PlanView["state"], string> = {
@@ -168,13 +169,8 @@ export function planReviewTarget(step: PlanStep, steps: readonly PlanStep[]): st
 
 /** The master's latest question still waiting for the user's answer, if any. */
 export function pendingAskId(events: readonly TimelineEvent[]): string | undefined {
-  const answered = new Set<string>();
-  for (let i = events.length - 1; i >= 0; i--) {
-    const ev = events[i].event;
-    if (ev.type === "ask_user_answer") answered.add(ev.id);
-    else if (ev.type === "ask_user" && !answered.has(ev.id)) return ev.id;
-  }
-  return undefined;
+  const last = pendingAsks(events).at(-1)?.event;
+  return last?.type === "ask_user" ? last.id : undefined;
 }
 
 /** Short name for a blocker: its title, or its id when the title is empty. */

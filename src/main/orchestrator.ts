@@ -63,6 +63,7 @@ import { forkContextPrompt } from "./chat-fork";
 import { buildResumeContext, instructionToResume, parseInstructionSnapshot, type InstructionSnapshot } from "./resume-context";
 import { consultResultText, consultStatusText, masterResultText } from "./consult-context";
 import { Council, COUNCIL_TOOLS } from "./council";
+import { EXPIRED_ASK_ANSWER, pendingAsks } from "../shared/ask-lifecycle";
 
 const KINDS: ConsultKind[] = ["implement", "review", "opinion", "writing"];
 const MAX_DEPTH = 3;
@@ -2166,6 +2167,7 @@ export class Orchestrator {
       }
     }
     if (role === "orch" && event.type === "turn_end") {
+      this.endQuestions(chatId);
       if (event.ok && !event.interrupted) this.publishArtifacts(chatId);
       this.reviewing.delete(chatId);
       this.afterMasterTurn(chatId, event);
@@ -2368,12 +2370,7 @@ export class Orchestrator {
   }
 
   private checkCompletion(chatId: number, end: Extract<AgentEvent, { type: "turn_end" }>): Extract<AgentEvent, { type: "turn_end" }> | null {
-    for (const [id, question] of this.asks) {
-      if (question.chatId !== chatId || question.keepStatus) continue;
-      this.asks.delete(id);
-      this.chats.emit(chatId, "orch", null, { type: "ask_user_answer", id, answer: "(응답 대기 종료)" });
-      question.resolve("마스터의 턴이 종료되어 답변을 받지 못했습니다.");
-    }
+    this.endQuestions(chatId);
     const inst = this.instructions.get(chatId);
     if (!inst || !end.ok || end.interrupted || this.stopped.has(chatId) || this.planning.has(chatId)) return end;
     const chat = this.chats.store.chat(chatId);
@@ -2474,6 +2471,7 @@ export class Orchestrator {
   }
 
   private async instruct(chat: Chat, input: AgentInput, continuePlan = false) {
+    this.endQuestions(chat.id);
     const epoch = this.nextEpoch(chat.id);
     this.stopped.delete(chat.id);
     const prefix = this.handover(chat);
@@ -2925,11 +2923,45 @@ export class Orchestrator {
   }
 
   // ---------- ask_user
+  private endQuestions(chatId: number) {
+    for (const [id, question] of this.asks) {
+      if (question.chatId !== chatId || question.keepStatus) continue;
+      this.asks.delete(id);
+      this.chats.emit(chatId, "orch", null, { type: "ask_user_answer", id, answer: EXPIRED_ASK_ANSWER });
+      question.resolve("마스터의 턴이 종료되어 답변을 받지 못했습니다.");
+    }
+  }
+
+  /** Native tool callbacks do not survive a core restart; an app-owned pending plan can be restored. */
+  restoreQuestions() {
+    const questions = this.chats.store.unansweredQuestions();
+    for (const chatId of new Set(questions.map(q => q.chatId))) {
+      const own = questions.filter(q => q.chatId === chatId);
+      let restore: string | undefined;
+      if (own.some(q => q.event.type === "ask_user" && q.event.planConfirm)) {
+        const events = this.chats.store.events(chatId);
+        if (pendingProposal(events) !== undefined) {
+          const card = pendingAsks(events).findLast(q => q.event.type === "ask_user" && q.event.planConfirm);
+          if (card?.event.type === "ask_user") restore = card.event.id;
+        }
+      }
+      for (const q of own) {
+        if (q.event.type !== "ask_user") continue;
+        const id = q.event.id;
+        if (id === restore) {
+          this.planConfirm.set(chatId, id);
+          this.asks.set(id, { chatId, keepStatus: true, resolve: answer => void this.onPlanConfirm(chatId, id, answer) });
+        } else this.chats.emit(chatId, "orch", null, { type: "ask_user_answer", id, answer: EXPIRED_ASK_ANSWER });
+      }
+    }
+  }
+
   private askUser(chatId: number, question: string, options: string[]): Promise<string> {
     const id = `ask:${randomUUID()}`;
+    const answer = new Promise<string>((resolve) => this.asks.set(id, { chatId, resolve }));
     this.chats.emit(chatId, "orch", "orch", { type: "ask_user", id, question, options });
     this.chats.updateChat(chatId, { status: "approval" });
-    return new Promise((resolve) => this.asks.set(id, { chatId, resolve }));
+    return answer;
   }
 
   /** Asks [진행/수정/취소] for a submitted plan; replaces an earlier question for the same chat. */
@@ -2986,7 +3018,11 @@ export class Orchestrator {
 
   answerAsk(chatId: number, askId: string, answer: string) {
     const a = this.asks.get(askId);
-    if (!a || a.chatId !== chatId) return false;
+    if (!a || a.chatId !== chatId) {
+      if (!a && this.chats.store.unansweredQuestions(chatId).some(q => q.event.type === "ask_user" && q.event.id === askId))
+        this.chats.emit(chatId, "orch", null, { type: "ask_user_answer", id: askId, answer: EXPIRED_ASK_ANSWER });
+      return false;
+    }
     this.asks.delete(askId);
     this.chats.emit(chatId, "orch", null, { type: "ask_user_answer", id: askId, answer });
     // The plan confirmation can be answered after the turn ended: it never marks the chat working by itself.

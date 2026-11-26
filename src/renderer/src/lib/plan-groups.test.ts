@@ -50,6 +50,32 @@ test("plan ask badge: first question in a plan-mode turn, before any proposal", 
   assert.equal(planAskId([...events, ev(2, { type: "ask_user_answer", id: "q1", answer: "src" })], "working", true, false), undefined);
 });
 
+test("plan ask badge: ordinary questions follow master boundaries, not worker or queued events", () => {
+  const ev = (id: number, event: TimelineEvent["event"], node: TimelineEvent["node"] = "orch", role: TimelineEvent["role"] = "orch"): TimelineEvent => ({ id, chatId: 1, node, role, at: id, event });
+  const question = ev(1, { type: "ask_user", id: "ordinary", question: "범위는?", options: [] });
+  const workerEnd = ev(2, { type: "turn_end", ok: true }, "w1", "w1");
+  const queued = ev(3, { type: "user", text: "추가", attachments: [], queued: true }, "orch", null);
+  assert.equal(planAskId([question, workerEnd, queued], "working", true, false), "ordinary");
+
+  const ended = ev(10, { type: "turn_end", ok: true });
+  assert.equal(planAskId([question, ended], "working", true, false), undefined, "a fresh working status does not revive an ended question");
+  const newUser = ev(20, { type: "user", text: "새 작업", attachments: [] }, "orch", null);
+  assert.equal(planAskId([question, newUser], "working", true, false), undefined);
+});
+
+test("plan ask badge: after a new question, only its card is selected", () => {
+  const ev = (id: number, event: TimelineEvent["event"]): TimelineEvent => ({ id, chatId: 1, node: "orch", role: "orch", at: id, event });
+  const old = ev(1, { type: "ask_user", id: "old", question: "이전", options: [] });
+  const next = ev(2, { type: "user", text: "새 질문", attachments: [] });
+  const fresh = ev(3, { type: "ask_user", id: "fresh", question: "새 질문의 확인", options: [] });
+  assert.equal(pendingAskId([old, next, fresh]), "fresh");
+  assert.equal(planAskId([old, next, fresh], "working", true, false), "fresh");
+
+  const oldConfirm = ev(10, { type: "ask_user", id: "old-confirm", question: "이전 계획", options: [], planConfirm: true });
+  const newConfirm = ev(11, { type: "ask_user", id: "new-confirm", question: "새 계획", options: [], planConfirm: true });
+  assert.equal(pendingAskId([oldConfirm, newConfirm]), "new-confirm");
+});
+
 const step = (id: string, extra: Partial<PlanStep> = {}): PlanStep => ({ id, title: `t-${id}`, status: "pending", ...extra });
 const ids = (steps: readonly PlanStep[]) => {
   const g = planGroups(planStepViews(steps));

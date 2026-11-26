@@ -6,6 +6,7 @@
 //  - "consult:N": one consult
 import { isAgentExpression, isWorkerKey } from "../../shared/types";
 import { currentPlanView, type PlanView } from "../../shared/plan-lifecycle";
+import { closesAsk, EXPIRED_ASK_ANSWER } from "../../shared/ask-lifecycle";
 import { roomProvenance, systemBrief, type ConsultFacts, type RoomProvenance } from "../../shared/room-message";
 import type { AgentExpression, AgentEvent, ApprovalDecision, ApprovalRequest, AttachmentRef, ConsultKind, ConsultStatus, FileDiff, NodeId, ReviewResult, Role, TimelineEvent } from "../../shared/types";
 
@@ -411,6 +412,9 @@ function nextLiveMessageKey(items: Item[], role: Role, node: NodeId): string {
 
 export function apply(items: Item[], e: TimelineEvent, expression?: AgentExpression): Item[] {
   const ev: AgentEvent = e.event;
+  if (ev.type === "user" || ev.type === "turn_end" || ev.type === "plan_state" || ev.type === "ask_user")
+    items = items.map(item => item.kind === "ask" && item.answer === undefined && closesAsk(e, item.planConfirm)
+      ? { ...item, answer: EXPIRED_ASK_ANSWER } : item);
   const role = (e.role ?? "orch") as Role;
   const node = e.node;
   // Stable keys keep React state (open cards) across rebuilds; live deltas have no id yet.

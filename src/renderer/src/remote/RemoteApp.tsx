@@ -12,6 +12,7 @@ import { buildItems, markClipped, planOf, type Item } from "../timeline";
 import { forkEventId } from "../lib/fork";
 import { consultCardReview, consultCardStatus } from "../lib/review-summary";
 import { needsAttention } from "../timeline-window";
+import { EXPIRED_ASK_ANSWER } from "../../../shared/ask-lifecycle";
 import { consultReason } from "../../../shared/room-message";
 import { cn } from "../lib/utils";
 import { ApiError, AuthError, logout as logoutRequest, request, setCsrf, url } from "./api";
@@ -582,7 +583,8 @@ function Ask({ item, chat, live, onError }: { item: Extract<Item, { kind: "ask" 
     <Card className={cn(open && "border-warning/60")}>
       <div className="mb-1 text-[12px] font-medium text-muted-foreground">마스터의 질문</div>
       <Md text={item.question} />
-      {item.answer !== undefined ? <div className="mt-2 text-[13px]"><span className="text-muted-foreground">답변 · </span>{item.answer}</div>
+      {item.answer === EXPIRED_ASK_ANSWER ? <div className="mt-2 text-[12px] text-muted-foreground">이미 종료되었거나 만료된 질문입니다.</div>
+        : item.answer !== undefined ? <div className="mt-2 text-[13px]"><span className="text-muted-foreground">답변 · </span>{item.answer}</div>
         : open ? (
           <div className="mt-2.5 grid gap-2">
             {item.options.length > 0 && <div className="flex flex-wrap gap-2">{item.options.map(o => <Btn key={o} variant="outline" disabled={pending} onClick={() => void send(o)}>{o}</Btn>)}</div>}

@@ -304,6 +304,7 @@ export async function runCore(dataDir: string, pipe: string, token: string, test
       usage: usage => rpc.emit("usage", usage),
     }, dataDir, join(import.meta.dirname, "bridge-mcp.js").replace(/app\.asar([\\/])/, "app.asar.unpacked$1"));
     orchestrator = new Orchestrator(chats);
+    orchestrator.restoreQuestions();
     characterChat = new CharacterChat(chats, undefined, characterModels);
     characterMeeting = new CharacterMeeting(characterChat, characterModels, event => rpc.emit("monitor:meeting-event", event), undefined, {
       web: (input, signal) => characterChat.meetingWeb(input, signal),

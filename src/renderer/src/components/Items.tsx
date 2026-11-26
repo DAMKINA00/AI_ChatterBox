@@ -17,6 +17,7 @@ import {
   X,
 } from "lucide-react";
 import { artifactFileLabel } from "../../../shared/artifact-markdown";
+import { EXPIRED_ASK_ANSWER } from "../../../shared/ask-lifecycle";
 import { CONSULT_KIND_LABEL, MASTER_LABEL, roleName, roleTone, type AgentExpression, type ApprovalRequest, type AttachmentRef, type FileDiff, type Role } from "../../../shared/types";
 import { api, cn, errorMessage, formatBytes } from "../lib/utils";
 import { useStore } from "../store";
@@ -897,25 +898,42 @@ function ConsultCard({ item, chatId }: { item: Extract<Item, { kind: "consult" }
 
 function AskCard({ item, chatId }: { item: Extract<Item, { kind: "ask" }>; chatId: number }) {
   const [text, setText] = useState("");
+  const [pending, setPending] = useState(false);
+  const [submitted, setSubmitted] = useState<string>();
+  const [rejected, setRejected] = useState(false);
+  const sending = useRef(false);
   const toast = useStore((s) => s.toast);
-  const answer = (a: string) => api.answerAskUser(chatId, item.id, a).catch((e) => toast(errorMessage(e)));
+  const live = useStore(s => s.chats.some(c => c.id === chatId && ["working", "approval"].includes(c.status)));
+  const response = item.answer ?? submitted;
+  const expired = response === EXPIRED_ASK_ANSWER || (response === undefined && (rejected || !live && !item.planConfirm));
+  const answer = async (a: string) => {
+    if (sending.current || expired || response !== undefined) return;
+    sending.current = true;
+    setPending(true);
+    try {
+      if (await api.answerAskUser(chatId, item.id, a)) setSubmitted(a);
+      else { setRejected(true); toast("이미 답변했거나 만료된 질문입니다. 현재 질문에 답변해 주세요."); }
+    } catch (e) { toast(errorMessage(e)); }
+    finally { sending.current = false; setPending(false); }
+  };
   return (
-    <div className="space-y-2.5 rounded-xl border border-primary/40 bg-primary/6 p-3" data-testid="ask-card" data-ask-id={item.id} tabIndex={-1}>
+    <div className={cn("space-y-2.5 rounded-xl border p-3", expired ? "border-border bg-muted/20" : "border-primary/40 bg-primary/6")} data-testid="ask-card" data-ask-id={item.id} data-expired={expired || undefined} tabIndex={-1}>
       <div className="flex items-center gap-2 text-[13px] font-semibold">
         <MessageCircleQuestion className="size-4 text-primary" />
         마스터의 질문
+        {expired && <span className="text-[12px] font-normal text-muted-foreground">종료됨</span>}
       </div>
       <div data-chat-search-text><Markdown text={item.question} /></div>
-      {item.answer !== undefined ? (
+      {expired ? <div className="text-[12.5px] text-muted-foreground">이미 종료되었거나 만료된 질문입니다.</div> : response !== undefined ? (
         <div className="text-[12.5px] text-muted-foreground">
-          답변: <span data-chat-search-text className="text-foreground">{item.answer}</span>
+          답변: <span data-chat-search-text className="text-foreground">{response}</span>
         </div>
       ) : (
         <>
           {item.options.length > 0 && (
             <div className="flex flex-wrap gap-2">
               {item.options.map((o) => (
-                <Button key={o} size="sm" variant="secondary" onClick={() => answer(o)}>
+                <Button key={o} size="sm" variant="secondary" disabled={pending} onClick={() => void answer(o)}>
                   {o}
                 </Button>
               ))}
@@ -928,9 +946,9 @@ function AskCard({ item, chatId }: { item: Extract<Item, { kind: "ask" }>; chatI
               if (text.trim()) void answer(text.trim());
             }}
           >
-            <Input value={text} onChange={(e) => setText(e.target.value)} placeholder="직접 답하기" className="h-8" />
-            <Button size="sm" type="submit" disabled={!text.trim()}>
-              답하기
+            <Input value={text} onChange={(e) => setText(e.target.value)} disabled={pending} placeholder="직접 답하기" className="h-8" />
+            <Button size="sm" type="submit" disabled={pending || !text.trim()}>
+              {pending ? "전달 중…" : "답하기"}
             </Button>
           </form>
         </>

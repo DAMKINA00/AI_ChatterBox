@@ -13,6 +13,7 @@ import { readyGroupSteps, validatePlanSteps, validateProposedTasks } from "../sh
 import { isReadCommand } from "./execution-policy";
 import { bridgeConnected, bridgeDenyNotice, findBridgeDenyRules, missingBridgeTools } from "./claude-settings";
 import { GEMINI_BRIDGE_TOOLS } from "./drivers/gemini-protocol";
+import { EXPIRED_ASK_ANSWER } from "../shared/ask-lifecycle";
 
 class FakeDriver implements AgentDriver {
   running = false;
@@ -99,6 +100,91 @@ async function planTurn(f: F, text: string) {
   f.engine.setPlanMode(f.chat.id, true);
   await f.chats.send(f.chat.id, text, []);
 }
+
+test("restart expires orphaned questions without changing historical answers or chat status", () => {
+  const f = fixture();
+  try {
+    f.chats.emit(f.chat.id, "orch", "orch", { type: "ask_user", id: "old", question: "old?", options: [] });
+    f.chats.emit(f.chat.id, "orch", "orch", { type: "ask_user", id: "answered", question: "answered?", options: [] });
+    f.chats.emit(f.chat.id, "orch", null, { type: "ask_user_answer", id: "answered", answer: "유지" });
+    f.store.updateChat(f.chat.id, { status: "interrupted" });
+    f.engine.restoreQuestions();
+    assert.equal(f.store.chat(f.chat.id)!.status, "interrupted");
+    assert.deepEqual(f.store.unansweredQuestions(f.chat.id), []);
+    const answers = () => f.store.events(f.chat.id).flatMap(e => e.event.type === "ask_user_answer" ? [e.event] : []);
+    assert.deepEqual(answers().map(a => [a.id, a.answer]), [["answered", "유지"], ["old", EXPIRED_ASK_ANSWER]]);
+    f.engine.restoreQuestions();
+    assert.equal(answers().length, 2, "startup cleanup is idempotent");
+    assert.equal(f.engine.answerAsk(f.chat.id, "old", "yes"), false);
+  } finally { f.close(); }
+});
+
+test("restart restores the current plan question so its answer still executes the proposal", async () => {
+  const f = fixture();
+  try {
+    await planTurn(f, "계획");
+    await f.call("propose_plan", { summary: "s", tasks: goodTasks });
+    f.master().finish();
+    const card = f.store.unansweredQuestions(f.chat.id)[0].event as any;
+    f.engine.asks.clear();
+    f.engine.planConfirm.clear();
+    f.engine.restoreQuestions();
+    assert.equal(f.engine.answerAsk(f.chat.id, card.id, "진행"), true);
+    await waitFor(() => f.states().at(-1)?.state === "running");
+    assert.equal(f.master().sendCalls.at(-1)!.noWrites, false);
+  } finally { f.close(); }
+});
+
+test("restart does not restore superseded or cancelled plan confirmations", async () => {
+  for (const next of ["cancel", "new instruction"]) {
+    const f = fixture();
+    try {
+      await planTurn(f, "계획");
+      await f.call("propose_plan", { summary: "s", tasks: goodTasks });
+      f.master().finish();
+      const card = f.store.unansweredQuestions(f.chat.id)[0].event as any;
+      if (next === "cancel") f.chats.emit(f.chat.id, "orch", null, { type: "plan_state", state: "cancelled", planId: f.states().at(-1)!.planId });
+      else f.store.addUserEvent(f.chat.id, { type: "user", text: "다른 작업", attachments: [] }, []);
+      f.engine.asks.clear();
+      f.engine.planConfirm.clear();
+      f.engine.restoreQuestions();
+      assert.equal(f.engine.answerAsk(f.chat.id, card.id, "진행"), false);
+      assert.deepEqual(f.store.unansweredQuestions(f.chat.id), []);
+    } finally { f.close(); }
+  }
+});
+
+test("answering an orphaned question returns false and records expiry once; unknown ids affect nothing", () => {
+  const f = fixture();
+  try {
+    f.chats.emit(f.chat.id, "orch", "orch", { type: "ask_user", id: "stale", question: "?", options: [] });
+    const count = f.store.events(f.chat.id).length;
+    assert.equal(f.engine.answerAsk(f.chat.id, "unknown", "yes"), false);
+    assert.equal(f.store.events(f.chat.id).length, count);
+    assert.equal(f.engine.answerAsk(f.chat.id + 1, "stale", "yes"), false);
+    assert.equal(f.store.events(f.chat.id).length, count);
+    assert.equal(f.engine.answerAsk(f.chat.id, "stale", "yes"), false);
+    assert.deepEqual(f.store.events(f.chat.id).at(-1)!.event, { type: "ask_user_answer", id: "stale", answer: EXPIRED_ASK_ANSWER });
+    assert.equal(f.engine.answerAsk(f.chat.id, "stale", "yes"), false);
+    assert.equal(f.store.events(f.chat.id).length, count + 1);
+  } finally { f.close(); }
+});
+
+test("live questions accept exactly one answer, and direct turn-end events expire their callbacks", async () => {
+  const f = fixture();
+  try {
+    await f.chats.send(f.chat.id, "작업", []);
+    const answer = f.engine.askUser(f.chat.id, "현재 질문", ["예"]);
+    const card = f.store.unansweredQuestions(f.chat.id)[0].event as any;
+    assert.equal(f.engine.answerAsk(f.chat.id, card.id, "예"), true);
+    assert.equal(await answer, "사용자 답변: 예");
+    assert.equal(f.engine.answerAsk(f.chat.id, card.id, "다른 답"), false);
+    const expired = f.engine.askUser(f.chat.id, "종료되는 질문", []);
+    f.engine.observe(f.chat.id, "orch", { type: "turn_end", ok: false, interrupted: true });
+    assert.match(await expired, /종료/);
+    assert.deepEqual(f.store.unansweredQuestions(f.chat.id), []);
+  } finally { f.close(); }
+});
 
 test("chat execution directives exclude questions, negation, conditions and quoted examples", () => {
   for (const text of ["진행", "진행해", "진행해줘", "계획대로 진행해 줘.", "작업을 시작해주세요", "계획에 담지 말고 그대로 작업을 진행해. 계획 모드는 종료야.", "진행하세요. 그리고 중복 카드도 정리해."])
