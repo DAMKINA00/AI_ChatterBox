@@ -128,15 +128,20 @@ function Boardroom() {
 
   async function send(event?: FormEvent) {
     event?.preventDefault();
-    if (!ready || submitting || room.requestId || !draft.trim()) return;
+    if (!ready || submitting || stopping || !draft.trim()) return;
+    const text = draft.trim();
     setProblem("");
     setSubmitting(true);
+    setDraft("");
+    goLatest();
     try {
-      await request(url("/api/boardroom"), { text: draft.trim() });
-      setDraft("");
-      goLatest();
+      if (room.requestId) await request(url("/api/boardroom/interrupt"), { requestId: room.requestId, text });
+      else await request(url("/api/boardroom"), { text });
       field.current?.focus();
-    } catch (e) { fault(e); }
+    } catch (e) {
+      setDraft(next => next ? `${text}\n${next}` : text);
+      fault(e);
+    }
     finally { setSubmitting(false); }
   }
 
@@ -149,6 +154,7 @@ function Boardroom() {
   }
 
   const speaking = new Set(room.drafts.map(message => message.sender));
+  const sendLabel = room.requestId ? "마스터에게 추가 메시지 보내기" : "안건 보내기";
   const posts = [...room.messages, ...room.drafts].sort((a, b) => a.at - b.at);
   const latestResult = room.messages.findLast(message => message.kind === "summary");
   function goResult() {
@@ -202,10 +208,10 @@ function Boardroom() {
                 e.preventDefault();
                 void send();
               }}
-              placeholder="회의실에 안건 보내기" aria-label="회의 안건" className="max-h-[30dvh] min-h-9 min-w-0 flex-1 resize-y bg-transparent px-2 py-1 text-base outline-none placeholder:text-[var(--room-muted)] sm:text-sm" />
+              placeholder={room.requestId ? "마스터에게 끼어들기" : "회의실에 안건 보내기"} aria-label={room.requestId ? "마스터에게 보낼 추가 메시지" : "회의 안건"} className="max-h-[30dvh] min-h-9 min-w-0 flex-1 resize-y bg-transparent px-2 py-1 text-base outline-none placeholder:text-[var(--room-muted)] sm:text-sm" />
             {room.requestId && <button type="button" title="회의 중단" aria-label="회의 중단" onClick={() => void stop()} disabled={stopping}
               className="grid size-9 shrink-0 place-items-center rounded-md border border-[var(--room-line)] text-[var(--room-coral)] hover:bg-[var(--room-hover)] disabled:opacity-50"><Square className="size-4" aria-hidden /></button>}
-            <button type="submit" title="안건 보내기" aria-label="안건 보내기" disabled={!ready || submitting || Boolean(room.requestId) || !draft.trim()}
+            <button type="submit" title={sendLabel} aria-label={sendLabel} disabled={!ready || submitting || stopping || !draft.trim()}
               className="grid size-9 shrink-0 place-items-center rounded-md bg-[var(--room-accent)] text-[#1b1e26] hover:brightness-110 disabled:opacity-35"><ArrowUp className="size-5" aria-hidden /></button>
           </div>
         </form>

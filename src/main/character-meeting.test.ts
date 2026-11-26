@@ -94,6 +94,47 @@ test("room narrows the first question, passes each finished contribution to the 
   assert.deepEqual(events.map(event => event.seq), events.map((_, index) => index + 1));
 });
 
+test("interrupts keep completed posts, withdraw the live draft and redirect the master in the same meeting", async () => {
+  const events: MeetingEvent[] = [];
+  const calls: { stage: string; userInterrupts?: string[]; discussion: { text: string }[] }[] = [];
+  const { promise: streaming, resolve: beganStreaming } = Promise.withResolvers<void>();
+  const room = new CharacterMeeting({
+    configured: () => ["codex"],
+    meetingEligibility: () => "available",
+    meetingReply: async (_agent, _model, value, signal, onText) => {
+      const input = value as typeof calls[number];
+      calls.push(input);
+      if (input.stage === "conclude") return "가격 기준을 반영한 결론";
+      if (!onText) return input.discussion.length >= 2 ? '{"action":"conclude"}' : '{"speaker":"gpt","focus":"비교 기준"}';
+      if (input.userInterrupts) return "가격부터 비교해요.";
+      if (!input.discussion.length) return "선택지 두 개가 있어요.";
+      onText("취소할 초안");
+      beganStreaming();
+      await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+      return "폐기된 발언";
+    },
+  }, () => ({}), event => events.push(event));
+
+  const meeting = room.start({ requestId: id, text: "두 방안을 비교해 줘." });
+  await streaming;
+  assert.equal(room.interrupt({ requestId: "b".repeat(32), text: "다른 회의" }), false);
+  assert.equal(room.interrupt({ requestId: id, text: "가격부터 봐 줘." }), true);
+  assert.equal(room.interrupt({ requestId: id, text: "운영비도 포함해 줘." }), true);
+  assert.equal(room.snapshot().requestId, id);
+  assert.equal(room.snapshot().drafts.length, 0);
+  assert.deepEqual(room.snapshot().messages.filter(post => post.sender === "user").map(post => post.text),
+    ["두 방안을 비교해 줘.", "가격부터 봐 줘.", "운영비도 포함해 줘."]);
+  await meeting;
+  assert.equal(calls.find(call => call.userInterrupts)?.stage, "moderate");
+  assert.deepEqual(calls.at(-1)?.userInterrupts, ["가격부터 봐 줘.", "운영비도 포함해 줘."]);
+  assert.deepEqual(calls.at(-1)?.discussion.map(entry => entry.text), ["선택지 두 개가 있어요.", "가격부터 비교해요."]);
+  assert.ok(events.some(event => event.type === "withdraw"));
+  assert.equal(events.filter(event => event.type === "end").length, 1);
+  assert.equal(room.snapshot().drafts.length, 0);
+  assert.equal(room.snapshot().messages.at(-1)?.text, "가격 기준을 반영한 결론");
+  assert.equal(room.interrupt({ requestId: id, text: "끝난 뒤 추가" }), false);
+});
+
 test("a stopped contribution withdraws its draft and releases the room for another agenda", async () => {
   const events: MeetingEvent[] = [];
   let reporting!: () => void;

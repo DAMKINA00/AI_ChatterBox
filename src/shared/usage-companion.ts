@@ -93,6 +93,7 @@ export type UsageCommandName =
   | "meeting-event"
   | "meeting-reset"
   | "meeting-restore"
+  | "meeting-interrupt-result"
   | "taskbar"
   | "startup"
   | "usage-alerts"

@@ -125,10 +125,14 @@ function registerHandlers(rpc: CoreRpc) {
     if (!ask) return { status: "error" };
     return characterChat.ask(ask);
   });
-  ipcMain.handle("monitor:meeting-start", async (_e, value: unknown) => {
+  ipcMain.handle("monitor:meeting-start", (_e, value: unknown) => {
     const request = parseMeetingRequest(value);
     if (!request) throw new Error("회의 요청이 올바르지 않습니다.");
-    await characterMeeting.start(request);
+    void characterMeeting.start(request).catch(() => undefined);
+  });
+  ipcMain.handle("monitor:meeting-interrupt", (_e, value: unknown) => {
+    const request = parseMeetingRequest(value);
+    return !!request && characterMeeting.interrupt(request);
   });
   ipcMain.handle("monitor:meeting-cancel", (_e, value: unknown) => {
     if (meetingRequestId(value)) characterMeeting.cancel(value);

@@ -1,6 +1,6 @@
 {
   "repository": "DAMKINA00/AI_UsageMonitor",
-  "revision": "ccd1ec5c36b49c8a675334778392abf0171219aa",
+  "revision": "4c7b77c06fad2ff34281dd42feb93607f82d1307",
   "project": "AIUsageMonitor.csproj",
   "publish": {
     "runtime": "win-x64",

@@ -43,6 +43,12 @@ try {
   await speaking.waitFor();
   assert.equal(await speaking.evaluate(el => getComputedStyle(el).animationName), "boardroom-speaking");
   await page.screenshot({ path: join(output, "streaming.png") });
+  const followup = page.getByRole("textbox", { name: "마스터에게 보낼 추가 메시지" });
+  await followup.fill("비용을 먼저 비교해 줘.");
+  await followup.press("Enter");
+  assert.equal(await followup.inputValue(), "");
+  await page.getByText("비용을 먼저 비교해 줘.", { exact: true }).waitFor();
+  await page.getByText("비용 기준을 먼저 확인해 주세요.", { exact: false }).waitFor();
   await page.getByText("회의를 마쳤어요.").waitFor();
   const rendered = await page.locator("#boardroom-panel article").allTextContents();
   const sequence = ["검토를 마쳤어요", "그 기준이라면 A안", "A안은 운영 시간 확인이 먼저예요", "공식 자료에 명시된 운영 시간", "A안을 추천합니다"];
@@ -93,7 +99,7 @@ try {
   await page.setViewportSize({ width: 390, height: 760 });
   await page.screenshot({ path: join(output, "boardroom-mobile.png") });
   assert.deepEqual(errors, []);
-  console.log("PASS Boardroom streaming, rich messages, transcript selection, roster toggle, result navigation and mobile layout");
+  console.log("PASS Boardroom interruption, streaming, rich messages, transcript selection, roster toggle, result navigation and mobile layout");
 } finally {
   await browser.close();
   await server.stop();

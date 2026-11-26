@@ -727,6 +727,13 @@ export class RemoteWeb {
       await call("monitor:meeting-cancel", [body.requestId]);
       return this.send(res, 200, { ok: true });
     }
+    if (method === "POST" && path === "/api/boardroom/interrupt") {
+      const body = await this.body(req, 26_000);
+      const request = parseMeetingRequest({ requestId: body?.requestId, text: body?.text });
+      if (!request) throw new HttpError(400, "추가 메시지를 1~4,000자로 입력해 주세요.");
+      if (!(await call("monitor:meeting-interrupt", [request]))) throw new HttpError(409, "회의가 이미 끝났어요. 새 안건으로 보낼 수 있어요.");
+      return this.send(res, 202, { ok: true });
+    }
     if (method === "GET" && path === "/api/chats") {
       const seq = this.seq;
       const [chats, projects] = await Promise.all([call("chats:list", []), call("projects:list", [])]);

@@ -15,7 +15,7 @@ import { CHARACTER_MEETING_VERSION, meetingRequestId, parseMeetingRequest, type 
 import { MONITOR_ACCOUNTS_VERSION, type MonitorAccountsPayload } from "./usage-monitor-feed";
 
 type UsageCommand = { command: UsageCommandName; value?: boolean | { id: MonitorCharacterId; on: boolean } | CharacterEvent | CharacterReply | MeetingEvent
-  | Omit<MeetingSnapshot, "messages" | "drafts"> | { message: MeetingMessage; draft: boolean } };
+  | Omit<MeetingSnapshot, "messages" | "drafts"> | { message: MeetingMessage; draft: boolean } | { id: string; accepted: boolean } };
 
 const MAX_LINE_BYTES = 64 * 1024;
 const START_TIMEOUT_MS = 20_000;
@@ -56,6 +56,7 @@ export interface UsageCompanionOptions {
   refreshRequested?(): void;
   characterAsk?(ask: CharacterAsk): Promise<CharacterAnswer>;
   meetingStart?(request: MeetingRequest): Promise<void>;
+  meetingInterrupt?(request: MeetingRequest): Promise<boolean>;
   meetingCancel?(requestId: string): void;
   meetingSnapshot?(): Promise<MeetingSnapshot>;
   spawn?: UsageSpawn;
@@ -261,12 +262,28 @@ export class UsageCompanion {
     }
     session.meetingRequest = request.requestId;
     let message = "회의 연결이 끊겼어요. 다시 시도해 주세요.";
-    try { await this.options.meetingStart?.(request); }
+    try {
+      if (this.options.meetingStart) { await this.options.meetingStart(request); return; }
+    }
     catch (error) { if (error instanceof Error && error.message === "다른 회의 안건을 처리 중이에요.") message = error.message; }
     if (session === this.session && !session.ended && !session.stopping && session.meetingRequest === request.requestId) {
       session.meetingRequest = undefined;
       this.write(session, { command: "meeting-event", value: { requestId: request.requestId, seq: 0, type: "end", text: message } });
     }
+  }
+
+  private async interruptMeeting(session: ChildSession, value: object) {
+    if (session.stopping || this.state?.characterMeeting !== CHARACTER_MEETING_VERSION) return;
+    const { id } = value as { id?: unknown };
+    const request = parseMeetingRequest(value);
+    if (!meetingRequestId(id)) return;
+    let accepted = false;
+    if (request) {
+      try { accepted = await this.options.meetingInterrupt?.(request) ?? false; }
+      catch { /* The meeting may end while a follow-up is being sent. */ }
+    }
+    if (session === this.session && !session.ended && !session.stopping)
+      this.write(session, { command: "meeting-interrupt-result", value: { id, accepted } });
   }
 
   private sendAccounts(session: ChildSession) {
@@ -477,6 +494,7 @@ export class UsageCompanion {
     }
     if (message.type === "character-ask") { void this.handleCharacterAsk(session, message); return; }
     if (message.type === "meeting-start") { void this.startMeeting(session, message).catch(() => undefined); return; }
+    if (message.type === "meeting-interrupt") { void this.interruptMeeting(session, message).catch(() => undefined); return; }
     if (message.type === "meeting-sync") { void this.syncMeeting(session).catch(() => undefined); return; }
     if (message.type === "meeting-cancel") {
       const { requestId } = message as { requestId?: unknown };

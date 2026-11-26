@@ -131,6 +131,7 @@ export const REMOTE_API = {
   boardroom: "/api/boardroom",
   boardroomStream: "/api/boardroom/stream",
   boardroomStop: "/api/boardroom/stop",
+  boardroomInterrupt: "/api/boardroom/interrupt",
   // existing
   login: "/api/login",
   logout: "/api/logout",

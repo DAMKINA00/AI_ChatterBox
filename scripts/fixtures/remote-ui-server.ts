@@ -149,8 +149,8 @@ export async function startFixture(staticDir: string, password: string) {
     configured: () => ["claude", "codex", "deepseek", "grok"],
     meetingEligibility: agent => agent === "grok" ? "resting" : "available",
     meetingReply: async (agent, _model, input, signal, stream) => {
-      const { stage, discussion } = input as { stage: string; discussion: { speaker: string }[] };
-      if (stage === "opening") return '{"speaker":"gpt","focus":"비교 기준 한 가지","webQuery":"공개 비교 자료"}';
+      const { stage, discussion, userInterrupts } = input as { stage: string; discussion: { speaker: string }[]; userInterrupts?: string[] };
+      if (stage === "opening") return JSON.stringify({ speaker: "gpt", focus: userInterrupts?.at(-1) === "비용을 먼저 비교해 줘." ? "비용 기준을 먼저 확인해 주세요." : "비교 기준 한 가지", webQuery: "공개 비교 자료" });
       if (stage === "moderate") {
         if (discussion.length === 1) return '{"speaker":"deepseek","focus":"앞선 기준에 맞는 선택지 하나","mode":"interject"}';
         if (discussion.length === 2) return '{"speaker":"claude","focus":"A안에는 어떤 제약이 있나요?","mode":"reaction"}';
@@ -181,6 +181,7 @@ export async function startFixture(staticDir: string, password: string) {
           try { void meeting.start(args[0] as MeetingRequest); return true; }
           catch { return false; }
         case "monitor:meeting-cancel": meeting.cancel(String(args[0])); return undefined;
+        case "monitor:meeting-interrupt": return meeting.interrupt(args[0] as MeetingRequest);
         case "chats:list": return chats;
         case "projects:list": return projects;
         case "chats:eventsPage": {

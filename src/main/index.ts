@@ -93,8 +93,9 @@ function startDesktopServices() {
     characterAsk: async ask => core ? core.call<CharacterAnswer>("monitor:character-question", [ask], 178_000) : { status: "error" },
     meetingStart: async request => {
       if (!core) throw new Error("코어 연결이 닫혔습니다.");
-      await core.call("monitor:meeting-start", [request], 540_000);
+      await core.call("monitor:meeting-start", [request]);
     },
+    meetingInterrupt: request => core?.call<boolean>("monitor:meeting-interrupt", [request]) ?? Promise.resolve(false),
     meetingCancel: requestId => { void core?.call("monitor:meeting-cancel", [requestId]).catch(() => undefined); },
     meetingSnapshot: () => core!.call<MeetingSnapshot>("monitor:meeting-snapshot", []),
   });
@@ -174,7 +175,7 @@ function createWindow() {
 }
 
 function registerUi(channels: string[], rpc: CoreRpc) {
-  const internal = new Set(["monitor:character-question", "monitor:meeting-start", "monitor:meeting-cancel", "monitor:meeting-snapshot", "monitor:meeting-submit", "attachment:info", "window:save", "files:resolve-link", "remote:chat-patch", "remote:project-patch", "remote:chat-delete", "remote:chat-fork", "remote:fork-anchor", "remote:attachment-remove", "remote:att-bytes", "remote:uploads", "remote:send"]);
+  const internal = new Set(["monitor:character-question", "monitor:meeting-start", "monitor:meeting-interrupt", "monitor:meeting-cancel", "monitor:meeting-snapshot", "monitor:meeting-submit", "attachment:info", "window:save", "files:resolve-link", "remote:chat-patch", "remote:project-patch", "remote:chat-delete", "remote:chat-fork", "remote:fork-anchor", "remote:attachment-remove", "remote:att-bytes", "remote:uploads", "remote:send"]);
   const local = new Set(["theme:set"]);
   for (const channel of channels.filter(channel => !internal.has(channel) && !local.has(channel))) {
     ipcMain.handle(channel, async (_event, ...args) => {
