@@ -1094,7 +1094,7 @@ export class ChatManager {
     const chat = this.store.chat(chatId);
     if (!chat) return;
     if (chat.status === "pausing" || chat.status === "paused") return;
-    if (pending > 0) this.updateChat(chatId, { status: "approval" });
+    if (pending > 0 || this.awaitingUser?.(chatId)) this.updateChat(chatId, { status: "approval" });
     else if (chat.status === "approval") this.updateChat(chatId, { status: this.isBusy(chatId) ? "working" : "idle" });
   }
 
@@ -1103,7 +1103,7 @@ export class ChatManager {
   }
 
   isBusyForUpdate(): boolean {
-    return this.store.listChats().some(chat => ["working", "approval", "pausing"].includes(chat.status) || this.isBusy(chat.id));
+    return this.followups.size > 0 || this.store.listChats().some(chat => ["working", "approval", "pausing"].includes(chat.status) || this.isBusy(chat.id));
   }
 
   // ---------- roles and drivers
@@ -1408,41 +1408,91 @@ export class ChatManager {
 
   /** App-level chat commands must be handled before a new user event supersedes a proposal. */
   beforeSend?: (chat: Chat, input: AgentInput, delivery: "now" | "next") => Promise<boolean>;
+  awaitingUser?: (chatId: number) => boolean;
 
-  async send(chatId: number, text: string, attachmentIds: number[], delivery: "now" | "next" = "now") {
+  private readonly followups = new Map<number, Promise<void>>();
+  private readonly stoppedFollowupEpoch = new Map<number, number>();
+  private readonly startingTurns = new Set<number>();
+  private readonly submissions = new Map<number, Promise<number | null>>();
+
+  /** The UI waits for durable acceptance, while delivery to the driver continues in the core. */
+  submit(chatId: number, text: string, attachmentIds: number[], delivery?: "now" | "next", clientMessageId?: string) {
+    const accept = () => new Promise<number | null>((resolve, reject) => {
+      let accepted = false;
+      const token = typeof clientMessageId === "string" && /^[a-zA-Z0-9-]{1,80}$/.test(clientMessageId) ? clientMessageId : undefined;
+      void this.send(chatId, text, attachmentIds, delivery, token, id => {
+        accepted = true;
+        resolve(id);
+      }).then(() => { resolve(null); }, error => {
+        if (!accepted) { reject(error); return; }
+        if (!this.disposing && this.store.chat(chatId))
+          this.emit(chatId, "orch", null, { type: "notice", text: `저장된 추가 지시의 전달이 지연되거나 실패했습니다. ${error instanceof Error ? error.message : String(error)}` });
+      });
+    });
+    const previous = this.submissions.get(chatId);
+    const ticket = previous ? previous.then(accept, accept) : accept();
+    this.submissions.set(chatId, ticket);
+    return ticket.finally(() => { if (this.submissions.get(chatId) === ticket) this.submissions.delete(chatId); });
+  }
+
+  async send(chatId: number, text: string, attachmentIds: number[], delivery: "now" | "next" = "now",
+    clientMessageId?: string, accepted?: (eventId: number) => void) {
     if (!["now", "next"].includes(delivery)) throw new Error("지원하지 않는 전달 방식입니다.");
-    const chat = this.store.chat(chatId);
+    let chat = this.store.chat(chatId);
     if (!chat) throw new Error("채팅이 없습니다.");
     const attachments = this.store.attachmentsFor(attachmentIds);
     if (!text.trim() && !attachments.length) throw new Error("메시지나 첨부 파일을 입력하세요.");
     if (await this.beforeSend?.(chat, { text, attachments }, delivery)) return;
+    chat = this.store.chat(chatId);
+    if (!chat) throw new Error("채팅이 없습니다.");
     if (chat.status === "pausing") throw new Error("마스터와 작업자의 중지 확인을 기다리고 있습니다.");
     if (chat.status === "working" || chat.status === "approval" || chat.status === "paused" || this.isBusy(chatId)) {
       if (!this.busySend) throw new Error("작업이 진행 중입니다. 끝나거나 중지한 뒤 보내 주세요.");
-      const ev = this.store.addUserEvent(chatId, { type: "user", text, attachments, queued: true, delivery }, attachmentIds);
+      const ev = this.store.addUserEvent(chatId, { type: "user", text, attachments, queued: true, delivery, ...(clientMessageId ? { clientMessageId } : {}) }, attachmentIds);
       this.sink.event(ev);
       this.updateChat(chatId, { touch: true });
-      await this.busySend(chat, { text, attachments }, delivery);
+      if (!accepted) {
+        await this.busySend(chat, { text, attachments }, delivery);
+        return;
+      }
+      const current = chat;
+      const epoch = this.stoppedFollowupEpoch.get(chatId);
+      const sendFollowup = () => {
+        if (this.disposing || this.stoppedFollowupEpoch.get(chatId) !== epoch)
+          throw new Error("작업이 중지되어 전달하지 않았습니다.");
+        return this.busySend!(current, { text, attachments }, delivery);
+      };
+      const previous = this.followups.get(chatId);
+      const task = previous ? previous.then(sendFollowup, sendFollowup) : Promise.resolve().then(sendFollowup);
+      this.followups.set(chatId, task);
+      accepted(ev.id);
+      try { await task; }
+      finally { if (this.followups.get(chatId) === task) this.followups.delete(chatId); }
       return;
     }
     // Plan mode, or a proposal waiting for approval: the message asks for a plan (or revises the proposal).
-    await this.startTurn(chatId, text, attachmentIds, () => this.sendHandler(chat, { text, attachments }), this.plansNextInput(chat));
+    const current = chat;
+    await this.startTurn(chatId, text, attachmentIds, () => this.sendHandler(current, { text, attachments }), this.plansNextInput(chat), clientMessageId, accepted);
   }
 
   /**
    * Record the user's message (as shown) and start an orchestrator run. Commands (/plan, /goal …)
    * use this with their own run; errors end the run with a visible message.
    */
-  async startTurn(chatId: number, display: string, attachmentIds: number[], run: () => Promise<void>, plan = false) {
+  async startTurn(chatId: number, display: string, attachmentIds: number[], run: () => Promise<void>, plan = false,
+    clientMessageId?: string, accepted?: (eventId: number) => void) {
     const attachments = this.store.attachmentsFor(attachmentIds);
     const isFirst = !this.store.hasUserEvent(chatId) && !this.store.chat(chatId)?.fork;
-    const userEvent = this.store.addUserEvent(chatId, { type: "user", text: display, attachments, ...(plan ? { plan: true as const } : {}) }, attachmentIds);
+    const userEvent = this.store.addUserEvent(chatId, { type: "user", text: display, attachments,
+      ...(plan ? { plan: true as const } : {}), ...(clientMessageId ? { clientMessageId } : {}) }, attachmentIds);
     this.sink.event(userEvent);
     this.updateChat(chatId, {
       status: "working",
       touch: true,
       title: isFirst ? titleFrom(display, attachments.length) : undefined,
     });
+    accepted?.(userEvent.id);
+    this.startingTurns.add(chatId);
     try {
       await run();
     } catch (e) {
@@ -1453,12 +1503,30 @@ export class ChatManager {
       this.emit(chatId, "orch", "orch", end);
       this.onDriverEvent?.(chatId, "orch", end);
       this.orchTurnEnded(chatId, end);
-    }
+    } finally { this.startingTurns.delete(chatId); }
   }
 
   /** The orchestrator's turn finished: the instruction is done. */
   /** Final status to apply once still-running workers finish (orchestrator ended first). */
   private pendingFinal = new Map<number, "done" | "error" | "idle">();
+
+  reconcileIdleChat(chat: Chat, now: number) {
+    if (!["working", "approval"].includes(chat.status)) return;
+    const waiting = this.approvals.pendingCount(chat.id) > 0 || this.awaitingUser?.(chat.id);
+    if (waiting) {
+      if (chat.status !== "approval") this.updateChat(chat.id, { status: "approval" });
+      return;
+    }
+    if (this.isBusy(chat.id) || this.startingTurns.has(chat.id) || this.followups.has(chat.id)) return;
+    const pending = this.pendingFinal.get(chat.id);
+    if (!pending && now - chat.lastActiveAt < 60_000) return;
+    const end = pending ? undefined : this.store.latestMasterEnd(chat.id);
+    const status = pending ?? (end ? end.interrupted ? "idle" : end.ok ? "done" : "error" : "interrupted");
+    this.pendingFinal.delete(chat.id);
+    if (status === "interrupted")
+      this.emit(chat.id, "orch", null, { type: "notice", text: "실행 중인 작업이 없어서 작업 상태를 중단됨으로 정리했습니다. 기존 기록은 보존됩니다." });
+    this.updateChat(chat.id, { status, unread: status !== "idle", touch: true });
+  }
 
   orchTurnEnded(chatId: number, end: Extract<AgentEvent, { type: "turn_end" }>) {
     if (["pausing", "paused"].includes(this.store.chat(chatId)?.status ?? "")) return;
@@ -1468,6 +1536,7 @@ export class ChatManager {
       this.pendingFinal.set(chatId, end.interrupted ? "idle" : end.ok ? "done" : "error");
       return;
     }
+    this.pendingFinal.delete(chatId);
     this.approvals.cancelChat(chatId);
     this.updateChat(chatId, {
       status: end.interrupted ? "idle" : end.ok ? "done" : "error",
@@ -1477,6 +1546,7 @@ export class ChatManager {
   }
 
   async stop(chatId: number) {
+    this.stoppedFollowupEpoch.set(chatId, (this.stoppedFollowupEpoch.get(chatId) ?? 0) + 1);
     this.approvals.cancelChat(chatId);
     await Promise.allSettled(Object.values(this.live.get(chatId) ?? {}).map((l) => l?.driver.stop()));
     this.pendingFinal.delete(chatId);

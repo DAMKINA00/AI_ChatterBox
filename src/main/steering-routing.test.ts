@@ -42,6 +42,46 @@ test("follow-ups are delivered once per run and replayable after pause without l
   } finally { await f.close(); }
 });
 
+test("UI submissions are acknowledged when saved, while slow follow-ups stay in send order", async () => {
+  const f = fixture();
+  try {
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const seen: string[] = [];
+    f.chats.busySend = async (_chat, input) => {
+      seen.push(input.text);
+      if (input.text === "first") await blocked;
+    };
+    const first = f.chats.submit(f.chat.id, "first", [], "now", "test-first");
+    const second = f.chats.submit(f.chat.id, "second", [], "now", "test-second");
+    const ids = await Promise.all([first, second]);
+    assert.deepEqual(seen, ["first"]);
+    const events = f.store.events(f.chat.id).filter(e => e.event.type === "user");
+    assert.deepEqual(events.map(e => e.id), ids);
+    assert.deepEqual(events.map(e => e.event.type === "user" && e.event.clientMessageId), ["test-first", "test-second"]);
+    release();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.deepEqual(seen, ["first", "second"]);
+  } finally { await f.close(); }
+});
+
+test("a finished incomplete master turn stops showing work, while a live user question stays actionable", async () => {
+  const f = fixture();
+  try {
+    const id = f.chat.id;
+    f.store.addEvent(id, "orch", "orch", { type: "turn_end", ok: false, error: "미완료: 범위 승인 필요" });
+    await f.engine.sweepWorkerRecovery(Date.now() + 61_000);
+    assert.equal(f.store.chat(id)?.status, "error");
+    f.store.updateChat(id, { status: "working" });
+    const answer = f.engine.askUser(id, "범위를 확대할까요?", ["허용", "거부"]);
+    await f.engine.sweepWorkerRecovery(Date.now() + 61_000);
+    assert.equal(f.store.chat(id)?.status, "approval");
+    f.engine.checkCompletion(id, { type: "turn_end", ok: false });
+    assert.match(await answer, /종료/);
+    assert.ok(f.store.events(id).some(e => e.event.type === "ask_user_answer" && e.event.answer === "(응답 대기 종료)"));
+  } finally { await f.close(); }
+});
+
 test("routing and bridge tools work without a project analysis service", async () => {
   const f = fixture();
   try {

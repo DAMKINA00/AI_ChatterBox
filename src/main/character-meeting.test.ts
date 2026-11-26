@@ -1,14 +1,43 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { resolve } from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { CharacterMeeting } from "./character-meeting";
 import { parseCharacterModels, parseMeetingRequest, type MeetingEvent } from "../shared/character-meeting";
 import type { ChatManager } from "./chats";
 import { CharacterChat } from "./character-chat";
 import { BoardroomMemory } from "./boardroom-memory";
 import { agendaUrls, parseWebSources, type WebLookup } from "./boardroom-web";
+import { BoardroomHistory } from "./boardroom-history";
+import { Store } from "./db";
 
 const id = "a".repeat(32);
+
+test("completed Boardroom messages and the stream cursor survive reopening the database", async t => {
+  const folder = mkdtempSync(join(tmpdir(), "cbx-boardroom-history-"));
+  const path = join(folder, "boardroom.db");
+  let store = new Store(path);
+  t.after(() => { store.close(); rmSync(folder, { recursive: true, force: true }); });
+  const create = () => new CharacterMeeting({
+    configured: () => [],
+    meetingEligibility: () => "available",
+    meetingReply: async () => "",
+  }, () => ({}), () => {}, undefined, { history: new BoardroomHistory(store) });
+  const first = create();
+  await first.start({ requestId: id, text: "이전 회의 안건" });
+  const snapshot = first.snapshot();
+  store.close();
+  store = new Store(path);
+  const restarted = create();
+  assert.deepEqual(restarted.snapshot(), snapshot);
+  assert.equal(restarted.snapshot().requestId, null);
+  assert.deepEqual(restarted.snapshot().drafts, []);
+  await restarted.start({ requestId: "b".repeat(32), text: "새 회의 안건" });
+  const next = restarted.snapshot();
+  assert.ok(next.seq > snapshot.seq);
+  assert.deepEqual(next.messages.map(message => message.text), ["이전 회의 안건", "새 회의 안건"]);
+});
 
 test("room narrows the first question, passes each finished contribution to the next speaker and concludes dynamically", async () => {
   const events: MeetingEvent[] = [];

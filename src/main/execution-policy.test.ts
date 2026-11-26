@@ -394,6 +394,7 @@ test("failed master startup ends the review restriction and permits a later ordi
   chats.sink = { event() {} };
   chats.updateChat = () => undefined;
   chats.orchTurnEnded = () => undefined;
+  chats.startingTurns = new Set<number>();
   let disposed = false;
   chats.disposeRole = async () => { disposed = true; };
   chats.emit = (...args: any[]) => events.push(args[3]);

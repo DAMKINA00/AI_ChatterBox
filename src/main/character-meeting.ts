@@ -1,16 +1,17 @@
 import { isAbsolute } from "node:path";
-import { CHARACTER_PROVIDERS, type CharacterModel, type CharacterModels, type MeetingEvent, type MeetingMessage, type MeetingRequest, type MeetingSnapshot } from "../shared/character-meeting";
+import { CHARACTER_PROVIDERS, MAX_MEETING_HISTORY, type CharacterModel, type CharacterModels, type MeetingEvent, type MeetingMessage, type MeetingRequest, type MeetingSnapshot } from "../shared/character-meeting";
 import { MONITOR_CHARACTERS, MONITOR_CHARACTER_LABEL, type MonitorCharacterId } from "../shared/usage-companion";
 import type { CharacterChat } from "./character-chat";
 import { exploreRepository } from "./council-repository";
 import { agendaUrls, type WebLookup, type WebSource } from "./boardroom-web";
 import { readCredits, STRENGTHS, type BoardroomMemory, type Credit, type ModelIdentity } from "./boardroom-memory";
+import type { BoardroomHistory } from "./boardroom-history";
 
 type Participant = Exclude<MonitorCharacterId, "orch">;
 type SpeakingTurn = { speaker: Participant; focus: string; keywords: string[]; mode: "reply" | "interject" | "reaction"; webQuery?: string };
 type DiscussionKind = "discussion" | "interjection" | "agreement" | "objection" | "evidence";
 type DiscussionEntry = { speaker: Participant; focus: string; text: string; kind: DiscussionKind };
-type MeetingServices = { web?: (lookup: WebLookup, signal: AbortSignal) => Promise<WebSource[]>; memory?: BoardroomMemory };
+type MeetingServices = { web?: (lookup: WebLookup, signal: AbortSignal) => Promise<WebSource[]>; memory?: BoardroomMemory; history?: BoardroomHistory };
 type Event = MeetingEvent extends infer E ? E extends MeetingEvent ? Omit<E, "requestId" | "seq"> : never : never;
 type MessageContent = Omit<MeetingMessage, "id" | "at">;
 const MAX_TURNS = 6;
@@ -34,7 +35,14 @@ export class CharacterMeeting {
     private readonly publish: (event: MeetingEvent) => void,
     private readonly explore = exploreRepository,
     private readonly services: MeetingServices = {},
-  ) {}
+  ) {
+    const saved = services.history?.load();
+    if (saved) {
+      this.history = saved.messages;
+      this.seq = saved.seq;
+      this.status = saved.status;
+    }
+  }
 
   start(request: MeetingRequest): Promise<void> {
     if (this.active) throw new Error("다른 회의 안건을 처리 중이에요.");
@@ -57,6 +65,12 @@ export class CharacterMeeting {
   async dispose() {
     this.active?.controller.abort();
     await this.active?.result;
+  }
+
+  private saveHistory(status: string) {
+    try { this.services.history?.save({ seq: this.seq + 1, status, messages: this.history }); }
+    catch { return false; }
+    return true;
   }
 
   private availability(settings = this.models(), providers = this.chat.configured()) {
@@ -82,7 +96,8 @@ export class CharacterMeeting {
       const message = { ...content, id: draft?.id ?? `${requestId}:${this.seq + 1}`, at: draft?.at ?? Date.now() };
       this.drafts.delete(message.id);
       this.history.push(message);
-      this.history = this.history.slice(-45);
+      this.history = this.history.slice(-MAX_MEETING_HISTORY);
+      this.saveHistory("앱 종료로 진행 중이던 회의가 중단됐어요.");
       emit({ type: "message", message });
       return message;
     };
@@ -305,6 +320,7 @@ export class CharacterMeeting {
     } catch {
       end = signal.aborted ? "회의를 중단했어요." : "회의를 마치지 못했어요. 모델 연결이나 사용량을 확인해 주세요.";
     } finally {
+      if (!this.saveHistory(end)) end += " 회의 기록을 저장하지 못했어요.";
       this.status = end;
       this.active = undefined;
       emit({ type: "end", text: end });

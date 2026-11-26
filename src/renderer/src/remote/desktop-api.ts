@@ -281,14 +281,15 @@ export function createRemoteApi(hooks: RemoteApiHooks): RemoteApi {
       return (await get<{ rows: RunStatsRows }>(url("/api/chats/:id/run-stats", chatId, now ? { live: "1" } : undefined))).rows;
     },
     searchChats: async q => (await get<RemoteSearchResponse>(url("/api/search", undefined, { q }))).chatIds,
-    async send(chatId, text, attachmentIds, delivery) {
+    async send(chatId, text, attachmentIds, delivery, clientMessageId) {
       const attachments = attachmentIds.map(id => {
         const uuid = pendingUploads.get(id);
         if (!uuid) throw new Error("첨부 목록이 오래되었습니다. 첨부를 지우고 다시 올리세요.");
         return { id, uuid };
       });
-      await post(url("/api/chats/:id/send", chatId), { text, delivery: delivery ?? "now", attachments });
+      const result = await post<{ eventId?: number | null }>(url("/api/chats/:id/send", chatId), { text, delivery: delivery ?? "now", attachments, clientMessageId });
       for (const id of attachmentIds) pendingUploads.delete(id);
+      return result?.eventId;
     },
     stop: async chatId => { await post(url("/api/chats/:id/stop", chatId)); },
     pause: async chatId => { await post(url("/api/chats/:id/pause", chatId)); },

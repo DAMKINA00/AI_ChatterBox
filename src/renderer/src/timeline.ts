@@ -12,7 +12,7 @@ import type { AgentExpression, AgentEvent, ApprovalDecision, ApprovalRequest, At
 type ItemKinds =
   | { kind: "artifacts"; key: string; paths: string[] }
   /** eventId: the persisted event (fork point); absent for live previews. */
-  | { kind: "user"; key: string; text: string; attachments: AttachmentRef[]; at: number; queued?: boolean; delivery?: "now" | "next"; eventId?: number }
+  | { kind: "user"; key: string; text: string; attachments: AttachmentRef[]; at: number; queued?: boolean; delivery?: "now" | "next"; eventId?: number; submission?: "sending" | "failed"; failure?: string }
   /**
    * room: a group chat line (send_message to=all or an app copy). origin "result": the app's copy of a finished
    * consult, not something the worker said.

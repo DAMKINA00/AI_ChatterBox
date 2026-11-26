@@ -810,6 +810,16 @@ export class Store {
       .all(chatId)
       .map((r: Row) => ({ id: r.id, chatId: r.chat_id, node: r.node, role: r.role, at: r.ts, event: JSON.parse(r.payload_json) }));
   }
+  latestMasterEnd(chatId: number): Extract<AgentEvent, { type: "turn_end" }> | undefined {
+    const row = this.db.prepare(`
+      SELECT CASE WHEN type = 'turn_end' THEN payload_json END AS payload_json
+      FROM chat_events
+      WHERE chat_id = ? AND node = 'orch'
+        AND ((type = 'turn_end' AND role = 'orch') OR (type = 'user' AND COALESCE(json_extract(payload_json, '$.queued'), 0) = 0))
+      ORDER BY id DESC LIMIT 1
+    `).get(chatId) as Row | undefined;
+    return row?.payload_json ? JSON.parse(row.payload_json) : undefined;
+  }
   latestForkAnchor(chatId: number): { id: number; preview: string } | null {
     const row = this.db.prepare(`
       SELECT id, substr(json_extract(payload_json, '$.text'), 1, 240) AS preview

@@ -627,6 +627,7 @@ export class Orchestrator {
 
   constructor(private chats: ChatManager) {
     chats.beforeMasterEnd = (chatId, event) => this.checkCompletion(chatId, event);
+    chats.awaitingUser = chatId => [...this.asks.values()].some(ask => ask.chatId === chatId && !ask.keepStatus);
     // Native plan tools (Claude TodoWrite, Codex plan updates) follow the same rules as the checklist
     // tool. A whole list cannot be refused, so steps that must stay are kept instead of dropped.
     chats.attributePlan = (chatId, event) => {
@@ -777,6 +778,10 @@ export class Orchestrator {
 
   /** Silence prompts a check, not termination: a long tool may still own its write scope. */
   async sweepWorkerRecovery(now = Date.now()) {
+    for (const chat of this.chats.store.listChats()) {
+      if (this.recoveryFlights.has(chat.id) || this.pauseFlights.has(chat.id) || this.planExecutionFlights.has(chat.id)) continue;
+      this.chats.reconcileIdleChat(chat, now);
+    }
     for (const [chatId, inst] of this.instructions) {
       const chat = this.chats.store.chat(chatId);
       if (!chat || this.stopped.has(chatId) || ["paused", "pausing", "approval"].includes(chat.status) || this.recoveryFlights.has(chatId)) continue;
@@ -2363,6 +2368,12 @@ export class Orchestrator {
   }
 
   private checkCompletion(chatId: number, end: Extract<AgentEvent, { type: "turn_end" }>): Extract<AgentEvent, { type: "turn_end" }> | null {
+    for (const [id, question] of this.asks) {
+      if (question.chatId !== chatId || question.keepStatus) continue;
+      this.asks.delete(id);
+      this.chats.emit(chatId, "orch", null, { type: "ask_user_answer", id, answer: "(응답 대기 종료)" });
+      question.resolve("마스터의 턴이 종료되어 답변을 받지 못했습니다.");
+    }
     const inst = this.instructions.get(chatId);
     if (!inst || !end.ok || end.interrupted || this.stopped.has(chatId) || this.planning.has(chatId)) return end;
     const chat = this.chats.store.chat(chatId);
@@ -2647,7 +2658,7 @@ export class Orchestrator {
     let accepted = false;
     try { accepted = !!(await driver?.steer?.({ ...input, text: prompt })); }
     catch { /* A turn can finish between clicking send and the native receipt. Keep the message queued. */ }
-    if (this.stopped.has(chat.id)) {
+    if (this.stopped.has(chat.id) || this.instructions.get(chat.id) !== inst) {
       this.chats.emit(chat.id, "orch", null, { type: "notice", text: "작업이 중지되어 즉시 전달하지 않았습니다. 이 메시지는 대화에 남아 있습니다." });
     } else if (accepted) {
       remember();
@@ -2979,7 +2990,8 @@ export class Orchestrator {
     this.asks.delete(askId);
     this.chats.emit(chatId, "orch", null, { type: "ask_user_answer", id: askId, answer });
     // The plan confirmation can be answered after the turn ended: it never marks the chat working by itself.
-    if (!a.keepStatus) this.chats.updateChat(chatId, { status: "working" });
+    if (!a.keepStatus && !this.chats.awaitingUser?.(chatId) && this.chats.approvals.pendingCount(chatId) === 0)
+      this.chats.updateChat(chatId, { status: "working" });
     a.resolve(`사용자 답변: ${answer}`);
     return true;
   }

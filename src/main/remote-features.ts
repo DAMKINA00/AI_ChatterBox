@@ -346,8 +346,12 @@ export class RemoteFeatures {
       const keys: RemoteUploadKey[] = list.map(a => ({ id: a.id, uuid: a.uuid }));
       // The core checks each {id, uuid} is an unsent remote upload of this chat whose file exists, and
       // links them in the same step (else 409: the web refreshes its list). Attachments alone may go with an empty text.
-      await core(call, "remote:send", [id, text(body.text ?? "", "지시", REMOTE_LIMITS.text, keys.length > 0), keys, delivery]);
-      send(res, 200, { ok: true });
+      const clientMessageId = body.clientMessageId;
+      if (clientMessageId !== undefined && (typeof clientMessageId !== "string" || !/^[a-zA-Z0-9-]{1,80}$/.test(clientMessageId)))
+        throw new HttpError(400, "메시지 식별자가 올바르지 않습니다.");
+      const eventId = await core<number | null>(call, "remote:send", [id, text(body.text ?? "", "지시", REMOTE_LIMITS.text, keys.length > 0), keys, delivery,
+        ...(clientMessageId === undefined ? [] : [clientMessageId])]);
+      send(res, 200, { ok: true, ...(clientMessageId === undefined ? {} : { eventId }) });
       return true;
     }
     if (action === "plan-mode") {

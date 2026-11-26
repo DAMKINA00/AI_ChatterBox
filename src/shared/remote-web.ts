@@ -273,7 +273,7 @@ export interface RemoteCommandRequest { name: RemoteCommandName; arg: string }
  * POST /api/chats/:id/send (existing, extended). attachments: only this chat's remote uploads not yet sent,
  * each as {id, uuid}; one that is gone or whose uuid differs (stale list) → 409.
  */
-export interface RemoteSendRequest { text: string; delivery?: "now" | "next"; attachments?: RemoteUploadKey[] }
+export interface RemoteSendRequest { text: string; delivery?: "now" | "next"; attachments?: RemoteUploadKey[]; clientMessageId?: string }
 
 /** GET /api/search?q= */
 export interface RemoteSearchResponse { chatIds: number[] }

@@ -18,6 +18,7 @@ import { CoreRpc } from "./core-rpc";
 import { CharacterChat } from "./character-chat";
 import { CharacterMeeting } from "./character-meeting";
 import { BoardroomMemory } from "./boardroom-memory";
+import { BoardroomHistory } from "./boardroom-history";
 import { CHARACTER_PROVIDERS, meetingRequestId, parseCharacterModels, parseMeetingRequest } from "../shared/character-meeting";
 import { parseCharacterAsk, type CharacterAnswer } from "../shared/usage-companion";
 
@@ -116,7 +117,9 @@ function registerHandlers(rpc: CoreRpc) {
   ipcMain.handle("chats:hasAttachment", (_e, id: number, attachmentId: number) => store.chatHasAttachment(id, attachmentId));
   ipcMain.handle("chats:search", (_e, q: string) => (q.trim() ? store.searchChats(q.trim()) : []));
   const notDeleting = (id: number) => { if (remoteDeleting.has(id)) throw new Error("채팅을 삭제하는 중입니다."); };
-  ipcMain.handle("chats:send", (_e, id: number, text: string, attachmentIds: number[], delivery?: "now" | "next") => { notDeleting(id); return chats.send(id, text, attachmentIds, delivery); });
+  ipcMain.handle("chats:send", (_e, id: number, text: string, attachmentIds: number[], delivery?: "now" | "next", clientMessageId?: string) => {
+    notDeleting(id); return chats.submit(id, text, attachmentIds, delivery, clientMessageId);
+  });
   ipcMain.handle("monitor:character-question", async (_e, value: unknown): Promise<CharacterAnswer> => {
     const ask = parseCharacterAsk(value);
     if (!ask) return { status: "error" };
@@ -215,9 +218,9 @@ function registerHandlers(rpc: CoreRpc) {
   });
   ipcMain.handle("remote:uploads", (_e, chatId?: number) => listRemoteUploads(store, attachments, chatId));
   ipcMain.handle("remote:attachment-remove", (_e, chatId: number, key: RemoteUploadKey) => removeRemoteUpload(store, attachments, chatId, key));
-  ipcMain.handle("remote:send", (_e, chatId: number, text: string, keys: RemoteUploadKey[], delivery?: "now" | "next") => {
+  ipcMain.handle("remote:send", (_e, chatId: number, text: string, keys: RemoteUploadKey[], delivery?: "now" | "next", clientMessageId?: string) => {
     notDeleting(chatId);
-    return chats.send(chatId, text, checkRemoteSend(store, attachments, chatId, keys), delivery);
+    return chats.submit(chatId, text, checkRemoteSend(store, attachments, chatId, keys), delivery, clientMessageId);
   });
 
   // attachments
@@ -301,6 +304,7 @@ export async function runCore(dataDir: string, pipe: string, token: string, test
     characterMeeting = new CharacterMeeting(characterChat, characterModels, event => rpc.emit("monitor:meeting-event", event), undefined, {
       web: (input, signal) => characterChat.meetingWeb(input, signal),
       memory: new BoardroomMemory(store),
+      history: new BoardroomHistory(store),
     });
     const channels = registerHandlers(rpc);
     await chats.start();

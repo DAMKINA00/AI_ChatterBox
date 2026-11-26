@@ -331,6 +331,8 @@ const ItemBody = memo(function ItemBody({ item, chatId, nested }: { item: Item; 
           <div className="min-w-0">
             <div className="mb-0.5 flex min-w-0 items-center gap-2">
               <span className="text-[12px] font-semibold text-foreground">관리자</span>
+              {item.submission && <span className={item.submission === "failed" ? "text-[11px] text-destructive" : "text-[11px] text-muted-foreground"}
+                title={item.failure}>{item.submission === "failed" ? "전송 실패" : "보내는 중"}</span>}
               {item.queued && <span className="text-[11px] text-muted-foreground">{item.delivery === "now" ? "즉시 전달 요청" : "다음 단계 추가 지시"}</span>}
               {forkId && <ForkMessageButton chatId={chatId} eventId={forkId} preview={item.text} className={FORK_ACTION} />}
             </div>

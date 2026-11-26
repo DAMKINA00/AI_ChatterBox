@@ -3,6 +3,7 @@ import { isMonitorCharacter, type MonitorCharacterId } from "./usage-companion";
 
 export const CHARACTER_PROVIDERS = { claude: "claude", gpt: "codex", gemini: "gemini", grok: "grok", deepseek: "deepseek" } as const;
 export const CHARACTER_MEETING_VERSION = 1;
+export const MAX_MEETING_HISTORY = 200;
 export type CharacterModel = { agent: AgentKind; model: string };
 export type CharacterModels = Partial<Record<MonitorCharacterId, CharacterModel>>;
 export type MeetingRequest = { requestId: string; text: string; folder?: string };

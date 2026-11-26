@@ -150,7 +150,7 @@ try {
       nextClass.includes("bg-transparent"),
   );
   const hint = await page.locator('[data-testid="send"]').locator("xpath=../..").textContent();
-  check("busy composer explains Enter, Alt+Enter, Shift+Enter and paste", ["Enter", "Alt+Enter", "Shift+Enter", "Ctrl+V"].every((key) => hint?.includes(key)));
+  check("busy composer shows next-stage delivery and newline hints", ["Alt+Enter", "Shift+Enter"].every((key) => hint?.includes(key)));
   check("busy placeholder names immediate and next delivery", (await box.getAttribute("placeholder"))?.includes("Enter") && (await box.getAttribute("placeholder"))?.includes("Alt+Enter"));
   await page.screenshot({ path: join(base, "composer-busy.png") });
 
@@ -196,6 +196,40 @@ try {
   sends = await waitForSends(app, 6);
   check("idle attachment-only send preserves attachment ids", sends[5]?.delivery === "now" && sends[5]?.text === "" && JSON.stringify(sends[5]?.attachments) === JSON.stringify([901]));
   check("attachment-only send clears the pending chip", (await page.locator('[data-testid="pending-attachments"]').count()) === 0);
+
+  await setChatStatus(app, chat, "approval");
+  await page.waitForSelector('[data-testid="awaiting-user"]');
+  check("approval wait does not show a working spinner", (await page.locator('[data-testid="working"]').count()) === 0);
+  await app.evaluate(({ ipcMain, BrowserWindow }) => {
+    globalThis.pendingSends = [];
+    globalThis.acceptSend = (index) => {
+      const { id, text, clientMessageId, accept } = globalThis.pendingSends[index];
+      const eventId = 1000 + index;
+      BrowserWindow.getAllWindows()[0].webContents.send("chat:event", {
+        id: eventId, chatId: id, node: "orch", role: null, at: Date.now(),
+        event: { type: "user", text, attachments: [], clientMessageId },
+      });
+      accept(eventId);
+    };
+    ipcMain.removeHandler("chats:send");
+    ipcMain.handle("chats:send", (_event, id, text, _attachments, _delivery, clientMessageId) =>
+      new Promise(accept => globalThis.pendingSends.push({ id, text, clientMessageId, accept })));
+  });
+  await box.fill("first delayed follow-up");
+  await box.press("Enter");
+  check("Enter clears the composer before the server accepts the message", await box.inputValue() === "");
+  const firstPending = page.getByTestId("user-message").filter({ hasText: "first delayed follow-up" });
+  await firstPending.getByText("보내는 중").waitFor();
+  await box.fill("second delayed follow-up");
+  await box.press("Enter");
+  const secondPending = page.getByTestId("user-message").filter({ hasText: "second delayed follow-up" });
+  await secondPending.getByText("보내는 중").waitFor();
+  await app.evaluate(() => globalThis.acceptSend(0));
+  await firstPending.getByText("보내는 중").waitFor({ state: "detached" });
+  check("saved message replaces its optimistic row exactly once", await firstPending.count() === 1);
+  await app.evaluate(() => globalThis.acceptSend(1));
+  await secondPending.getByText("보내는 중").waitFor({ state: "detached" });
+  check("back-to-back sends preserve their text while both are awaiting acceptance", await secondPending.count() === 1);
 } catch (error) {
   check("composer e2e completed", false, error instanceof Error ? error.stack ?? error.message : String(error));
 } finally {

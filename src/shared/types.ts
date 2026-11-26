@@ -435,7 +435,7 @@ export type AgentEvent =
   | { type: "image_generation"; id: string; status: "running" | "done" | "error"; prompt?: string; attachment?: AttachmentRef; error?: string }
   | { type: "expression"; expression: AgentExpression }
   /** plan: sent while plan mode was on (a planning request or a revision of the waiting proposal). */
-  | { type: "user"; text: string; attachments: AttachmentRef[]; queued?: boolean; delivery?: "now" | "next"; plan?: true }
+  | { type: "user"; text: string; attachments: AttachmentRef[]; queued?: boolean; delivery?: "now" | "next"; plan?: true; clientMessageId?: string }
   | { type: "text_delta"; text: string }
   | { type: "text"; text: string }
   /** clipped: original length when a history page sent a shortened input/output (see shared/event-page.ts). */
@@ -627,7 +627,7 @@ export interface ChatterBoxApi {
   runStats(chatId: number, now?: number): Promise<RunStatsRows>;
   /** Chat ids whose messages contain the text. */
   searchChats(q: string): Promise<number[]>;
-  send(chatId: number, text: string, attachmentIds: number[], delivery?: "now" | "next"): Promise<void>;
+  send(chatId: number, text: string, attachmentIds: number[], delivery?: "now" | "next", clientMessageId?: string): Promise<number | null | void>;
   stop(chatId: number): Promise<void>;
   pause(chatId: number): Promise<void>;
   /** Continue a run the app quit or crashed in the middle of. */

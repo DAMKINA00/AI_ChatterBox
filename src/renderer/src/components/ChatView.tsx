@@ -55,6 +55,7 @@ import { ForkOrigin } from "./Fork";
 import { ReviewTotalsBar } from "./ReviewResult";
 import { RunStatsDialog } from "./RunStats";
 import { useMobile } from "../lib/remote-mode";
+import { forgetOutgoing, sendOutgoing, useOutgoing } from "../lib/outgoing-messages";
 
 export function ChatView({ chat, project, node }: { chat: Chat; project: Project; node?: NodeId }) {
   const events = useStore((s) => s.events[chat.id]);
@@ -65,7 +66,17 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
   const consults = useStore((s) => s.consults[chat.id]);
   const busy = chat.status === "working" || chat.status === "approval";
   // Items a history page shortened are marked so the view can load their original.
-  const items = useMemo(() => events ? markClipped(chatTimelines.build(chat.id, events, node, busy), events) : [], [chat.id, events, node, busy]);
+  const outgoing = useOutgoing(chat.id);
+  const confirmed = useMemo(() => new Set(outgoing.length ? events?.flatMap(e =>
+    e.event.type === "user" && e.event.clientMessageId ? [e.event.clientMessageId] : []) ?? [] : []), [events, outgoing.length]);
+  useEffect(() => { if (confirmed.size) forgetOutgoing(chat.id, confirmed); }, [chat.id, confirmed]);
+  const items = useMemo(() => {
+    const persisted = events ? markClipped(chatTimelines.build(chat.id, events, node, busy), events) : [];
+    if (!outgoing.length || node && node !== "orch") return persisted;
+    return [...persisted, ...outgoing.filter(message => !confirmed.has(message.id)).map(message => ({
+      ...message, kind: "user" as const, key: `outgoing:${message.id}`, submission: message.failure ? "failed" as const : "sending" as const,
+    }))];
+  }, [chat.id, events, node, busy, outgoing, confirmed]);
   const instructionAt = useMemo(() => latestInstructionAt(all, chat.createdAt), [all, chat.createdAt]);
   const [dragging, setDragging] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -152,7 +163,7 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
       {!node && history?.snapshot && history.snapshotAt !== undefined && history.snapshot.approvals.total > 0 && (
         <OlderApprovals chatId={chat.id} before={history.snapshotAt} first={history.snapshot.approvals.pending} total={history.snapshot.approvals.total} />
       )}
-      <Timeline key={node ?? "all"} items={items} chatId={chat.id} role={streamRole} busy={busy} instructionAt={instructionAt} empty={!events?.length && !history?.hasMore} loading={!events} loadError={loadError}
+      <Timeline key={node ?? "all"} items={items} chatId={chat.id} role={streamRole} busy={busy} awaitingUser={chat.status === "approval"} lastActiveAt={chat.lastActiveAt} instructionAt={instructionAt} empty={!items.length && !history?.hasMore} loading={!events && !items.length} loadError={loadError}
         hasOlder={!!history?.hasMore} loadingOlder={!!history?.loadingOlder} masterView={!node || node === "orch"} mainView={!node}
         searchOpen={searchOpen} searchQuery={searchQuery} onSearchQuery={setSearchQuery} onCloseSearch={() => { setSearchOpen(false); setSearchQuery(""); }} />
       {chat.status === "interrupted" && <InterruptedBanner chat={chat} />}
@@ -558,7 +569,7 @@ function InterruptedBanner({ chat }: { chat: Chat }) {
       <History className="size-4 shrink-0 text-warning" />
       <div className="min-w-0 flex-1 text-[13px]">
         <div className="font-medium">중단됨</div>
-        <div className="text-[12px] text-muted-foreground">이전 실행이 앱 종료로 중단됐습니다. 이어서 진행하면 마스터가 작업 폴더 상태를 확인하고 남은 작업을 마칩니다.</div>
+        <div className="text-[12px] text-muted-foreground">이전 실행이 중단됐습니다. 이어서 진행하면 마스터가 작업 폴더 상태를 확인하고 남은 작업을 진행합니다.</div>
       </div>
       <Button
         size="sm"
@@ -607,7 +618,7 @@ function useStatusAnnouncement(status: ChatStatus, events: TimelineEvent[] | und
   return text;
 }
 
-function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, loadError, hasOlder, loadingOlder, masterView, mainView, searchOpen, searchQuery, onSearchQuery, onCloseSearch }: { items: ReturnType<typeof buildItems>; chatId: number; role?: Role; busy: boolean; instructionAt: number; empty: boolean; loading: boolean; loadError?: string; hasOlder: boolean; loadingOlder: boolean; masterView: boolean; mainView: boolean; searchOpen: boolean; searchQuery: string; onSearchQuery: (q: string) => void; onCloseSearch: () => void }) {
+function Timeline({ items, chatId, role, busy, awaitingUser, lastActiveAt, instructionAt, empty, loading, loadError, hasOlder, loadingOlder, masterView, mainView, searchOpen, searchQuery, onSearchQuery, onCloseSearch }: { items: ReturnType<typeof buildItems>; chatId: number; role?: Role; busy: boolean; awaitingUser: boolean; lastActiveAt: number; instructionAt: number; empty: boolean; loading: boolean; loadError?: string; hasOlder: boolean; loadingOlder: boolean; masterView: boolean; mainView: boolean; searchOpen: boolean; searchQuery: string; onSearchQuery: (q: string) => void; onCloseSearch: () => void }) {
   const loadOlder = useCallback(() => void useStore.getState().loadOlder(chatId), [chatId]);
   const ref = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
@@ -618,17 +629,18 @@ function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, lo
   if (atBottom) seen.current = seenReplies(items, mainView);
   const unseen = atBottom ? null : unseenLabel(unseenReplies(items, seen.current, mainView));
   const [now, setNow] = useState(() => Date.now());
+  const quietFor = now - lastActiveAt;
   const { history, pending } = useMemo(() => masterView ? {
     history: items.filter(item => item.kind !== "approval" || !!item.decision),
     pending: items.filter(item => item.kind === "approval" && !item.decision),
   } : { history: items, pending: [] }, [items, masterView]);
 
   useEffect(() => {
-    if (!busy) return;
+    if (!busy || awaitingUser) return;
     setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [busy, instructionAt]);
+  }, [busy, awaitingUser, instructionAt]);
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -679,7 +691,15 @@ function Timeline({ items, chatId, role, busy, instructionAt, empty, loading, lo
           ) : (
             <ItemList items={history} chatId={chatId} live={busy} older={hasOlder ? { loading: loadingOlder, load: loadOlder } : undefined} />
           )}
-          {busy && (
+          {awaitingUser && <div className="mt-4 flex items-center gap-2 text-[12px] text-warning" data-testid="awaiting-user">
+            <ShieldCheck className="size-3.5" /> 사용자 응답 대기
+          </div>}
+          {busy && !awaitingUser && quietFor >= 180_000 && (
+            <div className="mt-4 flex items-center gap-2 text-[12px] text-muted-foreground" data-testid="waiting-for-activity">
+              <History className="size-3.5" /> 새 응답 대기 · 마지막 활동 {formatElapsed(quietFor)} 전
+            </div>
+          )}
+          {busy && !awaitingUser && quietFor < 180_000 && (
             <div className="mt-4 flex items-center gap-2 text-[12px] text-muted-foreground" data-testid="working">
               <WorkingIndicator chatId={chatId} role={role} className="size-3.5" /> 작업 중… · {formatElapsed(now - instructionAt)}
             </div>
@@ -813,7 +833,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
   const [text, setText] = useState(() => drafts.get(chat.id)?.text ?? "");
   const [attachments, setAttachments] = useState<AttachmentRef[]>(() => drafts.get(chat.id)?.attachments ?? []);
   const [uploading, setUploading] = useState(0);
-  const [sending, setSending] = useState(false);
+  const [sending, setSending] = useState(0);
   const [pausePending, setPausePending] = useState<"pause" | "resume" | null>(null);
   const area = useRef<HTMLTextAreaElement>(null);
   const paused = chat.status === "paused";
@@ -940,22 +960,18 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
     const cmd = /^\/([a-z-]+)(?:\s+([\s\S]*))?$/i.exec(t);
     if (cmd) return void runCommand(cmd[1].toLowerCase(), cmd[2] ?? "");
     if (unavailableMaster) return void toast("Antigravity CLI(agy)가 설치되지 않았습니다. 다른 마스터를 선택하거나 설치 후 다시 확인하세요.");
-    if ((!t && !attachments.length) || sending || uploading) return;
-    setSending(true);
+    if ((!t && !attachments.length) || uploading) return;
+    const files = attachments;
+    setText("");
+    setAttachments([]);
+    drafts.delete(chat.id);
+    setSending(count => count + 1);
     try {
-      await api.send(
-        chat.id,
-        t,
-        attachments.map((a) => a.id),
-        delivery,
-      );
-      setText("");
-      setAttachments([]);
-      drafts.delete(chat.id);
+      await sendOutgoing(chat.id, t, files, delivery);
     } catch (e) {
       toast(errorMessage(e));
     } finally {
-      setSending(false);
+      setSending(count => count - 1);
     }
   };
 
@@ -974,7 +990,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
     const t = setTimeout(() => setPlanTarget(null), PLAN_TOGGLE_SETTLE_MS);
     return () => clearTimeout(t);
   }, [planTarget]);
-  const canSend = (!!text.trim() || attachments.length > 0) && !sending && !uploading && !pauseInFlight && !planBusy && (!unavailableMaster || text.trim().startsWith("/"));
+  const canSend = (!!text.trim() || attachments.length > 0) && !uploading && !pauseInFlight && !planBusy && (!unavailableMaster || text.trim().startsWith("/"));
   const togglePlanMode = useCallback(async () => {
     // Serialized with sends: no toggle while a send is in flight, no send while a toggle settles.
     if (planTarget !== null || sending) return;
@@ -1107,7 +1123,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
             }
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && !mobile) {
               e.preventDefault();
-              void send(busy && e.altKey && !e.ctrlKey && !e.metaKey ? "next" : "now");
+              if (!e.repeat) void send(busy && e.altKey && !e.ctrlKey && !e.metaKey ? "next" : "now");
             }
           }}
         />
@@ -1135,7 +1151,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
               type="button"
               aria-pressed={planMode}
               aria-label={`계획 모드 ${planMode ? "켜짐" : "꺼짐"} (Alt+P)`}
-              disabled={planBusy || sending}
+              disabled={planBusy || sending > 0}
               aria-busy={planBusy || undefined}
               onClick={() => void togglePlanMode()}
               data-testid="plan-mode-toggle"
@@ -1177,7 +1193,7 @@ const Composer = forwardRef<ComposerHandle, { chat: Chat; project: Project; busy
           ) : null}
           {busy && <Button size="sm" variant="outline" onClick={() => void send("next")} disabled={!canSend} aria-label="다음 단계로 전달" title="Alt+Enter" data-testid="send-next" className={cn("rounded-full px-3.5", mobile && "h-11")}>{mobile ? "다음 단계" : "다음 단계 전달"}</Button>}
           <Button size="sm" onClick={() => void send()} disabled={!canSend} aria-label={paused ? "지시 보관" : busy ? "마스터에게 즉시 전달" : planActive && !slashInput ? "계획 세우기" : "보내기"} title="Enter" data-testid="send" className={cn("rounded-full px-3.5", planActive && !slashInput && "bg-orch text-white hover:bg-orch/90", mobile && "h-11 px-4")}>
-            {sending ? <Loader2 className="animate-spin" /> : planActive && !slashInput ? <ListChecks /> : <SendHorizontal />}
+            {planActive && !slashInput ? <ListChecks /> : <SendHorizontal />}
             {paused ? "지시 보관" : busy ? "즉시 전달" : planActive && !slashInput ? "계획 세우기" : "보내기"}
           </Button>
         </div>

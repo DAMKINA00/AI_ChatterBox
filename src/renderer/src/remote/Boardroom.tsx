@@ -2,7 +2,7 @@ import { memo, useEffect, useLayoutEffect, useRef, useState, type FormEvent, typ
 import { ArrowDown, ArrowUp, Bookmark, Hash, ImageIcon, MessagesSquare, Sparkles, Square, UsersRound } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { MeetingEvent, MeetingMessage, MeetingSnapshot } from "../../../shared/character-meeting";
+import { MAX_MEETING_HISTORY, type MeetingEvent, type MeetingMessage, type MeetingSnapshot } from "../../../shared/character-meeting";
 import { MONITOR_CHARACTERS, MONITOR_CHARACTER_LABEL, type MonitorCharacterId } from "../../../shared/usage-companion";
 import { AgentAvatar } from "../components/AgentAvatar";
 import { cn, errorMessage } from "../lib/utils";
@@ -56,7 +56,7 @@ function applyEvent(state: MeetingSnapshot, event: MeetingEvent): MeetingSnapsho
   }
   if (event.type === "message") {
     next.drafts = next.drafts.filter(post => post.id !== event.message.id);
-    next.messages = [...next.messages, event.message].slice(-45);
+    next.messages = [...next.messages, event.message].slice(-MAX_MEETING_HISTORY);
   }
   if (event.type === "withdraw") next.drafts = next.drafts.filter(post => post.id !== event.id);
   return next;
