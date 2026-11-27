@@ -2,7 +2,7 @@
 // number (its SSE id); a snapshot carries the number reached before it was read. Messages that arrive
 // while the snapshot loads are buffered and replayed on top of it.
 import type { Chat, ChatAgent, Consult, TimelineEvent } from "../../../shared/types";
-import { prependPage, stateEvents, type EventPage, type StateSnapshot } from "../../../shared/event-page";
+import { clearToolProgress, prependPage, stateEvents, type EventPage, type StateSnapshot } from "../../../shared/event-page";
 import { appendEvent } from "../timeline";
 
 /**
@@ -48,6 +48,8 @@ export function mergeSnapshot(snapshot: Detail & { seq: number }, buffered: Stre
       if (ev.chatId !== chatId) continue;
       const known = !!ev.id && (message.seq <= snapshot.seq || detail.events.some(x => x.id === ev.id));
       if (known) {
+        const events = clearToolProgress(detail.events, ev);
+        if (events !== detail.events) detail = { ...detail, events };
         if (closesStream(ev)) {
           const i = detail.events.findLastIndex(x => x.event.type === "text_delta" && x.node === ev.node && x.role === ev.role);
           if (i >= 0) detail = { ...detail, events: [...detail.events.slice(0, i), ...detail.events.slice(i + 1)] };

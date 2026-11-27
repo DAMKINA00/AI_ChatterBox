@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft, BarChart3, Flag, FolderKanban, LoaderCircle, LogOut, Monitor, Moon, Pause, Play,
-  MessageCircleQuestion, Pencil, Plus, Search, Settings2, Square, Sun, Users, X,
+  MessageCircleQuestion, Pencil, Plus, Search, Settings2, Square, Sun, X,
 } from "lucide-react";
 import { REMOTE_EVENTS, REMOTE_LIMITS, type RemoteChatResponse, type RemoteSearchResponse } from "../../../shared/remote-web";
 import { CONSULT_KIND_LABEL, roleName, type AttachmentRef, type Chat, type ChatAgent, type ChatStatus, type Consult, type ConsultStatus, type RunStatsRows, type TimelineEvent } from "../../../shared/types";
@@ -31,6 +31,7 @@ import { planHistory } from "../lib/plan-history";
 import { isPlanChangedError, PLAN_CHANGED_TEXT, planActionsAvailable, planRunArg, planVersion } from "../lib/plan-view";
 import { planAskId } from "../lib/plan-mode";
 import { consultCardDomId, ForkAction, ForkContext, ForkOriginBar, PlanHistoryList, PlanSteps, PlanSummary, ReviewBlock, ReviewTotalsLine, RunStatsSheet } from "./Improvements";
+import { pendingWorkerApprovals, runningAssignments, WORKER_ACCEPTANCE } from "../lib/worker-activity";
 
 const STATUS_LABEL: Record<ChatStatus, string> = {
   idle: "대기", working: "작업 중", approval: "승인 대기", pausing: "일시정지 중", paused: "일시정지", done: "완료", error: "오류", interrupted: "중단됨",
@@ -262,6 +263,8 @@ function ChatPane({ chat, detail, onOlder, sourceExists, onOpenChat, onBack, onS
   };
   const command = (name: string, arg = "") => act(url("/api/chats/:id/command", chat.id), { name, arg });
   const agents = detail?.agents ?? [];
+  const running = runningAssignments(chat.status, detail?.consults, pendingWorkerApprovals(all));
+  const working = agents.filter(agent => agent.status === "active" && running.has(agent.key));
   return (
     <div className="flex h-full flex-col">
       <header className="flex items-center gap-1.5 border-b px-2 py-2 md:px-3">
@@ -285,7 +288,7 @@ function ChatPane({ chat, detail, onOlder, sourceExists, onOpenChat, onBack, onS
         </div>
       )}
       <GoalBar chat={chat} pending={pending} onClear={() => void command("goal", "clear")} />
-      <TeamPanel chat={chat} agents={agents} consults={detail?.consults ?? []} events={all} items={items} plan={plan} pending={pending} version={plan?.version ?? planVersion(all, plan?.planId)}
+      <TeamPanel chat={chat} consults={detail?.consults ?? []} events={all} items={items} plan={plan} pending={pending} version={plan?.version ?? planVersion(all, plan?.planId)}
         onPlan={(name, arg = "") => void command(name, arg)}
         onRevise={() => { const box = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="지시 입력"]'); box?.focus(); box?.scrollIntoView({ block: "nearest" }); }} />
       <div ref={scroller} onScroll={e => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; }} className="flex-1 overflow-y-auto px-3 py-4 md:px-6">
@@ -294,6 +297,15 @@ function ChatPane({ chat, detail, onOlder, sourceExists, onOpenChat, onBack, onS
             {detail.hasMore && <Btn variant="ghost" className="justify-self-center" disabled={loadingOlder} onClick={() => void loadOlder()}>{loadingOlder ? <LoaderCircle className="animate-spin" /> : null} 이전 기록 불러오기</Btn>}
             {items.map(item => <ItemView key={item.key} item={item} chat={chat} agents={agents} consults={detail?.consults ?? []} live={live} onError={onError} onForked={c => onOpenChat(c.id)} />)}</div>}
       </div>
+      {working.length > 0 && <div className="mx-auto flex w-full max-w-3xl shrink-0 gap-2 overflow-x-auto px-3 py-1" aria-label="작업 중인 에이전트" data-testid="running-workers">
+        {working.map(agent => <button type="button" key={agent.id} data-role={agent.key} data-testid="running-worker"
+          className="shrink-0 rounded-full border border-primary/30 bg-primary/8 px-2.5 py-1 text-[12px] text-primary hover:bg-primary/15"
+          onClick={() => {
+            const card = document.getElementById(consultCardDomId(running.get(agent.key)!.id));
+            card?.scrollIntoView({ block: "center", behavior: "smooth" });
+            card?.focus({ preventScroll: true });
+          }}>{agent.nickname} · 작업 중</button>)}
+      </div>}
       <Composer chat={chat} onError={onError} />
     </div>
   );
@@ -352,13 +364,11 @@ function AttachmentLinks({ chatId, attachments }: { chatId: number; attachments:
   );
 }
 
-function TeamPanel({ chat, agents, consults, events, items, plan, pending, version, onPlan, onRevise }: {
-  chat: Chat; agents: ChatAgent[]; consults: Consult[]; events: TimelineEvent[]; items: Item[]; plan: ReturnType<typeof planOf>; pending: boolean;
+function TeamPanel({ chat, consults, events, items, plan, pending, version, onPlan, onRevise }: {
+  chat: Chat; consults: Consult[]; events: TimelineEvent[]; items: Item[]; plan: ReturnType<typeof planOf>; pending: boolean;
   /** Version of the proposal on screen; approval sends it so a newer one is never run unseen. */
   version: number; onPlan: (name: "plan-run" | "plan-cancel", arg?: string) => void; onRevise: () => void;
 }) {
-  const active = agents.filter(a => a.status === "active");
-  const running = consults.filter(c => c.status === "running");
   // Cancelled, incomplete, failed and stopped plans stay listed with their state and reason.
   const shownPlan = plan;
   const proposed = shownPlan?.state === "proposed";
@@ -373,11 +383,11 @@ function TeamPanel({ chat, agents, consults, events, items, plan, pending, versi
     card?.scrollIntoView({ block: "center", behavior: "smooth" });
     card?.focus({ preventScroll: true });
   };
-  if (!active.length && !shownPlan && !reviews && !history.length && !askId) return null;
+  if (!shownPlan && !reviews && !history.length && !askId) return null;
   return (
     <details className="border-b bg-muted/30 px-3 py-2 text-[12.5px] md:px-6" open={proposed || (!!shownPlan && busyStatus(chat.status))}>
       <summary className="flex cursor-pointer flex-wrap items-center gap-x-2 font-medium">
-        <Users className="size-4" /> 작업자 {active.length}명{running.length ? ` · ${running.length}건 진행 중` : ""}{reviews ? ` · 리뷰 ${reviews}건` : ""}
+        <span>{shownPlan || history.length || askId ? "작업 계획" : "리뷰"}{reviews ? ` · ${reviews}건` : ""}</span>
         {shownPlan && <PlanSummary plan={shownPlan} />}
         {/* In the summary so it shows while the panel is folded (a plan-mode turn asks before any proposal). */}
         {askId && <span role="button" tabIndex={0} data-plan-ask-wait
@@ -389,12 +399,6 @@ function TeamPanel({ chat, agents, consults, events, items, plan, pending, versi
       </summary>
       {/* A long plan scrolls inside the folded panel instead of pushing the conversation away. */}
       <div className="mt-2 grid max-h-[min(55vh,520px)] gap-2 overflow-y-auto overscroll-contain" data-plan-scroll>
-        {active.length > 0 && <ul className="grid gap-1">
-          {active.map(a => {
-            const work = running.find(c => c.toRole === a.key);
-            return <li key={a.id} className="flex gap-2"><span className="font-medium">{a.nickname}</span><span className="min-w-0 truncate text-muted-foreground">{work ? `${CONSULT_KIND_LABEL[work.kind]} 진행 중 · ${work.request.slice(0, 80)}` : `대기 · ${a.job}`}</span></li>;
-          })}
-        </ul>}
         {shownPlan?.explanation && <div className="text-muted-foreground">{shownPlan.explanation}</div>}
         {shownPlan && <PlanSteps plan={shownPlan} consults={consults} items={items} />}
         <ReviewTotalsLine consults={consults} events={events} />
@@ -466,6 +470,10 @@ function ItemBody({ item, chat, agents, consults, live, onError, onForked, neste
       </div>;
     case "fork":
       return <ForkContext item={item} />;
+    case "worker-acceptance":
+      return <div className="flex flex-wrap gap-x-2 text-[12px]" data-testid="worker-acceptance">
+        <span className="font-medium">{roleName(item.role, agents)}</span><span>{WORKER_ACCEPTANCE}</span><span className="text-muted-foreground">자동 확인</span>
+      </div>;
     case "tool":
       return (
         <details className="rounded-md border px-2.5 py-1.5 text-[12.5px]">

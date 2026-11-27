@@ -1,5 +1,5 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ArrowDown, ArrowLeft, BarChart3, Check, ChevronDown, CircleAlert, History, ImagePlus, ListChecks, Loader2, Paperclip, Pause, Play, RotateCcw, Search, SendHorizontal, ShieldCheck, SlidersHorizontal, Workflow, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, BarChart3, Check, ChevronDown, History, ImagePlus, ListChecks, Loader2, Paperclip, Pause, Play, RotateCcw, Search, SendHorizontal, ShieldCheck, SlidersHorizontal, Workflow, X } from "lucide-react";
 import {
   APPROVAL_MODE_LABEL,
   AGENT_LABEL,
@@ -31,13 +31,11 @@ import { isPlanHotkey, PLAN_TOGGLE_SETTLE_MS, planAskId, planToggleSettled } fro
 import { SLASH_COMMANDS, StatusDialog, type SlashCommand } from "./Commands";
 import { AttachmentChip, ItemList, MainTimeline } from "./Items";
 import { AgentAvatar } from "./AgentAvatar";
-import { AgentUsage } from "./AgentUsage";
 import { defaultEffortForModel, EffortPicker, effortLabel } from "./EffortPicker";
 import { ModelPicker, useModelLabel } from "./ModelPicker";
 import { formatElapsed, latestInstructionAt } from "../lib/time";
 import { seenReplies, statusAnnouncement, unseenLabel, unseenReplies, type SeenReplies } from "../lib/new-responses";
 import {
-  Badge,
   Button,
   DropdownMenu,
   DropdownMenuCheckItem,
@@ -56,6 +54,7 @@ import { ReviewTotalsBar } from "./ReviewResult";
 import { RunStatsDialog } from "./RunStats";
 import { useMobile } from "../lib/remote-mode";
 import { forgetOutgoing, sendOutgoing, useOutgoing } from "../lib/outgoing-messages";
+import { pendingWorkerApprovals, runningAssignments, workerActivity, type WorkerActivity } from "../lib/worker-activity";
 
 export function ChatView({ chat, project, node }: { chat: Chat; project: Project; node?: NodeId }) {
   const events = useStore((s) => s.events[chat.id]);
@@ -65,18 +64,26 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
   const all = useMemo(() => stateEventsOf(events, history), [events, history]);
   const consults = useStore((s) => s.consults[chat.id]);
   const busy = chat.status === "working" || chat.status === "approval";
+  const workerView = !!node && node !== "orch";
+  const waitingWorkers = useMemo(() => pendingWorkerApprovals(all), [all]);
+  const running = useMemo(() => runningAssignments(chat.status, consults, waitingWorkers), [chat.status, consults, waitingWorkers]);
+  const liveConsult = workerView && busy ? consults?.findLast(consult => consult.status === "running" &&
+    (node === consult.toRole || node === `consult:${consult.id}`)) : undefined;
+  const awaitingUser = workerView ? !!liveConsult && waitingWorkers.has(liveConsult.toRole) : chat.status === "approval";
+  const streamBusy = workerView ? !!liveConsult : busy;
+  const activity = useMemo(() => liveConsult ? workerActivity(all, liveConsult) : undefined, [liveConsult, all]);
   // Items a history page shortened are marked so the view can load their original.
   const outgoing = useOutgoing(chat.id);
   const confirmed = useMemo(() => new Set(outgoing.length ? events?.flatMap(e =>
     e.event.type === "user" && e.event.clientMessageId ? [e.event.clientMessageId] : []) ?? [] : []), [events, outgoing.length]);
   useEffect(() => { if (confirmed.size) forgetOutgoing(chat.id, confirmed); }, [chat.id, confirmed]);
   const items = useMemo(() => {
-    const persisted = events ? markClipped(chatTimelines.build(chat.id, events, node, busy), events) : [];
+    const persisted = events ? markClipped(chatTimelines.build(chat.id, events, node, streamBusy), events) : [];
     if (!outgoing.length || node && node !== "orch") return persisted;
     return [...persisted, ...outgoing.filter(message => !confirmed.has(message.id)).map(message => ({
       ...message, kind: "user" as const, key: `outgoing:${message.id}`, submission: message.failure ? "failed" as const : "sending" as const,
     }))];
-  }, [chat.id, events, node, busy, outgoing, confirmed]);
+  }, [chat.id, events, node, streamBusy, outgoing, confirmed]);
   const instructionAt = useMemo(() => latestInstructionAt(all, chat.createdAt), [all, chat.createdAt]);
   const [dragging, setDragging] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -148,7 +155,6 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
     >
       <ChatHeader chat={chat} project={project} nodeLabel={nodeLabel} masterExpression={masterExpression} onSearch={() => setSearchOpen(true)} />
       <div role="status" aria-live="polite" aria-atomic="true" className="sr-only" data-testid="chat-status-announcer">{announcement}</div>
-      <TeamChips chat={chat} />
       {!node && <ForkOrigin chat={chat} />}
       {!node && <GoalBar chat={chat} />}
       {!node && plan && <PlanPanel chat={chat} plan={plan} askId={askId} version={plan.version ?? planVersion(all, plan.planId)} onRevise={() => composer.current?.focus()} />}
@@ -163,7 +169,7 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
       {!node && history?.snapshot && history.snapshotAt !== undefined && history.snapshot.approvals.total > 0 && (
         <OlderApprovals chatId={chat.id} before={history.snapshotAt} first={history.snapshot.approvals.pending} total={history.snapshot.approvals.total} />
       )}
-      <Timeline key={node ?? "all"} items={items} chatId={chat.id} role={streamRole} busy={busy} awaitingUser={chat.status === "approval"} lastActiveAt={chat.lastActiveAt} instructionAt={instructionAt} empty={!items.length && !history?.hasMore} loading={!events && !items.length} loadError={loadError}
+      <Timeline key={node ?? "all"} items={items} chatId={chat.id} role={streamRole} busy={streamBusy} awaitingUser={awaitingUser} lastActiveAt={liveConsult ? activity?.at ?? liveConsult.startedAt : chat.lastActiveAt} instructionAt={liveConsult?.startedAt ?? instructionAt} activity={activity} empty={!items.length && !history?.hasMore} loading={!events && !items.length} loadError={loadError}
         hasOlder={!!history?.hasMore} loadingOlder={!!history?.loadingOlder} masterView={!node || node === "orch"} mainView={!node}
         searchOpen={searchOpen} searchQuery={searchQuery} onSearchQuery={setSearchQuery} onCloseSearch={() => { setSearchOpen(false); setSearchQuery(""); }} />
       {chat.status === "interrupted" && <InterruptedBanner chat={chat} />}
@@ -176,7 +182,10 @@ export function ChatView({ chat, project, node }: { chat: Chat; project: Project
           에서 보내세요.
         </div>
       ) : (
-        <Composer ref={composer} chat={chat} project={project} busy={busy} />
+        <>
+          <RunningWorkers chatId={chat.id} agents={agents} running={running} events={all} />
+          <Composer ref={composer} chat={chat} project={project} busy={busy} />
+        </>
       )}
       {dragging && (
         <div data-testid="file-drop-overlay" className="pointer-events-none absolute inset-2 z-20 flex flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-primary bg-background/95 text-primary">
@@ -363,151 +372,22 @@ function ChatHeader({ chat, project, nodeLabel, masterExpression, onSearch }: { 
   );
 }
 
-/** The chat's workers with their state; more workers use quota faster. */
-function TeamChips({ chat }: { chat: Chat }) {
-  const agents = useStore((s) => s.agents[chat.id]);
-  const consults = useStore((s) => s.consults[chat.id]);
-  const loaded = useStore((s) => s.events[chat.id]);
-  const history = useStore((s) => s.history[chat.id]);
-  // Worker state, expressions and usage totals cover the whole history, not only the loaded pages.
-  const events = useMemo(() => (loaded ? stateEventsOf(loaded, history) : undefined), [loaded, history]);
-  const selection = useStore((s) => s.selection);
-  const select = useStore((s) => s.select);
-  const ordered = useMemo(
-    () =>
-      [...(agents ?? [])].sort((a, b) => {
-        const status = (a.status === "active" ? 0 : 1) - (b.status === "active" ? 0 : 1);
-        return status || a.createdAt - b.createdAt || a.id - b.id;
-      }),
-    [agents],
-  );
-  const active = ordered.filter((a) => a.status === "active");
-  const released = ordered.filter((a) => a.status === "released");
-  return (
-    <div className="border-b px-4 py-2" data-testid={ordered.length > 0 ? "team-chips" : undefined}>
-      {ordered.length > 0 && (
-        <Tooltip content="작업자가 많을수록 사용량이 빨리 줄어요">
-          <div className="flex items-center gap-2 overflow-x-auto whitespace-nowrap">
-            {active.map((a) => (
-              <WorkerChip
-                key={a.id}
-                agent={a}
-                selected={selection?.chatId === chat.id && selection.node === a.key}
-                status={workerStatus(a.key, events, consults)}
-                expression={latestExpression(events ?? [], a.key)}
-                onSelect={() => void select({ chatId: chat.id, node: a.key })}
-              />
-            ))}
-            {released.length > 0 && (
-              <div className="ml-1 flex items-center gap-1.5 border-l pl-2 text-[11px] text-muted-foreground" data-testid="released-workers">
-                <span>해제됨</span>
-                {released.map((a) => (
-                  <WorkerChip
-                    key={a.id}
-                    agent={a}
-                    selected={selection?.chatId === chat.id && selection.node === a.key}
-                    status={workerStatus(a.key, events, consults)}
-                    expression={latestExpression(events ?? [], a.key)}
-                    onSelect={() => void select({ chatId: chat.id, node: a.key })}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-        </Tooltip>
-      )}
-      <div className={cn("flex items-center gap-x-3 overflow-x-auto whitespace-nowrap", ordered.length > 0 && "mt-2 border-t pt-1.5")} data-testid="agent-usage-list">
-        <AgentUsage events={events ?? []} role="orch" label={MASTER_LABEL} />
-        {ordered.map((agent) => (
-          <span key={agent.id} className={cn("shrink-0", agent.status === "released" && "opacity-50 grayscale")}>
-            <AgentUsage events={events ?? []} role={agent.key} label={agent.nickname} />
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-type WorkerStatus = "working" | "approval" | "error" | "idle";
-
-const WORKER_STATUS_LABEL: Record<WorkerStatus, string> = { working: "작업 중", approval: "승인 대기", error: "오류", idle: "대기" };
-
-function workerStatus(role: Role, events: TimelineEvent[] | undefined, consults: Consult[] | undefined): WorkerStatus {
-  const pending = new Set<string>();
-  let state: WorkerStatus = "idle";
-  for (const e of events ?? []) {
-    if (e.event.type === "approval_request" && e.event.request.role === role) pending.add(e.event.request.id);
-    else if (e.event.type === "approval_resolved") pending.delete(e.event.id);
-    if (e.role !== role) continue;
-    switch (e.event.type) {
-      case "error":
-        state = "error";
-        break;
-      case "turn_end":
-        state = e.event.interrupted || e.event.ok ? "idle" : "error";
-        break;
-      case "text_delta":
-      case "tool_call":
-      case "tool_result":
-      case "file_change":
-      case "consult_start":
-        state = "working";
-        break;
-      case "approval_resolved":
-        state = "working";
-        break;
-    }
-  }
-  if (pending.size) return "approval";
-  if (consults?.some((c) => c.toRole === role && c.status === "running")) return "working";
-  const latestConsult = consults
-    ?.filter((c) => c.toRole === role)
-    .sort((a, b) => (a.endedAt ?? a.startedAt) - (b.endedAt ?? b.startedAt))
-    .at(-1);
-  if (latestConsult?.status === "error") return "error";
-  return state;
-}
-
-function WorkerChip({
-  agent,
-  selected,
-  status,
-  expression,
-  onSelect,
-}: {
-  agent: ChatAgent;
-  selected: boolean;
-  status: WorkerStatus;
-  expression: AgentExpression;
-  onSelect: () => void;
+function RunningWorkers({ chatId, agents, running, events }: {
+  chatId: number; agents?: ChatAgent[]; running: ReadonlyMap<Role, Consult>; events: TimelineEvent[];
 }) {
-  const released = agent.status === "released";
-  return (
-    <button
-      type="button"
-      className={cn(
-        "inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border px-2 text-[11.5px] transition-colors",
-        selected ? "border-primary bg-primary/10 text-foreground" : status === "working" ? "border-primary/40 bg-primary/8" : "text-muted-foreground",
-        released && "text-muted-foreground opacity-60 grayscale",
-      )}
-      data-testid="team-chip"
-      data-state={status}
-      data-role={agent.key}
-      data-selected={selected}
-      aria-pressed={selected}
-      aria-label={`${agent.nickname} ${WORKER_STATUS_LABEL[status]} 기록 열기`}
-      onClick={onSelect}
-    >
-      <AgentAvatar kind={agent.kind} expression={expression} size={32} alt={`${agent.nickname} 캐릭터`} className={released ? "grayscale" : undefined} />
+  const select = useStore(s => s.select);
+  const active = agents?.filter(agent => agent.status === "active" && running.has(agent.key));
+  if (!active?.length) return null;
+  return <div className="mx-auto flex w-full max-w-[892px] shrink-0 items-center gap-2 overflow-x-auto px-4 py-1" aria-label="작업 중인 에이전트" data-testid="running-workers">
+    {active.map(agent => <button type="button" key={agent.id} data-role={agent.key} data-testid="running-worker"
+      className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-primary/30 bg-primary/8 px-2 py-0.5 text-[12px] hover:bg-primary/15"
+      aria-label={`${agent.nickname} 작업 기록 열기`} onClick={() => void select({ chatId, node: agent.key })}>
+      <AgentAvatar kind={agent.kind} expression={latestExpression(events, agent.key)} size={24} alt="" />
       <span>{agent.nickname}</span>
-      <Badge className={cn("h-5 px-1.5 text-[10px] font-normal", status === "working" && "border-primary/30 text-primary", status === "approval" && "border-warning/40 text-warning", status === "error" && "border-destructive/40 text-destructive")}>
-        {status === "working" && <WorkingIndicator kind={agent.kind} className="size-3" />}
-        {status === "approval" && <ShieldCheck className="size-3" />}
-        {status === "error" && <CircleAlert className="size-3" />}
-        {WORKER_STATUS_LABEL[status]}
-      </Badge>
-    </button>
-  );
+      <WorkingIndicator kind={agent.kind} className="size-3" />
+      <span className="text-primary">작업 중</span>
+    </button>)}
+  </div>;
 }
 
 const APPROVAL_MODES = ["orchestrator-all", "orchestrator", "user"] as const;
@@ -618,7 +498,7 @@ function useStatusAnnouncement(status: ChatStatus, events: TimelineEvent[] | und
   return text;
 }
 
-function Timeline({ items, chatId, role, busy, awaitingUser, lastActiveAt, instructionAt, empty, loading, loadError, hasOlder, loadingOlder, masterView, mainView, searchOpen, searchQuery, onSearchQuery, onCloseSearch }: { items: ReturnType<typeof buildItems>; chatId: number; role?: Role; busy: boolean; awaitingUser: boolean; lastActiveAt: number; instructionAt: number; empty: boolean; loading: boolean; loadError?: string; hasOlder: boolean; loadingOlder: boolean; masterView: boolean; mainView: boolean; searchOpen: boolean; searchQuery: string; onSearchQuery: (q: string) => void; onCloseSearch: () => void }) {
+function Timeline({ items, chatId, role, busy, awaitingUser, lastActiveAt, instructionAt, activity, empty, loading, loadError, hasOlder, loadingOlder, masterView, mainView, searchOpen, searchQuery, onSearchQuery, onCloseSearch }: { items: ReturnType<typeof buildItems>; chatId: number; role?: Role; busy: boolean; awaitingUser: boolean; lastActiveAt: number; instructionAt: number; activity?: WorkerActivity; empty: boolean; loading: boolean; loadError?: string; hasOlder: boolean; loadingOlder: boolean; masterView: boolean; mainView: boolean; searchOpen: boolean; searchQuery: string; onSearchQuery: (q: string) => void; onCloseSearch: () => void }) {
   const loadOlder = useCallback(() => void useStore.getState().loadOlder(chatId), [chatId]);
   const ref = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
@@ -645,7 +525,7 @@ function Timeline({ items, chatId, role, busy, awaitingUser, lastActiveAt, instr
   useLayoutEffect(() => {
     const el = ref.current;
     if (el && stick.current && !searchOpen) el.scrollTop = el.scrollHeight;
-  }, [items, searchOpen]);
+  }, [items, activity, searchOpen]);
   useEffect(() => {
     stick.current = true;
     const el = ref.current;
@@ -694,12 +574,20 @@ function Timeline({ items, chatId, role, busy, awaitingUser, lastActiveAt, instr
           {awaitingUser && <div className="mt-4 flex items-center gap-2 text-[12px] text-warning" data-testid="awaiting-user">
             <ShieldCheck className="size-3.5" /> 사용자 응답 대기
           </div>}
+          {activity && <div className="mt-4 space-y-1 rounded-lg border border-primary/25 bg-card px-3 py-2 text-[12px]" data-testid="worker-live-activity" aria-label="최근 작업 활동">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="font-medium text-primary">실시간 작업</span>
+              <span>{activity.label}</span>
+            </div>
+            {activity.detail && <div className="truncate font-mono text-muted-foreground" title={activity.detail}>{activity.detail}</div>}
+            {activity.output && <pre className="max-h-24 overflow-auto rounded bg-code-bg px-2 py-1 whitespace-pre-wrap break-words select-text">{activity.output}</pre>}
+          </div>}
           {busy && !awaitingUser && quietFor >= 180_000 && (
             <div className="mt-4 flex items-center gap-2 text-[12px] text-muted-foreground" data-testid="waiting-for-activity">
               <History className="size-3.5" /> 새 응답 대기 · 마지막 활동 {formatElapsed(quietFor)} 전
             </div>
           )}
-          {busy && !awaitingUser && quietFor < 180_000 && (
+          {busy && !awaitingUser && !activity && quietFor < 180_000 && (
             <div className="mt-4 flex items-center gap-2 text-[12px] text-muted-foreground" data-testid="working">
               <WorkingIndicator chatId={chatId} role={role} className="size-3.5" /> 작업 중… · {formatElapsed(now - instructionAt)}
             </div>

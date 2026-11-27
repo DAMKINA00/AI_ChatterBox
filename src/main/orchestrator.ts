@@ -1955,6 +1955,7 @@ export class Orchestrator {
         // The account of the current attempt; only a priority policy ever moves to another one.
         let attempt: ResolvedCliAccount | null | undefined;
         let handover = "";
+        let acknowledged = false;
         const run = async (next?: ResolvedCliAccount) => {
           try {
             if (next) attempt = next;
@@ -1979,6 +1980,10 @@ export class Orchestrator {
               attachments,
               noWrites: false,
             });
+            if (caller === "orch" && !acknowledged && !settled && driver.running && !this.stopped.has(chatId) && this.epochs.get(chatId) === epoch) {
+              acknowledged = true;
+              this.chats.emit(chatId, node, target.key, { type: "consult_ack", consultId: consult.id });
+            }
           } catch (e) {
             r.resolve({ ok: false, error: e instanceof Error ? e.message : String(e) });
           }

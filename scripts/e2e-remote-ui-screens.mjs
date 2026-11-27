@@ -78,10 +78,13 @@ try {
     await page.waitForSelector('[data-testid="plan-panel"]', { timeout: 15_000 });
     check("desktop: chat header with master and agent model pickers", (await page.locator('[data-testid="chat-header-master-row"]').count()) === 1 && (await page.locator('[data-testid="chat-header-agents-row"] [data-testid="provider-controls"]').count()) === 5);
     check("desktop: providers not shown as missing (CLI state from /api/cli)", (await page.locator('[data-testid="provider-controls"][data-state="inactive"]').count()) === 0);
-    check("desktop: worker chips", (await page.locator('[data-testid="team-chips"]').count()) === 1);
+    check("desktop: finished workers do not appear above the composer", (await page.getByTestId("running-workers").count()) === 0);
     check("desktop: checklist with 4 steps", (await page.getByText("NAS Caddy를 새 IP·새 인증서로 변경").count()) >= 1);
-    check("desktop: previous checklist, review summary and token rate are visible", await page.getByText(/이전 계획/).isVisible()
-      && await page.getByText(/리뷰 1건/).first().isVisible() && await page.getByText(/24\.8 tok\/s/).first().isVisible());
+    check("desktop: the current checklist and review summary are visible", await page.getByTestId("plan-panel").isVisible()
+      && await page.getByText(/리뷰 1건/).first().isVisible());
+    await page.getByTestId("run-stats-open").click();
+    check("desktop: token rate is in execution stats", await page.getByTestId("run-stats").getByText(/24\.8 tok\/s/).first().isVisible());
+    await page.keyboard.press("Escape");
     check("desktop: markdown rendered (table, code)", (await page.locator('[data-testid="chat-view"] table').count()) >= 1 && (await page.locator('[data-testid="chat-view"] pre').count()) >= 1);
     check("desktop: raw HTML in a message stays text (no script, no dialog)", (await page.locator('[data-testid="chat-view"] script').count()) === 0 && !dialog() && (await page.getByText('<script>alert("xss")</script>', { exact: false }).count()) >= 1);
     check("desktop: avatars loaded", await page.evaluate(() => [...document.querySelectorAll('img[data-testid="agent-avatar"]')].some(i => i.complete && i.naturalWidth > 0)));

@@ -68,7 +68,7 @@ export interface Sink {
 }
 
 /** Live-only events (not persisted). */
-const TRANSIENT = new Set<AgentEvent["type"]>(["text_delta"]);
+const TRANSIENT = new Set<AgentEvent["type"]>(["text_delta", "tool_progress"]);
 
 interface Live {
   driver: AgentDriver;
@@ -1070,7 +1070,7 @@ export class ChatManager {
     this.sink.event(e);
     // Streaming can be frequent; persist activity at most every 15s until a full event arrives.
     if (event.type !== "agent_usage" && event.type !== "expression"
-      && (event.type !== "text_delta" || e.at - (this.store.chat(chatId)?.lastActiveAt ?? 0) >= 15_000))
+      && (!TRANSIENT.has(event.type) || e.at - (this.store.chat(chatId)?.lastActiveAt ?? 0) >= 15_000))
       this.updateChat(chatId, { touch: true });
   }
 

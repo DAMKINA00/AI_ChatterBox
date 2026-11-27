@@ -3,7 +3,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { makeChecks, launch, root } from "./e2e-lib.mjs";
+import { chatWorkerRows, makeChecks, launch, root } from "./e2e-lib.mjs";
 
 const { check, finish } = makeChecks();
 const base = join(root, ".scratch", "gemini-ui", String(Date.now()));
@@ -117,7 +117,7 @@ async function openSettings(page) {
 
 async function openChat(page) {
   await page.locator('[data-testid="chat-node"][data-chat-id="1"] [role="treeitem"]').click();
-  await page.waitForFunction(() => document.querySelectorAll('[data-testid="team-chip"]').length === 2);
+  await chatWorkerRows(page, 1);
 }
 
 let app;
@@ -129,14 +129,13 @@ try {
   await page.setViewportSize({ width: 1420, height: 1000 });
   await openChat(page);
 
-  const chips = page.locator('[data-testid="team-chip"]');
-  const roles = await chips.evaluateAll((els) => els.map((el) => el.getAttribute("data-role")));
-  check("Gemini active and released workers are seeded", roles.length === 2 && roles[0] === "w1" && roles[1] === "w2", roles.join(", "));
-  check("released Gemini worker is grouped separately", (await page.locator('[data-testid="released-workers"] [data-role="w2"]').count()) === 1);
+  const rows = await chatWorkerRows(page, 1);
+  const roles = await rows.evaluateAll((els) => els.map((el) => el.getAttribute("data-node")));
+  check("Gemini active and released workers are in the sidebar", roles.includes("w1") && roles.includes("w2") && roles.length === 2, roles.join(", "));
+  check("no Gemini worker is shown as working while idle", await page.getByTestId("running-workers").count() === 0);
   check(
-    "released Gemini worker uses gray treatment",
-    (await page.locator('[data-testid="released-workers"] [data-role="w2"]').evaluate((el) => el.className.includes("grayscale"))) &&
-      (await page.locator('[data-testid="released-workers"] [data-role="w2"] [data-kind="gemini"]').evaluate((el) => el.className.includes("grayscale"))),
+    "released Gemini worker uses dimmed sidebar styling",
+    await page.locator('[data-testid="tree-node"][data-node="w2"]').evaluate((el) => el.classList.contains("opacity-50")),
   );
   check(
     "Gemini avatars preserve kind and expression metadata",
@@ -149,15 +148,18 @@ try {
       (await page.locator('[data-testid="agent-message"][data-role="w2"]').textContent())?.includes("해제된 제미나이"),
   );
 
-  const usage = page.locator('[data-testid="agent-usage-w1"]');
+  await page.getByTestId("run-stats-open").click();
+  const usage = page.getByTestId("run-stats").getByTestId("agent-usage-w1");
   await usage.click();
   const usageMenu = page.getByRole("menu");
   await usageMenu.waitFor({ state: "visible" });
   const usageText = await usageMenu.textContent();
   check("Gemini usage row shows token counts", usageText?.includes("입력 120") && usageText.includes("출력 45") && usageText.includes("캐시 읽기 12"), usageText);
   await page.keyboard.press("Escape");
+  await usageMenu.waitFor({ state: "hidden" });
+  await page.keyboard.press("Escape");
 
-  const released = page.locator('[data-testid="released-workers"] [data-testid="team-chip"][data-role="w2"]');
+  const released = page.locator('[data-testid="tree-node"][data-node="w2"]');
   await released.click();
   await page.waitForFunction(() => document.querySelector("header")?.textContent?.includes("제미나이 2호"));
   check(
@@ -170,8 +172,8 @@ try {
   await geminiPicker.click();
   const geminiMenuText = await page.getByRole("menu").textContent();
   check("Gemini worker offers native CLI and no web controls", geminiMenuText?.includes("Antigravity CLI 계정 관리") && !geminiMenuText.includes("제미나이 웹") && !geminiMenuText.includes("AI Studio"), geminiMenuText);
-  await page.getByRole("menuitem").filter({ hasText: "gemini-4-hydrogen-high" }).click();
-  await page.waitForFunction(() => document.querySelector('[aria-label="이 채팅의 제미나이 모델"]')?.textContent?.includes("Gemini 4 Hydrogen"));
+  await page.getByRole("menuitem", { name: /4 Hydrogen/ }).click();
+  await page.waitForFunction(() => document.querySelector('[aria-label="이 채팅의 제미나이 모델"]')?.textContent?.includes("4 Hydrogen"));
   await geminiPicker.click();
   const reset = page.getByRole("menuitem", { name: /프로젝트 값 사용/ });
   check("Gemini chat override can return to the project value", (await reset.count()) === 1);
@@ -182,7 +184,7 @@ try {
   const projectGeminiPicker = dialog.getByLabel("제미나이 모델");
   check("project Gemini model picker uses the native Antigravity label", (await projectGeminiPicker.textContent())?.includes("Antigravity · Argon"));
   await projectGeminiPicker.click();
-  check("project Gemini model list exposes the native CLI model", (await page.getByRole("menuitem").filter({ hasText: "gemini-4-argon-medium" }).count()) === 1);
+  check("project Gemini model list exposes the native CLI model", (await page.getByRole("menuitem", { name: /Antigravity · Argon/ }).count()) === 1);
   await page.keyboard.press("Escape");
   await dialog.getByLabel("제미나이가 잘 맡는 작업").fill("저장된 Gemini 강점");
   await dialog.getByLabel("제미나이 작업자 주의점").fill("저장된 Gemini 주의점");
@@ -211,7 +213,7 @@ try {
     "Gemini messages and released gray treatment survive restart",
     (await page.locator('[data-testid="agent-message"][data-role="w1"]').textContent())?.includes("활성 제미나이") &&
       (await page.locator('[data-testid="agent-message"][data-role="w2"]').textContent())?.includes("해제된 제미나이") &&
-      (await page.locator('[data-testid="released-workers"] [data-role="w2"]').evaluate((el) => el.className.includes("grayscale"))),
+      (await page.locator('[data-testid="tree-node"][data-node="w2"]').evaluate((el) => el.classList.contains("opacity-50"))),
   );
   const restartedProjects = await page.evaluate(() => window.chatterbox.listProjects());
   const restartedSettings = restartedProjects.find((project) => project.id === 1)?.settings;
@@ -219,7 +221,8 @@ try {
     "Gemini settings survive restart",
     restartedSettings?.geminiStrengths === "저장된 Gemini 강점" && restartedSettings.geminiCautions === "저장된 Gemini 주의점" && restartedSettings.maxGeminiWorkers === 0,
   );
-  await page.locator('[data-testid="agent-usage-w1"]').click();
+  await page.getByTestId("run-stats-open").click();
+  await page.getByTestId("run-stats").getByTestId("agent-usage-w1").click();
   const restartedUsage = page.getByRole("menu");
   await restartedUsage.waitFor({ state: "visible" });
   check("Gemini token metrics replay after restart", (await restartedUsage.textContent())?.includes("출력 45"));

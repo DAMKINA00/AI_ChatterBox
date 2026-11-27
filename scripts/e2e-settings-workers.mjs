@@ -3,7 +3,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { makeChecks, launch, root } from "./e2e-lib.mjs";
+import { chatWorkerRows, makeChecks, launch, root } from "./e2e-lib.mjs";
 
 const { check, finish } = makeChecks();
 const base = join(root, ".scratch", "ui-verification", String(Date.now()));
@@ -119,19 +119,10 @@ try {
 
   // Open the seeded worker chat and verify the active/released team presentation.
   await page.locator('[data-testid="chat-node"][data-chat-id="1"] [role="treeitem"]').click();
-  await page.waitForFunction(() => document.querySelectorAll('[data-testid="team-chip"]').length === 12);
-  const chips = page.locator('[data-testid="team-chip"]');
-  const roles = await chips.evaluateAll((els) => els.map((el) => el.getAttribute("data-role")));
-  check("active workers precede released workers", roles.slice(0, 8).every((r) => /^w[1-8]$/.test(r)) && roles.slice(8).every((r) => /^w(?:9|10|11|12)$/.test(r)), roles.join(", "));
-  check("released workers are grouped at the trailing edge", (await page.locator('[data-testid="released-workers"] [data-testid="team-chip"]').count()) === 4);
-  check(
-    "released worker chips use the gray treatment",
-    await page.locator('[data-testid="released-workers"] [data-testid="team-chip"]').evaluateAll((els) => els.every((el) => el.className.includes("grayscale"))),
-  );
-  check(
-    "worker chips overflow horizontally when the team is large",
-    await page.locator('[data-testid="team-chips"] > div:not([data-testid="agent-usage-list"])').evaluate((el) => el.scrollWidth > el.clientWidth),
-  );
+  const workers = await chatWorkerRows(page, 1);
+  check("sidebar lists all the workers", await workers.count() === 12);
+  check("idle and released workers are absent from the live strip", await page.getByTestId("running-workers").count() === 0);
+  check("released sidebar workers remain dimmed", await workers.evaluateAll(rows => rows.filter(row => row.classList.contains("opacity-50")).length) === 4);
 
   // Expression metadata reaches messages and the role avatars.
   check(
@@ -139,17 +130,15 @@ try {
     (await page.locator('[data-testid="agent-message"][data-role="w1"][data-expression="happy"]').count()) === 1 &&
       (await page.locator('[data-testid="agent-message"][data-role="w1"] [data-testid="agent-avatar"][data-expression="happy"]').count()) === 1,
   );
-  check("role avatars render for the worker team", (await page.locator('[data-testid="team-chip"] [data-testid="agent-avatar"]').count()) === 12);
-
   // A chat with no agents must not show an empty team strip.
   await page.locator('[data-testid="chat-node"][data-chat-id="2"] [role="treeitem"]').click();
-  await page.waitForFunction(() => document.querySelector('[data-testid="timeline"]') && !document.querySelector('[data-testid="team-chips"]'));
-  check("team strip is hidden when the chat has no workers", (await page.locator('[data-testid="team-chips"]').count()) === 0);
+  await page.waitForSelector('[data-testid="timeline"]');
+  check("the live strip is hidden when the chat has no workers", await page.getByTestId("running-workers").count() === 0);
 
   // Return to the worker chat and open a released worker's history.
   await page.locator('[data-testid="chat-node"][data-chat-id="1"] [role="treeitem"]').click();
-  await page.waitForSelector('[data-testid="team-chips"]');
-  const released = page.locator('[data-testid="released-workers"] [data-testid="team-chip"]').first();
+  await chatWorkerRows(page, 1);
+  const released = page.locator('[data-testid="tree-node"][data-node="w9"]');
   await released.click();
   await page.waitForFunction(() => document.querySelector("header")?.textContent?.includes("클로드 5호"));
   check(
@@ -328,8 +317,8 @@ try {
     JSON.stringify(restartedProject?.settings),
   );
   await page.locator('[data-testid="chat-node"][data-chat-id="1"] [role="treeitem"]').click();
-  await page.waitForSelector('[data-testid="team-chips"]');
-  check("worker team history is available after restart", (await page.locator('[data-testid="team-chip"]').count()) === 12);
+  const restartedWorkers = await chatWorkerRows(page, 1);
+  check("worker team history is available after restart", await restartedWorkers.count() === 12);
 
   await page.getByLabel("새 프로젝트").first().click();
   const create = page.getByRole("dialog", { name: "새 프로젝트" });
@@ -366,6 +355,7 @@ try {
   check("a failed toggle keeps the typed instruction and the off state",
     await composer.inputValue() === instruction && await toggle.getAttribute("aria-pressed") === "false");
   await toggle.click();
+  await page.waitForFunction(() => !document.querySelector('[data-testid="plan-mode-toggle"]')?.disabled);
   await composer.focus();
   await page.keyboard.press("Alt+KeyP");
   for (let i = 0; i < 50 && (await app.evaluate(() => globalThis.planModeRequests.length)) < 3; i++) await page.waitForTimeout(100);

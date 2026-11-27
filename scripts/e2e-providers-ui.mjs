@@ -2,7 +2,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { launch, makeChecks, root } from "./e2e-lib.mjs";
+import { chatWorkerRows, launch, makeChecks, root } from "./e2e-lib.mjs";
 
 const { check, finish } = makeChecks();
 const base = join(root, ".scratch", "providers-ui", String(Date.now()));
@@ -46,9 +46,11 @@ try {
   await page.getByRole("menuitem", { name: /grok test model/ }).click();
   let chat = (await page.evaluate(() => window.chatterbox.listChats()))[0];
   check("Grok master selection persists", chat.orchestratorModelOverride === "grok:grok-test");
-  await page.locator('[data-testid="team-chip"][data-role="w2"]').click();
+  const workers = await chatWorkerRows(page, chat.id);
+  await page.locator('[data-testid="tree-node"][data-node="w2"]').click();
   check("peer message identifies sender and recipient", (await page.locator("main").textContent()).includes("API 계약: resultId 필드를 사용하세요."));
-  check("legacy worker names are normalized", (await page.getByTestId("team-chips").textContent()).includes("제미나이 1호") && (await page.getByTestId("team-chips").textContent()).includes("그록 1호"));
+  const names = await workers.allTextContents();
+  check("legacy worker names are normalized", names.includes("제미나이 1호") && names.includes("그록 1호"));
   const grok = page.locator('[data-testid="provider-controls"][data-provider="grok"]');
   await grok.locator('button[aria-label="그록 로그인 상태 다시 확인"]').waitFor();
   check("installed but logged-out Grok is visibly inactive", await grok.getAttribute("data-state") === "inactive" && (await grok.textContent()).includes("로그인 필요"));

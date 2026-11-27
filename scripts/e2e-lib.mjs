@@ -14,6 +14,15 @@ export function scratchDir(name, { fresh = true } = {}) {
   return dir;
 }
 
+export async function chatWorkerRows(page, chatId) {
+  const chat = page.locator(`[data-testid="chat-node"][data-chat-id="${chatId}"]`);
+  const expand = chat.getByRole("button", { name: "펼치기", exact: true });
+  if (await expand.count()) await expand.click();
+  const workers = chat.locator('[data-testid="tree-node"][data-node^="w"]');
+  await workers.first().waitFor();
+  return workers;
+}
+
 export function makeChecks() {
   const results = [];
   const check = (name, ok, detail = "") => {

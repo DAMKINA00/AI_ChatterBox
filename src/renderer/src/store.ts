@@ -228,7 +228,7 @@ export const useStore = create<State>((set, get) => ({
     api.onEvent((e) => {
       pendingEvents.push(e);
       // Keep approvals/results immediate; paint token bursts at most twenty times a second.
-      if (e.event.type !== "text_delta") flushEvents();
+      if (e.event.type !== "text_delta" && e.event.type !== "tool_progress") flushEvents();
       else eventTimer ??= window.setTimeout(flushEvents, 50);
     });
     api.onChatUpdated((c) => {

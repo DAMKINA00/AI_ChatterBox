@@ -35,11 +35,7 @@ try {
     settings: { ...DEFAULTS, claudeStrengths: "fixture", claudeCautions: "fixture", gptStrengths: "fixture", gptCautions: "fixture", geminiStrengths: "fixture", geminiCautions: "fixture" },
   });
   if (!project) throw new Error("could not create fixture project");
-  const chat = await page.evaluate((projectId) => window.chatterbox.createChat(projectId), project.id);
-  if (!chat) throw new Error("could not create fixture chat");
-
-  // Reload so the newly created project/chat are in the normal renderer store, then select it
-  // before injecting events. This makes the event listener's existing events array writable.
+  // Load the new project in the normal renderer store and open its draft composer through the UI.
   await page.reload();
   await page.waitForSelector('[data-testid="sidebar"]');
   check("analysis API removed from preload", await page.evaluate(() => !("graphify" in window.chatterbox)));
@@ -51,7 +47,9 @@ try {
     check(`${menu} menu retains project actions`, await page.getByRole("menuitem", { name: "새 채팅", exact: true }).count() === 1);
     await page.keyboard.press("Escape");
   }
-  await page.locator(`[data-testid="chat-node"][data-chat-id="${chat.id}"] [role="treeitem"]`).click();
+  await page.getByRole("button", { name: `${project.name}에 새 채팅`, exact: true }).click();
+  const chat = await page.evaluate(projectId => window.chatterbox.createChat(projectId), project.id);
+  if (!chat) throw new Error("could not open fixture chat");
   await page.waitForSelector('[data-testid="chat-title"]');
   await page.waitForSelector('[data-testid="timeline"]');
 
@@ -73,8 +71,10 @@ try {
       { title: "[제미나이 1호] 문서 초안 작성", status: "inProgress" },
       { title: "[지피티 1호] 이미지 확인", status: "pending" },
     ], explanation: "indicator fixture" }, now - 1000),
-    fixtureEvent(2, chat.id, "w1", "w1", { type: "tool_call", id: "fixture-tool-1", name: "Bash", input: "echo first" }, now - 900),
-    fixtureEvent(3, chat.id, "w1", "w1", { type: "tool_call", id: "fixture-tool-2", name: "Bash", input: "echo second" }, now - 800),
+    fixtureEvent(2, chat.id, "orch", "orch", { type: "consult_start", consultId: 1, from: "orch", to: "w1", kind: "implement", request: "GPT work", attachments: [] }, now - 920),
+    fixtureEvent(3, chat.id, "consult:1", "w1", { type: "consult_ack", consultId: 1 }, now - 910),
+    fixtureEvent(4, chat.id, "consult:1", "w1", { type: "tool_call", id: "fixture-tool-1", name: "Bash", input: "echo first" }, now - 900),
+    fixtureEvent(5, chat.id, "consult:1", "w1", { type: "tool_call", id: "fixture-tool-2", name: "Bash", input: "echo second" }, now - 800),
   ];
 
   await app.evaluate(({ BrowserWindow }, payload) => {
@@ -92,16 +92,28 @@ try {
   check("master mixes active running worker colors", masterColors === "gpt,gemini", masterColors);
   check("master excludes released and idle workers", masterColors === "gpt,gemini", masterColors);
 
-  await page.waitForFunction(() => document.querySelectorAll('[data-testid="team-chip"] [data-testid="working-indicator"]').length >= 3);
-  const chipColors = await page.locator('[data-testid="team-chip"]').evaluateAll((chips) => Object.fromEntries(chips.map((chip) => [
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="running-worker"] [data-testid="working-indicator"]').length === 2);
+  const chipColors = await page.getByTestId("running-worker").evaluateAll((chips) => Object.fromEntries(chips.map((chip) => [
     chip.getAttribute("data-role"), chip.querySelector('[data-testid="working-indicator"]')?.getAttribute("data-colors") ?? null,
   ])));
-  check("worker chips use each worker kind color", chipColors.w1 === "gpt" && chipColors.w2 === "gemini" && chipColors.w3 === "deepseek", JSON.stringify(chipColors));
-  check("idle active worker has no working indicator", chipColors.w4 === null, JSON.stringify(chipColors));
+  check("only running active workers have chips and each uses its own color", chipColors.w1 === "gpt" && chipColors.w2 === "gemini" && Object.keys(chipColors).length === 2, JSON.stringify(chipColors));
+  check("worker strip sits directly above the composer", await page.getByTestId("running-workers").evaluate(el => el.nextElementSibling?.getAttribute("data-testid") === "composer"));
+  const receipt = page.getByTestId("worker-acceptance");
+  await receipt.waitFor();
+  check("the main chat shows one app-generated acceptance for the worker", (await receipt.count()) === 1 && (await receipt.textContent()).includes("작업을 시작합니다"));
 
   const planIndicator = page.locator('[data-testid="plan-step"][data-status="inProgress"] [data-testid="working-indicator"]');
   await planIndicator.waitFor();
   check("plan step nickname resolves to worker color", await planIndicator.getAttribute("data-colors") === "gemini", await planIndicator.getAttribute("data-colors"));
+
+  await page.locator('[data-testid="running-worker"][data-role="w1"]').click();
+  const live = page.getByTestId("worker-live-activity");
+  await live.waitFor();
+  check("worker chat shows the latest command without opening its history", (await live.textContent()).includes("echo second"));
+  await app.evaluate(({ BrowserWindow }, e) => BrowserWindow.getAllWindows()[0].webContents.send("chat:event", e),
+    fixtureEvent(0, chat.id, "consult:1", "w1", { type: "tool_progress", id: "fixture-tool-2", delta: "streamed fixture output" }, Date.now()));
+  await live.getByText("streamed fixture output").waitFor();
+  check("worker chat shows command output while the tool is still running", (await live.textContent()).includes("streamed fixture output"));
 
   const group = page.getByTestId("task-list-group");
   await group.waitFor();
@@ -119,12 +131,18 @@ try {
   await page.emulateMedia({ reducedMotion: "no-preference" });
 
   await page.screenshot({ path: join(base, "ui.png") });
+  await page.getByRole("button", { name: "채팅 화면", exact: true }).click();
 
   const geminiDone = { ...consults[1], status: "done", responseSummary: "fixture done", endedAt: Date.now() };
   await app.evaluate(({ BrowserWindow }, consult) => BrowserWindow.getAllWindows()[0].webContents.send("consult:updated", consult), geminiDone);
   await page.waitForFunction(() => document.querySelector('[data-testid="chat-header-title-row"] [data-testid="working-indicator"]')?.getAttribute("data-colors") === "gpt");
   const afterGemini = await master.getAttribute("data-colors");
   check("master drops a completed consult color", afterGemini === "gpt", afterGemini);
+  await page.locator('[data-testid="running-worker"][data-role="w2"]').waitFor({ state: "detached" });
+  const gptDone = { ...consults[0], status: "done", endedAt: Date.now() };
+  await app.evaluate(({ BrowserWindow }, consult) => BrowserWindow.getAllWindows()[0].webContents.send("consult:updated", consult), gptDone);
+  await page.getByTestId("running-workers").waitFor({ state: "detached" });
+  check("the strip disappears after the last active worker finishes", await page.getByTestId("running-workers").count() === 0);
   check("no renderer page errors", errors.length === 0, errors.join(" | "));
 } catch (error) {
   check("working indicator UI regression completes", false, error instanceof Error ? error.stack ?? error.message : String(error));

@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import type { RunStats } from "../../../shared/run-stats";
-import type { Chat, RunStatsRows } from "../../../shared/types";
+import { MASTER_LABEL, type Chat, type RunStatsRows } from "../../../shared/types";
 import { formatDuration, PENDING_TOOL_LABEL, RUN_STATS_NOTE, runStatsFlags, runStatsRows, type RunStatsRow } from "../lib/run-stats-view";
 import { api, cn } from "../lib/utils";
-import { useStore } from "../store";
+import { stateEventsOf, useStore } from "../store";
+import { AgentUsage } from "./AgentUsage";
 import { Dialog, DialogContent } from "./ui";
 
 const CORE_REFRESH_MS = 5000;
@@ -12,7 +13,9 @@ const running = (chat: Chat) => chat.status === "working" || chat.status === "ap
 /** Recorded spans of tool runs and approval waits, per chat / role / consult. Opened from the chat header. */
 export function RunStatsDialog({ chat, open, onOpenChange }: { chat: Chat; open: boolean; onOpenChange: (open: boolean) => void }) {
   const events = useStore((s) => s.events[chat.id]);
-  const hasMore = useStore((s) => !!s.history[chat.id]?.hasMore);
+  const history = useStore((s) => s.history[chat.id]);
+  const hasMore = !!history?.hasMore;
+  const usageEvents = useMemo(() => stateEventsOf(events, history), [events, history]);
   const agents = useStore((s) => s.agents[chat.id]);
   const consults = useStore((s) => s.consults[chat.id]);
   const live = running(chat);
@@ -38,6 +41,10 @@ export function RunStatsDialog({ chat, open, onOpenChange }: { chat: Chat; open:
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent title="실행 통계" description={live ? "진행 중인 항목은 현재 시각까지 계산합니다." : "마지막 기록까지 계산합니다."} className="w-[min(760px,calc(100vw-32px))]" data-testid="run-stats">
         <p className="text-[12px] leading-relaxed text-muted-foreground" data-testid="run-stats-note">{RUN_STATS_NOTE}</p>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1" data-testid="agent-usage-list">
+          <AgentUsage events={usageEvents} role="orch" label={MASTER_LABEL} />
+          {agents?.map(agent => <AgentUsage key={agent.id} events={usageEvents} role={agent.key} label={agent.nickname} />)}
+        </div>
         {!rows ? null : rows.total.eventCount === 0 ? (
           <div className="text-[13px] text-muted-foreground">기록 없음</div>
         ) : (

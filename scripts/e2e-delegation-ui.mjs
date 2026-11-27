@@ -4,7 +4,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { makeChecks, launch, root } from "./e2e-lib.mjs";
+import { chatWorkerRows, makeChecks, launch, root } from "./e2e-lib.mjs";
 
 const { check, finish } = makeChecks();
 const base = join(root, ".scratch", "delegation-ui", String(Date.now()));
@@ -388,7 +388,7 @@ try {
   const releasedClass = await releasedSidebarWorker.getAttribute("class");
   check("released sidebar worker has no suffix and keeps gray styling", !!releasedLabel && !releasedLabel.includes("(해제)") && releasedClass?.includes("opacity-50"), `${releasedLabel} · ${releasedClass}`);
   await releasedSidebarWorker.click();
-  await page.waitForFunction(() => document.querySelector('[data-testid="team-chip"][data-role="w2"]')?.getAttribute("data-selected") === "true");
+  await page.waitForSelector('[data-testid="tree-node"][data-node="w2"][aria-current="page"]');
   check("clicking the released sidebar worker opens its history", (await page.locator('[data-testid="image-generation"][data-role="w2"]').count()) === 1);
   await page.locator('[data-testid="working-chat"][data-chat-id="1"]').click();
   await page.waitForFunction(() => document.querySelector('[data-testid="chat-node"][data-chat-id="1"] [role="treeitem"]')?.getAttribute("aria-selected") === "true");
@@ -534,8 +534,9 @@ try {
   );
 
   // The same request control is used in an individual worker history.
-  await page.locator('[data-testid="team-chip"][data-role="w1"]').click();
-  await page.waitForFunction(() => document.querySelector('[data-testid="team-chip"][data-role="w1"]')?.getAttribute("data-selected") === "true");
+  await chatWorkerRows(page, 1);
+  await page.locator('[data-testid="tree-node"][data-node="w1"]').click();
+  await page.waitForSelector('[data-testid="tree-node"][data-node="w1"][aria-current="page"]');
   const workerHistoryConsult = page.locator('[data-testid="consult-card"][data-status="done"]');
   await workerHistoryConsult.waitFor({ state: "visible" });
   const workerHistoryToggle = workerHistoryConsult.locator('[data-testid="consult-request-toggle"]');
@@ -655,8 +656,9 @@ try {
       (await page.locator('[data-testid="consult-summary-toggle"]').count()) === 0,
   );
 
-  await page.locator('[data-testid="team-chip"][data-role="w1"]').click();
-  await page.waitForFunction(() => document.querySelector('[data-testid="team-chip"][data-role="w1"]')?.getAttribute("data-selected") === "true");
+  await chatWorkerRows(page, 1);
+  await page.locator('[data-testid="tree-node"][data-node="w1"]').click();
+  await page.waitForSelector('[data-testid="tree-node"][data-node="w1"][aria-current="page"]');
   const workerApproval = page.locator('[data-testid="approval"]').filter({ hasText: workerApprovalTitle });
   await workerApproval.waitFor({ state: "visible" });
   check(

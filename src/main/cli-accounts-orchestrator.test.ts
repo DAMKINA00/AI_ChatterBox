@@ -200,6 +200,9 @@ test("parallel tasks carry distinct CLI IDs and a running worker cannot be rebou
     const pending = f.call("ask_parallel", { tasks: [a,b].map((w,i) => ({ to: w.nickname, kind: "opinion", message: "part", reason: "separate account", effort: "medium", accountId: `gpt-${i+1}` })) });
     await flush();
     assert.deepEqual(f.sent.map(s => s.accountId), ["gpt-1", "gpt-2"]);
+    const receipts = f.store.events(f.chat.id).filter(event => event.event.type === "consult_ack");
+    assert.deepEqual(receipts.map(event => event.role).sort(), [a.key, b.key].sort());
+    assert.ok(receipts.every(event => event.event.type === "consult_ack" && event.node === `consult:${event.event.consultId}`));
     const accounts = JSON.parse(body(await f.call("cli_accounts", { kind: "gpt" }))).accounts;
     assert.equal(accounts[1].runningWorkers, 1); assert.equal(accounts[1].workers[0].nickname, b.nickname);
     const team = body(await f.call("agents")); assert.match(team, /현재 실행 계정=gpt-1/); assert.match(team, /현재 실행 계정=gpt-2/);

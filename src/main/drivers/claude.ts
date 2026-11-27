@@ -218,8 +218,18 @@ export class ClaudeDriver implements AgentDriver {
         break;
       case "stream_event": {
         const e = ev.event;
-        if (e?.type === "content_block_delta" && e.delta?.type === "text_delta" && !ev.parent_tool_use_id)
+        if (ev.parent_tool_use_id) break;
+        if (e?.type === "content_block_delta" && e.delta?.type === "text_delta")
           this.host.emit({ type: "text_delta", text: e.delta.text });
+        const block = e?.type === "content_block_start" ? e.content_block : undefined;
+        if (block?.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string")
+          this.host.emit({ type: "tool_progress", id: block.id, name: block.name });
+        break;
+      }
+      case "tool_progress": {
+        if (!this._running || ev.parent_tool_use_id || typeof ev.tool_use_id !== "string" || typeof ev.tool_name !== "string"
+          || !Number.isFinite(ev.elapsed_time_seconds)) break;
+        this.host.emit({ type: "tool_progress", id: ev.tool_use_id, name: ev.tool_name, elapsedSeconds: Math.max(0, Math.floor(ev.elapsed_time_seconds)) });
         break;
       }
       case "assistant": {

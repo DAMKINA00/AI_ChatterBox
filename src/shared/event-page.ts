@@ -349,6 +349,7 @@ export function replayLive(snapshot: TimelineEvent[], buffered: readonly Timelin
   let events = snapshot;
   for (const e of buffered) {
     if (e.id && e.id <= lastId) {
+      events = clearToolProgress(events, e);
       if (e.event.type === "text" || e.event.type === "turn_end") {
         const i = events.findLastIndex(x => !x.id && x.event.type === "text_delta" && x.node === e.node && x.role === e.role);
         if (i >= 0) events = [...events.slice(0, i), ...events.slice(i + 1)];
@@ -358,4 +359,13 @@ export function replayLive(snapshot: TimelineEvent[], buffered: readonly Timelin
     events = append(events, e);
   }
   return events;
+}
+
+/** A finished tool or turn should never retain a live preview, including after reconnect. */
+export function clearToolProgress(events: TimelineEvent[], boundary: TimelineEvent): TimelineEvent[] {
+  const { event, node, role } = boundary;
+  if (event.type !== "tool_result" && event.type !== "turn_end") return events;
+  const stale = (e: TimelineEvent) => e.node === node && e.role === role && e.event.type === "tool_progress"
+    && (event.type === "turn_end" || e.event.id === event.id);
+  return events.some(stale) ? events.filter(e => !stale(e)) : events;
 }

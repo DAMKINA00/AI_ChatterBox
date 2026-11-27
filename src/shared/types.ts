@@ -440,6 +440,7 @@ export type AgentEvent =
   | { type: "text"; text: string }
   /** clipped: original length when a history page sent a shortened input/output (see shared/event-page.ts). */
   | { type: "tool_call"; id: string; name: string; input: string; diffs?: FileDiff[]; clipped?: number }
+  | { type: "tool_progress"; id: string; name?: string; delta?: string; elapsedSeconds?: number }
   | { type: "tool_result"; id: string; ok: boolean; output: string; clipped?: number }
   | { type: "file_change"; id: string; files: FileDiff[]; ok: boolean }
   | { type: "approval_request"; request: ApprovalRequest }
@@ -447,6 +448,8 @@ export type AgentEvent =
   /** An approval the orchestrator (or a remembered decision) answered without the user. */
   | { type: "approval_auto"; request: ApprovalRequest; decision: "allow" | "deny"; reason: string; reused?: boolean }
   | { type: "consult_start"; consultId: number; kind: ConsultKind; from: Role; to: Role; request: string; attachments: AttachmentRef[]; scope?: string[]; instructionId?: number; reason?: string }
+  /** App receipt that the assignment was handed to the worker's driver. */
+  | { type: "consult_ack"; consultId: number }
   | { type: "consult_end"; consultId: number; status: ConsultStatus; summary: string; files: string[] }
   | { type: "review_result"; consultId: number; review: ReviewResult }
   /** Read-only transcript a branched chat starts from; the first native session receives it as reference. */

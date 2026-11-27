@@ -695,6 +695,8 @@ function NodeRow({ chatId, node, label, icon, dim }: { chatId: number; node: Nod
   return (
     <button
       data-testid="tree-node"
+      data-node={node}
+      aria-current={active ? "page" : undefined}
       className={cn(
         "flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[12.5px]",
         active ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",

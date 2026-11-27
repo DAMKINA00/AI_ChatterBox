@@ -54,7 +54,7 @@ await send(
 let sawChips = false;
 const chipPoll = setInterval(async () => {
   try {
-    if ((await page.locator('[data-testid="team-chip"]').count()) >= 2) sawChips = true;
+    if ((await page.getByTestId("running-worker").count()) >= 2) sawChips = true;
   } catch {}
 }, 2000);
 await waitIdle(page, {
@@ -77,7 +77,7 @@ const w2w = consults.filter((x) => x.fromRole !== "orch");
 check("a worker asked another worker by nickname", w2w.length >= 1, w2w.map((x) => `${x.fromRole}→${x.toRole}`).join(", "));
 check("review by 지피티", consults.some((x) => x.kind === "review" && gpts.some((g) => g.key === x.toRole)));
 check("tests pass after the team's work", testsPass(), readFileSync(join(dir, "lib", "strings.js"), "utf8").slice(0, 80));
-check("team chips shown in the header while working", sawChips);
+check("concurrent workers appear above the composer", sawChips);
 const cardText = await page.locator('[data-testid="consult-card"]').first().textContent();
 check("consult card reads 마스터 → 클로드 N호", /마스터.*클로드 \d호/.test(cardText ?? ""), cardText?.slice(0, 80));
 const node = page.locator(`[data-testid="chat-node"][data-chat-id="${c.id}"]`);

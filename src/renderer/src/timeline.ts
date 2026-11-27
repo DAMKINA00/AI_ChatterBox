@@ -5,6 +5,7 @@
 //  - "orch" / "claude" / "gpt": one conversation, flat
 //  - "consult:N": one consult
 import { isAgentExpression, isWorkerKey } from "../../shared/types";
+import { clearToolProgress } from "../../shared/event-page";
 import { currentPlanView, type PlanView } from "../../shared/plan-lifecycle";
 import { closesAsk, EXPIRED_ASK_ANSWER } from "../../shared/ask-lifecycle";
 import { roomProvenance, systemBrief, type ConsultFacts, type RoomProvenance } from "../../shared/room-message";
@@ -19,6 +20,7 @@ type ItemKinds =
    * consult, not something the worker said.
    */
   | { kind: "message"; key: string; role: Role; node: NodeId; text: string; streaming: boolean; expression: AgentExpression; at: number; eventId?: number; room?: true; origin?: "result" }
+  | { kind: "worker-acceptance"; key: string; role: Role; at: number }
   /** Read-only transcript a forked chat started from. */
   | { kind: "fork"; key: string; text: string; attachments: AttachmentRef[]; at: number }
   /**
@@ -237,6 +239,11 @@ function foldEvents(events: TimelineEvent[], view: View, state: FoldState, start
   for (let index = start; index < events.length; index++) {
     if (beforeEvent) beforeEvent(index, { top, consultTargets, expressions, consultPaths, consultEnds });
     const e = events[index];
+    if (e.event.type === "consult_ack") {
+      if (view === undefined && e.role) top = [...top, { kind: "worker-acceptance", key: `accepted-${e.event.consultId}`, role: e.role, at: e.at }];
+      continue;
+    }
+    if (e.event.type === "tool_progress") continue;
     if (e.event.type === "review_result") {
       // Reported from inside the consult; the result belongs on the consult card itself in every view.
       top = attachReview(top, e.event.consultId, e.event.review);
@@ -420,6 +427,9 @@ export function apply(items: Item[], e: TimelineEvent, expression?: AgentExpress
   // Stable keys keep React state (open cards) across rebuilds; live deltas have no id yet.
   const key = e.id ? `e${e.id}` : `live-${e.node}-${role}`;
   switch (ev.type) {
+    case "tool_progress":
+    case "consult_ack":
+      return items;
     case "room_message":
       // Without consult facts only an explicit kind or the status-check wrapper is recognized.
       return [...items, roomItem(e, ev, roomProvenance(ev))];
@@ -539,6 +549,15 @@ export function apply(items: Item[], e: TimelineEvent, expression?: AgentExpress
 
 /** Appends a live event, coalescing streaming deltas so the list stays small. */
 export function appendEvent(list: TimelineEvent[], e: TimelineEvent): TimelineEvent[] {
+  const progress = e.event;
+  if (progress.type === "tool_progress") {
+    const index = list.findLastIndex(x => x.node === e.node && x.role === e.role && x.event.type === "tool_progress" && x.event.id === progress.id);
+    const prior = list[index]?.event;
+    if (prior?.type !== "tool_progress") return [...list, e];
+    const delta = ((prior.delta ?? "") + (progress.delta ?? "")).slice(-1200);
+    return [...list.slice(0, index), ...list.slice(index + 1), { ...e, event: { ...prior, ...progress, delta } }];
+  }
+  list = clearToolProgress(list, e);
   const last = list[list.length - 1];
   const sameStream = (x: TimelineEvent | undefined) => x && x.event.type === "text_delta" && x.node === e.node && x.role === e.role;
   if (e.event.type === "text_delta" && sameStream(last)) {

@@ -620,6 +620,11 @@ export class CodexDriver implements AgentDriver {
       case "item/agentMessage/delta":
         this.host.emit({ type: "text_delta", text: n.params.delta });
         break;
+      case "item/commandExecution/outputDelta":
+      case "item/fileChange/outputDelta":
+        if (this._running && (!this.turnId || n.params.turnId === this.turnId))
+          this.host.emit({ type: "tool_progress", id: n.params.itemId, delta: n.params.delta.slice(-1200) });
+        break;
       case "item/started":
         this.onItem(n.params.item, false);
         break;

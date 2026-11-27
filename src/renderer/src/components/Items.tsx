@@ -39,6 +39,7 @@ import { ForkContextCard, ForkMessageButton } from "./Fork";
 import { forkEventId } from "../lib/fork";
 import { consultCardReview, consultCardStatus } from "../lib/review-summary";
 import { consultReason } from "../../../shared/room-message";
+import { WORKER_ACCEPTANCE } from "../lib/worker-activity";
 
 /**
  * The main ("전체 대화") view reads as the group chat: long texts fold, consult summaries and work logs open on
@@ -370,6 +371,12 @@ const ItemBody = memo(function ItemBody({ item, chatId, nested }: { item: Item; 
           <ItemTime at={item.at} />
         </div>
       );
+    case "worker-acceptance":
+      return <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg px-2 py-1.5 text-[12px]" data-testid="worker-acceptance">
+        <RoleName chatId={chatId} role={item.role} />
+        <span data-chat-search-text>{WORKER_ACCEPTANCE}</span>
+        <span className="text-[11px] text-muted-foreground" title="에이전트 실행기에 작업이 전달됐습니다.">자동 확인</span>
+      </div>;
     case "tool":
       return <ToolCard item={item} chatId={chatId} nested={nested} />;
     case "files":
